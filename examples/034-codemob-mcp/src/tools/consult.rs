@@ -60,14 +60,15 @@ pub async fn handle(
         if let Some(context) = request_context.as_ref() {
             let service = state.session_service.clone();
             let session_id_for_cancel = session_id.clone();
-            context.replace_cancel_action(request_action(move || {
-                let service = service.clone();
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = service.interrupt(&session_id).await;
-                }
-            }));
-            let _ = context.run_cancel_if_requested().await;
+            let _ = context
+                .install_cancel_action(request_action(move || {
+                    let service = service.clone();
+                    let session_id = session_id_for_cancel.clone();
+                    async move {
+                        let _ = service.interrupt(&session_id).await;
+                    }
+                }))
+                .await;
         }
 
         let req = StartTurnRequest {
@@ -103,15 +104,16 @@ pub async fn handle(
     if let Some(context) = request_context.as_ref() {
         let service = state.session_service.clone();
         let session_id_for_cancel = session_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let service = service.clone();
-            let session_id = session_id_for_cancel.clone();
-            async move {
-                let _ = service.interrupt(&session_id).await;
-            }
-        }));
         // No archive cleanup — session stays alive for continuation via session_id.
-        let _ = context.run_cancel_if_requested().await;
+        let _ = context
+            .install_cancel_action(request_action(move || {
+                let service = service.clone();
+                let session_id = session_id_for_cancel.clone();
+                async move {
+                    let _ = service.interrupt(&session_id).await;
+                }
+            }))
+            .await;
     }
 
     let system_prompt = input

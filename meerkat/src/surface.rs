@@ -22,8 +22,9 @@ pub use meerkat_core::{
     session_allows_first_turn_build_overrides,
 };
 pub use request_execution::{
-    PreparedSurfaceSession, RequestAlreadyExists, RequestAsyncAction, RequestContext,
-    RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
+    CancelOutcome, CompleteOutcome, PreparedSurfaceSession, RequestAlreadyExists,
+    RequestAsyncAction, RequestContext, RequestTerminal, RequestTransitionError,
+    SurfaceRequestExecutor, SurfaceRequestPhase, noop_request_action, prepare_surface_session,
     request_action,
 };
 #[cfg(all(feature = "session-store", feature = "comms"))]

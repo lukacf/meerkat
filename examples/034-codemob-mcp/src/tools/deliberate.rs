@@ -79,36 +79,39 @@ pub async fn handle(
 
     if let Some(context) = request_context.as_ref() {
         if !resuming {
-            let mob_state = state.mob_state.clone();
-            let mob_id_for_cancel = mob_id.clone();
-            context.replace_cancel_action(request_action(move || {
-                let mob_state = mob_state.clone();
-                let mob_id = mob_id_for_cancel.clone();
-                async move {
-                    let _ = mob_state.mob_destroy(&mob_id).await;
-                }
-            }));
-            let mob_state = state.mob_state.clone();
+            let mob_state_cleanup = state.mob_state.clone();
             let mob_id_for_cleanup = mob_id.clone();
             context.set_unpublished_cleanup(request_action(move || {
-                let mob_state = mob_state.clone();
+                let mob_state = mob_state_cleanup.clone();
                 let mob_id = mob_id_for_cleanup.clone();
                 async move {
                     let _ = mob_state.mob_destroy(&mob_id).await;
                 }
             }));
+            let mob_state = state.mob_state.clone();
+            let mob_id_for_cancel = mob_id.clone();
+            let _ = context
+                .install_cancel_action(request_action(move || {
+                    let mob_state = mob_state.clone();
+                    let mob_id = mob_id_for_cancel.clone();
+                    async move {
+                        let _ = mob_state.mob_destroy(&mob_id).await;
+                    }
+                }))
+                .await;
         } else {
             let mob_state = state.mob_state.clone();
             let mob_id_for_cancel = mob_id.clone();
-            context.replace_cancel_action(request_action(move || {
-                let mob_state = mob_state.clone();
-                let mob_id = mob_id_for_cancel.clone();
-                async move {
-                    let _ = mob_state.mob_stop(&mob_id).await;
-                }
-            }));
+            let _ = context
+                .install_cancel_action(request_action(move || {
+                    let mob_state = mob_state.clone();
+                    let mob_id = mob_id_for_cancel.clone();
+                    async move {
+                        let _ = mob_state.mob_stop(&mob_id).await;
+                    }
+                }))
+                .await;
         }
-        let _ = context.run_cancel_if_requested().await;
     }
 
     // Collect profile names and orchestrator before moving definition
@@ -290,16 +293,17 @@ async fn run_flow(
         let mob_state = state.mob_state.clone();
         let mob_id_for_cancel = mob_id.clone();
         let run_id_for_cancel = run_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let mob_state = mob_state.clone();
-            let mob_id = mob_id_for_cancel.clone();
-            let run_id = run_id_for_cancel.clone();
-            async move {
-                let _ = mob_state.mob_cancel_flow(&mob_id, run_id.clone()).await;
-                let _ = mob_state.mob_destroy(&mob_id).await;
-            }
-        }));
-        let _ = context.run_cancel_if_requested().await;
+        let _ = context
+            .install_cancel_action(request_action(move || {
+                let mob_state = mob_state.clone();
+                let mob_id = mob_id_for_cancel.clone();
+                let run_id = run_id_for_cancel.clone();
+                async move {
+                    let _ = mob_state.mob_cancel_flow(&mob_id, run_id.clone()).await;
+                    let _ = mob_state.mob_destroy(&mob_id).await;
+                }
+            }))
+            .await;
     }
 
     let last_completed = Arc::new(AtomicUsize::new(0));

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -46,15 +46,104 @@ pub fn noop_request_action() -> RequestAsyncAction {
 #[derive(Debug)]
 pub struct RequestAlreadyExists;
 
+/// Terminal outcome produced by a long-running task (RPC/MCP async dispatch).
 #[derive(Debug)]
 pub enum RequestTerminal<T> {
+    /// Committed terminal. The request's side effects have been persisted and
+    /// the client must observe the result; late cancel does not override this.
     Publish(T),
+    /// Uncommitted terminal. Side effects did not land; a late cancel can
+    /// supersede this via [`CompleteOutcome::SupersededByCancel`].
     RespondWithoutPublish(T),
 }
 
+/// Canonical lifecycle phase of a tracked request.
+///
+/// Every tracked request advances through this state machine exactly once.
+/// Transitions are guarded: publish and cancel are mutually exclusive terminals,
+/// and re-entering a terminal phase yields a typed [`RequestTransitionError`]
+/// rather than silently rewriting state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestPhase {
+    /// Registered and in-flight. Cancel will run the installed action.
+    Pending,
+    /// Terminal: committed work was observed by the client.
+    Published,
+    /// Terminal: cancel won; any completion that arrives is superseded.
+    Cancelled,
+    /// Terminal: uncommitted work finished without publishing.
+    Completed,
+}
+
+impl fmt::Display for SurfaceRequestPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SurfaceRequestPhase::Pending => f.write_str("Pending"),
+            SurfaceRequestPhase::Published => f.write_str("Published"),
+            SurfaceRequestPhase::Cancelled => f.write_str("Cancelled"),
+            SurfaceRequestPhase::Completed => f.write_str("Completed"),
+        }
+    }
+}
+
+/// Typed rejection when a transition is inapplicable to the current phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTransitionError {
+    /// No tracked request with this key.
+    NotFound,
+    /// The request is already in a terminal phase; the requested transition
+    /// is rejected rather than silently overwriting prior state.
+    AlreadyTerminal { current: SurfaceRequestPhase },
+}
+
+impl fmt::Display for RequestTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("request not tracked"),
+            Self::AlreadyTerminal { current } => {
+                write!(f, "request already terminal (phase = {current})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestTransitionError {}
+
+/// Outcome of a cancel attempt.
+///
+/// Callers branch on this rather than reading a `cancel_requested` bool
+/// and making their own publish/cancel decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// Pending → Cancelled; the installed cancel action was run.
+    Cancelled,
+    /// The request was already committed (Published); cancel is suppressed.
+    /// Committed work is observable by the client and cannot be revoked.
+    AlreadyPublished,
+    /// The request had already transitioned to Cancelled (idempotent replay).
+    AlreadyCancelled,
+    /// The request had already completed without publishing; cancel arrived
+    /// too late and has no effect.
+    AlreadyCompleted,
+    /// No tracked request with this key.
+    NotFound,
+}
+
+/// Outcome of completing a request via the uncommitted path.
+///
+/// RPC and MCP surfaces use this to decide whether to write the task's own
+/// response or a cancel response — without peeking at internal booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompleteOutcome {
+    /// Pending → Completed; the surface should write the task's own response.
+    Completed,
+    /// Cancel landed first; the surface should write a cancel response instead
+    /// of the task's uncommitted terminal.
+    SupersededByCancel,
+}
+
 struct RequestEntry {
-    cancel_requested: AtomicBool,
-    ownership_published: AtomicBool,
+    phase: Mutex<SurfaceRequestPhase>,
     cancel_action: Mutex<RequestAsyncAction>,
     unpublished_cleanup: Mutex<Option<RequestAsyncAction>>,
     task_handle: Mutex<Option<JoinHandle<()>>>,
@@ -63,12 +152,15 @@ struct RequestEntry {
 impl RequestEntry {
     fn new(initial_cancel: RequestAsyncAction) -> Self {
         Self {
-            cancel_requested: AtomicBool::new(false),
-            ownership_published: AtomicBool::new(false),
+            phase: Mutex::new(SurfaceRequestPhase::Pending),
             cancel_action: Mutex::new(initial_cancel),
             unpublished_cleanup: Mutex::new(None),
             task_handle: Mutex::new(None),
         }
+    }
+
+    fn phase(&self) -> SurfaceRequestPhase {
+        *lock_or_recover(&self.phase)
     }
 }
 
@@ -83,44 +175,38 @@ impl RequestContext {
         &self.key
     }
 
-    pub fn replace_cancel_action(&self, action: RequestAsyncAction) {
-        let mut slot = self.cancel_action_guard();
-        *slot = action;
+    /// Current lifecycle phase (observation seam; not for decision-making
+    /// that should go through typed transitions).
+    pub fn phase(&self) -> SurfaceRequestPhase {
+        self.entry.phase()
     }
 
-    pub fn set_unpublished_cleanup(&self, cleanup: RequestAsyncAction) {
-        let mut slot = self.cleanup_guard();
-        *slot = Some(cleanup);
-    }
-
-    pub fn clear_unpublished_cleanup(&self) {
-        let mut slot = self.cleanup_guard();
-        *slot = None;
-    }
-
-    pub fn cancel_requested(&self) -> bool {
-        self.entry.cancel_requested.load(Ordering::Acquire)
-    }
-
-    pub async fn run_cancel_if_requested(&self) -> bool {
-        if !self.cancel_requested() {
-            return false;
-        }
-
-        let action = {
-            let slot = self.cancel_action_guard();
-            Arc::clone(&slot)
+    /// Install (or replace) the cancel action. If the request is already
+    /// [`SurfaceRequestPhase::Cancelled`], the newly-installed action is run
+    /// immediately so initialization-time races can't leave the caller with a
+    /// stale noop action on a cancelled request.
+    ///
+    /// Returns the phase observed at install time.
+    pub async fn install_cancel_action(&self, action: RequestAsyncAction) -> SurfaceRequestPhase {
+        let (phase, maybe_run) = {
+            let phase = *lock_or_recover(&self.entry.phase);
+            let mut slot = lock_or_recover(&self.entry.cancel_action);
+            *slot = Arc::clone(&action);
+            // If cancel already landed, honour the upgrade by re-firing now.
+            let run = matches!(phase, SurfaceRequestPhase::Cancelled).then(|| Arc::clone(&slot));
+            (phase, run)
         };
-        action().await;
-        true
+        if let Some(action) = maybe_run {
+            action().await;
+        }
+        phase
     }
 
-    fn cancel_action_guard(&self) -> MutexGuard<'_, RequestAsyncAction> {
-        lock_or_recover(&self.entry.cancel_action)
-    }
-
-    fn cleanup_guard(&self) -> MutexGuard<'_, Option<RequestAsyncAction>> {
-        lock_or_recover(&self.entry.unpublished_cleanup)
+    /// Install the cleanup action that runs if the request finishes without
+    /// publishing.
+    pub fn set_unpublished_cleanup(&self, cleanup: RequestAsyncAction) {
+        let mut slot = lock_or_recover(&self.entry.unpublished_cleanup);
+        *slot = Some(cleanup);
     }
 }
 
@@ -138,6 +224,8 @@ impl SurfaceRequestExecutor {
         }
     }
 
+    /// Register a new in-flight request. Panics on duplicate keys are avoided;
+    /// use [`Self::try_begin_request`] when the caller must detect duplicates.
     pub fn begin_request(
         &self,
         key: impl Into<String>,
@@ -170,127 +258,147 @@ impl SurfaceRequestExecutor {
         Ok(RequestContext { key, entry })
     }
 
+    /// Attach the task handle for later forced abort during shutdown.
     pub fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
-        if let Some(entry) = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
-            .cloned()
-        {
-            let mut slot = entry
-                .task_handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = lock_or_recover(&self.entries).get(key).cloned() {
+            let mut slot = lock_or_recover(&entry.task_handle);
             *slot = Some(handle);
         }
     }
 
-    pub fn cancel_requested(&self, key: &str) -> bool {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Read-only observation of the current phase for a key.
+    pub fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
+        lock_or_recover(&self.entries)
             .get(key)
-            .is_some_and(|entry| entry.cancel_requested.load(Ordering::Acquire))
+            .map(|entry| entry.phase())
     }
 
-    pub async fn cancel_request(&self, key: &str) -> bool {
-        let Some(entry) = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
-            .cloned()
-        else {
-            return false;
+    /// Typed cancel transition.
+    ///
+    /// * `Pending → Cancelled` fires the installed cancel action.
+    /// * `Published` is suppressed ([`CancelOutcome::AlreadyPublished`]);
+    ///   committed work cannot be revoked at the surface.
+    /// * Terminal phases return the matching `Already*` outcome; no state
+    ///   is mutated and no action fires twice.
+    pub async fn cancel_request(&self, key: &str) -> CancelOutcome {
+        // Acquire entry + decide transition atomically. Actions run outside
+        // the lock so they can await.
+        let (outcome, maybe_action) = {
+            let entries = lock_or_recover(&self.entries);
+            let Some(entry) = entries.get(key).cloned() else {
+                return CancelOutcome::NotFound;
+            };
+            drop(entries);
+
+            let mut phase = lock_or_recover(&entry.phase);
+            match *phase {
+                SurfaceRequestPhase::Pending => {
+                    *phase = SurfaceRequestPhase::Cancelled;
+                    drop(phase);
+                    let action = Arc::clone(&lock_or_recover(&entry.cancel_action));
+                    (CancelOutcome::Cancelled, Some(action))
+                }
+                SurfaceRequestPhase::Published => (CancelOutcome::AlreadyPublished, None),
+                SurfaceRequestPhase::Cancelled => (CancelOutcome::AlreadyCancelled, None),
+                SurfaceRequestPhase::Completed => (CancelOutcome::AlreadyCompleted, None),
+            }
         };
 
-        entry.cancel_requested.store(true, Ordering::Release);
-        if entry.ownership_published.load(Ordering::Acquire) {
-            return true;
+        if let Some(action) = maybe_action {
+            action().await;
         }
-
-        let action = {
-            let slot = entry
-                .cancel_action
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(&slot)
-        };
-        action().await;
-        true
+        outcome
     }
 
-    pub fn mark_published(&self, key: &str) {
-        if let Some(entry) = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
-            .cloned()
-        {
-            entry.ownership_published.store(true, Ordering::Release);
-        }
-    }
-
-    pub fn remove_published(&self, key: &str) {
+    /// Committed-terminal transition.
+    ///
+    /// `Pending → Published → (entry removed)` in one atomic step. Rejects
+    /// terminal phases via [`RequestTransitionError::AlreadyTerminal`] so a
+    /// late publish after cancel surfaces as a typed error rather than a
+    /// silent overwrite.
+    pub fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
         let mut entries = lock_or_recover(&self.entries);
-        entries.remove(key);
+        let Some(entry) = entries.get(key).cloned() else {
+            return Err(RequestTransitionError::NotFound);
+        };
+        let mut phase = lock_or_recover(&entry.phase);
+        match *phase {
+            SurfaceRequestPhase::Pending => {
+                *phase = SurfaceRequestPhase::Published;
+                drop(phase);
+                entries.remove(key);
+                Ok(())
+            }
+            current => Err(RequestTransitionError::AlreadyTerminal { current }),
+        }
     }
 
-    pub async fn finish_unpublished(&self, key: &str) {
-        let entry = {
+    /// Uncommitted-terminal transition.
+    ///
+    /// * `Pending → Completed`: runs the installed cleanup (if any) and
+    ///   removes the entry; returns [`CompleteOutcome::Completed`].
+    /// * `Cancelled`: cancel already won the race. Cleanup is still run
+    ///   (the surface still needs the invariants restored), and the caller
+    ///   is told to write a cancel response instead of the task's terminal.
+    /// * `Published`/`Completed`: terminal reached via another path;
+    ///   returns `Completed` idempotently with no side effect.
+    pub async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+        let (outcome, cleanup) = {
             let mut entries = lock_or_recover(&self.entries);
-            entries.remove(key)
+            let Some(entry) = entries.get(key).cloned() else {
+                return CompleteOutcome::Completed;
+            };
+            let mut phase = lock_or_recover(&entry.phase);
+            match *phase {
+                SurfaceRequestPhase::Pending => {
+                    *phase = SurfaceRequestPhase::Completed;
+                    drop(phase);
+                    entries.remove(key);
+                    let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
+                    (CompleteOutcome::Completed, cleanup)
+                }
+                SurfaceRequestPhase::Cancelled => {
+                    drop(phase);
+                    entries.remove(key);
+                    let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
+                    (CompleteOutcome::SupersededByCancel, cleanup)
+                }
+                SurfaceRequestPhase::Published | SurfaceRequestPhase::Completed => {
+                    // Entry may linger only if publish_and_complete wasn't
+                    // called; belt-and-braces remove.
+                    drop(phase);
+                    entries.remove(key);
+                    (CompleteOutcome::Completed, None)
+                }
+            }
         };
 
-        let Some(entry) = entry else {
-            return;
-        };
-
-        if entry.ownership_published.load(Ordering::Acquire) {
-            return;
-        }
-
-        let cleanup = entry
-            .unpublished_cleanup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
         if let Some(cleanup) = cleanup {
             cleanup().await;
         }
+        outcome
     }
 
+    /// Cancel every tracked request. Honours the same typed transitions as
+    /// [`Self::cancel_request`]; already-terminal entries are left alone.
     pub async fn cancel_all(&self) {
-        let keys: Vec<String> = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
-            .cloned()
-            .collect();
+        let keys: Vec<String> = lock_or_recover(&self.entries).keys().cloned().collect();
 
         for key in keys {
             let _ = self.cancel_request(&key).await;
         }
     }
 
+    /// Graceful shutdown: cancel all, wait `shutdown_grace`, then force-abort
+    /// remaining tasks and run any pending unpublished cleanups.
     pub async fn shutdown_and_abort_stragglers(&self) {
-        let has_entries = !self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty();
+        let has_entries = !lock_or_recover(&self.entries).is_empty();
         if has_entries {
             self.cancel_all().await;
             tokio::time::sleep(self.shutdown_grace).await;
         }
 
-        let remaining: Vec<(String, Arc<RequestEntry>)> = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let remaining: Vec<(String, Arc<RequestEntry>)> = lock_or_recover(&self.entries)
             .iter()
             .map(|(key, entry)| (key.clone(), Arc::clone(entry)))
             .collect();
@@ -299,18 +407,17 @@ impl SurfaceRequestExecutor {
             if let Some(handle) = lock_or_recover(&entry.task_handle).take() {
                 handle.abort();
             }
-            if !entry.ownership_published.load(Ordering::Acquire) {
-                let cleanup = entry
-                    .unpublished_cleanup
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
+            let phase = entry.phase();
+            if matches!(
+                phase,
+                SurfaceRequestPhase::Pending | SurfaceRequestPhase::Cancelled
+            ) {
+                let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
                 if let Some(cleanup) = cleanup {
                     cleanup().await;
                 }
             }
-            let mut entries = lock_or_recover(&self.entries);
-            entries.remove(&key);
+            lock_or_recover(&self.entries).remove(&key);
         }
     }
 }
@@ -358,9 +465,11 @@ mod tests {
             }
         }));
 
-        executor.finish_unpublished("req-1").await;
-        executor.finish_unpublished("req-1").await;
+        let first = executor.finish_unpublished("req-1").await;
+        let second = executor.finish_unpublished("req-1").await;
 
+        assert_eq!(first, CompleteOutcome::Completed);
+        assert_eq!(second, CompleteOutcome::Completed);
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     }
 
@@ -379,9 +488,12 @@ mod tests {
             }
         }));
 
-        executor.mark_published("req-2");
-        executor.finish_unpublished("req-2").await;
+        executor
+            .publish_and_complete("req-2")
+            .expect("publish must succeed on Pending");
+        let outcome = executor.finish_unpublished("req-2").await;
 
+        assert_eq!(outcome, CompleteOutcome::Completed);
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 0);
     }
 
@@ -403,17 +515,22 @@ mod tests {
             }),
         );
 
-        context.replace_cancel_action(request_action({
-            let upgraded_count = Arc::clone(&upgraded_count);
-            move || {
+        context
+            .install_cancel_action(request_action({
                 let upgraded_count = Arc::clone(&upgraded_count);
-                async move {
-                    upgraded_count.fetch_add(1, Ordering::SeqCst);
+                move || {
+                    let upgraded_count = Arc::clone(&upgraded_count);
+                    async move {
+                        upgraded_count.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
-            }
-        }));
+            }))
+            .await;
 
-        assert!(executor.cancel_request("req-3").await);
+        assert_eq!(
+            executor.cancel_request("req-3").await,
+            CancelOutcome::Cancelled
+        );
         assert_eq!(initial_count.load(Ordering::SeqCst), 0);
         assert_eq!(upgraded_count.load(Ordering::SeqCst), 1);
     }
@@ -434,11 +551,170 @@ mod tests {
         let _ctx = executor
             .try_begin_request("reuse-key", noop_request_action())
             .expect("first registration should succeed");
-        executor.finish_unpublished("reuse-key").await;
+        let _ = executor.finish_unpublished("reuse-key").await;
         let result = executor.try_begin_request("reuse-key", noop_request_action());
         assert!(
             result.is_ok(),
             "key should be available after previous request is removed"
         );
+    }
+
+    // ---- Wave 3 G defensive tests: typed terminal-phase rejection. ----
+
+    #[tokio::test]
+    async fn late_cancel_on_published_returns_already_published() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cancel_count = Arc::new(AtomicUsize::new(0));
+        let _ctx = executor.begin_request(
+            "pub-then-cancel",
+            request_action({
+                let cancel_count = Arc::clone(&cancel_count);
+                move || {
+                    let cancel_count = Arc::clone(&cancel_count);
+                    async move {
+                        cancel_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }),
+        );
+
+        executor
+            .publish_and_complete("pub-then-cancel")
+            .expect("publish must succeed on Pending");
+
+        // Entry was removed by publish_and_complete — NotFound is the typed
+        // signal for "no tracked request with this key" (consistent with the
+        // post-terminal semantics).
+        let outcome = executor.cancel_request("pub-then-cancel").await;
+        assert_eq!(outcome, CancelOutcome::NotFound);
+        assert_eq!(
+            cancel_count.load(Ordering::SeqCst),
+            0,
+            "cancel action must not run after publish committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_after_cancel_rejects_with_already_terminal() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let _ctx = executor.begin_request("cancel-then-pub", noop_request_action());
+
+        assert_eq!(
+            executor.cancel_request("cancel-then-pub").await,
+            CancelOutcome::Cancelled
+        );
+
+        let err = executor
+            .publish_and_complete("cancel-then-pub")
+            .expect_err("publish on Cancelled must be rejected");
+        assert!(matches!(
+            err,
+            RequestTransitionError::AlreadyTerminal {
+                current: SurfaceRequestPhase::Cancelled
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn finish_unpublished_after_cancel_reports_superseded() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = executor.begin_request("cancel-then-finish", noop_request_action());
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        assert_eq!(
+            executor.cancel_request("cancel-then-finish").await,
+            CancelOutcome::Cancelled
+        );
+
+        // Task completion arriving after cancel yields the typed "superseded"
+        // outcome — no shell-side late-cancel rewriting.
+        let outcome = executor.finish_unpublished("cancel-then-finish").await;
+        assert_eq!(outcome, CompleteOutcome::SupersededByCancel);
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            1,
+            "cleanup must still run on cancel-superseded completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn double_cancel_is_idempotent() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cancel_count = Arc::new(AtomicUsize::new(0));
+        let _ctx = executor.begin_request(
+            "double-cancel",
+            request_action({
+                let cancel_count = Arc::clone(&cancel_count);
+                move || {
+                    let cancel_count = Arc::clone(&cancel_count);
+                    async move {
+                        cancel_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }),
+        );
+
+        let first = executor.cancel_request("double-cancel").await;
+        let second = executor.cancel_request("double-cancel").await;
+        assert_eq!(first, CancelOutcome::Cancelled);
+        assert_eq!(second, CancelOutcome::AlreadyCancelled);
+        assert_eq!(
+            cancel_count.load(Ordering::SeqCst),
+            1,
+            "cancel action must run exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_cancel_action_fires_when_already_cancelled() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let noop_count = Arc::new(AtomicUsize::new(0));
+        let upgraded_count = Arc::new(AtomicUsize::new(0));
+        let context = executor.begin_request(
+            "install-after-cancel",
+            request_action({
+                let noop_count = Arc::clone(&noop_count);
+                move || {
+                    let noop_count = Arc::clone(&noop_count);
+                    async move {
+                        noop_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }),
+        );
+
+        // Cancel before the "real" action was installed; initial noop runs.
+        assert_eq!(
+            executor.cancel_request("install-after-cancel").await,
+            CancelOutcome::Cancelled
+        );
+
+        // Install the session-aware action; it fires immediately because the
+        // request is already Cancelled (the init race the old code covered
+        // via replace_cancel_action + run_cancel_if_requested).
+        let phase = context
+            .install_cancel_action(request_action({
+                let upgraded_count = Arc::clone(&upgraded_count);
+                move || {
+                    let upgraded_count = Arc::clone(&upgraded_count);
+                    async move {
+                        upgraded_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }))
+            .await;
+
+        assert_eq!(phase, SurfaceRequestPhase::Cancelled);
+        assert_eq!(noop_count.load(Ordering::SeqCst), 1);
+        assert_eq!(upgraded_count.load(Ordering::SeqCst), 1);
     }
 }

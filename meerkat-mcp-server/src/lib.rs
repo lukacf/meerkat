@@ -2498,13 +2498,15 @@ async fn handle_meerkat_run(
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
         let session_id_for_cancel = session_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let service = service.clone();
-            let session_id = session_id_for_cancel.clone();
-            async move {
-                let _ = service.interrupt(&session_id).await;
-            }
-        }));
+        let phase = context
+            .install_cancel_action(request_action(move || {
+                let service = service.clone();
+                let session_id = session_id_for_cancel.clone();
+                async move {
+                    let _ = service.interrupt(&session_id).await;
+                }
+            }))
+            .await;
         let service = state.service.clone();
         let session_id_for_cleanup = session_id.clone();
         let ingress_for_cleanup = ingress.clone();
@@ -2517,7 +2519,7 @@ async fn handle_meerkat_run(
                 ingress.clear_session(&session_id).await;
             }
         }));
-        if context.run_cancel_if_requested().await {
+        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
             let _ = state.service.archive(&session_id).await;
             ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
@@ -2684,14 +2686,16 @@ async fn handle_meerkat_resume(
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
         let session_id_for_cancel = session_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let service = service.clone();
-            let session_id = session_id_for_cancel.clone();
-            async move {
-                let _ = service.interrupt(&session_id).await;
-            }
-        }));
-        if context.run_cancel_if_requested().await {
+        let phase = context
+            .install_cancel_action(request_action(move || {
+                let service = service.clone();
+                let session_id = session_id_for_cancel.clone();
+                async move {
+                    let _ = service.interrupt(&session_id).await;
+                }
+            }))
+            .await;
+        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
             return Err(request_cancelled_tool_error());
         }
     }
@@ -3155,10 +3159,15 @@ mod tests {
     }
 
     async fn cancelled_request_context(key: &str) -> RequestContext {
+        use meerkat::surface::CancelOutcome;
         let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
         let context = executor.begin_request(key.to_string(), noop_request_action());
-        let cancelled = executor.cancel_request(key).await;
-        assert!(cancelled, "pre-cancel should mark request cancelled");
+        let outcome = executor.cancel_request(key).await;
+        assert_eq!(
+            outcome,
+            CancelOutcome::Cancelled,
+            "pre-cancel should transition Pending → Cancelled"
+        );
         context
     }
 

@@ -192,28 +192,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(completion) = completion_rx.recv() => {
-                let terminal = if executor.cancel_requested(&completion.request_key) {
-                    RequestTerminal::RespondWithoutPublish(
-                        request_cancelled_response(request_id_from_terminal(&completion.terminal))
-                    )
-                } else {
-                    completion.terminal
-                };
-
-                match terminal {
+                match completion.terminal {
                     RequestTerminal::Publish(response) => {
-                        if writer.send(response).await.is_ok() {
-                            executor.mark_published(&completion.request_key);
-                            executor.remove_published(&completion.request_key);
-                        } else {
-                            executor.finish_unpublished(&completion.request_key).await;
+                        if writer.send(response).await.is_err() {
+                            let _ = executor.finish_unpublished(&completion.request_key).await;
                             break Ok(());
                         }
+                        let _ = executor.publish_and_complete(&completion.request_key);
                     }
                     RequestTerminal::RespondWithoutPublish(response) => {
-                        let send_result = writer.send(response).await;
-                        executor.finish_unpublished(&completion.request_key).await;
-                        if send_result.is_err() {
+                        let cancel_id = response.get("id").cloned();
+                        let outcome = executor.finish_unpublished(&completion.request_key).await;
+                        let to_write = match outcome {
+                            meerkat::surface::CompleteOutcome::Completed => response,
+                            meerkat::surface::CompleteOutcome::SupersededByCancel => {
+                                request_cancelled_response(cancel_id)
+                            }
+                        };
+                        if writer.send(to_write).await.is_err() {
                             break Ok(());
                         }
                     }
@@ -249,15 +245,6 @@ fn request_key(id: &Value) -> String {
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {
     let request_id = params?.get("requestId")?;
     Some(request_key(request_id))
-}
-
-fn request_id_from_terminal(terminal: &RequestTerminal<Value>) -> Option<Value> {
-    let response = match terminal {
-        RequestTerminal::Publish(response) | RequestTerminal::RespondWithoutPublish(response) => {
-            response
-        }
-    };
-    response.get("id").cloned()
 }
 
 fn request_cancelled_response(id: Option<Value>) -> Value {

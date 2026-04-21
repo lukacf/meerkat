@@ -22113,8 +22113,8 @@ fn mob_modeled_default_kernel_value(
         }
         meerkat_machine_schema::TypeRef::Enum(name) => {
             meerkat_machine_kernels::KernelValue::NamedVariant {
-                enum_name: name.clone(),
-                variant: String::new(),
+                enum_name: name.clone().into(),
+                variant: String::new().into(),
             }
         }
         meerkat_machine_schema::TypeRef::Option(_) => meerkat_machine_kernels::KernelValue::None,
@@ -22176,8 +22176,8 @@ fn mob_modeled_kernel_value_from_json(
         }
         meerkat_machine_schema::TypeRef::Enum(name) => {
             meerkat_machine_kernels::KernelValue::NamedVariant {
-                enum_name: name.clone(),
-                variant: value.as_str().unwrap_or_default().to_string(),
+                enum_name: name.clone().into(),
+                variant: value.as_str().unwrap_or_default().to_string().into(),
             }
         }
         meerkat_machine_schema::TypeRef::Option(inner) => {
@@ -22246,7 +22246,7 @@ fn mob_modeled_json_from_kernel_value(
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
         }
         meerkat_machine_kernels::KernelValue::NamedVariant { variant, .. } => {
-            serde_json::Value::String(variant.clone())
+            serde_json::Value::String(variant.to_string())
         }
         meerkat_machine_kernels::KernelValue::Seq(items) => serde_json::Value::Array(
             items
@@ -22326,7 +22326,7 @@ fn mob_modeled_summary_from_kernel_state(
         .map(|field| {
             let value = state
                 .fields
-                .get(&field.name)
+                .get(field.name.as_str())
                 .map(mob_modeled_formal_string_from_kernel_value)
                 .unwrap_or_else(|| "null".to_string());
             (field.name.clone(), value)
@@ -22334,7 +22334,7 @@ fn mob_modeled_summary_from_kernel_state(
         .collect();
 
     MobModeledStateSummary {
-        phase: state.phase.clone(),
+        phase: state.phase.to_string(),
         formal_fields,
         unavailable_fields: runtime_reference.formal_unavailable_fields.clone(),
     }
@@ -22383,14 +22383,14 @@ fn mob_modeled_kernel_state(
     for field in &schema.state.fields {
         let value = before
             .formal_available_fields
-            .get(&field.name)
+            .get(field.name.as_str())
             .map(|raw| mob_modeled_kernel_value_from_raw(&field.ty, raw))
             .unwrap_or_else(|| mob_modeled_default_kernel_value(&field.ty));
-        fields.insert(field.name.clone(), value);
+        fields.insert(field.name.clone().into(), value);
     }
 
     meerkat_machine_kernels::KernelState {
-        phase: before.phase.clone(),
+        phase: before.phase.clone().into(),
         fields,
     }
 }
@@ -22468,10 +22468,13 @@ fn mob_modeled_kernel_input(
             "work_id" => mob_modeled_named_string("\"<work-id>\"".to_string()),
             _ => mob_modeled_default_kernel_value(&field.ty),
         };
-        fields.insert(field.name.clone(), value);
+        fields.insert(field.name.clone().into(), value);
     }
 
-    Ok(meerkat_machine_kernels::KernelInput { variant, fields })
+    Ok(meerkat_machine_kernels::KernelInput {
+        variant: variant.into(),
+        fields,
+    })
 }
 
 fn mob_modeled_transition_refusal_detail(
@@ -22542,7 +22545,7 @@ fn mob_modeled_schema_report(
                 &outcome.next_state,
                 before,
             )),
-            detail: outcome.transition,
+            detail: outcome.transition.to_string(),
             result_summary: mob_modeled_schema_result_summary(before, probe),
         },
         Err(error) => MobModeledStateSchemaReport {

@@ -1152,13 +1152,13 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_status".to_string(),
+            "step_status".into(),
             KernelValue::Map(BTreeMap::from([
                 (
                     KernelValue::String("step-a".to_string()),
                     KernelValue::NamedVariant {
-                        enum_name: "StepRunStatus".to_string(),
-                        variant: "Completed".to_string(),
+                        enum_name: "StepRunStatus".into(),
+                        variant: "Completed".into(),
                     },
                 ),
                 (KernelValue::String("step-b".to_string()), KernelValue::None),
@@ -1166,16 +1166,16 @@ mod tests {
         );
         run.flow_state
             .fields
-            .insert("failure_count".to_string(), KernelValue::U64(3));
+            .insert("failure_count".into(), KernelValue::U64(3));
         run.flow_state
             .fields
-            .insert("consecutive_failure_count".to_string(), KernelValue::U64(2));
+            .insert("consecutive_failure_count".into(), KernelValue::U64(2));
         run.flow_state
             .fields
-            .insert("max_step_retries".to_string(), KernelValue::U64(4));
+            .insert("max_step_retries".into(), KernelValue::U64(4));
         run.flow_state
             .fields
-            .insert("escalation_threshold".to_string(), KernelValue::U64(3));
+            .insert("escalation_threshold".into(), KernelValue::U64(3));
 
         assert_eq!(
             run.ordered_steps().unwrap(),
@@ -1239,12 +1239,12 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_status".to_string(),
+            "step_status".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::NamedVariant {
-                    enum_name: "StepRunStatus".to_string(),
-                    variant: "Broken".to_string(),
+                    enum_name: "StepRunStatus".into(),
+                    variant: "Broken".into(),
                 },
             )])),
         );
@@ -1265,14 +1265,14 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_status".to_string(),
+            "step_status".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::Map(BTreeMap::from([(
                     KernelValue::String("value".to_string()),
                     KernelValue::NamedVariant {
-                        enum_name: "StepRunStatus".to_string(),
-                        variant: "Completed".to_string(),
+                        enum_name: "StepRunStatus".into(),
+                        variant: "Completed".into(),
                     },
                 )])),
             )])),
@@ -1293,7 +1293,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_dependencies".to_string(),
+            "step_dependencies".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::Seq(vec![KernelValue::Bool(true)]),
@@ -1316,12 +1316,12 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_dependency_modes".to_string(),
+            "step_dependency_modes".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::NamedVariant {
-                    enum_name: "DependencyMode".to_string(),
-                    variant: "Broken".to_string(),
+                    enum_name: "DependencyMode".into(),
+                    variant: "Broken".into(),
                 },
             )])),
         );
@@ -1342,12 +1342,12 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_collection_policies".to_string(),
+            "step_collection_policies".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::NamedVariant {
-                    enum_name: "CollectionPolicyKind".to_string(),
-                    variant: "Broken".to_string(),
+                    enum_name: "CollectionPolicyKind".into(),
+                    variant: "Broken".into(),
                 },
             )])),
         );
@@ -1368,7 +1368,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_has_conditions".to_string(),
+            "step_has_conditions".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::String("yes".to_string()),
@@ -1391,7 +1391,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.fields.insert(
-            "step_branches".to_string(),
+            "step_branches".into(),
             KernelValue::Map(BTreeMap::from([(
                 KernelValue::String("step-a".to_string()),
                 KernelValue::Bool(true),

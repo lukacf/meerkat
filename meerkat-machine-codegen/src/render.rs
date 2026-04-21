@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt::Write};
+use std::fmt::Write;
 
 fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
     let _ignored = out.write_fmt(args);
@@ -584,6 +584,8 @@ fn machine_slug(machine_name: &str) -> String {
     to_snake_case(trimmed)
 }
 
+#[cfg(not(test))]
+use std::collections::BTreeSet;
 #[cfg(not(test))]
 fn render_kernel_ident_module<'a>(
     out: &mut String,

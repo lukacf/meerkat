@@ -7,6 +7,7 @@ pub struct AuditPolicy {
     pub projection_types: Vec<ProjectionTypeRule>,
     pub authority_modules: Vec<AuthorityModuleRule>,
     pub protected_fields: Vec<ProtectedFieldRule>,
+    pub forbidden_shell_reads: Vec<ForbiddenShellReadRule>,
     pub routed_effect_realizations: Vec<RoutedEffectRealizationRule>,
     pub required_live_symbols: Vec<RequiredLiveSymbolRule>,
     pub handoff_protocol_coverage: Vec<HandoffProtocolCoverageRule>,
@@ -60,6 +61,7 @@ impl AuditPolicy {
                     ],
                 ),
             ],
+            forbidden_shell_reads: default_forbidden_shell_reads(),
             routed_effect_realizations: default_routed_effect_realizations(),
             required_live_symbols: vec![],
             handoff_protocol_coverage: default_handoff_protocol_coverage(),
@@ -371,6 +373,121 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
         }
     }
     rules
+}
+
+/// Rule: detect shell-side authority state reads and shadow-state declarations
+/// that short-circuit the machine-owned seam.
+///
+/// Each rule binds a file (by suffix-match on the repo-relative path) to an AST
+/// pattern. Violations are errors unless annotated with
+/// `// RMAT-ALLOW(ForbiddenShellAuthorityReads)` on or above the offending span.
+#[derive(Debug, Clone)]
+pub struct ForbiddenShellReadRule {
+    pub path_suffix: &'static str,
+    pub kind: ForbiddenShellReadKind,
+    pub hint: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForbiddenShellReadKind {
+    /// Flag `<receiver>.<method>()` calls whose receiver tail ident is not in
+    /// `allowed_receivers`. Used for "no `orch.phase()` in the mob actor shell
+    /// except `lifecycle_authority.phase()`".
+    MethodCall {
+        method: &'static str,
+        allowed_receivers: &'static [&'static str],
+    },
+    /// Flag any struct field declaration whose name matches `field_name`.
+    /// Used for "the mob actor struct must not declare shadow counters named
+    /// `tracked_flows`/`pending_spawn_ids`".
+    FieldDeclared { field_name: &'static str },
+    /// Flag any `<base>.<field>` field access whose `base` is a path ending in
+    /// `base_ident` and whose field name is `field_name`. Used for "no
+    /// `policy.apply_mode` reads in the ephemeral driver".
+    FieldAccess {
+        base_ident: &'static str,
+        field_name: &'static str,
+    },
+}
+
+/// Default forbidden-read rules. These encode what `scripts/rmat-read-seam-lint.sh`
+/// used to enforce via regex, but as AST-precise policy entries that reuse the
+/// existing `RMAT-ALLOW` suppression mechanism.
+fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
+    vec![
+        // Mob actor shell: any `.phase()` read off something other than
+        // `lifecycle_authority` means the shell is inspecting canonical
+        // orchestrator state to decide whether to call apply().
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            kind: ForbiddenShellReadKind::MethodCall {
+                method: "phase",
+                allowed_receivers: &["lifecycle_authority"],
+            },
+            hint: "remove the phase pre-check and let authority.apply() reject illegal transitions",
+        },
+        // Ephemeral driver shell: no `ingress.phase()` gate before apply().
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            kind: ForbiddenShellReadKind::MethodCall {
+                method: "phase",
+                allowed_receivers: &[],
+            },
+            hint: "remove the phase pre-check and let authority.apply() reject illegal transitions",
+        },
+        // Ephemeral driver shell: policy branching fields must flow through
+        // authority.admit(); the shell must not classify inputs itself.
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            kind: ForbiddenShellReadKind::FieldAccess {
+                base_ident: "policy",
+                field_name: "apply_mode",
+            },
+            hint: "use authority.admit(); policy fields are authority-owned classification input",
+        },
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            kind: ForbiddenShellReadKind::FieldAccess {
+                base_ident: "policy",
+                field_name: "queue_mode",
+            },
+            hint: "use authority.admit(); policy fields are authority-owned classification input",
+        },
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            kind: ForbiddenShellReadKind::FieldAccess {
+                base_ident: "policy",
+                field_name: "consume_point",
+            },
+            hint: "use authority.admit(); policy fields are authority-owned classification input",
+        },
+        // MCP router: removal timing lives in ExternalToolSurfaceAuthority, not
+        // a shell-owned HashMap.
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-mcp/src/router.rs",
+            kind: ForbiddenShellReadKind::FieldDeclared {
+                field_name: "removal_timeouts",
+            },
+            hint: "read timeout info from authority state via authority.removal_timing()",
+        },
+        // Mob actor: shadow counters must not be re-declared on the actor struct.
+        // The snapshot type `MobFlowTrackerSnapshot` (in runtime/mod.rs) can
+        // still populate these via struct-literal projection.
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            kind: ForbiddenShellReadKind::FieldDeclared {
+                field_name: "tracked_flows",
+            },
+            hint: "read counts from authority snapshots (orchestrator.snapshot().active_flow_count)",
+        },
+        ForbiddenShellReadRule {
+            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            kind: ForbiddenShellReadKind::FieldDeclared {
+                field_name: "pending_spawn_ids",
+            },
+            hint: "read counts from authority snapshots (orchestrator.snapshot().pending_spawn_count)",
+        },
+    ]
 }
 
 fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {

@@ -12,6 +12,10 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+test-oracle = []
+
 [dependencies]
 meerkat-machine-schema.workspace = true
 serde.workspace = true

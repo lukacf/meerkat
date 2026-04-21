@@ -21,7 +21,7 @@ use crate::run::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_machine_kernels::KernelState;
+use meerkat_machine_kernels::legacy::KernelState;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};

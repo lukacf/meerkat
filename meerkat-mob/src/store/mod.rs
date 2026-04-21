@@ -28,7 +28,7 @@ use crate::run::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
-use meerkat_machine_kernels::KernelState;
+use meerkat_machine_kernels::legacy::KernelState;
 use serde::{Deserialize, Serialize};
 
 /// Errors from mob storage operations.

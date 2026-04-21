@@ -2,7 +2,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use indexmap::IndexMap;
-use meerkat_machine_kernels::{KernelState, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
 use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
     FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn minimal_run_with_schema_v2() -> MobRun {
-    use meerkat_machine_kernels::generated::flow_run;
+    use meerkat_machine_kernels::legacy_generated::flow_run;
     let flow_state = flow_run::initial_state().expect("init");
     MobRun {
         run_id: RunId::new(),
@@ -29,7 +29,7 @@ fn minimal_run_with_schema_v2() -> MobRun {
         frames: BTreeMap::new(),
         loops: BTreeMap::new(),
         loop_iteration_ledger: vec![],
-        schema_version: 4,
+        schema_version: 5,
         root_step_outputs: IndexMap::new(),
         loop_iteration_outputs: BTreeMap::new(),
     }
@@ -269,31 +269,31 @@ fn test_recovery_invalid_frame_invariant() {
     );
 }
 
-// ─── REQ-13: Pre-v3 runs are rejected with typed hard-cut error ──────────────
+// ─── REQ-13: Pre-row22 runs are rejected with typed hard-cut error ───────────
 
-/// REQ-13: Active pre-v3 frame runs are rejected with a typed hard-cut error.
+/// REQ-13: Active pre-row22 frame runs are rejected with a typed hard-cut error.
 #[test]
-fn test_hard_cut_rejects_pre_v3_run() {
+fn test_hard_cut_rejects_pre_row22_run() {
     let mut run = minimal_run_with_schema_v2();
-    run.schema_version = 2; // Simulate a pre-descriptor frame run.
-    run.status = MobRunStatus::Running; // Active pre-v3 run.
+    run.schema_version = 4; // Simulate a pre-row22 frame run.
+    run.status = MobRunStatus::Running; // Active pre-row22 run.
 
     let result = reconcile_run_state(&mut run);
     assert!(
-        matches!(result, Err(RestoreIncompatible::PreV3Schema { .. })),
-        "Pre-v3 run should be rejected, got: {result:?}"
+        matches!(result, Err(RestoreIncompatible::PreRow22Schema { .. })),
+        "Pre-row22 run should be rejected, got: {result:?}"
     );
 }
 
-/// REQ-13: A pre-v3 run in Pending state is accepted (not yet active).
+/// REQ-13: A pre-row22 run in Pending state is accepted (not yet active).
 #[test]
-fn test_pre_v3_pending_run_is_accepted() {
+fn test_pre_row22_pending_run_is_accepted() {
     let mut run = minimal_run_with_schema_v2();
-    run.schema_version = 2;
+    run.schema_version = 4;
     run.status = MobRunStatus::Pending;
 
     let result = reconcile_run_state(&mut run);
-    assert!(result.is_ok(), "Pending pre-v3 run should be accepted");
+    assert!(result.is_ok(), "Pending pre-row22 run should be accepted");
 }
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────

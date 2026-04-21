@@ -26,6 +26,9 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let error_name = format_ident!("{}TransitionError", machine_name);
     let authority_name = format_ident!("{}Authority", machine_name);
     let mutator_trait = format_ident!("{}Mutator", machine_name);
+    let transition_id_name = format_ident!("{}TransitionId", machine_name);
+    let guard_id_name = format_ident!("{}GuardId", machine_name);
+    let helper_id_name = format_ident!("{}HelperId", machine_name);
 
     let input_transitions: Vec<_> = def
         .transitions
@@ -61,12 +64,30 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .collect();
 
     let helpers: Vec<_> = def.helpers.iter().map(gen_helper).collect();
+    let transition_id_variants: Vec<_> = def.transitions.iter().map(|t| &t.name).collect();
+    let helper_id_variants: Vec<_> = def
+        .helpers
+        .iter()
+        .map(|helper| pascal_case_ident(&helper.name.to_string()))
+        .collect();
+    let guard_id_variants: Vec<_> = def
+        .transitions
+        .iter()
+        .flat_map(|transition| {
+            transition
+                .guards
+                .iter()
+                .enumerate()
+                .map(move |(idx, _)| format_ident!("{}Guard{}", transition.name, idx + 1))
+        })
+        .collect();
 
     let signal_method = if has_signals {
         quote! {
             pub fn apply_signal(&mut self, signal: #signal_name) -> Result<#transition_name, #error_name> {
                 let from_phase = self.state.phase();
                 let mut effects = Vec::new();
+                let transition_id;
 
                 match signal {
                     #signal_arms
@@ -79,7 +100,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name { from_phase, to_phase, transition_id, effects })
             }
         }
     } else {
@@ -94,7 +115,23 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         pub struct #transition_name {
             pub from_phase: #phase_name,
             pub to_phase: #phase_name,
+            pub transition_id: #transition_id_name,
             pub effects: Vec<#effect_name>,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum #transition_id_name {
+            #(#transition_id_variants),*
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum #guard_id_name {
+            #(#guard_id_variants),*
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum #helper_id_name {
+            #(#helper_id_variants),*
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +201,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                 let from_phase = self.state.phase();
                 #[allow(unused_mut)]
                 let mut effects = Vec::new();
+                let transition_id;
 
                 match input {
                     #input_arms
@@ -176,7 +214,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name { from_phase, to_phase, transition_id, effects })
             }
         }
     }
@@ -287,6 +325,12 @@ fn gen_transition_chain(
 fn gen_transition_body(def: &MachineDef, t: &TransitionDef) -> TokenStream {
     let prefix = FieldPrefix::AuthorityState;
     let mut stmts = Vec::new();
+    let transition_id_name = format_ident!("{}TransitionId", def.name);
+    let transition_id_variant = &t.name;
+
+    stmts.push(quote! {
+        transition_id = #transition_id_name::#transition_id_variant;
+    });
 
     for update in &t.updates {
         stmts.push(gen_update(update, prefix));
@@ -318,6 +362,27 @@ fn gen_transition_body(def: &MachineDef, t: &TransitionDef) -> TokenStream {
     }
 
     quote! { #(#stmts)* }
+}
+
+fn pascal_case_ident(raw: &str) -> Ident {
+    let mut out = String::new();
+    let mut capitalize = true;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if capitalize {
+                out.push(ch.to_ascii_uppercase());
+                capitalize = false;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            capitalize = true;
+        }
+    }
+    if out.is_empty() {
+        out.push('X');
+    }
+    format_ident!("{out}")
 }
 
 /// Generate Rust expression from an ExprDef.
@@ -605,13 +670,13 @@ fn gen_helper(helper: &HelperDef) -> TokenStream {
 
     if helper.params.is_empty() {
         quote! {
-            fn #name(&self) -> #return_ty {
+            pub fn #name(&self) -> #return_ty {
                 #body
             }
         }
     } else {
         quote! {
-            fn #name(#(#params),*) -> #return_ty {
+            pub fn #name(#(#params),*) -> #return_ty {
                 #body
             }
         }

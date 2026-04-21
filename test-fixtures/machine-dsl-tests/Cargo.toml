@@ -14,6 +14,7 @@ meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
 indexmap = "2" # used by DSL macro-generated schema code (invisible to cargo-machete)
 
 [dev-dependencies]
+meerkat-core = { path = "../../meerkat-core" }
 trybuild = "1"
 
 [package.metadata.cargo-machete]

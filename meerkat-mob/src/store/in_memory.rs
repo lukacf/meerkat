@@ -20,7 +20,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::KernelState;
+use meerkat_machine_kernels::legacy::KernelState;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

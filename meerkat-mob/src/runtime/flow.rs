@@ -28,7 +28,7 @@ use indexmap::IndexMap;
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::KernelEffect;
+use meerkat_machine_kernels::legacy::KernelEffect;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

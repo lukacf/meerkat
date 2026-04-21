@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::tempdir;
-use xtask::rmat_audit::collect_findings;
+use xtask::rmat_audit::{Finding, collect_findings};
 use xtask::rmat_policy::AuditPolicy;
 
 fn write_file(root: &Path, rel: &str, contents: &str) {
@@ -13,6 +13,23 @@ fn write_file(root: &Path, rel: &str, contents: &str) {
         fs::create_dir_all(parent).expect("create parent dirs");
     }
     fs::write(path, contents).expect("write fixture file");
+}
+
+fn assert_unsuppressed_finding(
+    findings: &[Finding],
+    rule: &str,
+    path: &str,
+    symbol_contains: &str,
+) {
+    assert!(
+        findings.iter().any(|finding| {
+            finding.key.rule == rule
+                && finding.key.path == path
+                && finding.key.symbol.contains(symbol_contains)
+                && !finding.suppressed
+        }),
+        "expected {rule} finding for {path} containing `{symbol_contains}`, got {findings:#?}"
+    );
 }
 
 #[test]
@@ -392,4 +409,135 @@ enum AnotherState { Pending, Running, Completed }
         })
         .expect("another suspicion");
     assert!(!another.suppressed);
+}
+
+#[test]
+fn row22_audit_catches_legacy_kernel_types_in_generated_modules() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "meerkat-machine-kernels/src/generated/meerkat.rs",
+        r"
+use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+",
+    );
+
+    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let path = "meerkat-machine-kernels/src/generated/meerkat.rs";
+    assert_unsuppressed_finding(&findings, "Row22NoLegacyKernelTypes", path, "KernelInput");
+    assert_unsuppressed_finding(&findings, "Row22NoLegacyKernelTypes", path, "KernelState");
+    assert_unsuppressed_finding(&findings, "Row22NoLegacyKernelTypes", path, "KernelValue");
+}
+
+#[test]
+fn row22_audit_catches_fields_get_and_phase_string_introspection() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        r#"
+struct KernelState {
+    phase: String,
+    fields: std::collections::BTreeMap<String, String>,
+}
+
+fn inspect(state: &KernelState) -> Option<&String> {
+    let _ = state.phase.as_str();
+    state.fields.get("ready_frames")
+}
+"#,
+    );
+
+    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let path = "meerkat-mob/src/generated/flow_frame_loop_driver.rs";
+    assert_unsuppressed_finding(&findings, "Row22NoFieldsGet", path, "state.fields.get");
+    assert_unsuppressed_finding(
+        &findings,
+        "Row22NoPhaseStringIntrospection",
+        path,
+        "state.phase.as_str()",
+    );
+}
+
+#[test]
+fn row22_audit_catches_public_evaluate_helper_and_helper_name_dispatch() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "meerkat-machine-kernels/src/generated/mob.rs",
+        r#"
+pub struct KernelState;
+pub struct KernelValue;
+pub struct TransitionRefusal;
+
+pub fn evaluate_helper(
+    state: &KernelState,
+    helper_name: &str,
+    args: &std::collections::BTreeMap<String, KernelValue>,
+) -> Result<KernelValue, TransitionRefusal> {
+    let _ = state;
+    let _ = args;
+    if helper_name == "pending_member_count" {
+        return Ok(KernelValue);
+    }
+    Ok(KernelValue)
+}
+"#,
+    );
+
+    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let path = "meerkat-machine-kernels/src/generated/mob.rs";
+    assert_unsuppressed_finding(
+        &findings,
+        "Row22NoPublicEvaluateHelper",
+        path,
+        "evaluate_helper",
+    );
+    assert_unsuppressed_finding(
+        &findings,
+        "Row22NoStringHelperDispatch",
+        path,
+        "helper_name",
+    );
+}
+
+#[test]
+fn row22_audit_catches_string_identity_matches_and_effect_variant_checks() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        r#"
+struct Input {
+    variant: String,
+}
+
+struct Effect {
+    variant: String,
+}
+
+fn route(input: &Input, effect: &Effect) -> bool {
+    let matched = match input.variant.as_str() {
+        "PumpNodeScheduler" => true,
+        _ => false,
+    };
+    matched && effect.variant == "GrantNodeSlot"
+}
+"#,
+    );
+
+    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let path = "meerkat-mob/src/generated/flow_frame_loop_driver.rs";
+    assert_unsuppressed_finding(
+        &findings,
+        "Row22NoStringIdentityMatches",
+        path,
+        "input.variant.as_str()",
+    );
+    assert_unsuppressed_finding(
+        &findings,
+        "Row22NoEffectVariantMatches",
+        path,
+        "effect.variant",
+    );
 }

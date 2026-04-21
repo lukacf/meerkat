@@ -21,8 +21,8 @@ use crate::store::MobRunStore;
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::KernelValue;
-use meerkat_machine_kernels::generated::flow_run;
+use meerkat_machine_kernels::legacy::KernelValue;
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1235,7 +1235,7 @@ fn root_outputs_from_run(run: &MobRun) -> IndexMap<StepId, serde_json::Value> {
 }
 
 fn string_from_state_field(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
     field: &str,
 ) -> Result<String, MobError> {
     match kernel_state.fields.get(field) {
@@ -1247,7 +1247,7 @@ fn string_from_state_field(
 }
 
 fn u64_from_state_field(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
     field: &str,
 ) -> Result<u64, MobError> {
     match kernel_state.fields.get(field) {
@@ -1258,7 +1258,7 @@ fn u64_from_state_field(
     }
 }
 
-fn frame_is_body(kernel_state: &meerkat_machine_kernels::KernelState) -> bool {
+fn frame_is_body(kernel_state: &meerkat_machine_kernels::legacy::KernelState) -> bool {
     matches!(
         kernel_state.fields.get("frame_scope"),
         Some(KernelValue::NamedVariant { variant, .. }) if variant == "Body"
@@ -1266,7 +1266,7 @@ fn frame_is_body(kernel_state: &meerkat_machine_kernels::KernelState) -> bool {
 }
 
 fn frame_loop_instance_id(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
 ) -> Option<LoopInstanceId> {
     match kernel_state.fields.get("loop_instance_id") {
         Some(KernelValue::String(loop_instance_id)) if !loop_instance_id.is_empty() => {
@@ -1276,31 +1276,35 @@ fn frame_loop_instance_id(
     }
 }
 
-fn frame_iteration(kernel_state: &meerkat_machine_kernels::KernelState) -> Result<u64, MobError> {
+fn frame_iteration(
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
+) -> Result<u64, MobError> {
     u64_from_state_field(kernel_state, "iteration")
 }
 
 fn loop_parent_frame_id(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
 ) -> Result<FrameId, MobError> {
     string_from_state_field(kernel_state, "parent_frame_id")
         .map(|value| FrameId::from(value.as_str()))
 }
 
 fn loop_parent_node_id(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
 ) -> Result<FlowNodeId, MobError> {
     string_from_state_field(kernel_state, "parent_node_id")
         .map(|value| FlowNodeId::from(value.as_str()))
 }
 
 fn loop_id_from_state(
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
 ) -> Result<LoopId, MobError> {
     string_from_state_field(kernel_state, "loop_id").map(|value| LoopId::from(value.as_str()))
 }
 
-fn loop_depth(kernel_state: &meerkat_machine_kernels::KernelState) -> Result<u32, MobError> {
+fn loop_depth(
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
+) -> Result<u32, MobError> {
     let value = u64_from_state_field(kernel_state, "depth")?;
     u32::try_from(value).map_err(|_| {
         MobError::Internal(format!(
@@ -1317,7 +1321,9 @@ fn usize_from_u64(value: u64, context: &str) -> Result<usize, MobError> {
     })
 }
 
-fn active_body_frame_id(kernel_state: &meerkat_machine_kernels::KernelState) -> Option<FrameId> {
+fn active_body_frame_id(
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
+) -> Option<FrameId> {
     match kernel_state.fields.get("active_body_frame_id") {
         Some(KernelValue::String(frame_id)) if !frame_id.is_empty() => {
             Some(FrameId::from(frame_id.as_str()))
@@ -1336,7 +1342,9 @@ fn active_body_frame_id(kernel_state: &meerkat_machine_kernels::KernelState) -> 
 
 /// Collect the IDs of all nodes whose `node_status` is `Running` in the given
 /// kernel state. Used to detect orphaned in-flight nodes after a process crash.
-fn running_node_ids(kernel_state: &meerkat_machine_kernels::KernelState) -> Vec<FlowNodeId> {
+fn running_node_ids(
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
+) -> Vec<FlowNodeId> {
     match kernel_state.fields.get("node_status") {
         Some(KernelValue::Map(map)) => map
             .iter()
@@ -1355,7 +1363,7 @@ fn running_node_ids(kernel_state: &meerkat_machine_kernels::KernelState) -> Vec<
 
 fn collect_frame_step_statuses(
     spec: &FrameSpec,
-    kernel_state: &meerkat_machine_kernels::KernelState,
+    kernel_state: &meerkat_machine_kernels::legacy::KernelState,
 ) -> IndexMap<StepId, StepRunStatus> {
     let Some(KernelValue::Map(status_map)) = kernel_state.fields.get("node_status") else {
         return IndexMap::new();

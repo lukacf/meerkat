@@ -511,24 +511,24 @@ mod tests {
         )
         .unwrap();
 
-        let kernel_input = meerkat_machine_kernels::KernelInput {
+        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
             variant: "Claim".into(),
             fields: std::collections::BTreeMap::from([
                 (
                     "owner_id".into(),
-                    meerkat_machine_kernels::KernelValue::String("w".into()),
+                    meerkat_machine_kernels::legacy::KernelValue::String("w".into()),
                 ),
                 (
                     "at_utc_ms".into(),
-                    meerkat_machine_kernels::KernelValue::U64(1),
+                    meerkat_machine_kernels::legacy::KernelValue::U64(1),
                 ),
                 (
                     "lease_expires_at_utc_ms".into(),
-                    meerkat_machine_kernels::KernelValue::U64(2),
+                    meerkat_machine_kernels::legacy::KernelValue::U64(2),
                 ),
                 (
                     "claim_token".into(),
-                    meerkat_machine_kernels::KernelValue::String("t".into()),
+                    meerkat_machine_kernels::legacy::KernelValue::String("t".into()),
                 ),
             ]),
         };
@@ -548,17 +548,20 @@ mod tests {
                 at_utc_ms: 5,
             },
         );
-        let kernel_input = meerkat_machine_kernels::KernelInput {
+        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
             variant: "Skip".into(),
             fields: std::collections::BTreeMap::from([
-                ("detail".into(), meerkat_machine_kernels::KernelValue::None),
+                (
+                    "detail".into(),
+                    meerkat_machine_kernels::legacy::KernelValue::None,
+                ),
                 (
                     "failure_class".into(),
-                    meerkat_machine_kernels::KernelValue::None,
+                    meerkat_machine_kernels::legacy::KernelValue::None,
                 ),
                 (
                     "at_utc_ms".into(),
-                    meerkat_machine_kernels::KernelValue::U64(5),
+                    meerkat_machine_kernels::legacy::KernelValue::U64(5),
                 ),
             ]),
         };

@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Expr, ExprAssign, ExprField, ExprIf, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemEnum,
-    ItemFn, ItemImpl, ItemStruct, ItemUnion, Member, Type,
+    BinOp, Expr, ExprAssign, ExprBinary, ExprField, ExprIf, ExprLit, ExprMatch, ExprMethodCall,
+    FnArg, ImplItem, ImplItemFn, Item, ItemEnum, ItemFn, ItemImpl, ItemStruct, ItemUnion, ItemUse,
+    Lit, Member, Pat, PatIdent, Type, TypePath, UseTree, Visibility,
 };
 
 use crate::ownership_ledger;
@@ -168,7 +169,10 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
 
 pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    let files = collect_repo_rs_files(root)?;
+    let mut files = collect_repo_rs_files(root)?;
+    files.extend(collect_row22_rs_files(root)?);
+    files.sort();
+    files.dedup();
     let route_coverage = collect_route_realization_findings(root, policy);
 
     for file in files {
@@ -212,6 +216,12 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
                 ForbiddenShellReadsVisitor::new(&relative, &source, applicable_forbidden_rules);
             forbidden.visit_file(&parsed);
             findings.extend(forbidden.findings);
+        }
+
+        if is_row22_scoped_path(&relative) {
+            let mut row22 = Row22AuditVisitor::new(&relative, &source);
+            row22.visit_file(&parsed);
+            findings.extend(row22.findings);
         }
     }
 
@@ -308,6 +318,12 @@ fn collect_repo_rs_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn collect_row22_rs_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_row22_rs_files_recursive(root, root, &mut files)?;
+    Ok(files)
+}
+
 fn collect_rs_files_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
@@ -336,6 +352,46 @@ fn collect_rs_files_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>)
         }
     }
     Ok(())
+}
+
+fn collect_row22_rs_files_recursive(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let skip = rel.components().any(|component| {
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some("target" | ".git" | ".claude" | "node_modules" | "test-fixtures")
+                )
+            });
+            if !skip {
+                collect_row22_rs_files_recursive(root, &path, files)?;
+            }
+        } else if path.extension().and_then(OsStr::to_str) == Some("rs") {
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+            if is_row22_scoped_path(&relative) {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_row22_scoped_path(relative: &str) -> bool {
+    relative.starts_with("meerkat-machine-kernels/src/generated/")
+        || relative.starts_with("meerkat-core/src/generated/")
+        || relative.starts_with("meerkat-mcp/src/generated/")
+        || relative.starts_with("meerkat-mob/src/generated/")
+        || relative == "meerkat-mob/src/run.rs"
+        || relative.starts_with("meerkat-mob/src/runtime/")
+        || relative.starts_with("meerkat-mob/src/store/")
 }
 
 fn collect_dead_authority_wiring_findings(
@@ -734,6 +790,144 @@ struct ForbiddenShellReadsVisitor<'a> {
     findings: Vec<Finding>,
 }
 
+struct Row22AuditVisitor<'a> {
+    relative: &'a str,
+    source: &'a str,
+    findings: Vec<Finding>,
+}
+
+impl<'a> Row22AuditVisitor<'a> {
+    fn new(relative: &'a str, source: &'a str) -> Self {
+        Self {
+            relative,
+            source,
+            findings: Vec::new(),
+        }
+    }
+
+    fn push_finding(&mut self, rule: &str, span: proc_macro2::Span, symbol: String, message: &str) {
+        let suppressed = has_rmat_allow(self.source, span, rule);
+        self.findings.push(error_finding(
+            rule,
+            self.relative,
+            &symbol,
+            message.to_string(),
+            suppressed,
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for Row22AuditVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        let mut symbols = Vec::new();
+        collect_legacy_kernel_use_symbols(&node.tree, &mut symbols);
+        for symbol in symbols {
+            self.push_finding(
+                "Row22NoLegacyKernelTypes",
+                node.span(),
+                symbol,
+                "row-22 scope must not import legacy Kernel* public types",
+            );
+        }
+        visit::visit_item_use(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &'ast TypePath) {
+        if let Some(symbol) = legacy_kernel_type_symbol(node) {
+            self.push_finding(
+                "Row22NoLegacyKernelTypes",
+                node.span(),
+                symbol,
+                "row-22 scope must not reference legacy Kernel* public types",
+            );
+        }
+        visit::visit_type_path(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        check_row22_fn_signature(
+            self.relative,
+            self.source,
+            &mut self.findings,
+            &node.vis,
+            &node.sig.ident.to_string(),
+            &node.sig.inputs,
+            node.span(),
+        );
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let vis = node.vis.clone();
+        check_row22_fn_signature(
+            self.relative,
+            self.source,
+            &mut self.findings,
+            &vis,
+            &node.sig.ident.to_string(),
+            &node.sig.inputs,
+            node.span(),
+        );
+        visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let method = node.method.to_string();
+        if method == "get"
+            && let Some(symbol) = field_method_symbol(&node.receiver, "fields", "get")
+        {
+            self.push_finding(
+                "Row22NoFieldsGet",
+                node.span(),
+                symbol,
+                "row-22 scope must not inspect semantic state via string-keyed fields.get(...)",
+            );
+        }
+
+        if method == "as_str"
+            && let Some(symbol) = field_method_symbol(&node.receiver, "phase", "as_str")
+        {
+            self.push_finding(
+                "Row22NoPhaseStringIntrospection",
+                node.span(),
+                symbol,
+                "row-22 scope must not inspect phase through string conversion",
+            );
+        }
+
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast ExprMatch) {
+        if let Expr::MethodCall(method) = &*node.expr
+            && method.method == "as_str"
+            && let Some(symbol) = field_method_symbol(&method.receiver, "variant", "as_str")
+        {
+            self.push_finding(
+                "Row22NoStringIdentityMatches",
+                node.span(),
+                symbol,
+                "row-22 scope must not branch on semantic identity through raw strings",
+            );
+        }
+        visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
+        if matches!(node.op, BinOp::Eq(_) | BinOp::Ne(_))
+            && let Some(symbol) = variant_string_comparison_symbol(node)
+        {
+            self.push_finding(
+                "Row22NoEffectVariantMatches",
+                node.span(),
+                symbol,
+                "row-22 scope must not compare effect variants as raw strings",
+            );
+        }
+        visit::visit_expr_binary(self, node);
+    }
+}
+
 impl<'a> ForbiddenShellReadsVisitor<'a> {
     fn new(relative: &'a str, source: &'a str, rules: Vec<&'a ForbiddenShellReadRule>) -> Self {
         Self {
@@ -900,6 +1094,149 @@ fn tail_path_ident(expr: &Expr) -> Option<String> {
         Expr::Group(inner) => tail_path_ident(&inner.expr),
         _ => None,
     }
+}
+
+fn collect_legacy_kernel_use_symbols(tree: &UseTree, out: &mut Vec<String>) {
+    match tree {
+        UseTree::Name(name) => {
+            let symbol = name.ident.to_string();
+            if is_legacy_kernel_type_name(&symbol) {
+                out.push(symbol);
+            }
+        }
+        UseTree::Rename(rename) => {
+            let symbol = rename.ident.to_string();
+            if is_legacy_kernel_type_name(&symbol) {
+                out.push(symbol);
+            }
+        }
+        UseTree::Path(path) => {
+            let symbol = path.ident.to_string();
+            if is_legacy_kernel_type_name(&symbol) {
+                out.push(symbol);
+            }
+            collect_legacy_kernel_use_symbols(&path.tree, out);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_legacy_kernel_use_symbols(item, out);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn is_legacy_kernel_type_name(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "KernelState" | "KernelInput" | "KernelSignal" | "KernelEffect" | "KernelValue"
+    )
+}
+
+fn legacy_kernel_type_symbol(node: &TypePath) -> Option<String> {
+    node.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .filter(|symbol| is_legacy_kernel_type_name(symbol))
+}
+
+fn is_public(vis: &Visibility) -> bool {
+    matches!(vis, Visibility::Public(_))
+}
+
+fn check_row22_fn_signature(
+    relative: &str,
+    source: &str,
+    findings: &mut Vec<Finding>,
+    vis: &Visibility,
+    name: &str,
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+    span: proc_macro2::Span,
+) {
+    if is_public(vis) && name == "evaluate_helper" {
+        let suppressed = has_rmat_allow(source, span, "Row22NoPublicEvaluateHelper");
+        findings.push(error_finding(
+            "Row22NoPublicEvaluateHelper",
+            relative,
+            "evaluate_helper",
+            "row-22 scope must not expose public evaluate_helper dispatch".to_string(),
+            suppressed,
+        ));
+    }
+
+    for input in inputs {
+        let FnArg::Typed(arg) = input else {
+            continue;
+        };
+        let Pat::Ident(PatIdent { ident, .. }) = &*arg.pat else {
+            continue;
+        };
+        if ident == "helper_name" && is_str_reference(&arg.ty) {
+            let suppressed = has_rmat_allow(source, span, "Row22NoStringHelperDispatch");
+            findings.push(error_finding(
+                "Row22NoStringHelperDispatch",
+                relative,
+                "helper_name",
+                "row-22 scope must not dispatch helpers by helper_name: &str".to_string(),
+                suppressed,
+            ));
+        }
+    }
+}
+
+fn is_str_reference(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(reference) => {
+            matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str"))
+        }
+        _ => false,
+    }
+}
+
+fn field_method_symbol(expr: &Expr, member: &str, method: &str) -> Option<String> {
+    let Expr::Field(field) = expr else {
+        return None;
+    };
+    let Member::Named(ident) = &field.member else {
+        return None;
+    };
+    if ident != member {
+        return None;
+    }
+    let base = field.base.to_token_stream().to_string().replace(' ', "");
+    Some(format!("{base}.{member}.{method}()"))
+}
+
+fn variant_string_comparison_symbol(expr: &ExprBinary) -> Option<String> {
+    if let Some(symbol) = field_string_literal_symbol(&expr.left, &expr.right, "variant") {
+        return Some(symbol);
+    }
+    field_string_literal_symbol(&expr.right, &expr.left, "variant")
+}
+
+fn field_string_literal_symbol(
+    field_side: &Expr,
+    string_side: &Expr,
+    member: &str,
+) -> Option<String> {
+    let Expr::Field(field) = field_side else {
+        return None;
+    };
+    let Member::Named(ident) = &field.member else {
+        return None;
+    };
+    if ident != member {
+        return None;
+    }
+    let Expr::Lit(ExprLit {
+        lit: Lit::Str(_), ..
+    }) = string_side
+    else {
+        return None;
+    };
+    let base = field.base.to_token_stream().to_string().replace(' ', "");
+    Some(format!("{base}.{member}"))
 }
 
 fn type_ident(ty: &Type) -> Option<String> {

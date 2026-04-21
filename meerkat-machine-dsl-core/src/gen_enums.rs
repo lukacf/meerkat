@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 use crate::ast::{EnumDef, MachineDef};
 use crate::gen_state::gen_type;
@@ -19,6 +19,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
 fn gen_enum(enum_def: &EnumDef) -> TokenStream {
     let name = &enum_def.name;
+    let kind_name = format_ident!("{}Kind", name);
     let variants: Vec<_> = enum_def
         .variants
         .iter()
@@ -41,10 +42,38 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
         })
         .collect();
 
+    let kind_variants: Vec<_> = enum_def.variants.iter().map(|v| &v.name).collect();
+    let kind_arms: Vec<_> = enum_def
+        .variants
+        .iter()
+        .map(|v| {
+            let vname = &v.name;
+            let pattern = if v.fields.is_empty() {
+                quote! { Self::#vname }
+            } else {
+                quote! { Self::#vname { .. } }
+            };
+            quote! { #pattern => #kind_name::#vname }
+        })
+        .collect();
+
     quote! {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum #name {
             #(#variants),*
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum #kind_name {
+            #(#kind_variants),*
+        }
+
+        impl #name {
+            pub fn kind(&self) -> #kind_name {
+                match self {
+                    #(#kind_arms),*
+                }
+            }
         }
     }
 }

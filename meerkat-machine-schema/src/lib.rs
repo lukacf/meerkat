@@ -7,7 +7,12 @@ mod composition;
 mod machine;
 pub mod types;
 
-pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
+pub use types::{
+    AgentIdentity, AgentRuntimeId, BranchId, CollectionPolicyKind, CommsRuntimeId, DependencyMode,
+    FenceToken, FlowId, FlowNodeId, FlowNodeKind, FlowRunStatus, FrameId, FrameScope, Generation,
+    LoopId, LoopInstanceId, LoopIterationStage, McpServerId, MeerkatId, MobId, NodeRunStatus,
+    PeerCorrelationId, ProfileName, RunId, SessionId, StepId, StepRunStatus, TaskId, WorkId,
+};
 
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,

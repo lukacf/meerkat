@@ -154,3 +154,55 @@ fn canonical_machine_inventory_matches_docs_and_artifact_bundle() {
         "expected canonical machine inventory to match docs and artifact bundle, got {mismatches:#?}"
     );
 }
+
+#[test]
+fn generated_kernel_module_inventory_includes_public_canonical_modules() {
+    let root = repo_root().expect("repo root");
+    let mismatches =
+        collect_generated_kernel_boundary_mismatches(&root).expect("generated kernel mismatches");
+    assert!(
+        mismatches.is_empty(),
+        "generated kernel boundary drift should stay empty for row-22 targets, got {mismatches:#?}"
+    );
+
+    let generated_mod =
+        fs::read_to_string(generated_kernel_mod_path(&root)).expect("generated kernel mod");
+    for slug in [
+        "auth",
+        "meerkat",
+        "mob",
+        "occurrence_lifecycle",
+        "schedule_lifecycle",
+    ] {
+        assert!(
+            generated_mod.contains(&format!("pub mod {slug};")),
+            "public generated kernel mod should export {slug}"
+        );
+        assert!(
+            generated_kernel_module_path(&root, slug).exists(),
+            "public generated kernel module {slug} should exist on disk"
+        );
+    }
+    for compat in ["flow_frame", "flow_run", "loop_iteration"] {
+        assert!(
+            !generated_mod.contains(&format!("pub mod {compat};")),
+            "public generated kernel mod should not export compat module {compat}"
+        );
+        assert!(
+            generated_kernel_module_path(&root, compat).exists(),
+            "compat module file {compat} should remain on disk for legacy_generated consumers"
+        );
+    }
+}
+
+#[test]
+fn row22_flow_frame_loop_driver_artifact_exists() {
+    let root = repo_root().expect("repo root");
+    let path = root.join("meerkat-mob/src/generated/flow_frame_loop_driver.rs");
+    let source = fs::read_to_string(&path).expect("flow_frame_loop_driver");
+    assert!(
+        source.starts_with("// @generated — composition driver for `flow_frame_loop`"),
+        "expected generated flow driver banner in {}",
+        path.display()
+    );
+}

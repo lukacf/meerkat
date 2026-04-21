@@ -1,0 +1,15 @@
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+  --> tests/compile_fail/canonical_transition_rejects_string_input_identity.rs:11:13
+   |
+11 |     let _ = meerkat_machine_kernels::generated::meerkat::transition(&state, &input);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^         ------ argument #2 of type `meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput` is missing
+   |
+note: function defined here
+  --> $WORKSPACE/meerkat-machine-kernels/src/generated/meerkat.rs
+   |
+   | pub fn transition<C: Context>(
+   |        ^^^^^^^^^^
+help: provide the argument
+   |
+11 |     let _ = meerkat_machine_kernels::generated::meerkat::transition(&state, /* meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput */, &input);
+   |                                                                             +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

@@ -1,0 +1,19 @@
+error[E0425]: cannot find value `evaluate_helper` in module `meerkat_machine_kernels::generated::meerkat`
+  --> tests/compile_fail/helper_string_dispatch_absent.rs:12:54
+   |
+12 |         meerkat_machine_kernels::generated::meerkat::evaluate_helper;
+   |                                                      ^^^^^^^^^^^^^^^ not found in `meerkat_machine_kernels::generated::meerkat`
+   |
+help: consider importing one of these functions
+   |
+ 1 + use meerkat_machine_kernels::legacy_generated::flow_frame::evaluate_helper;
+   |
+ 1 + use meerkat_machine_kernels::legacy_generated::flow_run::evaluate_helper;
+   |
+ 1 + use meerkat_machine_kernels::legacy_generated::loop_iteration::evaluate_helper;
+   |
+help: if you import `evaluate_helper`, refer to it directly
+   |
+12 -         meerkat_machine_kernels::generated::meerkat::evaluate_helper;
+12 +         evaluate_helper;
+   |

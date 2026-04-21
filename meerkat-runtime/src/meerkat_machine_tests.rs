@@ -17,9 +17,8 @@ use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
-use meerkat_machine_kernels::{
-    KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,
-};
+use meerkat_machine_kernels::legacy::{KernelEffect, KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::{TransitionOutcome, TransitionRefusal};
 use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine as schema_meerkat_machine;
 use meerkat_machine_schema::{MachineSchema, TriggerKind, TypeRef};
 use serde::Serialize;
@@ -13139,9 +13138,9 @@ fn assert_modeled_meerkat_transition_matches_runtime_after(
     input: &KernelInput,
     runtime_after: &RuntimeParitySnapshotSummary,
 ) {
-    let outcome =
-        modeled_meerkat_kernel::transition(&runtime_modeled_kernel_state(schema, before), input)
-            .expect("modeled transition should succeed");
+    let outcome = modeled_meerkat_kernel::kernel()
+        .transition(&runtime_modeled_kernel_state(schema, before), input)
+        .expect("modeled transition should succeed");
     let schema_after =
         runtime_modeled_summary_from_kernel_state(schema, &outcome.next_state, before)
             .expect("modeled transition should produce a schema summary");
@@ -13165,9 +13164,9 @@ fn assert_modeled_meerkat_post_admission_signal_matches_runtime(
     input: &KernelInput,
     runtime_signal: crate::driver::ephemeral::PostAdmissionSignal,
 ) {
-    let outcome =
-        modeled_meerkat_kernel::transition(&runtime_modeled_kernel_state(schema, before), input)
-            .expect("modeled transition should succeed");
+    let outcome = modeled_meerkat_kernel::kernel()
+        .transition(&runtime_modeled_kernel_state(schema, before), input)
+        .expect("modeled transition should succeed");
     let modeled_signal = runtime_modeled_post_admission_signal_from_effects(&outcome.effects);
     assert_eq!(
         format!("{runtime_signal:?}"),
@@ -14450,7 +14449,7 @@ fn runtime_modeled_schema_report(
         }
     };
 
-    match modeled_meerkat_kernel::transition(&state, &input) {
+    match modeled_meerkat_kernel::kernel().transition(&state, &input) {
         Ok(outcome) => {
             let result_summary = runtime_modeled_schema_result_summary(before, probe, &outcome);
             RuntimeModeledStateSchemaReport {

@@ -7,10 +7,10 @@ use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{
+use meerkat_machine_kernels::legacy::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
 };
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

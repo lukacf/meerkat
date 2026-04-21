@@ -6,6 +6,7 @@
 mod flow_frame;
 mod flow_run;
 mod loop_iteration;
+pub mod types;
 
 pub use flow_frame::flow_frame_machine;
 pub use flow_run::flow_run_machine;

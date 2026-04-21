@@ -1,37 +1,37 @@
-# Initial Traceability Matrix
+# Row-22 Traceability Matrix
 
-This is the initial requirement traceability matrix for the `0.5` RCT package.
+| Req ID | Phase | Implemented In | Runtime Caller | Test Name | Status | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| TYPE-001 | 1-2 | `meerkat-machine-codegen/tests/render_contracts.rs` | `render_machine_kernel_module` | `renders_all_eight_typed_machine_modules` | PROVISIONAL | red: render contract now fails on legacy `Kernel*` machine-module surface |
+| TYPE-002 | 1 | `test-fixtures/machine-dsl-tests/tests/compile_fail/typed_state_has_no_fields_map.rs`; `test-fixtures/machine-dsl-tests/tests/compile_fail/typed_phase_has_no_as_str.rs` | trybuild | `typed_state_has_no_fields_map.rs` | PROVISIONAL | red: fixtures still compile against `KernelState.fields` and stringly phase `.as_str()` |
+| TYPE-003 | 1-2 | `meerkat-machine-codegen/tests/render_contracts.rs` | `render_machine_kernel_module` | `renders_all_eight_typed_machine_modules` | PROVISIONAL | red: renderer still emits `KernelInput`/`KernelEffect` instead of typed enums and kinds |
+| TYPE-004 | 1 | `test-fixtures/machine-dsl-tests/tests/compile_fail/helper_string_dispatch_absent.rs`; `meerkat-machine-codegen/tests/helper_graphs.rs` | trybuild + public schema graph scan | `helper_string_dispatch_absent.rs` | PROVISIONAL | compile-fail fixture is red; helper graph coverage exists and synthetic cycles are caught |
+| TYPE-005 | 1 | `meerkat-runtime/tests/row22_canonical_parity.rs` | generated canonical machine modules | `meerkat_coverage_scenarios_match_typed_modeled_kernel` | PROVISIONAL | red: all five canonical parity scaffolds fail because canonical machine state is still `KernelState` |
+| TYPE-006 | 2 | `meerkat-core/tests/row22_protocol_helpers.rs`; `meerkat-mcp/tests/row22_protocol_helpers.rs`; `meerkat-mob/tests/row22_protocol_helpers.rs`; `meerkat-machine-codegen/tests/render_contracts.rs` | generated helper modules + canonical composition schemas | `meerkat_mob_seam_generated_helpers_are_typed` | PROVISIONAL | core/mcp helper contracts and three protocol round-trips are green; mob helper typedness is green; canonical composition Rust-module render surface remains red/blocked |
+| TYPE-007 | 2 | `meerkat-machine-codegen/tests/render_contracts.rs`; `meerkat-mob/tests/row22_generated_contracts.rs` | generated `flow_frame_loop_driver.rs` | `renders_typed_flow_frame_loop_driver` | PROVISIONAL | red: compat driver still exposes `KernelState`, `.fields.get(...)`, and phase-string folklore |
+| TYPE-008 | 3 | `meerkat-mob/tests/row22_persistence_contracts.rs` | compat persistence/CAS scaffolds | `sqlite_cas_flow_state_uses_typed_eq` | PROVISIONAL | red: flow/frame/loop CAS scaffolds still resolve to legacy `KernelState`, and new runs still write schema version 4 |
+| CONTRACT-001 | 1 | `test-fixtures/machine-dsl-tests/tests/compile_fail/canonical_transition_rejects_string_input_identity.rs`; `test-fixtures/machine-dsl-tests/tests/compile_fail/compat_transition_rejects_string_input_identity.rs`; `test-fixtures/machine-dsl-tests/tests/compile_fail/canonical_transition_signal_rejects_string_identity.rs` | trybuild | `canonical_transition_rejects_string_input_identity.rs` | PROVISIONAL | red: canonical and compat stringly `KernelInput`/`KernelSignal` entrypoints still compile |
+| CONTRACT-002 | 2 | `meerkat-core/tests/row22_generated_contracts.rs`; `meerkat-mcp/tests/row22_generated_contracts.rs`; `meerkat-mob/tests/row22_generated_contracts.rs`; `meerkat-core/tests/row22_protocol_helpers.rs`; `meerkat-mcp/tests/row22_protocol_helpers.rs`; `meerkat-mob/tests/row22_protocol_helpers.rs` | generated consumer modules | `typed_composition_modules_do_not_reference_legacy_kernel_types` | PROVISIONAL | core/mcp helper files are clean and round-trip tests are green; mob helper typedness is green; mob compat driver remains red and canonical composition Rust-module render coverage is still blocked |
+| CONTRACT-003 | 0 | `test-fixtures/machine-dsl-tests/tests/compile_fail/legacy_kernel_types_not_exported.rs` | trybuild | `legacy_kernel_types_not_exported.rs` | PROVISIONAL | red: crate-root `Kernel*` exports still compile |
+| CONTRACT-004 | 0 | `xtask/tests/rmat_audit.rs` | `xtask` audit | `row22_ast_audit` | PROVISIONAL | red: four `Row22No*` audit expectations are added, but current audit still only reports existing route-coverage findings |
+| CONTRACT-005 | 3 | `meerkat-mob/tests/row22_persistence_contracts.rs` | compat recovery scaffolds | `recovery_rejects_pre_row22_active_run` | PROVISIONAL | red: schema-version 4 active runs are still accepted; row-22 hard-cut rejection is not in place yet |
+| INV-001 | 0-2 | `meerkat-core/tests/row22_generated_contracts.rs`; `meerkat-mcp/tests/row22_generated_contracts.rs`; `meerkat-mob/tests/row22_generated_contracts.rs` | generated consumer modules | `typed_composition_modules_do_not_reference_legacy_kernel_types` | PROVISIONAL | core/mcp pass; mob fails on `flow_frame_loop_driver.rs` legacy `Kernel*` references |
+| INV-002 | 0 | `meerkat-machine-codegen/tests/helper_graphs.rs` | public machine schemas | `canonical_and_compat_helper_graphs_are_acyclic` | PROVISIONAL | pass: canonical + compat helper graphs are acyclic; synthetic helper cycle is detected locally |
+| INV-003 | 1 | — | — | `occurrence_coverage_scenarios_match_typed_modeled_kernel` | MISSING | — |
+| INV-004 | 3 | `meerkat-mob/tests/row22_persistence_contracts.rs` | compat CAS scaffolds | `sqlite_cas_loop_state_uses_typed_eq` | PROVISIONAL | red: CAS scaffolds still observe legacy `KernelState` rather than typed Eq-owned states |
+| INV-005 | 3 | `meerkat-mob/tests/row22_persistence_contracts.rs` | compat recovery scaffolds | `decode_pre_row22_run_state_is_rejected` | PROVISIONAL | red: pre-row-22 active compat snapshots are still accepted at schema version 4 |
+| INV-006 | 3 | `xtask/src/machines_tests.rs` | registry-backed stats scaffolds | `machine_verify_stats_reports_five_machines_and_four_compositions` | PROVISIONAL | green: stats inventory test confirms 5 canonical machines and 4 canonical compositions are in scope |
+| CHOKE-001 | 0-1 | `meerkat-machine-codegen/tests/render_contracts.rs`; `xtask/tests/machines_contracts.rs` | `make machine-codegen` | `renders_all_eight_typed_machine_modules` | PROVISIONAL | row-scope generated kernel inventory test passes; typed machine render contract is now red on legacy surface |
+| CHOKE-002 | 0-2 | `meerkat-machine-codegen/tests/render_contracts.rs`; `meerkat-core/tests/row22_protocol_helpers.rs`; `meerkat-mcp/tests/row22_protocol_helpers.rs`; `meerkat-mob/tests/row22_protocol_helpers.rs` | `make machine-codegen` | `renders_all_four_typed_composition_modules` | PROVISIONAL | red: explicit canonical composition Rust-module render contract now exists and fails because `meerkat_mob_seam`/schedule bundles still expose no stable Rust helper surface |
+| CHOKE-003 | 1 | `meerkat-runtime/tests/row22_canonical_parity.rs` | canonical runtime crates | `auth_coverage_scenarios_match_typed_modeled_kernel` | PROVISIONAL | red: canonical parity scaffolds exist for all five machines and currently fail on the legacy modeled-kernel surface |
+| CHOKE-004 | 2 | `meerkat-mob/tests/row22_compat_oracles.rs` | compat typed modules | `flow_frame_transition_fixtures_match_schema_oracle` | PROVISIONAL | red: compat oracle scaffolds exist for flow_run/flow_frame/loop_iteration plus driver typedness; no `compact/*` bridge path is allowed and that guard is green |
+| CHOKE-005 | 2-3 | — | meerkat-mob runtime/store | `flow_frame_e2e_tests` | MISSING | — |
+| CHOKE-006 | 0 | `xtask/tests/machines_contracts.rs`; `xtask/tests/rmat_audit.rs` | `xtask` audit | `machines_contracts` | PROVISIONAL | machines-contract inventory checks are green; row-22 AST audit expectations are red and ready for implementation |
+| E2E-001 | 0-1 | band-A local spot runs | targeted cargo batches | targeted batch evidence | PROVISIONAL | spot runs recorded: compile-fail/rmat/render-contract/canonical-parity/compat-oracle/persistence red; machines-contract/helper-graph/core+mcp protocol helpers/TLC stats green. Official phase batch still pending orchestrator |
+| E2E-002 | 3 | — | full workspace gate | final acceptance commands | MISSING | — |
+| E2E-003 | 3 | — | `compare-machine-verify-stats.sh` | stats diff output | MISSING | — |
 
-This matrix tracks **implementation/cutover evidence**, not the already
-validated target-model baseline. The target machine/composition authority has
-already been validated at commit `4e350279`, but the requirements below remain
-`MISSING` until the cutover phases land real runtime-facing entrypoints and
-evidence on the implementation branch.
+Phase-0 band-A note:
 
-| REQ-ID | Domain | Planned Phase | Runtime Caller / Entry Point | Primary Evidence Target | Initial Status |
-| --- | --- | --- | --- | --- | --- |
-| `REQ-001` | in-repo source of truth | `2` | repo CI / `cargo xtask machine-check-drift --all` | machine bundle import + CI failure proof | `MISSING` |
-| `REQ-002` | machine-authority/codegen workflow | `2` | `cargo xtask machine-codegen --all` | drift and generation proof | `MISSING` |
-| `REQ-003` | machine final modes and owner map | `11` | full CI + release gate | final owner-map verification | `MISSING` |
-| `REQ-004` | closed runtime ingress taxonomy | `3` | runtime admission path | runtime ingress tests + no-Projected/no-SystemGenerated proof | `MISSING` |
-| `REQ-005` | contributor model and receipt semantics | `3` | persistent + ephemeral runtime recovery | replay/receipt tests | `MISSING` |
-| `REQ-006` | out-of-band control plane | `3` | runtime control channel | control-plane preemption tests | `MISSING` |
-| `REQ-007` | runtime policy algebra and queue discipline | `3` | runtime policy resolution | policy/queue behavioral tests | `MISSING` |
-| `REQ-008` | turn execution narrowing | `5` | runtime -> core run primitive path | host-mode cutover + turn kernel proof | `MISSING` |
-| `REQ-009` | peer comms normalization + reservations | `5` | `RuntimeCommsBridge` | peer/runtime bridge tests | `MISSING` |
-| `REQ-010` | completion-aware runtime comms bridge | `5` | `accept_input_with_completion(...)` | reservation/completion E2E | `MISSING` |
-| `REQ-011` | shared async-op lifecycle substrate | `4` | `OpsLifecycleRegistry` | registry-backed mob/background-op proof | `MISSING` |
-| `REQ-012` | mob-only child-agent path + no lifecycle leakage | `4` | mob control plane and parent wait path | no `SubagentResult` leakage proof | `MISSING` |
-| `REQ-013` | mob owner split | `7` | mob actor/orchestrator runtime path | decomposition and replay tests | `MISSING` |
-| `REQ-014` | flow/orchestrator durable truth | `7` | flow run + orchestration kernels | flow/mob replay tests | `MISSING` |
-| `REQ-015` | external tool lifecycle machine | `6` | MCP router/adapter/gateway path | add/remove/reload behavioral tests | `MISSING` |
-| `REQ-016` | typed notices primary, transcript notices derivative | `6` | runtime/tool-surface notice path | outward notice contract proof | `MISSING` |
-| `REQ-017` | CLI/REST/RPC external-event cutovers | `8` | CLI, REST, JSON-RPC | real surface ingress E2Es | `MISSING` |
-| `REQ-018` | MCP run/resume cutover | `9` | MCP server tools | runtime-backed MCP smoke | `MISSING` |
-| `REQ-019` | WASM/browser convergence | `9` | browser runtime exports | browser E2Es + wasm32 checks | `MISSING` |
-| `REQ-020` | Python/TypeScript wrapper parity | `10` | SDK client/wrapper APIs | regenerated bindings + wrapper smoke | `MISSING` |
-| `REQ-021` | Rust docs/examples/API posture | `10` | docs/examples compile path | runtime-backed docs/examples proof | `MISSING` |
-| `REQ-022` | final deletion ledger complete | `11` | release gate | bypass deletion proof | `MISSING` |
-| `REQ-023` | rich-machine authority harness and owner tests | `6` and `7` | `cargo xtask machine-verify --machine <name>` | advanced machine-authority harness + kernel tests | `MISSING` |
-| `REQ-024` | SchemaKernel by-construction workflow | `2` and `3` | generated owner crates | generated kernel no-drift proof | `MISSING` |
-| `REQ-025` | surface compatibility/versioning policy | `8` to `10` | public schemas + docs + bindings | change propagation proof | `MISSING` |
+- Canonical composition Rust-module render contracts remain blocked because the repo does not yet expose a public/stable Rust render surface for the four canonical compositions. Existing band-A coverage therefore pins `render_machine_kernel_module`, `render_generated_kernel_mod`, current generated consumer helper files, and the compat `flow_frame_loop_driver` only.
+- One protocol round-trip remains partially blocked in band-A: `flow_loop_until_evaluation` exposes a typed generated helper module, but its source/authority types are crate-private from integration tests, so this pass could only pin typed helper surface, not an external round-trip harness.

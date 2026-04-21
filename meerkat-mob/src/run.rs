@@ -8,8 +8,8 @@ use crate::ids::{
 };
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -63,7 +63,7 @@ pub struct MobRun {
     /// Ordered ledger of loop iteration → body frame mappings.
     #[serde(default)]
     pub loop_iteration_ledger: Vec<LoopIterationLedgerEntry>,
-    /// Schema version: 0 for legacy runs, 4 for self-describing frame-aware runs.
+    /// Schema version: 0 for legacy runs, 5 for self-describing frame-aware runs.
     #[serde(default)]
     pub schema_version: u32,
     /// Root frame step outputs keyed by step_id string.
@@ -514,7 +514,7 @@ impl MobRun {
             frames: BTreeMap::new(),
             loops: BTreeMap::new(),
             loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
+            schema_version: 5,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
         }
@@ -1456,7 +1456,7 @@ mod tests {
             frames: BTreeMap::new(),
             loops: BTreeMap::new(),
             loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
+            schema_version: 5,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
         };

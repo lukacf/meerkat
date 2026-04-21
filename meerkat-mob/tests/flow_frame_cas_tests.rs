@@ -6,8 +6,8 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use meerkat_mob::ids::FrameId;
 use meerkat_mob::run::{FrameSnapshot, MobRun};
 use meerkat_mob::store::MobRunStore;
@@ -329,7 +329,7 @@ fn build_run_state_with_three_ready_frames() -> KernelState {
 #[tokio::test]
 async fn test_transition_frame_cas_exhaustion_returns_err() {
     use indexmap::IndexMap;
-    use meerkat_machine_kernels::KernelState;
+    use meerkat_machine_kernels::legacy::KernelState;
     use meerkat_mob::definition::{DependencyMode, FlowNodeSpec, FrameSpec, FrameStepSpec};
     use meerkat_mob::ids::{FlowNodeId, StepId};
     use meerkat_mob::run::FrameSnapshot;

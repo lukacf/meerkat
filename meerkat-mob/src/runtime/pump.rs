@@ -7,8 +7,8 @@
 
 use crate::error::MobError;
 use crate::ids::{FrameId, LoopInstanceId};
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use std::collections::BTreeMap;
 
 /// A scheduler grant produced by pumping.

@@ -3069,6 +3069,7 @@ name = "machine-dsl-tests"
 version = "0.6.0"
 dependencies = [
  "indexmap",
+ "meerkat-core",
  "meerkat-machine-codegen",
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
@@ -3460,6 +3461,7 @@ version = "0.6.0"
 dependencies = [
  "indexmap",
  "meerkat-machine-dsl",
+ "serde",
 ]
 
 [[package]]

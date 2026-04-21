@@ -1,0 +1,5 @@
+error[E0609]: no field `variant` on type `&MeerkatMachineEffect`
+  --> tests/compile_fail/typed_effect_has_no_variant_string.rs:17:57
+   |
+17 |     let _ = outcome.effects.first().map(|effect| effect.variant.as_str());
+   |                                                         ^^^^^^^ unknown field

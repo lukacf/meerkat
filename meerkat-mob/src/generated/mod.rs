@@ -5,5 +5,5 @@
 // owner feedback returns an obligation token that must be consumed by the
 // corresponding feedback submitter.
 
-pub mod flow_frame_loop_driver;
-pub mod protocol_flow_loop_until_evaluation;
+pub(crate) mod flow_frame_loop_driver;
+pub(crate) mod protocol_flow_loop_until_evaluation;

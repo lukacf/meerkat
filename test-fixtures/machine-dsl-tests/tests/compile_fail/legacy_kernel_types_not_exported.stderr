@@ -1,0 +1,21 @@
+error[E0432]: unresolved imports `meerkat_machine_kernels::KernelEffect`, `meerkat_machine_kernels::KernelInput`, `meerkat_machine_kernels::KernelSignal`, `meerkat_machine_kernels::KernelState`, `meerkat_machine_kernels::KernelValue`
+ --> tests/compile_fail/legacy_kernel_types_not_exported.rs:3:31
+  |
+3 | use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelSignal, KernelState, KernelValue};
+  |                               ^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^ no `KernelValue` in the root
+  |                               |             |            |             |
+  |                               |             |            |             no `KernelState` in the root
+  |                               |             |            no `KernelSignal` in the root
+  |                               |             no `KernelInput` in the root
+  |                               no `KernelEffect` in the root
+  |
+  = help: consider importing this struct instead:
+          meerkat_machine_kernels::legacy::KernelEffect
+  = help: consider importing this struct instead:
+          meerkat_machine_kernels::legacy::KernelInput
+  = help: consider importing this struct instead:
+          meerkat_machine_kernels::legacy::KernelSignal
+  = help: consider importing this struct instead:
+          meerkat_machine_kernels::legacy::KernelState
+  = help: consider importing this enum instead:
+          meerkat_machine_kernels::legacy::KernelValue

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/composition_protocol_rejects_raw_effect_shape.rs:13:39
+   |
+13 |     let _ = accept_wait_all_satisfied(raw);
+   |             ------------------------- ^^^ expected `WaitAllSatisfied`, found `RawEffectShape`
+   |             |
+   |             arguments to this function are incorrect
+   |
+note: function defined here
+  --> $WORKSPACE/meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs
+   |
+   | pub fn accept_wait_all_satisfied(source: WaitAllSatisfied) -> OpsBarrierSatisfactionObligation {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^

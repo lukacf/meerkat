@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 
 use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
-use meerkat_machine_kernels::generated::loop_iteration;
-use meerkat_machine_kernels::{
+use meerkat_machine_kernels::legacy::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
 };
+use meerkat_machine_kernels::legacy_generated::loop_iteration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoopIterationInput {

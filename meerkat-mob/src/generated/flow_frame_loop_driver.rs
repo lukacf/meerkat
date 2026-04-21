@@ -26,10 +26,10 @@ use crate::runtime::flow_frame_kernel::{build_start_body_frame_input, topologica
 use crate::runtime::loop_iteration_authority::{
     LoopIterationAuthority, LoopUntilEvaluationRequested,
 };
-use meerkat_machine_kernels::generated::{flow_frame, flow_run, loop_iteration};
-use meerkat_machine_kernels::{
+use meerkat_machine_kernels::legacy::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
 };
+use meerkat_machine_kernels::legacy_generated::{flow_frame, flow_run, loop_iteration};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]

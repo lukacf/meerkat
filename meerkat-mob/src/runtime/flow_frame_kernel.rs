@@ -8,8 +8,8 @@ use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::FrameSnapshot;
 use crate::store::MobRunStore;
-use meerkat_machine_kernels::generated::flow_frame;
-use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelEffect, KernelInput, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_frame;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 

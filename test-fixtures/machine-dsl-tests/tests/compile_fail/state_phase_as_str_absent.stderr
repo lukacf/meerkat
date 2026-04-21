@@ -1,0 +1,5 @@
+error[E0599]: no method named `as_str` found for enum `meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatPhase` in the current scope
+ --> tests/compile_fail/state_phase_as_str_absent.rs:3:25
+  |
+3 |     let _ = state.phase.as_str();
+  |                         ^^^^^^ method not found in `meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatPhase`

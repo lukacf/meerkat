@@ -6,13 +6,13 @@
 
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
-use meerkat_machine_kernels::KernelValue;
+use meerkat_machine_kernels::legacy::KernelValue;
 
 /// Errors that prevent a run from being resumed.
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreIncompatible {
-    #[error("cannot resume pre-v3 frame run: schema_version={schema_version}")]
-    PreV3Schema { schema_version: u32 },
+    #[error("cannot resume pre-row22 frame run: schema_version={schema_version}")]
+    PreRow22Schema { schema_version: u32 },
     #[error("frame invariant violated: frame {frame_id} has Ready nodes not in ready_queue")]
     FrameInvariantViolation { frame_id: FrameId },
     #[error("stale queue entries could not be reconciled")]
@@ -31,9 +31,9 @@ pub enum RestoreIncompatible {
 ///
 /// Returns `Err(RestoreIncompatible)` if the persisted state is irrecoverable.
 pub fn reconcile_run_state(run: &mut MobRun) -> Result<(), RestoreIncompatible> {
-    // 1. Pre-v3 check: reject active runs that predate descriptor-backed frame recovery.
-    if run.schema_version < 3 && run.status != MobRunStatus::Pending && !run.status.is_terminal() {
-        return Err(RestoreIncompatible::PreV3Schema {
+    // 1. Hard cut: reject active runs that predate the row-22 typed snapshot cut.
+    if run.schema_version < 5 && run.status != MobRunStatus::Pending && !run.status.is_terminal() {
+        return Err(RestoreIncompatible::PreRow22Schema {
             schema_version: run.schema_version,
         });
     }
@@ -293,11 +293,11 @@ mod tests {
     use super::*;
     use crate::ids::RunId;
     use crate::run::{MobRun, MobRunStatus};
-    use meerkat_machine_kernels::{KernelState, KernelValue};
+    use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use meerkat_machine_kernels::generated::flow_run;
+        use meerkat_machine_kernels::legacy_generated::flow_run;
         let flow_state = flow_run::initial_state().expect("init");
         MobRun {
             run_id: RunId::new(),
@@ -313,7 +313,7 @@ mod tests {
             frames: BTreeMap::new(),
             loops: BTreeMap::new(),
             loop_iteration_ledger: vec![],
-            schema_version: 4,
+            schema_version: 5,
             root_step_outputs: indexmap::IndexMap::new(),
             loop_iteration_outputs: std::collections::BTreeMap::new(),
         }
@@ -366,23 +366,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_v3_pending_run_is_accepted() {
-        // Pending runs (not active) are fine even before schema_version 3.
+    fn test_pre_row22_pending_run_is_accepted() {
+        // Pending runs (not active) are fine even before schema_version 5.
         let mut run = minimal_v2_run_running();
-        run.schema_version = 2;
+        run.schema_version = 4;
         run.status = MobRunStatus::Pending;
         assert!(reconcile_run_state(&mut run).is_ok());
     }
 
     #[test]
-    fn test_pre_v3_running_run_is_rejected() {
+    fn test_pre_row22_running_run_is_rejected() {
         let mut run = minimal_v2_run_running();
-        run.schema_version = 2;
+        run.schema_version = 4;
         run.status = MobRunStatus::Running;
         let result = reconcile_run_state(&mut run);
         assert!(
-            matches!(result, Err(RestoreIncompatible::PreV3Schema { .. })),
-            "Expected PreV3Schema, got: {result:?}"
+            matches!(result, Err(RestoreIncompatible::PreRow22Schema { .. })),
+            "Expected PreRow22Schema, got: {result:?}"
         );
     }
 

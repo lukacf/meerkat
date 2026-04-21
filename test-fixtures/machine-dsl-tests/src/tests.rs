@@ -215,7 +215,7 @@ mod e2e_tla {
         assert_eq!(state.phase, "Locked");
 
         // Feed InsertCoin input
-        let input = meerkat_machine_kernels::KernelInput {
+        let input = meerkat_machine_kernels::legacy::KernelInput {
             variant: "InsertCoin".into(),
             fields: std::collections::BTreeMap::new(),
         };
@@ -248,7 +248,7 @@ mod e2e_tla {
         ];
 
         for (variant_name, dsl_input) in inputs {
-            let kernel_input = meerkat_machine_kernels::KernelInput {
+            let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
                 variant: variant_name.into(),
                 fields: std::collections::BTreeMap::new(),
             };

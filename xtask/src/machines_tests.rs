@@ -118,6 +118,45 @@ color="white";
 
 #[cfg(feature = "machine-authority")]
 #[test]
+fn parse_tlc_graph_stats_extracts_generated_distinct_and_depth() {
+    let output = r#"
+TLC2 Version 2.19 of Day Month 20?? (rev: abcdef)
+1234 states generated, 567 distinct states found, 89 states left on queue.
+The depth of the complete state graph search is 42.
+"#;
+
+    let stats = parse_tlc_graph_stats(output);
+    assert_eq!(stats.generated_states, Some(1234));
+    assert_eq!(stats.distinct_states, Some(567));
+    assert_eq!(stats.depth, Some(42));
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn machine_verify_stats_reports_five_machines_and_four_compositions() {
+    let registry = CanonicalRegistry::load();
+    let selection = registry
+        .select(&SelectionArgs {
+            all: true,
+            machines: vec![],
+            compositions: vec![],
+        })
+        .expect("select all canonical machine/composition targets");
+
+    assert_eq!(
+        selection.machines.len(),
+        5,
+        "row-22 stats reporting should include five canonical machines"
+    );
+    assert_eq!(
+        selection.compositions.len(),
+        4,
+        "row-22 stats reporting should include four canonical compositions"
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
 fn hopcroft_refinement_merges_terminally_equivalent_states_without_observation() {
     let dot = r#"
 strict digraph DiskGraph {

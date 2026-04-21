@@ -7,8 +7,8 @@
 
 use indexmap::IndexMap;
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_run;
 use meerkat_mob::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowSpec, FlowStepSpec, LimitsSpec,
     StepOutputFormat,

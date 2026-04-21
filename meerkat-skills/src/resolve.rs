@@ -165,10 +165,7 @@ pub async fn resolve_repositories_with_roots(
                     );
                     sources.push(NamedSource {
                         name: repo.name.clone(),
-                        source: SourceNode::External(ExternalSkillSource::new(
-                            repo.source_uuid.to_string(),
-                            client,
-                        )),
+                        source: SourceNode::External(ExternalSkillSource::new(client)),
                     });
                 }
                 SkillRepoTransport::Git {

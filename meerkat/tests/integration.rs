@@ -1140,15 +1140,12 @@ elif echo "$line" | grep -q '"method":"skills/invoke_function"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/invoke_function","result":{"output":{"transport":"stdio","ok":true}}}}'
 fi
 "#;
-        let stdio = ExternalSkillSource::new(
-            "stdio-src",
-            StdioExternalClient::new(
-                "sh",
-                vec!["-c".to_string(), stdio_script.to_string()],
-                BTreeMap::new(),
-                None,
-            ),
-        );
+        let stdio = ExternalSkillSource::new(StdioExternalClient::new(
+            "sh",
+            vec!["-c".to_string(), stdio_script.to_string()],
+            BTreeMap::new(),
+            None,
+        ));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1201,10 +1198,11 @@ fi
                 });
             }
         });
-        let http = ExternalSkillSource::new(
+        let http = ExternalSkillSource::new(HttpExternalClient::new(
             "http-src",
-            HttpExternalClient::new("http-src", format!("http://{addr}"), None),
-        );
+            format!("http://{addr}"),
+            None,
+        ));
 
         let stdio_skills = stdio.list(&SkillFilter::default()).await.unwrap();
         let http_skills = http.list(&SkillFilter::default()).await.unwrap();

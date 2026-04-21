@@ -250,7 +250,7 @@ fi
             BTreeMap::new(),
             None,
         );
-        let external = ExternalSkillSource::new("ext-src", client);
+        let external = ExternalSkillSource::new(client);
         let node = SourceNode::External(external);
         let listed = node.list(&SkillFilter::default()).await.unwrap();
         assert_eq!(listed.len(), 1);

@@ -6,9 +6,9 @@ use async_trait::async_trait;
 #[cfg(feature = "mob")]
 use meerkat::DeliveryTerminal;
 use meerkat::surface::{
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, accepted_scheduled_input_from_runtime_outcome,
-    build_dispatch_from_accepted, immediate_delivery_failure, schedule_attempt_idempotency_key,
+    RuntimeAdmissionProjection, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, dispatch_from_admission,
+    immediate_delivery_failure, project_runtime_admission, schedule_attempt_idempotency_key,
     schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(feature = "mob")]
@@ -486,9 +486,9 @@ impl SessionRuntime {
             )
             .await
         {
-            Ok(accepted) => Ok(build_dispatch_from_accepted(
+            Ok(projection) => Ok(dispatch_from_admission(
                 occurrence,
-                accepted,
+                projection,
                 dispatch.materialized_session_id,
             )),
             Err(error) => Ok(immediate_delivery_failure(
@@ -520,9 +520,9 @@ impl SessionRuntime {
             )
             .await
         {
-            Ok(accepted) => Ok(build_dispatch_from_accepted(
+            Ok(projection) => Ok(dispatch_from_admission(
                 occurrence,
-                accepted,
+                projection,
                 materialized_session_id,
             )),
             Err(error) => Ok(immediate_delivery_failure(
@@ -543,7 +543,7 @@ impl SessionRuntime {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         skill_references: Vec<String>,
         additional_instructions: Vec<String>,
-    ) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
         if self
             .live_session_is_stale(session_id)
             .await
@@ -618,9 +618,7 @@ impl SessionRuntime {
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(accepted_scheduled_input_from_runtime_outcome(
-            outcome, handle,
-        ))
+        Ok(project_runtime_admission(outcome, handle))
     }
 
     async fn accept_scheduled_event_with_completion(
@@ -630,7 +628,7 @@ impl SessionRuntime {
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
         if self
             .live_session_is_stale(session_id)
             .await
@@ -672,9 +670,7 @@ impl SessionRuntime {
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(accepted_scheduled_input_from_runtime_outcome(
-            outcome, handle,
-        ))
+        Ok(project_runtime_admission(outcome, handle))
     }
 
     fn schedule_owner_id(&self) -> String {

@@ -44,8 +44,21 @@ struct ResolvedScheduledSession {
 }
 
 pub struct AcceptedScheduledInput {
-    pub correlation_id: String,
+    pub correlation_id: Option<String>,
     pub handle: Option<CompletionHandle>,
+}
+
+/// Typed projection of a runtime admission outcome into the schedule surface.
+///
+/// The schedule taxonomy (`OccurrenceFailureClass`) has domain-specific variants
+/// (target/lease/mob) that the runtime does not know about, so we keep it distinct
+/// from the runtime's `AcceptOutcome`. Callers exhaustively match this projection
+/// and route the rejected arm through `immediate_delivery_failure` with the
+/// correct failure class, rather than laundering it back through the accepted
+/// path with a sentinel correlation id.
+pub enum RuntimeAdmissionProjection {
+    Admitted(AcceptedScheduledInput),
+    Rejected { detail: String },
 }
 
 #[derive(Debug, Clone)]
@@ -373,31 +386,54 @@ pub fn spawn_schedule_host(
     }
 }
 
-pub fn accepted_scheduled_input_from_runtime_outcome(
+pub fn project_runtime_admission(
     outcome: AcceptOutcome,
     handle: Option<CompletionHandle>,
-) -> AcceptedScheduledInput {
+) -> RuntimeAdmissionProjection {
     match outcome {
-        AcceptOutcome::Accepted { input_id, .. } => AcceptedScheduledInput {
-            correlation_id: input_id.to_string(),
-            handle,
+        AcceptOutcome::Accepted { input_id, .. } => {
+            RuntimeAdmissionProjection::Admitted(AcceptedScheduledInput {
+                correlation_id: Some(input_id.to_string()),
+                handle,
+            })
+        }
+        AcceptOutcome::Deduplicated { existing_id, .. } => {
+            RuntimeAdmissionProjection::Admitted(AcceptedScheduledInput {
+                correlation_id: Some(existing_id.to_string()),
+                handle,
+            })
+        }
+        AcceptOutcome::Rejected { reason } => RuntimeAdmissionProjection::Rejected {
+            detail: reason.to_string(),
         },
-        AcceptOutcome::Deduplicated { existing_id, .. } => AcceptedScheduledInput {
-            correlation_id: existing_id.to_string(),
-            handle,
+        // `AcceptOutcome` is `#[non_exhaustive]`; treat additions as rejections
+        // until the surface is taught to project them.
+        other => RuntimeAdmissionProjection::Rejected {
+            detail: format!("unsupported runtime accept outcome: {other:?}"),
         },
-        AcceptOutcome::Rejected { reason } => AcceptedScheduledInput {
-            correlation_id: "rejected".to_string(),
-            handle: Some(CompletionHandle::already_resolved(
-                CompletionOutcome::Abandoned(reason.to_string()),
-            )),
-        },
-        _ => AcceptedScheduledInput {
-            correlation_id: "rejected".to_string(),
-            handle: Some(CompletionHandle::already_resolved(
-                CompletionOutcome::Abandoned("unsupported runtime accept outcome".to_string()),
-            )),
-        },
+    }
+}
+
+/// Build a `DeliveryDispatch` from a runtime admission projection.
+///
+/// Admitted inputs flow through `build_dispatch_from_accepted`; rejected inputs
+/// flow through `immediate_delivery_failure` with `OccurrenceFailureClass::RuntimeRejected`.
+pub fn dispatch_from_admission(
+    occurrence: &Occurrence,
+    projection: RuntimeAdmissionProjection,
+    materialized_session_id: Option<SessionId>,
+) -> DeliveryDispatch {
+    match projection {
+        RuntimeAdmissionProjection::Admitted(accepted) => {
+            build_dispatch_from_accepted(occurrence, accepted, materialized_session_id)
+        }
+        RuntimeAdmissionProjection::Rejected { detail } => immediate_delivery_failure(
+            occurrence,
+            detail,
+            OccurrenceFailureClass::RuntimeRejected,
+            None,
+            materialized_session_id,
+        ),
     }
 }
 
@@ -411,7 +447,7 @@ pub fn build_dispatch_from_accepted(
         occurrence.attempt_count,
         DeliveryReceiptStage::DispatchAccepted,
     );
-    receipt.correlation_id = Some(accepted.correlation_id.clone());
+    receipt.correlation_id = accepted.correlation_id.clone();
     receipt.materialized_session_id = materialized_session_id.clone();
 
     let occurrence_id = occurrence.occurrence_id.clone();
@@ -426,7 +462,7 @@ pub fn build_dispatch_from_accepted(
                 attempt_count,
                 DeliveryReceiptStage::Completed,
             );
-            receipt.correlation_id = Some(correlation_id);
+            receipt.correlation_id = correlation_id;
             receipt.materialized_session_id = completed_materialized_session_id;
             Ok(DeliveryTerminal::completed(Some(receipt)))
         }),
@@ -434,7 +470,7 @@ pub fn build_dispatch_from_accepted(
 
     DeliveryDispatch {
         receipt,
-        correlation_id: Some(accepted.correlation_id),
+        correlation_id: accepted.correlation_id,
         materialized_session_id,
         completion,
     }
@@ -514,6 +550,12 @@ pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
     )
 }
 
+/// Project a runtime `CompletionOutcome` into a schedule `DeliveryTerminal`.
+///
+/// This is an exhaustive typed mapping from the runtime's completion taxonomy
+/// into the schedule's failure-class taxonomy (see `OccurrenceFailureClass`).
+/// The taxonomies are distinct: the runtime surfaces callback/terminated
+/// semantics that the schedule domain models as delivery failure categories.
 fn scheduled_completion_future(
     handle: CompletionHandle,
     materialized_session_id: Option<SessionId>,

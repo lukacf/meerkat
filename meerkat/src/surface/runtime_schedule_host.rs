@@ -6,10 +6,10 @@ use chrono::Utc;
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
 use super::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, accepted_scheduled_input_from_runtime_outcome,
-    build_dispatch_from_accepted, default_persistent_executor, immediate_delivery_failure,
-    materialize_session, schedule_attempt_idempotency_key, schedule_host_supported,
+    NoopScheduleMobHost, RuntimeAdmissionProjection, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleSessionHost, default_persistent_executor,
+    dispatch_from_admission, immediate_delivery_failure, materialize_session,
+    project_runtime_admission, schedule_attempt_idempotency_key, schedule_host_supported,
     spawn_schedule_host,
 };
 use crate::{
@@ -216,7 +216,7 @@ impl RuntimeBackedScheduleSessionHost {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         skill_references: Vec<String>,
         additional_instructions: Vec<String>,
-    ) -> Result<super::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
         let skill_keys = self.canonical_skill_keys(skill_references)?;
 
@@ -249,9 +249,7 @@ impl RuntimeBackedScheduleSessionHost {
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(accepted_scheduled_input_from_runtime_outcome(
-            outcome, handle,
-        ))
+        Ok(project_runtime_admission(outcome, handle))
     }
 
     async fn accept_scheduled_event_with_completion(
@@ -261,7 +259,7 @@ impl RuntimeBackedScheduleSessionHost {
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<super::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
         let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
@@ -291,9 +289,7 @@ impl RuntimeBackedScheduleSessionHost {
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(accepted_scheduled_input_from_runtime_outcome(
-            outcome, handle,
-        ))
+        Ok(project_runtime_admission(outcome, handle))
     }
 }
 
@@ -382,9 +378,9 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
             )
             .await
         {
-            Ok(accepted) => Ok(build_dispatch_from_accepted(
+            Ok(projection) => Ok(dispatch_from_admission(
                 occurrence,
-                accepted,
+                projection,
                 dispatch.materialized_session_id,
             )),
             Err(error) => Ok(immediate_delivery_failure(
@@ -416,9 +412,9 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
             )
             .await
         {
-            Ok(accepted) => Ok(build_dispatch_from_accepted(
+            Ok(projection) => Ok(dispatch_from_admission(
                 occurrence,
-                accepted,
+                projection,
                 materialized_session_id,
             )),
             Err(error) => Ok(immediate_delivery_failure(

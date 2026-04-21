@@ -12670,8 +12670,8 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         }
         TypeRef::Named(_) => KernelValue::String(String::new()),
         TypeRef::Enum(name) => KernelValue::NamedVariant {
-            enum_name: name.clone(),
-            variant: String::new(),
+            enum_name: name.clone().into(),
+            variant: String::new().into(),
         },
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
@@ -12713,8 +12713,8 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
             KernelValue::String(serde_json::to_string(value).unwrap_or_else(|_| "null".into()))
         }
         TypeRef::Enum(name) => KernelValue::NamedVariant {
-            enum_name: name.clone(),
-            variant: value.as_str().unwrap_or_default().to_string(),
+            enum_name: name.clone().into(),
+            variant: value.as_str().unwrap_or_default().to_string().into(),
         },
         TypeRef::Option(inner) => {
             if value.is_null() {
@@ -12774,7 +12774,7 @@ fn runtime_modeled_json_from_kernel_value(value: &KernelValue) -> serde_json::Va
         KernelValue::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
         }
-        KernelValue::NamedVariant { variant, .. } => serde_json::Value::String(variant.clone()),
+        KernelValue::NamedVariant { variant, .. } => serde_json::Value::String(variant.to_string()),
         KernelValue::Seq(items) => serde_json::Value::Array(
             items
                 .iter()
@@ -12887,16 +12887,16 @@ fn runtime_modeled_kernel_state(
     for field in &schema.state.fields {
         let value = before
             .formal_available_fields
-            .get(&field.name)
+            .get(field.name.as_str())
             .map(|raw| runtime_modeled_kernel_value_from_raw(&field.ty, raw))
             .unwrap_or_else(|| match field.name.as_str() {
                 "active_fence_token" => runtime_modeled_option_some(KernelValue::U64(0)),
                 _ => runtime_modeled_default_kernel_value(&field.ty),
             });
-        fields.insert(field.name.clone(), value);
+        fields.insert(field.name.clone().into(), value);
     }
     KernelState {
-        phase: before.phase.clone(),
+        phase: before.phase.clone().into(),
         fields,
     }
 }
@@ -13012,10 +13012,13 @@ fn runtime_modeled_kernel_input(
             "kind" => KernelValue::String("runtime_created".to_string()),
             _ => runtime_modeled_default_kernel_value(&field.ty),
         };
-        fields.insert(field.name.clone(), value);
+        fields.insert(field.name.clone().into(), value);
     }
 
-    Ok(KernelInput { variant, fields })
+    Ok(KernelInput {
+        variant: variant.into(),
+        fields,
+    })
 }
 
 fn runtime_parity_probe_variant_name(probe: RuntimeParityProbeInput) -> &'static str {
@@ -13085,7 +13088,7 @@ fn runtime_modeled_summary_from_kernel_state(
         .map(|field| {
             let value = state
                 .fields
-                .get(&field.name)
+                .get(field.name.as_str())
                 .map(runtime_modeled_formal_string_from_kernel_value)
                 .unwrap_or_else(|| "null".to_string());
             (field.name.clone(), value)
@@ -13093,7 +13096,7 @@ fn runtime_modeled_summary_from_kernel_state(
         .collect();
 
     Some(RuntimeModeledStateSummary {
-        phase: state.phase.clone(),
+        phase: state.phase.to_string(),
         formal_fields,
     })
 }
@@ -13182,36 +13185,36 @@ fn runtime_modeled_publish_input(
     staged_visibility_revision: u64,
 ) -> KernelInput {
     KernelInput {
-        variant: "PublishCommittedVisibleSet".to_string(),
+        variant: "PublishCommittedVisibleSet".into(),
         fields: BTreeMap::from([
             (
-                "active_filter".to_string(),
+                "active_filter".into(),
                 KernelValue::String(
                     serde_json::to_string(&meerkat_core::ToolFilter::All)
                         .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
                 ),
             ),
             (
-                "staged_filter".to_string(),
+                "staged_filter".into(),
                 KernelValue::String(
                     serde_json::to_string(&meerkat_core::ToolFilter::All)
                         .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
                 ),
             ),
             (
-                "active_requested_deferred_names".to_string(),
+                "active_requested_deferred_names".into(),
                 runtime_modeled_string_set(&[]),
             ),
             (
-                "staged_requested_deferred_names".to_string(),
+                "staged_requested_deferred_names".into(),
                 runtime_modeled_string_set(&[]),
             ),
             (
-                "active_visibility_revision".to_string(),
+                "active_visibility_revision".into(),
                 KernelValue::U64(active_visibility_revision),
             ),
             (
-                "staged_visibility_revision".to_string(),
+                "staged_visibility_revision".into(),
                 KernelValue::U64(staged_visibility_revision),
             ),
         ]),
@@ -13365,16 +13368,16 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
         .expect("attached steer test should capture an active run snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = KernelInput {
-        variant: "AcceptWithCompletion".to_string(),
+        variant: "AcceptWithCompletion".into(),
         fields: BTreeMap::from([
-            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            ("input_id".into(), runtime_modeled_input_id_value()),
             (
-                "request_immediate_processing".to_string(),
+                "request_immediate_processing".into(),
                 KernelValue::Bool(true),
             ),
-            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
-            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
-            ("run_id".to_string(), runtime_modeled_run_id_value()),
+            ("interrupt_yielding".into(), KernelValue::Bool(false)),
+            ("wake_if_idle".into(), KernelValue::Bool(false)),
+            ("run_id".into(), runtime_modeled_run_id_value()),
         ]),
     };
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
@@ -13427,16 +13430,16 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
         .expect("idle queue test should capture a post-state snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = KernelInput {
-        variant: "AcceptWithCompletion".to_string(),
+        variant: "AcceptWithCompletion".into(),
         fields: BTreeMap::from([
-            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            ("input_id".into(), runtime_modeled_input_id_value()),
             (
-                "request_immediate_processing".to_string(),
+                "request_immediate_processing".into(),
                 KernelValue::Bool(false),
             ),
-            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
-            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
-            ("run_id".to_string(), runtime_modeled_run_id_value()),
+            ("interrupt_yielding".into(), KernelValue::Bool(false)),
+            ("wake_if_idle".into(), KernelValue::Bool(false)),
+            ("run_id".into(), runtime_modeled_run_id_value()),
         ]),
     };
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
@@ -13636,16 +13639,16 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
         .expect("running steer test should capture a post-state snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = KernelInput {
-        variant: "AcceptWithCompletion".to_string(),
+        variant: "AcceptWithCompletion".into(),
         fields: BTreeMap::from([
-            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            ("input_id".into(), runtime_modeled_input_id_value()),
             (
-                "request_immediate_processing".to_string(),
+                "request_immediate_processing".into(),
                 KernelValue::Bool(true),
             ),
-            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
-            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
-            ("run_id".to_string(), runtime_modeled_run_id_value()),
+            ("interrupt_yielding".into(), KernelValue::Bool(false)),
+            ("wake_if_idle".into(), KernelValue::Bool(false)),
+            ("run_id".into(), runtime_modeled_run_id_value()),
         ]),
     };
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
@@ -13751,16 +13754,16 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
         .expect("running interrupt test should capture a post-state snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = KernelInput {
-        variant: "AcceptWithCompletion".to_string(),
+        variant: "AcceptWithCompletion".into(),
         fields: BTreeMap::from([
-            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            ("input_id".into(), runtime_modeled_input_id_value()),
             (
-                "request_immediate_processing".to_string(),
+                "request_immediate_processing".into(),
                 KernelValue::Bool(false),
             ),
-            ("interrupt_yielding".to_string(), KernelValue::Bool(true)),
-            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
-            ("run_id".to_string(), runtime_modeled_run_id_value()),
+            ("interrupt_yielding".into(), KernelValue::Bool(true)),
+            ("wake_if_idle".into(), KernelValue::Bool(false)),
+            ("run_id".into(), runtime_modeled_run_id_value()),
         ]),
     };
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
@@ -14460,7 +14463,7 @@ fn runtime_modeled_schema_report(
                     &outcome.next_state,
                     before,
                 ),
-                detail: outcome.transition,
+                detail: outcome.transition.to_string(),
                 result_summary,
             }
         }

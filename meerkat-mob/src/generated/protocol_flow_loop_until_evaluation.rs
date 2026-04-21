@@ -19,7 +19,7 @@ pub struct FlowLoopUntilEvaluationObligation {
     pub loop_id: LoopId,
 }
 
-pub fn accept_evaluate_until_condition(
+pub(crate) fn accept_evaluate_until_condition(
     source: LoopUntilEvaluationRequested,
 ) -> FlowLoopUntilEvaluationObligation {
     FlowLoopUntilEvaluationObligation {
@@ -31,7 +31,7 @@ pub fn accept_evaluate_until_condition(
     }
 }
 
-pub fn submit_until_condition_met(
+pub(crate) fn submit_until_condition_met(
     authority: &mut LoopIterationAuthority,
     obligation: FlowLoopUntilEvaluationObligation,
 ) -> Result<LoopIterationTransition, MobError> {
@@ -42,7 +42,7 @@ pub fn submit_until_condition_met(
     Ok(transition)
 }
 
-pub fn submit_until_condition_failed(
+pub(crate) fn submit_until_condition_failed(
     authority: &mut LoopIterationAuthority,
     obligation: FlowLoopUntilEvaluationObligation,
 ) -> Result<LoopIterationTransition, MobError> {

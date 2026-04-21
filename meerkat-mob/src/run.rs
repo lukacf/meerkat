@@ -2,14 +2,14 @@
 
 use crate::definition::{DependencyMode, FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
 use crate::error::MobError;
+use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MobId, ProfileName, RunId,
     StepId,
 };
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::{KernelState, KernelValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -621,43 +621,49 @@ impl MobRun {
             .as_ref()
             .and_then(|limits| limits.max_step_retries)
             .map_or(0, u64::from);
-        let input = KernelInput {
-            variant: "CreateRun".to_string(),
-            fields: BTreeMap::from([
-                ("step_ids".to_string(), KernelValue::Seq(step_ids)),
-                ("ordered_steps".to_string(), KernelValue::Seq(ordered_steps)),
+        let input = flow_run::input(
+            flow_run::input::create_run(),
+            flow_run::fields([
+                (flow_run::field::step_ids(), KernelValue::Seq(step_ids)),
                 (
-                    "step_dependencies".to_string(),
+                    flow_run::field::ordered_steps(),
+                    KernelValue::Seq(ordered_steps),
+                ),
+                (
+                    flow_run::field::step_dependencies(),
                     KernelValue::Map(step_dependencies),
                 ),
                 (
-                    "step_dependency_modes".to_string(),
+                    flow_run::field::step_dependency_modes(),
                     KernelValue::Map(step_dependency_modes),
                 ),
                 (
-                    "step_has_conditions".to_string(),
+                    flow_run::field::step_has_conditions(),
                     KernelValue::Map(step_has_conditions),
                 ),
-                ("step_branches".to_string(), KernelValue::Map(step_branches)),
                 (
-                    "step_collection_policies".to_string(),
+                    flow_run::field::step_branches(),
+                    KernelValue::Map(step_branches),
+                ),
+                (
+                    flow_run::field::step_collection_policies(),
                     KernelValue::Map(step_collection_policies),
                 ),
                 (
-                    "step_quorum_thresholds".to_string(),
+                    flow_run::field::step_quorum_thresholds(),
                     KernelValue::Map(step_quorum_thresholds),
                 ),
                 (
-                    "escalation_threshold".to_string(),
+                    flow_run::field::escalation_threshold(),
                     KernelValue::U64(escalation_threshold),
                 ),
                 (
-                    "max_step_retries".to_string(),
+                    flow_run::field::max_step_retries(),
                     KernelValue::U64(max_step_retries),
                 ),
                 // v2 scheduler limits — read from config, default to 0 (unlimited/disabled)
                 (
-                    "max_active_nodes".to_string(),
+                    flow_run::field::max_active_nodes(),
                     KernelValue::U64(
                         config
                             .limits
@@ -667,7 +673,7 @@ impl MobRun {
                     ),
                 ),
                 (
-                    "max_active_frames".to_string(),
+                    flow_run::field::max_active_frames(),
                     KernelValue::U64(
                         config
                             .limits
@@ -677,7 +683,7 @@ impl MobRun {
                     ),
                 ),
                 (
-                    "max_frame_depth".to_string(),
+                    flow_run::field::max_frame_depth(),
                     KernelValue::U64(
                         config
                             .limits
@@ -687,7 +693,7 @@ impl MobRun {
                     ),
                 ),
             ]),
-        };
+        );
         let outcome = flow_run::transition(&initial, &input)
             .map_err(|error| MobError::Internal(format!("flow_run CreateRun failed: {error}")))?;
         Ok(outcome.next_state)
@@ -739,8 +745,8 @@ fn dependency_mode_value(mode: crate::definition::DependencyMode) -> KernelValue
         crate::definition::DependencyMode::Any => "Any",
     };
     KernelValue::NamedVariant {
-        enum_name: "DependencyMode".to_string(),
-        variant: variant.to_string(),
+        enum_name: "DependencyMode".into(),
+        variant: variant.into(),
     }
 }
 
@@ -751,8 +757,8 @@ fn collection_policy_kind_value(policy: &crate::definition::CollectionPolicy) ->
         crate::definition::CollectionPolicy::Quorum { .. } => "Quorum",
     };
     KernelValue::NamedVariant {
-        enum_name: "CollectionPolicyKind".to_string(),
-        variant: variant.to_string(),
+        enum_name: "CollectionPolicyKind".into(),
+        variant: variant.into(),
     }
 }
 
@@ -871,7 +877,7 @@ impl StepRunStatus {
             _ => value.as_named_variant("StepRunStatus")?,
         };
 
-        match variant {
+        match variant.as_str() {
             "Dispatched" => Ok(Self::Dispatched),
             "Completed" => Ok(Self::Completed),
             "Failed" => Ok(Self::Failed),

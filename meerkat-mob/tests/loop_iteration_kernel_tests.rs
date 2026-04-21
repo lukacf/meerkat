@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use meerkat_machine_kernels::generated::loop_iteration;
 use meerkat_machine_kernels::{KernelInput, KernelValue};
+use meerkat_mob::generated::loop_iteration;
 use std::collections::BTreeMap;
 
 fn str_val(s: &str) -> KernelValue {

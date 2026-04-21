@@ -1,8 +1,4 @@
 pub mod catalog;
-/// Compatibility-only absorbed machine schemas retained for generated kernel
-/// consumers during the two-kernel collapse. These are intentionally excluded
-/// from the canonical registry.
-pub mod compat;
 mod composition;
 mod machine;
 pub mod types;
@@ -14,7 +10,6 @@ pub use catalog::{
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
 };
-pub use compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine};
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriverRustBinding,
     CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionSchemaError,
@@ -103,21 +98,6 @@ mod tests {
                     .iter()
                     .any(|effect| effect.variant == "SupersedePendingOccurrences"),
                 "{transition_name} should supersede older pending occurrences"
-            );
-        }
-    }
-
-    #[test]
-    fn canonical_registry_excludes_compat_flow_machine_schemas() {
-        let machine_names: Vec<_> = canonical_machine_schemas()
-            .into_iter()
-            .map(|schema| schema.machine)
-            .collect();
-
-        for compat_name in ["FlowRunMachine", "FlowFrameMachine", "LoopIterationMachine"] {
-            assert!(
-                !machine_names.iter().any(|name| name == compat_name),
-                "{compat_name} should remain compat-only, not canonical"
             );
         }
     }

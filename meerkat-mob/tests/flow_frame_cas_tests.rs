@@ -6,8 +6,8 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_mob::generated::flow_run;
 use meerkat_mob::ids::FrameId;
 use meerkat_mob::run::{FrameSnapshot, MobRun};
 use meerkat_mob::store::MobRunStore;

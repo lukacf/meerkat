@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::{collections::BTreeSet, fmt::Write};
 
 fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
     let _ignored = out.write_fmt(args);
@@ -311,7 +311,14 @@ pub fn render_composition_mapping_coverage(
 pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let module_name = machine_slug(&schema.machine);
-    let catalog_fn = format!("catalog::dsl::dsl_{module_name}_machine");
+    let catalog_fn = if matches!(
+        module_name.as_str(),
+        "flow_frame" | "flow_run" | "loop_iteration"
+    ) {
+        format!("{module_name}_machine")
+    } else {
+        format!("catalog::dsl::dsl_{module_name}_machine")
+    };
 
     pushln!(
         &mut out,
@@ -320,7 +327,7 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "use crate::runtime::{{");
     pushln!(
         &mut out,
-        "    GeneratedMachineKernel, KernelInput, KernelSignal, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,"
+        "    GeneratedMachineKernel, KernelEffectVariant, KernelField, KernelFields, KernelHelperName, KernelInput, KernelInputVariant, KernelPhase, KernelSignal, KernelSignalVariant, KernelState, KernelTransitionName, KernelValue, TransitionOutcome, TransitionRefusal,"
     );
     pushln!(&mut out, "}};");
     pushln!(&mut out);
@@ -335,6 +342,130 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    GeneratedMachineKernel::new(schema())");
     pushln!(&mut out, "}}");
     pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "pub fn fields(entries: impl IntoIterator<Item = (KernelField, KernelValue)>) -> KernelFields {{"
+    );
+    pushln!(&mut out, "    entries.into_iter().collect()");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "pub fn input(variant: KernelInputVariant, fields: KernelFields) -> KernelInput {{"
+    );
+    pushln!(&mut out, "    KernelInput::new(variant, fields)");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "pub fn signal(variant: KernelSignalVariant, fields: KernelFields) -> KernelSignal {{"
+    );
+    pushln!(&mut out, "    KernelSignal::new(variant, fields)");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    render_kernel_ident_module(
+        &mut out,
+        "phase",
+        "KernelPhase",
+        schema
+            .state
+            .phase
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str()),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "field",
+        "KernelField",
+        schema
+            .state
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .chain(
+                schema
+                    .inputs
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+            )
+            .chain(
+                schema
+                    .signals
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+            )
+            .chain(
+                schema
+                    .effects
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+            )
+            .chain(
+                schema
+                    .helpers
+                    .iter()
+                    .flat_map(|helper| helper.params.iter().map(|field| field.name.as_str())),
+            )
+            .chain(
+                schema
+                    .derived
+                    .iter()
+                    .flat_map(|helper| helper.params.iter().map(|field| field.name.as_str())),
+            ),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "input",
+        "KernelInputVariant",
+        schema
+            .inputs
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str()),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "signal",
+        "KernelSignalVariant",
+        schema
+            .signals
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str()),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "effect",
+        "KernelEffectVariant",
+        schema
+            .effects
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str()),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "helper",
+        "KernelHelperName",
+        schema
+            .helpers
+            .iter()
+            .map(|helper| helper.name.as_str())
+            .chain(schema.derived.iter().map(|helper| helper.name.as_str())),
+    );
+    render_kernel_ident_module(
+        &mut out,
+        "transition",
+        "KernelTransitionName",
+        schema
+            .transitions
+            .iter()
+            .map(|transition| transition.name.as_str()),
+    );
     pushln!(
         &mut out,
         "pub fn initial_state() -> Result<KernelState, TransitionRefusal> {{"
@@ -364,11 +495,8 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(&mut out, "pub fn evaluate_helper(");
     pushln!(&mut out, "    state: &KernelState,");
-    pushln!(&mut out, "    helper_name: &str,");
-    pushln!(
-        &mut out,
-        "    args: &std::collections::BTreeMap<String, KernelValue>,"
-    );
+    pushln!(&mut out, "    helper_name: &KernelHelperName,");
+    pushln!(&mut out, "    args: &KernelFields,");
     pushln!(&mut out, ") -> Result<KernelValue, TransitionRefusal> {{");
     pushln!(
         &mut out,
@@ -390,11 +518,6 @@ pub fn render_generated_kernel_mod(schemas: &[MachineSchema]) -> String {
         .iter()
         .map(|schema| machine_slug(&schema.machine))
         .collect();
-    for compatibility_slug in ["flow_frame", "flow_run", "loop_iteration"] {
-        if !module_slugs.iter().any(|slug| slug == compatibility_slug) {
-            module_slugs.push(compatibility_slug.to_string());
-        }
-    }
     module_slugs.sort();
     for slug in module_slugs {
         pushln!(&mut out, "pub mod {slug};");
@@ -459,6 +582,29 @@ fn render_semantic_mapping_section(
 fn machine_slug(machine_name: &str) -> String {
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
+}
+
+#[cfg(not(test))]
+fn render_kernel_ident_module<'a>(
+    out: &mut String,
+    module_name: &str,
+    type_name: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) {
+    let mut seen = BTreeSet::new();
+    pushln!(out, "pub mod {module_name} {{");
+    for name in names {
+        if !seen.insert(name) {
+            continue;
+        }
+        let function_name = to_snake_case(name);
+        pushln!(out, "    #[must_use]");
+        pushln!(out, "    pub fn {function_name}() -> super::{type_name} {{");
+        pushln!(out, "        super::{type_name}::new_static(\"{name}\")");
+        pushln!(out, "    }}");
+    }
+    pushln!(out, "}}");
+    pushln!(out);
 }
 
 #[cfg(not(test))]

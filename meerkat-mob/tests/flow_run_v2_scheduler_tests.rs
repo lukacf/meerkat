@@ -7,12 +7,12 @@
 
 use indexmap::IndexMap;
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
 use meerkat_mob::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowSpec, FlowStepSpec, LimitsSpec,
     StepOutputFormat,
 };
+use meerkat_mob::generated::flow_run;
 use meerkat_mob::ids::{FlowId, ProfileName, StepId};
 use meerkat_mob::run::{FlowRunConfig, MobRun};
 use std::collections::BTreeMap;

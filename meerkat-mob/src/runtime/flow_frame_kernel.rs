@@ -5,11 +5,11 @@
 
 use crate::definition::{DependencyMode, FlowNodeSpec, FrameSpec};
 use crate::error::MobError;
+use crate::generated::flow_frame;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::FrameSnapshot;
 use crate::store::MobRunStore;
-use meerkat_machine_kernels::generated::flow_frame;
-use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue};
+use meerkat_machine_kernels::{KernelEffect, KernelFields, KernelInput, KernelValue};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
@@ -436,7 +436,7 @@ fn build_frame_start_fields(
     frame_id: &FrameId,
     spec: &FrameSpec,
     ordered: &[FlowNodeId],
-) -> BTreeMap<String, KernelValue> {
+) -> KernelFields {
     let ordered_kv: Vec<KernelValue> = ordered
         .iter()
         .map(|n| KernelValue::String(n.to_string()))
@@ -503,17 +503,32 @@ fn build_frame_start_fields(
         }
     }
 
-    BTreeMap::from([
-        ("frame_id".into(), KernelValue::String(frame_id.to_string())),
-        ("tracked_nodes".into(), KernelValue::Set(tracked)),
-        ("ordered_nodes".into(), KernelValue::Seq(ordered_kv)),
-        ("node_kind".into(), KernelValue::Map(node_kind)),
-        ("node_dependencies".into(), KernelValue::Map(node_deps)),
+    flow_frame::fields([
         (
-            "node_dependency_modes".into(),
+            flow_frame::field::frame_id(),
+            KernelValue::String(frame_id.to_string()),
+        ),
+        (
+            flow_frame::field::tracked_nodes(),
+            KernelValue::Set(tracked),
+        ),
+        (
+            flow_frame::field::ordered_nodes(),
+            KernelValue::Seq(ordered_kv),
+        ),
+        (flow_frame::field::node_kind(), KernelValue::Map(node_kind)),
+        (
+            flow_frame::field::node_dependencies(),
+            KernelValue::Map(node_deps),
+        ),
+        (
+            flow_frame::field::node_dependency_modes(),
             KernelValue::Map(node_dep_modes),
         ),
-        ("node_branches".into(), KernelValue::Map(node_branches)),
+        (
+            flow_frame::field::node_branches(),
+            KernelValue::Map(node_branches),
+        ),
     ])
 }
 

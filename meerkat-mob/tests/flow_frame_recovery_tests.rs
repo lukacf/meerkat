@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn minimal_run_with_schema_v2() -> MobRun {
-    use meerkat_machine_kernels::generated::flow_run;
+    use meerkat_mob::generated::flow_run;
     let flow_state = flow_run::initial_state().expect("init");
     MobRun {
         run_id: RunId::new(),
@@ -364,11 +364,11 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
 
     // Manually add loop-inst-2 to pending_body_frame_loops as a stale entry.
     run.flow_state.fields.insert(
-        "pending_body_frame_loops".to_string(),
+        "pending_body_frame_loops".into(),
         KernelValue::Seq(vec![KernelValue::String("loop-inst-2".into())]),
     );
     run.flow_state.fields.insert(
-        "pending_body_frame_loop_membership".to_string(),
+        "pending_body_frame_loop_membership".into(),
         KernelValue::Set(
             [KernelValue::String("loop-inst-2".into())]
                 .into_iter()

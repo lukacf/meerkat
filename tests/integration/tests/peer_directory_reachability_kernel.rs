@@ -7,10 +7,10 @@ use meerkat_machine_kernels::{KernelSignal, KernelValue};
 
 fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     KernelSignal {
-        variant: variant.to_string(),
+        variant: variant.into(),
         fields: fields
             .into_iter()
-            .map(|(field, value)| (field.to_string(), value))
+            .map(|(field, value)| (field.into(), value))
             .collect(),
     }
 }

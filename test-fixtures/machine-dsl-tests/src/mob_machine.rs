@@ -1231,7 +1231,10 @@ mod tests {
         };
         let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();
 
-        assert_eq!(format!("{:?}", dsl_r.to_phase), kernel_r.next_state.phase);
+        assert_eq!(
+            format!("{:?}", dsl_r.to_phase),
+            kernel_r.next_state.phase.as_str()
+        );
         assert_eq!(dsl_r.effects.len(), kernel_r.effects.len());
 
         kernel_state = kernel_r.next_state;

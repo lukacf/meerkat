@@ -17,7 +17,7 @@ use crate::runtime::flow_frame_loop_driver::{
     FlowFrameLoopDecision, FlowFrameLoopDriver, FlowFrameLoopStorePlan, FlowFrameLoopWork,
     FlowFrameTerminalPhase,
 };
-use crate::runtime::flow_kernels::flow_run;
+use crate::runtime::flow_kernels::{flow_frame, flow_run};
 use crate::store::MobRunStore;
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -203,7 +203,11 @@ impl FlowFrameEngine {
             }
 
             let root_snapshot = self.require_frame(run_id, root_frame_id).await?;
-            if root_snapshot.kernel_state.phase != "Running" && workers.is_empty() {
+            if !root_snapshot
+                .kernel_state
+                .phase_is(&flow_frame::phase::running())
+                && workers.is_empty()
+            {
                 break;
             }
 
@@ -539,18 +543,18 @@ impl FlowFrameEngine {
             if !reconciled
                 .flow_state
                 .fields
-                .contains_key("ready_frame_membership")
+                .contains_key(flow_run::field::ready_frame_membership().as_str())
             {
                 let mut next_state = flow_run::initial_state().map_err(|error| {
                     MobError::Internal(format!("flow_run initial_state failed: {error:?}"))
                 })?;
-                next_state.phase = "Running".into();
+                next_state.phase = flow_run::phase::running();
                 next_state.fields.insert(
-                    "max_frame_depth".into(),
+                    flow_run::field::max_frame_depth(),
                     KernelValue::U64(self.max_frame_depth as u64),
                 );
                 next_state.fields.insert(
-                    "max_active_frames".into(),
+                    flow_run::field::max_active_frames(),
                     KernelValue::U64(self.max_active_frames as u64),
                 );
                 reconciled.flow_state = next_state;
@@ -713,7 +717,8 @@ impl FlowFrameEngine {
                     active_body_frame_id(&loop_snapshot.kernel_state).as_ref() == Some(&frame_id);
                 let awaiting_until =
                     FlowFrameLoopDriver::pending_until_obligation(loop_snapshot)?.is_some();
-                if frame.kernel_state.phase == "Running" || (!active_body_owner && !awaiting_until)
+                if frame.kernel_state.phase_is(&flow_frame::phase::running())
+                    || (!active_body_owner && !awaiting_until)
                 {
                     continue;
                 }

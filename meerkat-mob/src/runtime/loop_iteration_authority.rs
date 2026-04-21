@@ -5,13 +5,11 @@
 //! boundary. This module owns that boundary and delegates transition legality to
 //! the generated loop-iteration machine kernel.
 
-use std::collections::BTreeMap;
-
 use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
 use crate::runtime::flow_kernels::loop_iteration;
 use meerkat_machine_kernels::{
-    KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
+    KernelEffect, KernelField, KernelState, KernelValue, TransitionOutcome,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,18 +37,21 @@ pub(crate) struct LoopUntilEvaluationRequested {
 
 impl LoopUntilEvaluationRequested {
     pub(crate) fn from_effect(effect: &KernelEffect) -> Result<Self, MobError> {
-        if effect.variant != "EvaluateUntilCondition" {
+        if effect.variant != loop_iteration::effect::evaluate_until_condition() {
             return Err(MobError::Internal(format!(
                 "expected EvaluateUntilCondition effect, got '{}'",
                 effect.variant
             )));
         }
         Ok(Self {
-            loop_instance_id: parse_loop_instance_id(effect, "loop_instance_id")?,
-            iteration: parse_u32(effect, "iteration")?,
-            parent_frame_id: parse_frame_id(effect, "parent_frame_id")?,
-            parent_node_id: parse_flow_node_id(effect, "parent_node_id")?,
-            loop_id: parse_loop_id(effect, "loop_id")?,
+            loop_instance_id: parse_loop_instance_id(
+                effect,
+                &loop_iteration::field::loop_instance_id(),
+            )?,
+            iteration: parse_u32(effect, &loop_iteration::field::iteration())?,
+            parent_frame_id: parse_frame_id(effect, &loop_iteration::field::parent_frame_id())?,
+            parent_node_id: parse_flow_node_id(effect, &loop_iteration::field::parent_node_id())?,
+            loop_id: parse_loop_id(effect, &loop_iteration::field::loop_id())?,
         })
     }
 }
@@ -92,40 +93,46 @@ impl LoopIterationMutator for LoopIterationAuthority {
 }
 
 impl LoopIterationInput {
-    fn into_kernel_input(self) -> KernelInput {
+    fn into_kernel_input(self) -> meerkat_machine_kernels::KernelInput {
         match self {
             Self::UntilConditionMet {
                 loop_instance_id,
                 iteration,
-            } => KernelInput {
-                variant: "UntilConditionMet".into(),
-                fields: BTreeMap::from([
+            } => loop_iteration::input(
+                loop_iteration::input::until_condition_met(),
+                loop_iteration::fields([
                     (
-                        "loop_instance_id".into(),
+                        loop_iteration::field::loop_instance_id(),
                         KernelValue::String(loop_instance_id.to_string()),
                     ),
-                    ("iteration".into(), KernelValue::U64(u64::from(iteration))),
+                    (
+                        loop_iteration::field::iteration(),
+                        KernelValue::U64(u64::from(iteration)),
+                    ),
                 ]),
-            },
+            ),
             Self::UntilConditionFailed {
                 loop_instance_id,
                 iteration,
-            } => KernelInput {
-                variant: "UntilConditionFailed".into(),
-                fields: BTreeMap::from([
+            } => loop_iteration::input(
+                loop_iteration::input::until_condition_failed(),
+                loop_iteration::fields([
                     (
-                        "loop_instance_id".into(),
+                        loop_iteration::field::loop_instance_id(),
                         KernelValue::String(loop_instance_id.to_string()),
                     ),
-                    ("iteration".into(), KernelValue::U64(u64::from(iteration))),
+                    (
+                        loop_iteration::field::iteration(),
+                        KernelValue::U64(u64::from(iteration)),
+                    ),
                 ]),
-            },
+            ),
         }
     }
 }
 
-fn parse_string(effect: &KernelEffect, field: &str) -> Result<String, MobError> {
-    match effect.fields.get(field) {
+fn parse_string(effect: &KernelEffect, field: &KernelField) -> Result<String, MobError> {
+    match effect.field(field) {
         Some(KernelValue::String(value)) => Ok(value.clone()),
         other => Err(MobError::Internal(format!(
             "effect '{}' field '{}' expected string, got {other:?}",
@@ -134,8 +141,8 @@ fn parse_string(effect: &KernelEffect, field: &str) -> Result<String, MobError> 
     }
 }
 
-fn parse_u32(effect: &KernelEffect, field: &str) -> Result<u32, MobError> {
-    match effect.fields.get(field) {
+fn parse_u32(effect: &KernelEffect, field: &KernelField) -> Result<u32, MobError> {
+    match effect.field(field) {
         Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
             MobError::Internal(format!(
                 "effect '{}' field '{}' value {} does not fit in u32",
@@ -149,19 +156,22 @@ fn parse_u32(effect: &KernelEffect, field: &str) -> Result<u32, MobError> {
     }
 }
 
-fn parse_loop_instance_id(effect: &KernelEffect, field: &str) -> Result<LoopInstanceId, MobError> {
+fn parse_loop_instance_id(
+    effect: &KernelEffect,
+    field: &KernelField,
+) -> Result<LoopInstanceId, MobError> {
     Ok(LoopInstanceId::from(parse_string(effect, field)?))
 }
 
-fn parse_frame_id(effect: &KernelEffect, field: &str) -> Result<FrameId, MobError> {
+fn parse_frame_id(effect: &KernelEffect, field: &KernelField) -> Result<FrameId, MobError> {
     Ok(FrameId::from(parse_string(effect, field)?))
 }
 
-fn parse_flow_node_id(effect: &KernelEffect, field: &str) -> Result<FlowNodeId, MobError> {
+fn parse_flow_node_id(effect: &KernelEffect, field: &KernelField) -> Result<FlowNodeId, MobError> {
     Ok(FlowNodeId::from(parse_string(effect, field)?))
 }
 
-fn parse_loop_id(effect: &KernelEffect, field: &str) -> Result<LoopId, MobError> {
+fn parse_loop_id(effect: &KernelEffect, field: &KernelField) -> Result<LoopId, MobError> {
     Ok(LoopId::from(parse_string(effect, field)?))
 }
 
@@ -172,22 +182,25 @@ mod tests {
     #[test]
     fn until_request_parses_from_kernel_effect() {
         let effect = KernelEffect {
-            variant: "EvaluateUntilCondition".into(),
+            variant: loop_iteration::effect::evaluate_until_condition(),
             fields: BTreeMap::from([
                 (
-                    "loop_instance_id".into(),
+                    loop_iteration::field::loop_instance_id(),
                     KernelValue::String("loop-1".into()),
                 ),
-                ("iteration".into(), KernelValue::U64(2)),
+                (loop_iteration::field::iteration(), KernelValue::U64(2)),
                 (
-                    "parent_frame_id".into(),
+                    loop_iteration::field::parent_frame_id(),
                     KernelValue::String("frame-root".into()),
                 ),
                 (
-                    "parent_node_id".into(),
+                    loop_iteration::field::parent_node_id(),
                     KernelValue::String("loop-node".into()),
                 ),
-                ("loop_id".into(), KernelValue::String("loop".into())),
+                (
+                    loop_iteration::field::loop_id(),
+                    KernelValue::String("loop".into()),
+                ),
             ]),
         };
 

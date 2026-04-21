@@ -41,6 +41,83 @@ impl MachineSchema {
                 .chain(self.derived.iter().map(|helper| helper.name.as_str())),
             "helper/derived",
         )?;
+        validate_generated_accessor_names(
+            "phase",
+            self.state
+                .phase
+                .variants
+                .iter()
+                .map(|variant| variant.name.as_str()),
+        )?;
+        validate_generated_accessor_names(
+            "field",
+            self.state
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .chain(
+                    self.inputs
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+                )
+                .chain(
+                    self.signals
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+                )
+                .chain(
+                    self.effects
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter().map(|field| field.name.as_str())),
+                )
+                .chain(
+                    self.helpers
+                        .iter()
+                        .flat_map(|helper| helper.params.iter().map(|field| field.name.as_str())),
+                )
+                .chain(
+                    self.derived
+                        .iter()
+                        .flat_map(|helper| helper.params.iter().map(|field| field.name.as_str())),
+                ),
+        )?;
+        validate_generated_accessor_names(
+            "input",
+            self.inputs
+                .variants
+                .iter()
+                .map(|variant| variant.name.as_str()),
+        )?;
+        validate_generated_accessor_names(
+            "signal",
+            self.signals
+                .variants
+                .iter()
+                .map(|variant| variant.name.as_str()),
+        )?;
+        validate_generated_accessor_names(
+            "effect",
+            self.effects
+                .variants
+                .iter()
+                .map(|variant| variant.name.as_str()),
+        )?;
+        validate_generated_accessor_names(
+            "helper",
+            self.helpers
+                .iter()
+                .map(|helper| helper.name.as_str())
+                .chain(self.derived.iter().map(|helper| helper.name.as_str())),
+        )?;
+        validate_generated_accessor_names(
+            "transition",
+            self.transitions
+                .iter()
+                .map(|transition| transition.name.as_str()),
+        )?;
 
         if !phase_names.contains(&self.state.init.phase) {
             return Err(MachineSchemaError::UnknownPhase {
@@ -1055,31 +1132,244 @@ fn unique_names<'a>(
     Ok(seen)
 }
 
+fn validate_generated_accessor_names<'a>(
+    namespace: &'static str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), MachineSchemaError> {
+    let mut raw_seen = IndexSet::new();
+    let mut accessor_to_raw = IndexMap::<String, String>::new();
+
+    for raw_name in names {
+        if !raw_seen.insert(raw_name) {
+            continue;
+        }
+
+        let accessor = generated_accessor_name(raw_name);
+        if accessor.is_empty() {
+            return Err(MachineSchemaError::InvalidGeneratedAccessorName {
+                namespace,
+                name: raw_name.to_owned(),
+                accessor,
+                reason: "normalizes to an empty Rust identifier",
+            });
+        }
+        if accessor.starts_with(|ch: char| ch.is_ascii_digit()) {
+            return Err(MachineSchemaError::InvalidGeneratedAccessorName {
+                namespace,
+                name: raw_name.to_owned(),
+                accessor,
+                reason: "normalizes to an identifier that starts with a digit",
+            });
+        }
+        if !accessor
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        {
+            return Err(MachineSchemaError::InvalidGeneratedAccessorName {
+                namespace,
+                name: raw_name.to_owned(),
+                accessor,
+                reason: "normalizes to an identifier with unsupported characters",
+            });
+        }
+        if rust_keyword(&accessor) {
+            return Err(MachineSchemaError::InvalidGeneratedAccessorName {
+                namespace,
+                name: raw_name.to_owned(),
+                accessor,
+                reason: "normalizes to a reserved Rust keyword",
+            });
+        }
+
+        if let Some(previous_name) = accessor_to_raw.insert(accessor.clone(), raw_name.to_owned())
+            && previous_name != raw_name
+        {
+            return Err(MachineSchemaError::GeneratedAccessorCollision {
+                namespace,
+                accessor,
+                first_name: previous_name,
+                second_name: raw_name.to_owned(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn generated_accessor_name(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_is_sep = true;
+
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            if !previous_is_sep {
+                out.push('_');
+                previous_is_sep = true;
+            }
+            continue;
+        }
+
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() && !previous_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        }
+    }
+
+    out.trim_matches('_').to_owned()
+}
+
+fn rust_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "try"
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MachineSchemaError {
-    DuplicateName { kind: &'static str, name: String },
+    DuplicateName {
+        kind: &'static str,
+        name: String,
+    },
+    GeneratedAccessorCollision {
+        namespace: &'static str,
+        accessor: String,
+        first_name: String,
+        second_name: String,
+    },
+    InvalidGeneratedAccessorName {
+        namespace: &'static str,
+        name: String,
+        accessor: String,
+        reason: &'static str,
+    },
     EmptyName(&'static str),
-    UnknownPhase { phase: String },
-    UnknownField { field: String },
-    UnknownInputVariant { variant: String },
-    UnknownSurfaceOnlyInputVariant { variant: String },
-    UnknownSignalVariant { variant: String },
-    UnknownEffectVariant { variant: String },
-    UnknownHelper { helper: String },
-    UnknownBinding { binding: String },
-    UnknownVariant { variant: String },
-    UnknownVariantField { variant: String, field: String },
-    UnknownEffectDispositionVariant { variant: String },
-    DuplicateEffectDisposition { variant: String },
-    MissingEffectDisposition { variant: String },
-    HandoffProtocolOnRoutedEffect { variant: String },
-    SurfaceOnlyInputHasTransition { variant: String, transition: String },
+    UnknownPhase {
+        phase: String,
+    },
+    UnknownField {
+        field: String,
+    },
+    UnknownInputVariant {
+        variant: String,
+    },
+    UnknownSurfaceOnlyInputVariant {
+        variant: String,
+    },
+    UnknownSignalVariant {
+        variant: String,
+    },
+    UnknownEffectVariant {
+        variant: String,
+    },
+    UnknownHelper {
+        helper: String,
+    },
+    UnknownBinding {
+        binding: String,
+    },
+    UnknownVariant {
+        variant: String,
+    },
+    UnknownVariantField {
+        variant: String,
+        field: String,
+    },
+    UnknownEffectDispositionVariant {
+        variant: String,
+    },
+    DuplicateEffectDisposition {
+        variant: String,
+    },
+    MissingEffectDisposition {
+        variant: String,
+    },
+    HandoffProtocolOnRoutedEffect {
+        variant: String,
+    },
+    SurfaceOnlyInputHasTransition {
+        variant: String,
+        transition: String,
+    },
 }
 
 impl fmt::Display for MachineSchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateName { kind, name } => write!(f, "duplicate {kind} name `{name}`"),
+            Self::GeneratedAccessorCollision {
+                namespace,
+                accessor,
+                first_name,
+                second_name,
+            } => write!(
+                f,
+                "generated {namespace} accessor `{accessor}` collides for `{first_name}` and `{second_name}`"
+            ),
+            Self::InvalidGeneratedAccessorName {
+                namespace,
+                name,
+                accessor,
+                reason,
+            } => write!(
+                f,
+                "generated {namespace} accessor `{accessor}` for `{name}` is invalid: {reason}"
+            ),
             Self::EmptyName(kind) => write!(f, "empty {kind} name"),
             Self::UnknownPhase { phase } => write!(f, "unknown phase `{phase}`"),
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
@@ -1212,6 +1502,48 @@ mod tests {
             Err(MachineSchemaError::SurfaceOnlyInputHasTransition {
                 variant: "RegisterSession".into(),
                 transition,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_generated_accessor_collisions_after_normalization() {
+        let mut schema = meerkat_machine();
+        schema.inputs.variants.push(crate::VariantSchema {
+            name: "Foo-Bar".into(),
+            fields: vec![],
+        });
+        schema.inputs.variants.push(crate::VariantSchema {
+            name: "foo_bar".into(),
+            fields: vec![],
+        });
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::GeneratedAccessorCollision {
+                namespace: "input",
+                accessor: "foo_bar".into(),
+                first_name: "Foo-Bar".into(),
+                second_name: "foo_bar".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_generated_accessor_names_that_become_rust_keywords() {
+        let mut schema = meerkat_machine();
+        schema.signals.variants.push(crate::VariantSchema {
+            name: "type".into(),
+            fields: vec![],
+        });
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::InvalidGeneratedAccessorName {
+                namespace: "signal",
+                name: "type".into(),
+                accessor: "type".into(),
+                reason: "normalizes to a reserved Rust keyword",
             })
         );
     }

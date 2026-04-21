@@ -290,6 +290,11 @@
         "summary": "Continue session with new message"
       }
     },
+    "/sessions/{id}/peer-response-terminal": {
+      "post": {
+        "summary": "Admit a correlated terminal peer response through the typed runtime ingress"
+      }
+    },
     "/sessions/{id}/system_context": {
       "post": {
         "summary": "Append system context to a session"

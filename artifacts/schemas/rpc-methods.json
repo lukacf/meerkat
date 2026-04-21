@@ -117,7 +117,15 @@
     },
     {
       "description": "Queue a runtime-backed external event",
-      "name": "session/external_event"
+      "name": "session/external_event",
+      "params_type": "SessionExternalEventEnvelope",
+      "result_type": "RuntimeAcceptResult"
+    },
+    {
+      "description": "Admit a correlated terminal peer response through the typed runtime ingress",
+      "name": "session/peer_response_terminal",
+      "params_type": "SessionPeerResponseTerminalParams",
+      "result_type": "RuntimeAcceptResult"
     },
     {
       "description": "Stage runtime system context for application at the next LLM boundary",

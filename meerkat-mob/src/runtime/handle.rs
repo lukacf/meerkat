@@ -6,7 +6,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime::MobLifecycleSnapshot;
 use crate::runtime::mob_member_lifecycle_authority::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
-    MobMemberLifecycleAuthority, MobMemberLifecycleInput, MobMemberTerminalClass,
+    MobMemberLifecycleAuthority, MobMemberLifecycleInput,
 };
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
@@ -501,39 +501,6 @@ pub enum PeerTarget {
 impl From<AgentIdentity> for PeerTarget {
     fn from(value: AgentIdentity) -> Self {
         Self::Local(value)
-    }
-}
-
-struct MobMemberTerminalClassifier;
-
-impl MobMemberTerminalClassifier {
-    fn classify(material: &CanonicalMemberSnapshotMaterial) -> MobMemberTerminalClass {
-        if !material.member_present {
-            return MobMemberTerminalClass::TerminalUnknown;
-        }
-        match material.status {
-            // Retiring remains non-terminal while canonical roster membership
-            // still exists, even if the session read is already inactive/missing.
-            CanonicalMemberStatus::Retiring => MobMemberTerminalClass::Running,
-            CanonicalMemberStatus::Broken => MobMemberTerminalClass::TerminalFailure,
-            CanonicalMemberStatus::Active => match material.session_observation {
-                CanonicalSessionObservation::Active
-                | CanonicalSessionObservation::Inactive
-                | CanonicalSessionObservation::Unknown => MobMemberTerminalClass::Running,
-                CanonicalSessionObservation::Missing => MobMemberTerminalClass::TerminalCompleted,
-            },
-            CanonicalMemberStatus::Completed => MobMemberTerminalClass::TerminalCompleted,
-            CanonicalMemberStatus::Unknown => MobMemberTerminalClass::TerminalUnknown,
-        }
-    }
-
-    fn is_terminal(material: &CanonicalMemberSnapshotMaterial) -> bool {
-        matches!(
-            Self::classify(material),
-            MobMemberTerminalClass::TerminalFailure
-                | MobMemberTerminalClass::TerminalUnknown
-                | MobMemberTerminalClass::TerminalCompleted
-        )
     }
 }
 
@@ -3129,7 +3096,7 @@ impl MobHandle {
     ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
         loop {
             let material = self.canonical_member_list_material(agent_identity).await;
-            if MobMemberTerminalClassifier::is_terminal(&material) {
+            if MobMemberLifecycleAuthority::is_terminal(&material) {
                 return Ok(material);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

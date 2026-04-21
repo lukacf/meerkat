@@ -13,6 +13,7 @@ use crate::generated::flow_frame_loop_driver::{
     FlowFrameLoopDecision, FlowFrameLoopDriver, FlowFrameLoopStorePlan, FlowFrameLoopWork,
     FlowFrameTerminalPhase,
 };
+use crate::generated::flow_run;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::{FlowContext, FrameSnapshot, LoopSnapshot, MobRun, StepRunStatus};
 use crate::runtime::conditions::evaluate_condition;
@@ -22,7 +23,6 @@ use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use meerkat_machine_kernels::KernelValue;
-use meerkat_machine_kernels::generated::flow_run;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -208,8 +208,29 @@ impl FlowFrameEngine {
             }
 
             if !progressed && workers.is_empty() {
+                let run = self.require_run(run_id).await?;
+                let loop_summary = run
+                    .loops
+                    .iter()
+                    .next()
+                    .map(|(loop_id, snapshot)| {
+                        format!(
+                            "{loop_id}: phase={}, stage={:?}, active_body_frame_id={:?}",
+                            snapshot.kernel_state.phase,
+                            snapshot.kernel_state.fields.get("stage"),
+                            snapshot.kernel_state.fields.get("active_body_frame_id"),
+                        )
+                    })
+                    .unwrap_or_else(|| "none".to_string());
                 return Err(MobError::Internal(format!(
-                    "frame runtime stalled for root frame '{root_frame_id}' in run '{run_id}'"
+                    "frame runtime stalled for root frame '{root_frame_id}' in run '{run_id}' \
+                     (root_phase={}, root_node_status={:?}, ready_frames={:?}, pending_body_frame_loops={:?}, loops={}, first_loop={})",
+                    root_snapshot.kernel_state.phase,
+                    root_snapshot.kernel_state.fields.get("node_status"),
+                    run.flow_state.fields.get("ready_frames"),
+                    run.flow_state.fields.get("pending_body_frame_loops"),
+                    run.loops.len(),
+                    loop_summary,
                 )));
             }
         }

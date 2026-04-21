@@ -2,20 +2,30 @@ use super::terminalization::{
     FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
 };
 use crate::error::MobError;
+use crate::generated::flow_run;
 use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{
-    KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
+    KernelEffect, KernelField, KernelFields, KernelHelperName, KernelState, KernelValue,
+    TransitionOutcome,
 };
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod sealed {
     pub trait Sealed {}
+}
+
+fn kernel_fields<K>(entries: impl IntoIterator<Item = (K, KernelValue)>) -> KernelFields
+where
+    K: Into<KernelField>,
+{
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.into(), value))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -317,7 +327,7 @@ impl FlowRunKernel {
             .cas_with_retry(
                 run_id,
                 "ProjectFrameStepStatus",
-                BTreeMap::from([
+                kernel_fields([
                     ("step_id".to_string(), Self::step_id_value(step_id)),
                     (
                         "step_status".to_string(),
@@ -353,7 +363,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "StepBranchBlocked",
-            BTreeMap::from([("step_id".to_string(), Self::step_id_value(step_id))]),
+            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -366,7 +376,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "StepDependencyReady",
-            BTreeMap::from([("step_id".to_string(), Self::step_id_value(step_id))]),
+            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -379,7 +389,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "StepDependencyShouldSkip",
-            BTreeMap::from([("step_id".to_string(), Self::step_id_value(step_id))]),
+            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -475,7 +485,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "CollectionSatisfied",
-            BTreeMap::from([("step_id".to_string(), Self::step_id_value(step_id))]),
+            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -488,7 +498,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "CollectionFeasible",
-            BTreeMap::from([("step_id".to_string(), Self::step_id_value(step_id))]),
+            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -502,7 +512,7 @@ impl FlowRunKernel {
         self.helper_bool(
             run_id,
             "TargetRetryAllowed",
-            BTreeMap::from([(
+            kernel_fields([(
                 "retry_key".to_string(),
                 KernelValue::String(Self::retry_key(step_id, target_id)),
             )]),
@@ -564,10 +574,11 @@ impl FlowRunKernel {
         &self,
         state: &KernelState,
         helper: &str,
-        fields: BTreeMap<String, KernelValue>,
+        fields: KernelFields,
     ) -> Result<KernelValue, MobError> {
+        let helper_name: KernelHelperName = helper.into();
         flow_run::kernel()
-            .evaluate_helper(state, helper, &fields)
+            .evaluate_helper(state, &helper_name, &fields)
             .map_err(|error| {
                 MobError::Internal(format!("flow_run helper {helper} refused: {error}"))
             })
@@ -582,7 +593,7 @@ impl FlowRunKernel {
         &self,
         run_id: &RunId,
         variant: &str,
-        fields: BTreeMap<String, KernelValue>,
+        fields: KernelFields,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         for attempt in 0..5u32 {
             let run = self.require_run(run_id).await?;
@@ -625,7 +636,8 @@ impl FlowRunKernel {
             if run.status.is_terminal() {
                 return Ok(TerminalizationOutcome::Noop);
             }
-            let next_state = self.transition_state(&run.flow_state, variant, BTreeMap::new())?;
+            let next_state =
+                self.transition_state(&run.flow_state, variant, flow_run::fields([]))?;
             let transitioned = self
                 .run_store
                 .cas_run_snapshot(
@@ -675,7 +687,7 @@ impl FlowRunKernel {
         self.cas_with_retry(
             run_id,
             variant,
-            BTreeMap::from([(
+            kernel_fields([(
                 "step_id".to_string(),
                 KernelValue::String(step_id.to_string()),
             )]),
@@ -731,16 +743,9 @@ impl FlowRunKernel {
         &self,
         state: &KernelState,
         variant: &str,
-        fields: BTreeMap<String, KernelValue>,
+        fields: KernelFields,
     ) -> Result<TransitionOutcome, MobError> {
-        flow_run::transition(
-            state,
-            &KernelInput {
-                variant: variant.to_string(),
-                fields,
-            },
-        )
-        .map_err(|error| {
+        flow_run::transition(state, &flow_run::input(variant.into(), fields)).map_err(|error| {
             MobError::Internal(format!("flow_run {variant} transition refused: {error}"))
         })
     }
@@ -749,7 +754,7 @@ impl FlowRunKernel {
         &self,
         state: &KernelState,
         variant: &str,
-        fields: BTreeMap<String, KernelValue>,
+        fields: KernelFields,
     ) -> Result<KernelState, MobError> {
         Ok(self.transition_outcome(state, variant, fields)?.next_state)
     }
@@ -758,7 +763,7 @@ impl FlowRunKernel {
         &self,
         run_id: &RunId,
         helper: &str,
-        fields: BTreeMap<String, KernelValue>,
+        fields: KernelFields,
     ) -> Result<bool, MobError> {
         let run = self.require_run(run_id).await?;
         match self.evaluate_helper_value(&run.flow_state, helper, fields)? {
@@ -797,7 +802,8 @@ impl FlowRunMutator for FlowRunKernel {
         if run.status != MobRunStatus::Pending {
             return Ok(false);
         }
-        let next_state = self.transition_state(&run.flow_state, "StartRun", BTreeMap::new())?;
+        let next_state =
+            self.transition_state(&run.flow_state, "StartRun", flow_run::fields([]))?;
         self.run_store
             .cas_run_snapshot(
                 run_id,
@@ -912,7 +918,7 @@ impl FlowRunMutator for FlowRunKernel {
         let next_state = self.transition_state(
             &run.flow_state,
             "RegisterTargets",
-            BTreeMap::from([
+            kernel_fields([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 (
                     "target_count".to_string(),
@@ -947,7 +953,7 @@ impl FlowRunMutator for FlowRunKernel {
         self.cas_with_retry(
             run_id,
             "RecordTargetSuccess",
-            BTreeMap::from([
+            kernel_fields([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
             ]),
@@ -977,7 +983,7 @@ impl FlowRunMutator for FlowRunKernel {
         self.cas_with_retry(
             run_id,
             "RecordTargetFailure",
-            BTreeMap::from([
+            kernel_fields([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
                 ("retry_key".to_string(), KernelValue::String(retry_key)),
@@ -1007,7 +1013,7 @@ impl FlowRunMutator for FlowRunKernel {
         self.cas_with_retry(
             run_id,
             "RecordTargetCanceled",
-            BTreeMap::from([
+            kernel_fields([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
             ]),

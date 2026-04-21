@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use crate::{
+use meerkat_machine_schema::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, HelperSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding,
     StateSchema, TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
@@ -2072,4 +2072,4 @@ fn init(field: &str, expr: Expr) -> FieldInit {
 }
 
 // Suppress unused import warning - InitSchema is used via the struct literal in MachineSchema
-use crate::InitSchema;
+use meerkat_machine_schema::InitSchema;

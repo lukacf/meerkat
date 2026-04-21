@@ -6,8 +6,8 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_machine_kernels::generated::flow_frame;
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
+use meerkat_mob::generated::flow_frame;
 use std::collections::{BTreeMap, BTreeSet};
 
 // Helper: build a KernelValue::NamedVariant for NodeRunStatus

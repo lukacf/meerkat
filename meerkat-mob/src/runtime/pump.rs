@@ -6,8 +6,8 @@
 //! `RegisterReadyFrame` or `RegisterPendingBodyFrame` calls.
 
 use crate::error::MobError;
+use crate::generated::flow_run;
 use crate::ids::{FrameId, LoopInstanceId};
-use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
 use std::collections::BTreeMap;
 

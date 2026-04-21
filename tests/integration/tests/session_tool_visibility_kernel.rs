@@ -26,20 +26,20 @@ fn empty_string_set() -> KernelValue {
 
 fn input(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
     KernelInput {
-        variant: variant.to_string(),
+        variant: variant.into(),
         fields: fields
             .into_iter()
-            .map(|(field, value)| (field.to_string(), value))
+            .map(|(field, value)| (field.into(), value))
             .collect(),
     }
 }
 
 fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     KernelSignal {
-        variant: variant.to_string(),
+        variant: variant.into(),
         fields: fields
             .into_iter()
-            .map(|(field, value)| (field.to_string(), value))
+            .map(|(field, value)| (field.into(), value))
             .collect(),
     }
 }

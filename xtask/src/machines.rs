@@ -2120,15 +2120,11 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
-    let mut expected = registry
+    registry
         .machines
         .iter()
         .map(|schema| generated_kernel_module_slug(&schema.machine))
-        .collect::<BTreeSet<_>>();
-    for compat in ["flow_frame", "flow_run", "loop_iteration"] {
-        expected.insert(compat.to_string());
-    }
-    expected
+        .collect::<BTreeSet<_>>()
 }
 
 fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistry) -> Result<()> {

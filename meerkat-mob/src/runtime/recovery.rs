@@ -128,12 +128,10 @@ fn reconcile_ready_frames(run: &mut MobRun) {
             .collect(),
     );
 
+    run.flow_state.fields.insert("ready_frames".into(), new_seq);
     run.flow_state
         .fields
-        .insert("ready_frames".to_string(), new_seq);
-    run.flow_state
-        .fields
-        .insert("ready_frame_membership".to_string(), new_set);
+        .insert("ready_frame_membership".into(), new_set);
 }
 
 /// Rebuild `pending_body_frame_loops` and `pending_body_frame_loop_membership`
@@ -167,10 +165,10 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
 
     run.flow_state
         .fields
-        .insert("pending_body_frame_loops".to_string(), new_seq);
+        .insert("pending_body_frame_loops".into(), new_seq);
     run.flow_state
         .fields
-        .insert("pending_body_frame_loop_membership".to_string(), new_set);
+        .insert("pending_body_frame_loop_membership".into(), new_set);
 }
 
 /// Rebuild the run-level active counters from persisted snapshots.
@@ -198,11 +196,11 @@ fn reconcile_active_counts(run: &mut MobRun) {
         .count() as u64;
 
     run.flow_state.fields.insert(
-        "active_node_count".to_string(),
+        "active_node_count".into(),
         KernelValue::U64(active_node_count),
     );
     run.flow_state.fields.insert(
-        "active_frame_count".to_string(),
+        "active_frame_count".into(),
         KernelValue::U64(active_frame_count),
     );
 }
@@ -297,7 +295,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use meerkat_machine_kernels::generated::flow_run;
+        use crate::generated::flow_run;
         let flow_state = flow_run::initial_state().expect("init");
         MobRun {
             run_id: RunId::new(),

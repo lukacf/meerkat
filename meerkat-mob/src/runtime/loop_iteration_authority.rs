@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::error::MobError;
+use crate::generated::loop_iteration;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
-use meerkat_machine_kernels::generated::loop_iteration;
 use meerkat_machine_kernels::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
 };

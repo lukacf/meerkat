@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::{Borrow, Cow},
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TriggerKind,
@@ -7,12 +11,117 @@ use meerkat_machine_schema::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+macro_rules! kernel_ident {
+    ($name:ident) => {
+        #[derive(
+            Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(Cow<'static, str>);
+
+        impl $name {
+            #[must_use]
+            pub const fn new_static(value: &'static str) -> Self {
+                Self(Cow::Borrowed(value))
+            }
+
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                self.0.as_ref()
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(Cow::Owned(value))
+            }
+        }
+
+        impl From<&String> for $name {
+            fn from(value: &String) -> Self {
+                Self(Cow::Owned(value.clone()))
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(Cow::Owned(value.to_owned()))
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool {
+                self.as_str() == other
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+
+        impl PartialEq<String> for $name {
+            fn eq(&self, other: &String) -> bool {
+                self.as_str() == other
+            }
+        }
+    };
+}
+
+kernel_ident!(KernelPhase);
+kernel_ident!(KernelField);
+kernel_ident!(KernelInputVariant);
+kernel_ident!(KernelSignalVariant);
+kernel_ident!(KernelEffectVariant);
+kernel_ident!(KernelTransitionName);
+kernel_ident!(KernelHelperName);
+kernel_ident!(KernelEnumName);
+kernel_ident!(KernelEnumVariant);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct KernelNamedVariant {
+    pub enum_name: KernelEnumName,
+    pub variant: KernelEnumVariant,
+}
+
+impl KernelNamedVariant {
+    #[must_use]
+    pub const fn new_static(enum_name: &'static str, variant: &'static str) -> Self {
+        Self {
+            enum_name: KernelEnumName::new_static(enum_name),
+            variant: KernelEnumVariant::new_static(variant),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KernelValue {
     Bool(bool),
     U64(u64),
     String(String),
-    NamedVariant { enum_name: String, variant: String },
+    NamedVariant {
+        enum_name: KernelEnumName,
+        variant: KernelEnumVariant,
+    },
     Seq(Vec<KernelValue>),
     Set(BTreeSet<KernelValue>),
     Map(BTreeMap<KernelValue, KernelValue>),
@@ -32,8 +141,8 @@ enum KernelValueRepr {
         value: String,
     },
     NamedVariant {
-        enum_name: String,
-        variant: String,
+        enum_name: KernelEnumName,
+        variant: KernelEnumVariant,
     },
     Seq {
         items: Vec<KernelValue>,
@@ -133,33 +242,95 @@ fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelState {
-    pub phase: String,
-    pub fields: BTreeMap<String, KernelValue>,
+    pub phase: KernelPhase,
+    pub fields: KernelFields,
+}
+
+impl KernelState {
+    #[must_use]
+    pub fn field(&self, field: &KernelField) -> Option<&KernelValue> {
+        self.fields.get(field.as_str())
+    }
+
+    #[must_use]
+    pub fn phase_is(&self, phase: &KernelPhase) -> bool {
+        &self.phase == phase
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelInput {
-    pub variant: String,
-    pub fields: BTreeMap<String, KernelValue>,
+    pub variant: KernelInputVariant,
+    pub fields: KernelFields,
+}
+
+impl KernelInput {
+    #[must_use]
+    pub fn new(variant: KernelInputVariant, fields: KernelFields) -> Self {
+        Self { variant, fields }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelSignal {
-    pub variant: String,
-    pub fields: BTreeMap<String, KernelValue>,
+    pub variant: KernelSignalVariant,
+    pub fields: KernelFields,
+}
+
+impl KernelSignal {
+    #[must_use]
+    pub fn new(variant: KernelSignalVariant, fields: KernelFields) -> Self {
+        Self { variant, fields }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelEffect {
-    pub variant: String,
-    pub fields: BTreeMap<String, KernelValue>,
+    pub variant: KernelEffectVariant,
+    pub fields: KernelFields,
+}
+
+impl KernelEffect {
+    #[must_use]
+    pub fn field(&self, field: &KernelField) -> Option<&KernelValue> {
+        self.fields.get(field.as_str())
+    }
+
+    #[must_use]
+    pub fn variant_is(&self, variant: &KernelEffectVariant) -> bool {
+        &self.variant == variant
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutcome {
-    pub transition: String,
+    pub transition: KernelTransitionName,
     pub next_state: KernelState,
     pub effects: Vec<KernelEffect>,
+}
+
+pub type KernelFields = BTreeMap<KernelField, KernelValue>;
+
+#[derive(Debug, Clone, Copy)]
+enum TriggerVariantRef<'a> {
+    Input(&'a KernelInputVariant),
+    Signal(&'a KernelSignalVariant),
+}
+
+impl<'a> TriggerVariantRef<'a> {
+    fn as_str(self) -> &'a str {
+        match self {
+            Self::Input(variant) => variant.as_str(),
+            Self::Signal(variant) => variant.as_str(),
+        }
+    }
+
+    fn kind(self) -> TriggerKind {
+        match self {
+            Self::Input(_) => TriggerKind::Input,
+            Self::Signal(_) => TriggerKind::Signal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -221,19 +392,19 @@ impl GeneratedMachineKernel {
 
     pub fn initial_state(&self) -> Result<KernelState, TransitionRefusal> {
         let mut state = KernelState {
-            phase: self.schema.state.init.phase.clone(),
+            phase: self.schema.state.init.phase.clone().into(),
             fields: self
                 .schema
                 .state
                 .fields
                 .iter()
-                .map(|field| (field.name.clone(), default_value_for_type(&field.ty)))
+                .map(|field| (field.name.clone().into(), default_value_for_type(&field.ty)))
                 .collect(),
         };
 
         for init in &self.schema.state.init.fields {
             let value = self.eval_expr(&state, &BTreeMap::new(), &init.expr, "<init>")?;
-            state.fields.insert(init.field.clone(), value);
+            state.fields.insert(init.field.clone().into(), value);
         }
 
         Ok(state)
@@ -244,7 +415,11 @@ impl GeneratedMachineKernel {
         state: &KernelState,
         input: &KernelInput,
     ) -> Result<TransitionOutcome, TransitionRefusal> {
-        self.transition_with_kind(state, TriggerKind::Input, &input.variant, &input.fields)
+        self.transition_with_kind(
+            state,
+            TriggerVariantRef::Input(&input.variant),
+            &input.fields,
+        )
     }
 
     pub fn transition_signal(
@@ -252,17 +427,22 @@ impl GeneratedMachineKernel {
         state: &KernelState,
         signal: &KernelSignal,
     ) -> Result<TransitionOutcome, TransitionRefusal> {
-        self.transition_with_kind(state, TriggerKind::Signal, &signal.variant, &signal.fields)
+        self.transition_with_kind(
+            state,
+            TriggerVariantRef::Signal(&signal.variant),
+            &signal.fields,
+        )
     }
 
     fn transition_with_kind(
         &self,
         state: &KernelState,
-        trigger_kind: TriggerKind,
-        variant: &str,
-        fields: &BTreeMap<String, KernelValue>,
+        trigger_variant: TriggerVariantRef<'_>,
+        fields: &KernelFields,
     ) -> Result<TransitionOutcome, TransitionRefusal> {
-        let trigger_variant = match trigger_kind {
+        let variant = trigger_variant.as_str();
+        let trigger_kind = trigger_variant.kind();
+        let trigger_schema = match trigger_kind {
             TriggerKind::Input => self.schema.inputs.variant_named(variant).map_err(|_| {
                 TransitionRefusal::UnknownInputVariant {
                     machine: self.schema.machine.clone(),
@@ -277,8 +457,8 @@ impl GeneratedMachineKernel {
             })?,
         };
 
-        for field in &trigger_variant.fields {
-            let Some(value) = fields.get(&field.name) else {
+        for field in &trigger_schema.fields {
+            let Some(value) = fields.get(field.name.as_str()) else {
                 return Err(match trigger_kind {
                     TriggerKind::Input => TransitionRefusal::InvalidInputPayload {
                         machine: self.schema.machine.clone(),
@@ -310,7 +490,11 @@ impl GeneratedMachineKernel {
 
         let mut matches = Vec::new();
         for transition in &self.schema.transitions {
-            if !transition.from.iter().any(|phase| phase == &state.phase) {
+            if !transition
+                .from
+                .iter()
+                .any(|phase| phase.as_str() == state.phase.as_str())
+            {
                 continue;
             }
             if transition.on.kind != trigger_kind || transition.on.variant != variant {
@@ -320,7 +504,7 @@ impl GeneratedMachineKernel {
             let mut bindings = BTreeMap::new();
             let mut malformed = false;
             for binding in &transition.on.bindings {
-                let Some(value) = fields.get(binding) else {
+                let Some(value) = fields.get(binding.as_str()) else {
                     malformed = true;
                     break;
                 };
@@ -362,14 +546,14 @@ impl GeneratedMachineKernel {
         match matches.len() {
             0 => Err(TransitionRefusal::NoMatchingTransition {
                 machine: self.schema.machine.clone(),
-                phase: state.phase.clone(),
+                phase: state.phase.to_string(),
                 variant: variant.to_owned(),
             }),
             1 => {
                 let Some((transition, bindings)) = matches.pop() else {
                     return Err(TransitionRefusal::NoMatchingTransition {
                         machine: self.schema.machine.clone(),
-                        phase: state.phase.clone(),
+                        phase: state.phase.to_string(),
                         variant: variant.to_owned(),
                     });
                 };
@@ -377,7 +561,7 @@ impl GeneratedMachineKernel {
             }
             _ => Err(TransitionRefusal::AmbiguousTransition {
                 machine: self.schema.machine.clone(),
-                phase: state.phase.clone(),
+                phase: state.phase.to_string(),
                 variant: variant.to_owned(),
                 transitions: matches
                     .iter()
@@ -397,7 +581,7 @@ impl GeneratedMachineKernel {
         for update in &transition.updates {
             self.apply_update(&mut next_state, bindings, update, &transition.name)?;
         }
-        next_state.phase = transition.to.clone();
+        next_state.phase = transition.to.clone().into();
 
         let mut effects = Vec::new();
         for effect in &transition.emit {
@@ -405,7 +589,7 @@ impl GeneratedMachineKernel {
         }
 
         Ok(TransitionOutcome {
-            transition: transition.name.clone(),
+            transition: transition.name.clone().into(),
             next_state,
             effects,
         })
@@ -414,15 +598,15 @@ impl GeneratedMachineKernel {
     pub fn evaluate_helper(
         &self,
         state: &KernelState,
-        helper_name: &str,
-        args: &BTreeMap<String, KernelValue>,
+        helper_name: &KernelHelperName,
+        args: &KernelFields,
     ) -> Result<KernelValue, TransitionRefusal> {
         let helper = self
             .schema
             .helpers
             .iter()
             .chain(self.schema.derived.iter())
-            .find(|candidate| candidate.name == helper_name)
+            .find(|candidate| candidate.name == helper_name.as_str())
             .ok_or_else(|| TransitionRefusal::EvaluationError {
                 machine: self.schema.machine.clone(),
                 transition: "<helper>".to_string(),
@@ -431,7 +615,7 @@ impl GeneratedMachineKernel {
 
         let mut bindings = BTreeMap::new();
         for param in &helper.params {
-            let Some(value) = args.get(&param.name) else {
+            let Some(value) = args.get(param.name.as_str()) else {
                 return Err(TransitionRefusal::EvaluationError {
                     machine: self.schema.machine.clone(),
                     transition: "<helper>".to_string(),
@@ -461,12 +645,12 @@ impl GeneratedMachineKernel {
         let mut fields = BTreeMap::new();
         for (name, expr) in &effect.fields {
             fields.insert(
-                name.clone(),
+                name.clone().into(),
                 self.eval_expr(state, bindings, expr, transition_name)?,
             );
         }
         Ok(KernelEffect {
-            variant: effect.variant.clone(),
+            variant: effect.variant.clone().into(),
             fields,
         })
     }
@@ -481,26 +665,26 @@ impl GeneratedMachineKernel {
         match update {
             Update::Assign { field, expr } => {
                 let value = self.eval_expr(state, bindings, expr, transition_name)?;
-                state.fields.insert(field.clone(), value);
+                state.fields.insert(field.clone().into(), value);
             }
             Update::Increment { field, amount } => {
                 let current = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::U64(0));
                 let value = current
                     .as_u64()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 state.fields.insert(
-                    field.clone(),
+                    field.clone().into(),
                     KernelValue::U64(value.saturating_add(*amount)),
                 );
             }
             Update::Decrement { field, amount } => {
                 let current = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::U64(0));
                 let value = current
@@ -509,38 +693,44 @@ impl GeneratedMachineKernel {
                 let next = value.checked_sub(*amount).ok_or_else(|| {
                     self.eval_error(transition_name, format!("underflow decrementing `{field}`"))
                 })?;
-                state.fields.insert(field.clone(), KernelValue::U64(next));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::U64(next));
             }
             Update::MapInsert { field, key, value } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut map = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Map(BTreeMap::new()))
                     .into_map()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.insert(key, value);
-                state.fields.insert(field.clone(), KernelValue::Map(map));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Map(map));
             }
             Update::MapRemove { field, key } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 let mut map = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Map(BTreeMap::new()))
                     .into_map()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.remove(&key);
-                state.fields.insert(field.clone(), KernelValue::Map(map));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Map(map));
             }
             Update::MapIncrement { field, key, amount } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 let mut map = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Map(BTreeMap::new()))
                     .into_map()
@@ -552,13 +742,15 @@ impl GeneratedMachineKernel {
                     .as_u64()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.insert(key, KernelValue::U64(current.saturating_add(*amount)));
-                state.fields.insert(field.clone(), KernelValue::Map(map));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Map(map));
             }
             Update::MapDecrement { field, key, amount } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 let mut map = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Map(BTreeMap::new()))
                     .into_map()
@@ -576,43 +768,51 @@ impl GeneratedMachineKernel {
                     )
                 })?;
                 map.insert(key, KernelValue::U64(next));
-                state.fields.insert(field.clone(), KernelValue::Map(map));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Map(map));
             }
             Update::SetInsert { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut set = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Set(BTreeSet::new()))
                     .into_set()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 set.insert(value);
-                state.fields.insert(field.clone(), KernelValue::Set(set));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Set(set));
             }
             Update::SetRemove { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut set = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Set(BTreeSet::new()))
                     .into_set()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 set.remove(&value);
-                state.fields.insert(field.clone(), KernelValue::Set(set));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Set(set));
             }
             Update::SeqAppend { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut seq = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Seq(Vec::new()))
                     .into_seq()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 seq.push(value);
-                state.fields.insert(field.clone(), KernelValue::Seq(seq));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Seq(seq));
             }
             Update::SeqPrepend { field, values } => {
                 let values = self.eval_expr(state, bindings, values, transition_name)?;
@@ -621,18 +821,20 @@ impl GeneratedMachineKernel {
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 let mut seq = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Seq(Vec::new()))
                     .into_seq()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 prefix.append(&mut seq);
-                state.fields.insert(field.clone(), KernelValue::Seq(prefix));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Seq(prefix));
             }
             Update::SeqPopFront { field } => {
                 let mut seq = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Seq(Vec::new()))
                     .into_seq()
@@ -640,13 +842,15 @@ impl GeneratedMachineKernel {
                 if !seq.is_empty() {
                     seq.remove(0);
                 }
-                state.fields.insert(field.clone(), KernelValue::Seq(seq));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Seq(seq));
             }
             Update::SeqRemoveValue { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut seq = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Seq(Vec::new()))
                     .into_seq()
@@ -654,7 +858,9 @@ impl GeneratedMachineKernel {
                 if let Some(index) = seq.iter().position(|item| item == &value) {
                     seq.remove(index);
                 }
-                state.fields.insert(field.clone(), KernelValue::Seq(seq));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Seq(seq));
             }
             Update::SeqRemoveAll { field, values } => {
                 let values = self.eval_expr(state, bindings, values, transition_name)?;
@@ -663,7 +869,7 @@ impl GeneratedMachineKernel {
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 let mut seq = state
                     .fields
-                    .get(field)
+                    .get(field.as_str())
                     .cloned()
                     .unwrap_or(KernelValue::Seq(Vec::new()))
                     .into_seq()
@@ -673,7 +879,9 @@ impl GeneratedMachineKernel {
                         seq.remove(index);
                     }
                 }
-                state.fields.insert(field.clone(), KernelValue::Seq(seq));
+                state
+                    .fields
+                    .insert(field.clone().into(), KernelValue::Seq(seq));
             }
             Update::Conditional {
                 condition,
@@ -726,8 +934,8 @@ impl GeneratedMachineKernel {
             Expr::U64(value) => Ok(KernelValue::U64(*value)),
             Expr::String(value) => Ok(KernelValue::String(value.clone())),
             Expr::NamedVariant { enum_name, variant } => Ok(KernelValue::NamedVariant {
-                enum_name: enum_name.clone(),
-                variant: variant.clone(),
+                enum_name: enum_name.clone().into(),
+                variant: variant.clone().into(),
             }),
             Expr::EmptySet => Ok(KernelValue::Set(BTreeSet::new())),
             Expr::EmptyMap => Ok(KernelValue::Map(BTreeMap::new())),
@@ -737,9 +945,9 @@ impl GeneratedMachineKernel {
                     .map(|item| self.eval_expr(state, bindings, item, transition_name))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            Expr::CurrentPhase => Ok(KernelValue::String(state.phase.clone())),
+            Expr::CurrentPhase => Ok(KernelValue::String(state.phase.to_string())),
             Expr::Phase(phase) => Ok(KernelValue::String(phase.clone())),
-            Expr::Field(field) => state.fields.get(field).cloned().ok_or_else(|| {
+            Expr::Field(field) => state.fields.get(field.as_str()).cloned().ok_or_else(|| {
                 self.eval_error(transition_name, format!("unknown field `{field}`"))
             }),
             Expr::Binding(binding) => bindings.get(binding).cloned().ok_or_else(|| {
@@ -1065,16 +1273,29 @@ impl KernelValue {
         }
     }
 
-    pub fn as_named_variant(&self, expected_enum: &str) -> Result<&str, String> {
+    pub fn as_named_variant(
+        &self,
+        expected_enum: impl AsRef<str>,
+    ) -> Result<&KernelEnumVariant, String> {
+        let expected_enum = expected_enum.as_ref();
         match self {
-            Self::NamedVariant { enum_name, variant } if enum_name == expected_enum => {
-                Ok(variant.as_str())
+            Self::NamedVariant { enum_name, variant } if enum_name.as_str() == expected_enum => {
+                Ok(variant)
             }
             Self::NamedVariant { enum_name, .. } => Err(format!(
                 "expected named variant of enum `{expected_enum}`, found enum `{enum_name}`"
             )),
             other => Err(format!("expected named variant, found {other:?}")),
         }
+    }
+
+    #[must_use]
+    pub fn is_named_variant(&self, expected: &KernelNamedVariant) -> bool {
+        matches!(
+            self,
+            Self::NamedVariant { enum_name, variant }
+                if enum_name == &expected.enum_name && variant == &expected.variant
+        )
     }
 
     fn into_seq(self) -> Result<Vec<KernelValue>, String> {
@@ -1116,8 +1337,8 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
         TypeRef::Named(name) if named_type_is_u64(name) => KernelValue::U64(0),
         TypeRef::Named(_) => KernelValue::String(String::new()),
         TypeRef::Enum(name) => KernelValue::NamedVariant {
-            enum_name: name.clone(),
-            variant: String::new(),
+            enum_name: name.clone().into(),
+            variant: KernelEnumVariant::default(),
         },
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
@@ -1133,7 +1354,9 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name) => true,
         (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name) => true,
-        (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) if enum_name == name => {
+        (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name))
+            if enum_name.as_str() == name =>
+        {
             true
         }
         (KernelValue::None, TypeRef::Option(_)) => true,

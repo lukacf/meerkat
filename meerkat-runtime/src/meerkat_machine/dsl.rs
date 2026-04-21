@@ -135,18 +135,40 @@ impl OperationId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct OperationKind(pub String);
+/// Typed async-operation kind. Closed mirror of
+/// [`meerkat_core::ops_lifecycle::OperationKind`] — replaces the former
+/// newtype wrapper around an opaque JSON-encoded string. The DSL writes this
+/// variant directly on `RegisterOp` so guards on `PeerReadyOp`
+/// (`kind_is_mob_member_child`) can reason about the closed set without
+/// string parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationKind {
+    #[default]
+    MobMemberChild,
+    BackgroundToolOp,
+}
 
-impl<T: Into<String>> From<T> for OperationKind {
-    fn from(s: T) -> Self {
-        Self(s.into())
+impl From<meerkat_core::ops_lifecycle::OperationKind> for OperationKind {
+    fn from(kind: meerkat_core::ops_lifecycle::OperationKind) -> Self {
+        match kind {
+            meerkat_core::ops_lifecycle::OperationKind::MobMemberChild => Self::MobMemberChild,
+            meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp => Self::BackgroundToolOp,
+        }
+    }
+}
+
+impl From<OperationKind> for meerkat_core::ops_lifecycle::OperationKind {
+    fn from(kind: OperationKind) -> Self {
+        match kind {
+            OperationKind::MobMemberChild => Self::MobMemberChild,
+            OperationKind::BackgroundToolOp => Self::BackgroundToolOp,
+        }
     }
 }
 
 impl OperationKind {
-    pub fn from_domain(id: &meerkat_core::ops_lifecycle::OperationKind) -> Self {
-        Self::from(serde_json::to_string(id).unwrap_or_else(|_| "\"unknown\"".to_string()))
+    pub fn from_domain(kind: &meerkat_core::ops_lifecycle::OperationKind) -> Self {
+        Self::from(*kind)
     }
 }
 
@@ -1301,6 +1323,30 @@ impl From<OperationStatus> for meerkat_core::ops_lifecycle::OperationStatus {
     }
 }
 
+/// Typed discriminant mirror of
+/// [`meerkat_core::ops_lifecycle::OperationTerminalOutcome`] — replaces the
+/// former opaque JSON string carried in the DSL's `op_terminal_outcomes`
+/// map. Unit variants only; payload data (completion result, failure error,
+/// cancellation reason, terminated reason) rides on the companion
+/// `op_terminal_payload: Map<String, String>` field of the DSL state as
+/// JSON keyed to the same operation id, and is reconstructed in the shell
+/// by pairing the typed discriminant with the companion entry.
+///
+/// The DSL writes these variants directly on each terminal transition
+/// (`CompleteOp`, `FailOp`, `CancelOp`, `AbortOp`, `RetireCompletedOp`,
+/// `TerminateOp`); the shell reads them through the typed map and rebuilds
+/// the domain enum in `ShellState::terminal_outcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationTerminalOutcomeKind {
+    #[default]
+    Completed,
+    Failed,
+    Aborted,
+    Cancelled,
+    Retired,
+    Terminated,
+}
+
 /// Typed input-abandonment reason. Closed mirror of the discriminant set of
 /// [`crate::input_state::InputAbandonReason`] — replaces the former
 /// `format!("{reason:?}")` Debug round-trip in the DSL's
@@ -1443,8 +1489,11 @@ machine! {
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, Enum<OperationStatus>>,
             op_completion_seq: Map<String, u64>,
-            op_terminal_outcomes: Map<String, String>,
-            op_kinds: Map<String, String>,
+            // Terminal-outcome discriminant. Payload (result/error/reason)
+            // rides on the companion `op_terminal_payload` map as JSON.
+            op_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
+            op_terminal_payload: Map<String, String>,
+            op_kinds: Map<String, Enum<OperationKind>>,
             op_peer_ready: Map<String, bool>,
             op_progress_counts: Map<String, u64>,
             active_op_count: u64,
@@ -1662,6 +1711,7 @@ machine! {
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
             op_terminal_outcomes = EmptyMap,
+            op_terminal_payload = EmptyMap,
             op_kinds = EmptyMap,
             op_peer_ready = EmptyMap,
             op_progress_counts = EmptyMap,
@@ -1837,18 +1887,23 @@ machine! {
                 attempt_count: u64,
             },
             RecordBoundarySeq { input_id: String, seq: u64 },
-            // Ops lifecycle inputs
-            RegisterOp { operation_id: String, kind: String },
+            // Ops lifecycle inputs.
+            // Terminal transitions carry a typed outcome discriminant plus
+            // an opaque `payload` string — the inner payload of the domain
+            // `OperationTerminalOutcome` encoded as JSON by the shell. The
+            // DSL does not parse the payload; it only tracks the closed-set
+            // discriminant so guards can reason about it.
+            RegisterOp { operation_id: String, kind: Enum<OperationKind> },
             StartOp { operation_id: String },
-            CompleteOp { operation_id: String, outcome: String },
-            FailOp { operation_id: String, outcome: String },
-            CancelOp { operation_id: String, outcome: String },
-            AbortOp { operation_id: String, outcome: String },
+            CompleteOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            CancelOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            AbortOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             PeerReadyOp { operation_id: String },
             ProgressReportedOp { operation_id: String },
             RetireRequestedOp { operation_id: String },
-            RetireCompletedOp { operation_id: String, outcome: String },
-            TerminateOp { operation_id: String, outcome: String },
+            RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             RequestWaitAll { operation_ids: Set<String> },
             SatisfyWaitAll,
             // Comms drain inputs
@@ -4420,7 +4475,7 @@ machine! {
         // CompleteOp: terminal success from Running|Retiring.
         transition CompleteOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CompleteOp { operation_id, outcome }
+            on input CompleteOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
@@ -4429,6 +4484,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Completed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.next_completion_seq += 1;
@@ -4445,7 +4501,7 @@ machine! {
         // callers that only care about one sub-state.
         transition FailOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input FailOp { operation_id, outcome }
+            on input FailOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
@@ -4455,6 +4511,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Failed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -4465,7 +4522,7 @@ machine! {
         // CancelOp: terminal cancellation from any non-terminal state.
         transition CancelOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CancelOp { operation_id, outcome }
+            on input CancelOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
@@ -4475,6 +4532,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Cancelled);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -4488,7 +4546,7 @@ machine! {
         // semantic boundary crisp.
         transition AbortOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AbortOp { operation_id, outcome }
+            on input AbortOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
@@ -4496,6 +4554,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Aborted);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -4553,7 +4612,7 @@ machine! {
         // RetireCompletedOp: terminal retirement (Running|Retiring -> Retired).
         transition RetireCompletedOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RetireCompletedOp { operation_id, outcome }
+            on input RetireCompletedOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
@@ -4562,6 +4621,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Retired);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -4570,12 +4630,14 @@ machine! {
         }
 
         // TerminateOp: bulk-terminate variant used by owner-terminated cascade.
-        // Shell loops across non-terminal ops and issues one TerminateOp each;
-        // the session lock provides cascade atomicity. Legal only from any
-        // non-terminal state — terminal-state TerminateOp is a guard rejection.
+        // Shell loops across non-terminal ops (mechanical cursor) and issues
+        // one TerminateOp per op; the session lock provides cascade atomicity.
+        // The "is this op terminal-able?" decision lives in the DSL guard —
+        // terminal-state TerminateOp is a guard rejection, surfaced to the
+        // caller via `classify_op_rejection` as `InvalidTransition`.
         transition TerminateOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input TerminateOp { operation_id, outcome }
+            on input TerminateOp { operation_id, outcome, payload }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
@@ -4585,6 +4647,7 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Terminated);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
             }
             to Idle

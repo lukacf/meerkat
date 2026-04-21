@@ -6845,7 +6845,6 @@ dependencies = [
  "clap",
  "meerkat-machine-codegen",
  "meerkat-machine-schema",
- "meerkat-mob",
  "proc-macro2",
  "quote",
  "serde",

@@ -28,5 +28,6 @@ pub use render::render_machine_module;
 pub use render::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_mapping_coverage, render_composition_module, render_generated_kernel_mod,
-    render_machine_kernel_module, render_machine_mapping_coverage,
+    render_machine_kernel_module, render_machine_kernel_module_with_schema_path,
+    render_machine_mapping_coverage, render_runtime_local_machine_kernel_module,
 };

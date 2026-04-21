@@ -17,15 +17,13 @@ use meerkat_machine_codegen::{
     render_composition_witness_cfg, render_generated_kernel_mod, render_machine_ci_cfg,
     render_machine_contract_markdown, render_machine_kernel_module,
     render_machine_mapping_coverage, render_machine_semantic_model,
+    render_runtime_local_machine_kernel_module,
 };
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-};
-use meerkat_mob::runtime::flow_kernels::{
-    flow_frame as runtime_flow_frame, flow_run as runtime_flow_run,
-    loop_iteration as runtime_loop_iteration,
+    runtime_local,
 };
 use serde::Serialize;
 
@@ -314,6 +312,14 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         );
     }
 
+    for entry in runtime_local_flow_kernel_entries(root) {
+        write_generated(
+            &entry.wrapper_path,
+            &render_runtime_local_machine_kernel_module(&entry.schema, entry.schema_fn_path),
+        )?;
+        println!("generated {}", entry.wrapper_path.display());
+    }
+
     for composition in &selection.compositions {
         remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
         write_generated(
@@ -510,6 +516,14 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         &render_generated_kernel_mod(&kernel_export_schemas),
         &mut mismatches,
     )?;
+
+    for entry in runtime_local_flow_kernel_entries(root) {
+        compare_generated(
+            &entry.wrapper_path,
+            &render_runtime_local_machine_kernel_module(&entry.schema, entry.schema_fn_path),
+            &mut mismatches,
+        )?;
+    }
 
     for composition in &selection.compositions {
         collect_legacy_authority_mismatch(
@@ -1228,9 +1242,9 @@ impl CanonicalRegistry {
 
 fn runtime_local_flow_kernel_schemas() -> Vec<MachineSchema> {
     vec![
-        runtime_flow_run::schema(),
-        runtime_flow_frame::schema(),
-        runtime_loop_iteration::schema(),
+        runtime_local::flow_run_machine(),
+        runtime_local::flow_frame_machine(),
+        runtime_local::loop_iteration_machine(),
     ]
 }
 
@@ -2118,6 +2132,32 @@ pub fn generated_kernel_mod_path(root: &Path) -> PathBuf {
     generated_kernel_root(root).join("mod.rs")
 }
 
+struct RuntimeLocalFlowKernelEntry {
+    schema: MachineSchema,
+    schema_fn_path: &'static str,
+    wrapper_path: PathBuf,
+}
+
+fn runtime_local_flow_kernel_entries(root: &Path) -> Vec<RuntimeLocalFlowKernelEntry> {
+    vec![
+        RuntimeLocalFlowKernelEntry {
+            schema: runtime_local::flow_run_machine(),
+            schema_fn_path: "meerkat_machine_schema::runtime_local::flow_run_machine",
+            wrapper_path: root.join("meerkat-mob/src/runtime/flow_kernels/flow_run.rs"),
+        },
+        RuntimeLocalFlowKernelEntry {
+            schema: runtime_local::flow_frame_machine(),
+            schema_fn_path: "meerkat_machine_schema::runtime_local::flow_frame_machine",
+            wrapper_path: root.join("meerkat-mob/src/runtime/flow_kernels/flow_frame.rs"),
+        },
+        RuntimeLocalFlowKernelEntry {
+            schema: runtime_local::loop_iteration_machine(),
+            schema_fn_path: "meerkat_machine_schema::runtime_local::loop_iteration_machine",
+            wrapper_path: root.join("meerkat-mob/src/runtime/flow_kernels/loop_iteration.rs"),
+        },
+    ]
+}
+
 pub fn composition_mapping_path(root: &Path, slug: &str) -> PathBuf {
     root.join("specs")
         .join("compositions")
@@ -2136,8 +2176,9 @@ fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Resul
 
 fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineSchema> {
     // Only canonical machines generate `meerkat-machine-kernels/src/generated/*.rs`
-    // exports. Runtime-local flow kernels stay in `meerkat-mob::flow_kernels`
-    // and are validated directly via `validate_runtime_local_flow_kernels()`.
+    // exports. Runtime-local flow kernels generate mob-local wrapper modules
+    // under `meerkat-mob/src/runtime/flow_kernels/*.rs` and are validated
+    // separately via `validate_runtime_local_flow_kernels()`.
     let mut schemas = registry.machines.clone();
     schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
     schemas.dedup_by(|a, b| a.machine == b.machine);
@@ -2146,8 +2187,8 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
     // Keep the canonical generated-kernel boundary strict: runtime-local flow
-    // kernels are validated separately and must not silently expand the
-    // canonical five-machine export set.
+    // kernels have their own wrapper-generation drift contract and must not
+    // silently expand the canonical five-machine export set.
     registry
         .machines
         .iter()

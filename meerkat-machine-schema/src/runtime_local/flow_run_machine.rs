@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use meerkat_machine_schema::{
+use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier,
     RustBinding, StateSchema, TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,

@@ -1353,6 +1353,30 @@ impl InputAbandonReason {
     }
 }
 
+/// Typed work-lane assignment for admitted inputs. Replaces the former
+/// parallel `queue_lane` / `steer_lane` sets with a single map
+/// (`input_lane: Map<String, Enum<InputLane>>`) so mutual exclusion is
+/// structural — an admitted input is in exactly one lane by construction.
+///
+/// DSL-side mirror of the shell's `meerkat_core::types::HandlingMode`; the
+/// DSL owns the typed mirror so transitions can carry it without depending
+/// on the shell's domain enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputLane {
+    #[default]
+    Queue,
+    Steer,
+}
+
+impl From<crate::HandlingMode> for InputLane {
+    fn from(mode: crate::HandlingMode) -> Self {
+        match mode {
+            crate::HandlingMode::Queue => Self::Queue,
+            crate::HandlingMode::Steer => Self::Steer,
+        }
+    }
+}
+
 // Ensure we keep the exact generated schema DSL body from the catalog source.
 machine! {
     machine MeerkatMachine {
@@ -1410,8 +1434,11 @@ machine! {
             input_boundary_sequences: Map<String, u64>,
             next_admission_seq: u64,
             input_admission_seq: Map<String, u64>,
-            queue_lane: Set<String>,
-            steer_lane: Set<String>,
+            // Unified work-lane membership for admitted inputs. Mutual
+            // exclusion between Queue and Steer is structural: an input
+            // maps to exactly one `InputLane` value by construction.
+            // Replaces the former `queue_lane`/`steer_lane` parallel sets.
+            input_lane: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, Enum<OperationStatus>>,
@@ -1630,8 +1657,7 @@ machine! {
             input_boundary_sequences = EmptyMap,
             next_admission_seq = 0,
             input_admission_seq = EmptyMap,
-            queue_lane = EmptySet,
-            steer_lane = EmptySet,
+            input_lane = EmptyMap,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -1794,9 +1820,11 @@ machine! {
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
             QueueAccepted { input_id: String },
+            SteerAccepted { input_id: String },
+            ChangeLane { input_id: String, new_lane: Enum<InputLane> },
             StageForRun { input_id: String, run_id: String },
             IncrementAttemptCount { input_id: String },
-            RollbackStaged { input_id: String },
+            RollbackStaged { input_id: String, lane: Enum<InputLane> },
             MarkApplied { input_id: String },
             MarkAppliedPendingConsumption { input_id: String },
             ConsumeInput { input_id: String },
@@ -4145,7 +4173,7 @@ machine! {
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
-                self.queue_lane.insert(input_id);
+                self.input_lane.insert(input_id, InputLane::Queue);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -4153,7 +4181,42 @@ machine! {
             emit IngressAccepted
         }
 
-        // StageForRun: stage a queued input for a run
+        // SteerAccepted: admit a new input into the steer lane.
+        // Symmetric sibling of QueueAccepted; the caller chooses lane based
+        // on the input's resolved HandlingMode. Mutually exclusive by
+        // construction because `input_lane` is a map, not two sets.
+        transition SteerAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SteerAccepted { input_id }
+            guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Queued);
+                self.input_lane.insert(input_id, InputLane::Steer);
+                self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                self.next_admission_seq += 1;
+            }
+            to Idle
+            emit IngressAccepted
+        }
+
+        // ChangeLane: move a tracked input between Queue and Steer lanes.
+        // Used for priority-front enqueue paths where the lane may differ
+        // from the admission default. Because `input_lane` is a map,
+        // insertion overwrites the prior lane — no strip-then-insert dance.
+        transition ChangeLane {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ChangeLane { input_id, new_lane }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_lane.insert(input_id, new_lane);
+            }
+            to Idle
+        }
+
+        // StageForRun: stage a queued input for a run. Removes the input
+        // from its work lane — staged inputs are no longer "currently
+        // queuable". The shell's queue projections are derived from
+        // `input_lane` membership and must not include staged inputs.
         transition StageForRun {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StageForRun { input_id, run_id }
@@ -4161,6 +4224,7 @@ machine! {
             update {
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
+                self.input_lane.remove(input_id);
             }
             to Idle
             emit RecordRunAssociation
@@ -4177,14 +4241,18 @@ machine! {
             to Idle
         }
 
-        // RollbackStaged: return a staged input to queued
+        // RollbackStaged: return a staged input to queued. The caller
+        // supplies the target lane (the shell's `HandlingMode` at rollback
+        // time) so the DSL can re-admit the input to its work lane without
+        // external post-hoc writes.
         transition RollbackStaged {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RollbackStaged { input_id }
+            on input RollbackStaged { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
+                self.input_lane.insert(input_id, lane);
             }
             to Idle
             emit InputLifecycleNotice
@@ -4221,8 +4289,7 @@ machine! {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
-                self.queue_lane.remove(input_id);
-                self.steer_lane.remove(input_id);
+                self.input_lane.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -4247,8 +4314,7 @@ machine! {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
-                self.queue_lane.remove(input_id);
-                self.steer_lane.remove(input_id);
+                self.input_lane.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
@@ -4259,14 +4325,16 @@ machine! {
             emit RecordTerminalOutcome
         }
 
-        // SupersedeInput: terminal — mark input superseded, remove from queue
+        // SupersedeInput: terminal — mark input superseded, remove from
+        // its work lane (either Queue or Steer; the unified map handles
+        // both cases with a single remove).
         transition SupersedeInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
-                self.queue_lane.remove(input_id);
+                self.input_lane.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Superseded);
                 self.input_superseded_by.insert(input_id, superseded_by);
                 self.input_aggregate_id.remove(input_id);
@@ -4277,14 +4345,15 @@ machine! {
             emit RecordTerminalOutcome
         }
 
-        // CoalesceInput: terminal — mark input coalesced, remove from queue
+        // CoalesceInput: terminal — mark input coalesced, remove from
+        // its work lane.
         transition CoalesceInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
-                self.queue_lane.remove(input_id);
+                self.input_lane.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Coalesced);
                 self.input_aggregate_id.insert(input_id, aggregate_id);
                 self.input_superseded_by.remove(input_id);
@@ -4302,8 +4371,7 @@ machine! {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
-                self.queue_lane.remove(input_id);
-                self.steer_lane.remove(input_id);
+                self.input_lane.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
                 self.input_abandon_reason.insert(input_id, reason);
                 self.input_abandon_attempt_count.insert(input_id, attempt_count);

@@ -275,18 +275,18 @@ impl EphemeralRuntimeDriver {
     /// Read the current queue lane (FIFO) in admission order, as tracked by
     /// the driver-local DSL.
     fn dsl_queue_lane(&self) -> Vec<InputId> {
-        self.lane_in_admission_order(&self.dsl.0.state.queue_lane)
+        self.lane_in_admission_order(mm_dsl::InputLane::Queue)
     }
 
     fn dsl_steer_lane(&self) -> Vec<InputId> {
-        self.lane_in_admission_order(&self.dsl.0.state.steer_lane)
+        self.lane_in_admission_order(mm_dsl::InputLane::Steer)
     }
 
-    fn lane_in_admission_order(&self, lane: &std::collections::BTreeSet<String>) -> Vec<InputId> {
+    fn lane_in_admission_order(&self, lane: mm_dsl::InputLane) -> Vec<InputId> {
         let mut candidates: Vec<(u64, InputId)> = self
             .admission_order
             .iter()
-            .filter(|id| lane.contains(&Self::dsl_key(id)))
+            .filter(|id| self.dsl.0.state.input_lane.get(&Self::dsl_key(id)).copied() == Some(lane))
             .cloned()
             .map(|id| {
                 let seq = self
@@ -721,17 +721,17 @@ impl EphemeralRuntimeDriver {
                 .insert(key.clone(), seq);
             self.dsl.0.state.next_admission_seq = seq.saturating_add(1);
         }
-        self.dsl.0.state.queue_lane.remove(&key);
-        self.dsl.0.state.steer_lane.remove(&key);
+        // Recovery seeding is a direct DSL-state write from the persisted
+        // snapshot by design — there are no transitions to replay. Only
+        // Queued inputs carry lane membership; staged/terminal inputs are
+        // not in any work lane.
+        self.dsl.0.state.input_lane.remove(&key);
         if matches!(lifecycle_state, InputLifecycleState::Queued) {
-            match handling_mode {
-                HandlingMode::Steer => {
-                    self.dsl.0.state.steer_lane.insert(key);
-                }
-                HandlingMode::Queue => {
-                    self.dsl.0.state.queue_lane.insert(key);
-                }
-            }
+            self.dsl
+                .0
+                .state
+                .input_lane
+                .insert(key, mm_dsl::InputLane::from(handling_mode));
         }
     }
 
@@ -807,17 +807,31 @@ impl EphemeralRuntimeDriver {
             s.updated_at = now;
         }
 
-        // 3. DSL phase transition (authoritative).
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::QueueAccepted {
-                input_id: Self::dsl_key(input_id),
-            },
-            "QueueAccepted",
-        )?;
+        // 3. DSL phase transition (authoritative). Admission lane mirrors
+        //    the resolved handling_mode; the DSL owns lane membership from
+        //    first touch.
+        let admission_lane = mm_dsl::InputLane::from(handling_mode);
+        let admission_key = Self::dsl_key(input_id);
+        let (admission_input, admission_label) = match admission_lane {
+            mm_dsl::InputLane::Queue => (
+                mm_dsl::MeerkatMachineInput::QueueAccepted {
+                    input_id: admission_key,
+                },
+                "QueueAccepted",
+            ),
+            mm_dsl::InputLane::Steer => (
+                mm_dsl::MeerkatMachineInput::SteerAccepted {
+                    input_id: admission_key,
+                },
+                "SteerAccepted",
+            ),
+        };
+        self.dsl_apply(admission_input, admission_label)?;
 
         // 4. Handle supersession / coalescing of an existing queued input.
         //    The new input goes into the queue (step 5); the existing one
-        //    transitions to its terminal state here.
+        //    transitions to its terminal state here. The DSL transitions
+        //    own lane removal.
         if let Some(action) = existing_action {
             match action {
                 ExistingQueuedAdmissionAction::Coalesce { existing_id } => {
@@ -826,8 +840,6 @@ impl EphemeralRuntimeDriver {
                     let from_phase = self
                         .input_phase(existing_id)
                         .unwrap_or(InputLifecycleState::Queued);
-                    self.dsl.0.state.queue_lane.remove(&existing_key);
-                    self.dsl.0.state.steer_lane.remove(&existing_key);
                     self.dsl_apply(
                         mm_dsl::MeerkatMachineInput::CoalesceInput {
                             input_id: existing_key,
@@ -851,8 +863,6 @@ impl EphemeralRuntimeDriver {
                     let from_phase = self
                         .input_phase(existing_id)
                         .unwrap_or(InputLifecycleState::Queued);
-                    self.dsl.0.state.queue_lane.remove(&existing_key);
-                    self.dsl.0.state.steer_lane.remove(&existing_key);
                     self.dsl_apply(
                         mm_dsl::MeerkatMachineInput::SupersedeInput {
                             input_id: existing_key,
@@ -873,7 +883,10 @@ impl EphemeralRuntimeDriver {
             }
         }
 
-        // 5. Enqueue the new input into the correct lane.
+        // 5. Enqueue the new input into the correct lane. When the
+        //    queue_action's target differs from the admission lane (e.g.
+        //    priority reroute), the shell emits a `ChangeLane` transition
+        //    rather than writing `input_lane` directly.
         match queue_action {
             AdmissionQueueAction::None => {}
             AdmissionQueueAction::EnqueueTo { target } => {
@@ -883,19 +896,15 @@ impl EphemeralRuntimeDriver {
                         self.steer_queue.enqueue(input_id.clone(), input.clone());
                     }
                 }
-                // DSL QueueAccepted already inserted into queue_lane; ensure
-                // the correct lane for the intended target (Steer might need
-                // relocation if QueueAccepted defaulted).
-                let key = Self::dsl_key(input_id);
-                match target {
-                    HandlingMode::Queue => {
-                        self.dsl.0.state.steer_lane.remove(&key);
-                        self.dsl.0.state.queue_lane.insert(key);
-                    }
-                    HandlingMode::Steer => {
-                        self.dsl.0.state.queue_lane.remove(&key);
-                        self.dsl.0.state.steer_lane.insert(key);
-                    }
+                let target_lane = mm_dsl::InputLane::from(target);
+                if target_lane != admission_lane {
+                    self.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::ChangeLane {
+                            input_id: Self::dsl_key(input_id),
+                            new_lane: target_lane,
+                        },
+                        "ChangeLane",
+                    )?;
                 }
             }
             AdmissionQueueAction::EnqueueFront { target } => {
@@ -925,15 +934,15 @@ impl EphemeralRuntimeDriver {
                     .state
                     .input_admission_seq
                     .insert(key.clone(), min_seq.saturating_sub(1));
-                match target {
-                    HandlingMode::Queue => {
-                        self.dsl.0.state.steer_lane.remove(&key);
-                        self.dsl.0.state.queue_lane.insert(key);
-                    }
-                    HandlingMode::Steer => {
-                        self.dsl.0.state.queue_lane.remove(&key);
-                        self.dsl.0.state.steer_lane.insert(key);
-                    }
+                let target_lane = mm_dsl::InputLane::from(target);
+                if target_lane != admission_lane {
+                    self.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::ChangeLane {
+                            input_id: key,
+                            new_lane: target_lane,
+                        },
+                        "ChangeLane",
+                    )?;
                 }
             }
         }
@@ -1064,7 +1073,7 @@ impl EphemeralRuntimeDriver {
 
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
         let key = Self::dsl_key(input_id);
-        self.dsl.0.state.queue_lane.contains(&key) || self.dsl.0.state.steer_lane.contains(&key)
+        self.dsl.0.state.input_lane.contains_key(&key)
     }
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         let excluded_keys: std::collections::HashSet<String> =
@@ -1072,9 +1081,8 @@ impl EphemeralRuntimeDriver {
         self.dsl
             .0
             .state
-            .queue_lane
-            .iter()
-            .chain(self.dsl.0.state.steer_lane.iter())
+            .input_lane
+            .keys()
             .any(|queued_key| !excluded_keys.contains(queued_key))
     }
     fn existing_superseded_input(
@@ -1203,8 +1211,7 @@ impl EphemeralRuntimeDriver {
             let from_phase = self
                 .input_phase(input_id)
                 .unwrap_or(InputLifecycleState::Queued);
-            self.dsl.0.state.queue_lane.remove(&key);
-            self.dsl.0.state.steer_lane.remove(&key);
+            // `StageForRun` is the sole writer of `input_lane` on stage.
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::StageForRun {
                     input_id: key,
@@ -1341,11 +1348,8 @@ impl EphemeralRuntimeDriver {
             let key = Self::dsl_key(input_id);
 
             if attempts >= MAX_STAGE_ATTEMPTS {
-                // Max stage attempts exhausted — Abandon instead of RollbackStaged.
-                // Remove from lanes first so the DSL AbandonInput idempotently
-                // clears both.
-                self.dsl.0.state.queue_lane.remove(&key);
-                self.dsl.0.state.steer_lane.remove(&key);
+                // Max stage attempts exhausted — Abandon instead of
+                // RollbackStaged.
                 let attempts_count = u64::from(attempts);
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {
@@ -1386,23 +1390,22 @@ impl EphemeralRuntimeDriver {
                     )),
                 );
             } else {
-                // Still have attempts — rollback to Queued.
+                // Still have attempts — rollback to Queued. The shell
+                // passes the input's recorded `HandlingMode` so
+                // `RollbackStaged` can re-admit it to the correct lane.
+                let lane = self
+                    .handling_mode
+                    .get(input_id)
+                    .copied()
+                    .map(mm_dsl::InputLane::from)
+                    .unwrap_or(mm_dsl::InputLane::Queue);
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::RollbackStaged {
-                        input_id: key.clone(),
+                        input_id: key,
+                        lane,
                     },
                     "RollbackStaged",
                 )?;
-                // Put the input back into the correct lane so the next
-                // drain sees it.
-                match self.handling_mode.get(input_id).copied() {
-                    Some(HandlingMode::Steer) => {
-                        self.dsl.0.state.steer_lane.insert(key);
-                    }
-                    _ => {
-                        self.dsl.0.state.queue_lane.insert(key);
-                    }
-                }
 
                 let now = Utc::now();
                 if let Some(state) = self.ledger.get_mut(input_id) {
@@ -1587,10 +1590,6 @@ impl EphemeralRuntimeDriver {
             let from_phase = self
                 .input_phase(id)
                 .unwrap_or(InputLifecycleState::Accepted);
-            // Remove from lanes first so DSL AbandonInput's membership
-            // invariants hold regardless of prior lane presence.
-            self.dsl.0.state.queue_lane.remove(&key);
-            self.dsl.0.state.steer_lane.remove(&key);
             if self
                 .dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {

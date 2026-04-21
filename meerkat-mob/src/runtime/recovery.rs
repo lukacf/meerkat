@@ -218,10 +218,18 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
     if snap.kernel_state.phase != "Running" {
         return false;
     }
-    let awaiting_body_frame = matches!(
-        snap.kernel_state.fields.get("stage"),
-        Some(KernelValue::NamedVariant { variant, .. }) if variant == "AwaitingBodyFrame"
-    );
+    let awaiting_body_frame = match snap.kernel_state.fields.get("stage") {
+        Some(KernelValue::NamedVariant { variant, .. }) if variant == "AwaitingBodyFrame" => true,
+        None => {
+            tracing::warn!(
+                loop_instance_id = %loop_id,
+                "loop snapshot is missing stage field; \
+                 treating as awaiting body frame — snapshot may be corrupt"
+            );
+            true
+        }
+        _ => false,
+    };
     if !awaiting_body_frame {
         return false;
     }

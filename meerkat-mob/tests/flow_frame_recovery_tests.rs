@@ -385,6 +385,31 @@ fn test_recovery_does_not_requeue_awaiting_until_loop() {
     );
 }
 
+/// Recovery treats a missing loop `stage` field the same way it already treats
+/// a missing `active_body_frame_id`: as a corruption-tolerant fallback for
+/// `Running` loops that would otherwise strand resume progress.
+#[test]
+fn test_recovery_requeues_loop_when_stage_is_missing() {
+    let mut run = minimal_run_with_schema_v2();
+
+    let loop_snap = LoopSnapshot {
+        kernel_state: KernelState {
+            phase: "Running".into(),
+            fields: BTreeMap::from([("active_body_frame_id".into(), KernelValue::None)]),
+        },
+    };
+    run.loops
+        .insert(LoopInstanceId::from("loop-missing-stage"), loop_snap);
+
+    reconcile_run_state(&mut run).expect("reconcile");
+
+    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
+    assert!(
+        pending.contains(&"loop-missing-stage".to_string()),
+        "loop with missing stage should still be requeued as pending body-frame work; got: {pending:?}"
+    );
+}
+
 /// Recovery drops stale pending_body_frame_loops entries for loops whose
 /// active_body_frame_id is already set (body frame already started).
 #[test]

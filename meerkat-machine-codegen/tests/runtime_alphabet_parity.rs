@@ -79,6 +79,15 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "AttachSessionIngress",
         "AttachMobIngress",
         "DetachIngress",
+        // Wave 3 D Row 21: supervisor-bridge authorization is staged by
+        // `stage_supervisor_{bind,authorize,revoke}` from the comms drain
+        // task, not dispatched through `MeerkatMachineCommand`. The typed
+        // `BindSupervisor`, `AuthorizeSupervisor`, and `RevokeSupervisor`
+        // inputs are DSL-internal, analogous to the peer-ingress ownership
+        // inputs above.
+        "BindSupervisor",
+        "AuthorizeSupervisor",
+        "RevokeSupervisor",
         // U9 (dogma #4): realtime product-turn lifecycle is driven via
         // `RealtimeProductTurnHandle` (meerkat-core/src/handles.rs) from the
         // realtime-WS dispatch loop in `meerkat-rpc::realtime_ws`, not

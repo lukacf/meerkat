@@ -99,6 +99,30 @@ impl PeerIngressOwner {
     }
 }
 
+/// Typed view of the per-session supervisor-bridge binding (Wave 3 D Row 21).
+///
+/// Projected from the DSL's tagged-union state
+/// (`supervisor_binding_kind` + `supervisor_bound_{name, peer_id, address, epoch}`).
+/// The `supervisor_binding_consistency` invariant guarantees the companion
+/// fields are populated exactly when the kind is `Bound`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SupervisorBinding {
+    /// No supervisor bound. The initial state and the state after a
+    /// successful `RevokeSupervisor`.
+    Unbound,
+    /// Supervisor authorized. The four companion fields travel together:
+    /// `name` + `peer_id` + `address` derive from the initial bind or the
+    /// latest `AuthorizeSupervisor` rotation; `epoch` monotonically
+    /// increases across rotations.
+    Bound {
+        name: String,
+        peer_id: String,
+        address: String,
+        epoch: u64,
+    },
+}
+
 pub struct CommsDrainSlot {
     pub phase: CommsDrainPhase,
     pub mode: Option<CommsDrainMode>,
@@ -581,4 +605,172 @@ impl MeerkatMachine {
             )
             .await;
     }
+
+    /// Read the current supervisor binding from DSL state (Wave 3 D Row 21).
+    ///
+    /// Returns `SupervisorBinding::Unbound` for sessions that have no
+    /// registered DSL state (unknown / destroyed sessions). The
+    /// `supervisor_binding_consistency` invariant guarantees the four
+    /// companion fields are populated exactly when the kind is `Bound`; if
+    /// that invariant were ever violated at runtime, we gracefully degrade
+    /// to `Unbound` rather than panic.
+    pub async fn supervisor_binding(&self, session_id: &SessionId) -> SupervisorBinding {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return SupervisorBinding::Unbound;
+        };
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match authority.state.supervisor_binding_kind {
+            crate::meerkat_machine::dsl::SupervisorBindingKind::Unbound => {
+                SupervisorBinding::Unbound
+            }
+            crate::meerkat_machine::dsl::SupervisorBindingKind::Bound => {
+                match (
+                    authority.state.supervisor_bound_name.clone(),
+                    authority.state.supervisor_bound_peer_id.clone(),
+                    authority.state.supervisor_bound_address.clone(),
+                    authority.state.supervisor_bound_epoch,
+                ) {
+                    (Some(name), Some(peer_id), Some(address), Some(epoch)) => {
+                        SupervisorBinding::Bound {
+                            name,
+                            peer_id,
+                            address,
+                            epoch,
+                        }
+                    }
+                    _ => {
+                        tracing::error!(
+                            %session_id,
+                            "supervisor_binding_consistency invariant violation: Bound without all companion fields"
+                        );
+                        SupervisorBinding::Unbound
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stage a DSL `BindSupervisor` input (Wave 3 D Row 21).
+    ///
+    /// Returns the classified result from the DSL mutator so callers can
+    /// surface typed rejections (e.g. "already bound"). The shell uses
+    /// this after validating the incoming bridge request's bootstrap
+    /// token; the DSL is the authority that flips `Unbound → Bound`.
+    pub async fn stage_supervisor_bind(
+        &self,
+        session_id: &SessionId,
+        name: String,
+        peer_id: String,
+        address: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::BindSupervisor {
+                name,
+                peer_id,
+                address,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `AuthorizeSupervisor` input (Wave 3 D Row 21).
+    ///
+    /// Rotates the current binding to a new supervisor + epoch. The shell
+    /// must have already verified the rotation is authorized by the
+    /// *current* supervisor before calling this method.
+    pub async fn stage_supervisor_authorize(
+        &self,
+        session_id: &SessionId,
+        name: String,
+        peer_id: String,
+        address: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeSupervisor {
+                name,
+                peer_id,
+                address,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `RevokeSupervisor` input (Wave 3 D Row 21).
+    ///
+    /// Returns to `Unbound`. The DSL guard enforces that the supplied
+    /// `peer_id` and `epoch` match the current binding exactly; a stale
+    /// revoke cannot tear down a freshly rotated binding.
+    pub async fn stage_supervisor_revoke(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeSupervisor { peer_id, epoch },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
 }
+
+/// Errors raised when staging a supervisor-binding input against the DSL
+/// (Wave 3 D Row 21).
+#[derive(Debug)]
+pub enum SupervisorBindingStageError {
+    /// The session is not registered with the runtime.
+    SessionNotRegistered,
+    /// The DSL mutator rejected the transition (e.g. guard failure). The
+    /// boxed inner is the typed DSL transition error; callers that need to
+    /// distinguish guard rejections from missing-transition failures can
+    /// match on it.
+    Dsl(crate::meerkat_machine::dsl::MeerkatMachineTransitionError),
+}
+
+impl std::fmt::Display for SupervisorBindingStageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotRegistered => write!(f, "session not registered with runtime"),
+            Self::Dsl(err) => write!(f, "DSL rejected supervisor binding input: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for SupervisorBindingStageError {}

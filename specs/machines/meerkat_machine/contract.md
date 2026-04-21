@@ -32,6 +32,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
 - `peer_ingress_mob_id`: `Option<MobId>`
+- `supervisor_binding_kind`: `SupervisorBindingKind`
+- `supervisor_bound_name`: `Option<String>`
+- `supervisor_bound_peer_id`: `Option<String>`
+- `supervisor_bound_address`: `Option<String>`
+- `supervisor_bound_epoch`: `Option<u64>`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -116,6 +121,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttachSessionIngress`(comms_runtime_id: CommsRuntimeId)
 - `AttachMobIngress`(comms_runtime_id: CommsRuntimeId, mob_id: MobId)
 - `DetachIngress`
+- `BindSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
+- `AuthorizeSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
+- `RevokeSupervisor`(peer_id: String, epoch: u64)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -213,6 +221,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `current_run_only_while_running_or_retired`
 - `realtime_binding_epoch_consistency`
 - `peer_ingress_owner_consistency`
+- `supervisor_binding_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -3435,6 +3444,121 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `owner_is_attached`
+- To: `Stopped`
+
+### `BindSupervisorIdle`
+- From: `Idle`
+- On: `BindSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_unbound`
+- To: `Idle`
+
+### `BindSupervisorAttached`
+- From: `Attached`
+- On: `BindSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_unbound`
+- To: `Attached`
+
+### `BindSupervisorRunning`
+- From: `Running`
+- On: `BindSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_unbound`
+- To: `Running`
+
+### `BindSupervisorRetired`
+- From: `Retired`
+- On: `BindSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_unbound`
+- To: `Retired`
+
+### `BindSupervisorStopped`
+- From: `Stopped`
+- On: `BindSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_unbound`
+- To: `Stopped`
+
+### `AuthorizeSupervisorIdle`
+- From: `Idle`
+- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_bound`
+- To: `Idle`
+
+### `AuthorizeSupervisorAttached`
+- From: `Attached`
+- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_bound`
+- To: `Attached`
+
+### `AuthorizeSupervisorRunning`
+- From: `Running`
+- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_bound`
+- To: `Running`
+
+### `AuthorizeSupervisorRetired`
+- From: `Retired`
+- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_bound`
+- To: `Retired`
+
+### `AuthorizeSupervisorStopped`
+- From: `Stopped`
+- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- Guards:
+  - `supervisor_bound`
+- To: `Stopped`
+
+### `RevokeSupervisorIdle`
+- From: `Idle`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `RevokeSupervisorAttached`
+- From: `Attached`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `RevokeSupervisorRunning`
+- From: `Running`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `RevokeSupervisorRetired`
+- From: `Retired`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `RevokeSupervisorStopped`
+- From: `Stopped`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
 - To: `Stopped`
 
 ## Coverage

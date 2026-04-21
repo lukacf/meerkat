@@ -95,7 +95,10 @@ mod session_management;
 mod traits;
 mod visibility;
 
-pub use comms_drain::{CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerIngressOwner};
+pub use comms_drain::{
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerIngressOwner, SupervisorBinding,
+    SupervisorBindingStageError,
+};
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 

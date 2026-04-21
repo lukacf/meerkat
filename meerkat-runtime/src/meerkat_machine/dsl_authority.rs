@@ -169,6 +169,11 @@ pub(crate) fn project_state(
         peer_ingress_owner_kind: super::dsl::PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,
+        supervisor_binding_kind: super::dsl::SupervisorBindingKind::Unbound,
+        supervisor_bound_name: None,
+        supervisor_bound_peer_id: None,
+        supervisor_bound_address: None,
+        supervisor_bound_epoch: None,
     }
 }
 

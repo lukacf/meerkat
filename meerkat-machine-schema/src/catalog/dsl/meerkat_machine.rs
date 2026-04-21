@@ -110,6 +110,28 @@ machine! {
             peer_ingress_owner_kind: Enum<PeerIngressOwnerKind>,
             peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
             peer_ingress_mob_id: Option<MobId>,
+
+            // --- Supervisor-bridge authorization (Wave 3 D Row 21) ---
+            //
+            // Canonical authorization fact for the supervisor-bridge
+            // command surface. Previously lived as an
+            // `Option<AuthorizedSupervisorState>` on the comms drain
+            // task's stack; the companion trust edge was router-owned,
+            // so the authorization discriminant had split ownership.
+            // The DSL now owns both the kind and the canonical binding
+            // (`peer_id` + `name` + `address` + `epoch`); the trust edge
+            // in the router stays in lock-step via shell-side
+            // `add_trusted_peer` / `remove_trusted_peer` calls that only
+            // run after the DSL mutator accepts the matching
+            // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
+            // transition. The `supervisor_binding_consistency` invariant
+            // enforces that the companion fields are populated exactly
+            // when `supervisor_binding_kind == Bound`.
+            supervisor_binding_kind: Enum<SupervisorBindingKind>,
+            supervisor_bound_name: Option<String>,
+            supervisor_bound_peer_id: Option<String>,
+            supervisor_bound_address: Option<String>,
+            supervisor_bound_epoch: Option<u64>,
         }
 
         init(Initializing) {
@@ -138,6 +160,11 @@ machine! {
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
+            supervisor_binding_kind = SupervisorBindingKind::Unbound,
+            supervisor_bound_name = None,
+            supervisor_bound_peer_id = None,
+            supervisor_bound_address = None,
+            supervisor_bound_epoch = None,
         }
 
         terminal [Destroyed]
@@ -281,6 +308,33 @@ machine! {
             AttachSessionIngress { comms_runtime_id: CommsRuntimeId },
             AttachMobIngress { comms_runtime_id: CommsRuntimeId, mob_id: MobId },
             DetachIngress,
+            // Supervisor-bridge authorization (Wave 3 D Row 21).
+            //
+            // `BindSupervisor` establishes the initial binding from
+            // `Unbound`. `AuthorizeSupervisor` rotates an already-`Bound`
+            // binding — the shell enforces the "new supervisor must be
+            // authorized by the current supervisor" gate via
+            // sender-authentication on the incoming request before
+            // firing this input. `RevokeSupervisor` tears the binding
+            // down and returns to `Unbound`; the `epoch` and `peer_id`
+            // must match the current binding so a stale revoke cannot
+            // clear a rotated binding.
+            BindSupervisor {
+                name: String,
+                peer_id: String,
+                address: String,
+                epoch: u64,
+            },
+            AuthorizeSupervisor {
+                name: String,
+                peer_id: String,
+                address: String,
+                epoch: u64,
+            },
+            RevokeSupervisor {
+                peer_id: String,
+                epoch: u64,
+            },
         }
 
         surface_only [
@@ -504,6 +558,24 @@ machine! {
             || (self.peer_ingress_owner_kind == PeerIngressOwnerKind::MobOwned
                 && self.peer_ingress_comms_runtime_id != None
                 && self.peer_ingress_mob_id != None)
+        }
+
+        // Supervisor-binding tagged-union discipline (Wave 3 D Row 21).
+        // `Unbound` carries no companions; `Bound` carries all four
+        // (`name`, `peer_id`, `address`, `epoch`). A half-populated
+        // binding is structurally unrepresentable — the split-ownership
+        // regression class is closed by construction.
+        invariant supervisor_binding_consistency {
+            (self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+                && self.supervisor_bound_name == None
+                && self.supervisor_bound_peer_id == None
+                && self.supervisor_bound_address == None
+                && self.supervisor_bound_epoch == None)
+            || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                && self.supervisor_bound_name != None
+                && self.supervisor_bound_peer_id != None
+                && self.supervisor_bound_address != None
+                && self.supervisor_bound_epoch != None)
         }
 
 
@@ -2376,6 +2448,63 @@ machine! {
             }
             to Idle
         }
+
+        // =====================================================================
+        // Supervisor-bridge authorization (Wave 3 D Row 21)
+        // =====================================================================
+
+        transition BindSupervisor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BindSupervisor { name, peer_id, address, epoch }
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+            }
+            update {
+                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                self.supervisor_bound_name = Some(name);
+                self.supervisor_bound_peer_id = Some(peer_id);
+                self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_epoch = Some(epoch);
+            }
+            to Idle
+        }
+
+        transition AuthorizeSupervisor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AuthorizeSupervisor { name, peer_id, address, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            update {
+                self.supervisor_bound_name = Some(name);
+                self.supervisor_bound_peer_id = Some(peer_id);
+                self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_epoch = Some(epoch);
+            }
+            to Idle
+        }
+
+        transition RevokeSupervisor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RevokeSupervisor { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_binding_kind = SupervisorBindingKind::Unbound;
+                self.supervisor_bound_name = None;
+                self.supervisor_bound_peer_id = None;
+                self.supervisor_bound_address = None;
+                self.supervisor_bound_epoch = None;
+            }
+            to Idle
+        }
     }
 }
 
@@ -2556,6 +2685,24 @@ pub enum PeerIngressOwnerKind {
     Unattached,
     SessionOwned,
     MobOwned,
+}
+
+/// Supervisor-bridge authorization kind (Wave 3 D Row 21).
+///
+/// Paired with `supervisor_bound_{name, peer_id, address, epoch}` in DSL
+/// state; `supervisor_binding_consistency` enforces pairing. Rotation is
+/// structural: `BindSupervisor` requires `Unbound`; `AuthorizeSupervisor`
+/// requires `Bound`; `RevokeSupervisor` requires `Bound` and returns to
+/// `Unbound`. Before Wave 3 D this fact lived as an `Option<AuthorizedSupervisorState>`
+/// on the comms drain task's stack — the identity and epoch of the
+/// authorized supervisor were helper-local while the corresponding trust
+/// edge was router-owned. Moving the authorization discriminant + epoch
+/// into DSL state collapses that split ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindingKind {
+    #[default]
+    Unbound,
+    Bound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

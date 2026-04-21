@@ -101,6 +101,7 @@ pub(crate) fn project_state(
         registration_phase: super::dsl::RegistrationPhase::Queuing,
         drain_phase: super::dsl::DrainPhase::Inactive,
         drain_mode: None,
+        next_staged_visibility_revision: 0,
         active_filter: super::dsl::ToolFilter::All,
         staged_filter: super::dsl::ToolFilter::All,
         active_visibility_revision: 0,

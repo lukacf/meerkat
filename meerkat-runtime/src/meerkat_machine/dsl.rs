@@ -1674,6 +1674,16 @@ machine! {
             drain_mode: Option<DrainMode>,
 
             // --- Visibility substate ---
+            //
+            // `next_staged_visibility_revision` is the DSL-owned monotonic
+            // counter that mints staged-revision tokens (dogma round 4,
+            // wave 2b #12). `StageVisibilityFilter` / `StageDeferredNames` /
+            // `RequestDeferredTools` increment it in their `update {}` and
+            // write the new value into `staged_visibility_revision` in the
+            // same atomic transition; the shell's `MachineToolVisibilityOwner`
+            // reads the minted value back and applies it to its projection
+            // rather than minting independently.
+            next_staged_visibility_revision: u64,
             active_filter: ToolFilter,
             staged_filter: ToolFilter,
             active_visibility_revision: u64,
@@ -1898,6 +1908,7 @@ machine! {
             drain_phase = DrainPhase::Inactive,
             drain_mode = None,
             // Visibility substate
+            next_staged_visibility_revision = 0,
             active_filter = ToolFilter::All,
             staged_filter = ToolFilter::All,
             active_visibility_revision = 0,
@@ -2116,7 +2127,10 @@ machine! {
             DrainExitedClean,
             DrainExitedRespawnable,
             // Visibility inputs
-            StageVisibilityFilter { filter: ToolFilter, revision: u64 },
+            // Dogma round 4, wave 2b #12: `StageVisibilityFilter` no longer
+            // accepts a revision parameter — the DSL mints it via
+            // `next_staged_visibility_revision` in the transition's update.
+            StageVisibilityFilter { filter: ToolFilter },
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
             StageDeferredNames { names: Set<String> },
             CommitDeferredNames { names: Set<String> },
@@ -4929,13 +4943,18 @@ machine! {
         // Absorbed substate transitions — Visibility
         // =====================================================================
 
-        // StageVisibilityFilter: stage a new tool filter + revision
+        // StageVisibilityFilter: stage a new tool filter; DSL mints the new
+        // staged-revision token via `next_staged_visibility_revision`
+        // (dogma round 4, wave 2b #12 — single-owner monotonic). The shell
+        // reads the minted value back via
+        // `MeerkatMachine::stage_session_dsl_input_with_minted_revision`.
         transition StageVisibilityFilter {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input StageVisibilityFilter { filter, revision }
+            on input StageVisibilityFilter { filter }
             update {
+                self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_filter = filter;
-                self.staged_visibility_revision = revision;
+                self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
             emit RefreshVisibleSurfaceSet
@@ -4953,12 +4972,16 @@ machine! {
             emit RefreshVisibleSurfaceSet
         }
 
-        // StageDeferredNames: stage a set of deferred tool names
+        // StageDeferredNames: stage a set of deferred tool names; DSL mints
+        // the new staged-revision token via `next_staged_visibility_revision`
+        // (dogma round 4, wave 2b #12). Shell reads the minted value back.
         transition StageDeferredNames {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StageDeferredNames { names }
             update {
+                self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_deferred_names = names;
+                self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
             emit RefreshVisibleSurfaceSet

@@ -1,14 +1,96 @@
 use super::*;
 
-#[derive(Debug, Default)]
+/// Machine-backed tool-visibility owner. Staged-revision tokens are minted
+/// by the session's `MeerkatMachine` DSL authority via its
+/// `next_staged_visibility_revision` counter (dogma round 4, wave 2b #12) —
+/// the owner holds a handle to that authority and routes every
+/// staging-path trait call through the DSL so there is a single
+/// monotonic source of truth.
+///
+/// The former `next_revision: AtomicU64` counter is gone; the DSL's
+/// counter is authoritative and trait-object callers see the same values
+/// as dispatch-path callers without a second shell-side source.
+#[derive(Default)]
 pub struct MachineToolVisibilityOwner {
     pub state: StdRwLock<SessionToolVisibilityState>,
-    pub next_revision: AtomicU64,
+    /// Handle to the per-session DSL authority — set by
+    /// `MeerkatMachine::session_management` immediately after the owner is
+    /// created. When present, staging-path trait calls mint their revision
+    /// by firing the matching DSL input and reading back
+    /// `staged_visibility_revision` from the authority state.
+    ///
+    /// Remains `None` only during construction / tests that never call a
+    /// staging trait method — the owner refuses staging calls in that
+    /// state rather than falling back to any shadow counter.
+    dsl_authority: StdRwLock<Option<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>>>,
+}
+
+impl std::fmt::Debug for MachineToolVisibilityOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineToolVisibilityOwner")
+            .field("state", &"<StdRwLock<SessionToolVisibilityState>>")
+            .field(
+                "dsl_authority",
+                &self
+                    .dsl_authority
+                    .read()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|_| "bound"))
+                    .unwrap_or("unbound"),
+            )
+            .finish()
+    }
 }
 
 impl MachineToolVisibilityOwner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the per-session DSL authority. Called by the session
+    /// management wiring immediately after the owner `Arc` is installed on
+    /// the runtime session entry. Idempotent under re-binding during
+    /// recovery.
+    pub fn bind_dsl_authority(
+        &self,
+        authority: Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>,
+    ) {
+        let mut slot = self
+            .dsl_authority
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(authority);
+    }
+
+    fn mint_revision_via_dsl(
+        &self,
+        input: super::dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let slot = self
+            .dsl_authority
+            .read()
+            .map_err(|_| ToolScopeStageError::Owner {
+                message: "machine visibility DSL authority slot lock poisoned".to_string(),
+            })?;
+        let authority = slot
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ToolScopeStageError::Owner {
+                message:
+                    "machine visibility DSL authority not bound — staging call before session wiring"
+                        .to_string(),
+            })?;
+        drop(slot);
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(&mut *guard, input).map_err(|err| {
+            ToolScopeStageError::Owner {
+                message: super::dsl_authority::map_error(err, context),
+            }
+        })?;
+        Ok(ToolScopeRevision(guard.state.staged_visibility_revision))
     }
 }
 
@@ -33,11 +115,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        let next_revision = visibility_state
-            .active_revision
-            .max(visibility_state.staged_revision);
         *state = visibility_state;
-        self.next_revision.store(next_revision, Ordering::SeqCst);
         Ok(())
     }
 
@@ -46,10 +124,21 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         filter: ToolFilter,
         witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        // DSL is the single monotonic source — mint first, then apply
+        // the projection to the owner-held state under the projection
+        // lock. The DSL input's `update {}` increments
+        // `next_staged_visibility_revision` and stamps
+        // `staged_visibility_revision` atomically inside the DSL
+        // authority lock.
+        let revision = self.mint_revision_via_dsl(
+            super::dsl::MeerkatMachineInput::StageVisibilityFilter {
+                filter: super::dsl::ToolFilter::from(&filter),
+            },
+            "StageVisibilityFilter",
+        )?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
         state.staged_filter = filter;
         state.filter_witnesses.extend(witnesses);
         state.staged_revision = revision.0;
@@ -60,10 +149,15 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         names: std::collections::BTreeSet<String>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let revision = self.mint_revision_via_dsl(
+            super::dsl::MeerkatMachineInput::StageDeferredNames {
+                names: names.clone(),
+            },
+            "StageDeferredNames",
+        )?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
         state.staged_requested_deferred_names = names;
         state.staged_revision = revision.0;
         Ok(revision)
@@ -74,13 +168,32 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         names: std::collections::BTreeSet<String>,
         witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        // `request_deferred_tools` extends the staged set; compute the
+        // full extended set before firing the DSL input so the DSL state
+        // tracks the same logical post-condition as the owner state.
+        let extended: std::collections::BTreeSet<String> = {
+            let state = self.state.read().map_err(|_| ToolScopeStageError::Owner {
+                message: "machine visibility state lock poisoned".to_string(),
+            })?;
+            state
+                .staged_requested_deferred_names
+                .union(&names)
+                .cloned()
+                .collect()
+        };
+        let revision = self.mint_revision_via_dsl(
+            super::dsl::MeerkatMachineInput::StageDeferredNames {
+                names: extended.clone(),
+            },
+            "StageDeferredNames",
+        )?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
-        state.staged_requested_deferred_names.extend(names);
+        state.staged_requested_deferred_names = extended;
         state.requested_witnesses.extend(witnesses);
         state.staged_revision = revision.0;
+        let _ = names; // names merged via `extended`
         Ok(revision)
     }
 

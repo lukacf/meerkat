@@ -489,31 +489,16 @@ impl MeerkatMachine {
                             .tool_visibility_owner,
                     )
                 };
-                // DSL-first: stage visibility filter before mutation. Typed
-                // `ToolFilter` mirror crosses the seam directly — no
-                // JSON-stringification.
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::StageVisibilityFilter {
-                            filter: crate::meerkat_machine::dsl::ToolFilter::from(&filter),
-                            // Use a placeholder revision — the real revision comes from the
-                            // owner after mutation. DSL validates the transition shape, not
-                            // the revision value.
-                            revision: 0,
-                        },
-                        "StageVisibilityFilter",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                let revision = match owner.stage_persistent_filter(filter, witnesses) {
-                    Ok(rev) => rev,
-                    Err(err) => {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeDriverError::Internal(err.to_string()));
-                    }
-                };
+                // Delegate to the owner — the `MachineToolVisibilityOwner`
+                // trait impl fires the `StageVisibilityFilter` DSL input
+                // internally (dogma round 4, wave 2b #12: DSL owns the
+                // `next_staged_visibility_revision` monotonic). The DSL
+                // input's `update {}` increments and stamps the revision
+                // under the authority lock; the owner reads the minted
+                // value back and projects it onto its own state.
+                let revision = owner
+                    .stage_persistent_filter(filter, witnesses)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::RequestDeferredTools {
@@ -550,33 +535,13 @@ impl MeerkatMachine {
                             .tool_visibility_owner,
                     )
                 };
-                // Read current accumulated deferred names, union with new names
-                // (request_deferred_tools extends, DSL replaces — pass the full set)
-                let current_names = owner
-                    .visibility_state()
-                    .map(|s| s.staged_requested_deferred_names)
+                // Delegate to the owner — `request_deferred_tools` fires
+                // the `StageDeferredNames` DSL input (with the extended set)
+                // to mint the revision and then projects onto owner state
+                // (dogma round 4, wave 2b #12).
+                let revision = owner
+                    .request_deferred_tools(names, witnesses)
                     .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
-                let accumulated_names: BTreeSet<String> =
-                    current_names.union(&names).cloned().collect();
-                // DSL-first: stage deferred names before mutation
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::StageDeferredNames {
-                            names: accumulated_names,
-                        },
-                        "StageDeferredNames",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                let revision = match owner.request_deferred_tools(names, witnesses) {
-                    Ok(rev) => rev,
-                    Err(err) => {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeDriverError::Internal(err.to_string()));
-                    }
-                };
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::PublishCommittedVisibleSet {

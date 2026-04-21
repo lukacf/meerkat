@@ -226,6 +226,16 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
                 &mut errors,
             );
         }
+
+        // Fidelity: the schema's `from` phase set must be derivable from the
+        // guards without silent fallback. `gen_schema::derive_from_phases`
+        // returns `Err` for any guard shape that would historically have
+        // fallen back to `all_phases` or an empty set. We run it here so
+        // the error surfaces with transition-level span context rather than
+        // emerging from generated-code `compile_error!` tokens.
+        if let Err(msg) = crate::gen_schema::derive_from_phases(def, t) {
+            errors.push(Error::new(t.span, msg));
+        }
     }
 
     // --- Disposition validation ---

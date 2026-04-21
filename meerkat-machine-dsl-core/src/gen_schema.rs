@@ -545,22 +545,33 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 })
                 .collect();
 
-            // Derive `from` phases from guard expressions
-            let from_phases = derive_from_phases(def, t);
-
-            quote! {
-                TransitionSchema {
-                    name: #name.into(),
-                    from: vec![#(#from_phases.into()),*],
-                    on: InputMatch {
-                        kind: #kind,
-                        variant: #variant.into(),
-                        bindings: vec![#(#bindings.into()),*],
-                    },
-                    guards: #guards,
-                    updates: vec![#(#updates),*],
-                    to: #to.into(),
-                    emit: vec![#(#effects),*],
+            // Derive `from` phases from guard expressions. `validate` has
+            // already refused to compile the machine if any transition's
+            // guard is unanalyzable; this branch reflects that invariant
+            // via a `compile_error!` belt-and-suspenders for defense in
+            // depth if someone bypasses validate in the future.
+            match derive_from_phases(def, t) {
+                Ok(from_phases) => quote! {
+                    TransitionSchema {
+                        name: #name.into(),
+                        from: vec![#(#from_phases.into()),*],
+                        on: InputMatch {
+                            kind: #kind,
+                            variant: #variant.into(),
+                            bindings: vec![#(#bindings.into()),*],
+                        },
+                        guards: #guards,
+                        updates: vec![#(#updates),*],
+                        to: #to.into(),
+                        emit: vec![#(#effects),*],
+                    }
+                },
+                Err(msg) => {
+                    let err = format!(
+                        "internal error: from-phase derivation failed at schema codegen \
+                         (validation should have caught this): {msg}"
+                    );
+                    quote! { compile_error!(#err) }
                 }
             }
         })
@@ -658,17 +669,347 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
         .collect()
 }
 
+/// Compositional representation of the phase-set a guard constrains to.
+///
+/// The lattice:
+/// - `All` = "no phase constraint from this guard" (e.g., non-phase guards,
+///   or absent guards).
+/// - `Only(S)` = "transition is reachable from exactly the phases in S".
+/// - `Unanalyzable(msg)` = "the guard references the phase field in a shape
+///   the compiler can't lower to a precise phase set". Surfaced as a
+///   compile-time error rather than silently coerced to `All`.
+#[derive(Debug, Clone)]
+pub(crate) enum PhaseSet {
+    All,
+    Only(Vec<String>),
+    Unanalyzable(String),
+}
+
+impl PhaseSet {
+    fn intersect(self, other: PhaseSet, all_phases: &[String]) -> PhaseSet {
+        match (self, other) {
+            (PhaseSet::Unanalyzable(m), _) | (_, PhaseSet::Unanalyzable(m)) => {
+                PhaseSet::Unanalyzable(m)
+            }
+            (PhaseSet::All, rhs) => rhs,
+            (lhs, PhaseSet::All) => lhs,
+            (PhaseSet::Only(a), PhaseSet::Only(b)) => {
+                let set: Vec<String> = a.into_iter().filter(|p| b.iter().any(|q| q == p)).collect();
+                if set.is_empty() {
+                    // Intersection is empty — transition is unreachable.
+                    // This is either a machine-author bug (A && B with
+                    // incompatible phase constraints) or an over-eager
+                    // analysis. Surface as an error.
+                    PhaseSet::Unanalyzable(format!(
+                        "guard conjunction narrows to empty phase set (all phases: {all_phases:?})"
+                    ))
+                } else {
+                    PhaseSet::Only(set)
+                }
+            }
+        }
+    }
+
+    fn union(self, other: PhaseSet) -> PhaseSet {
+        match (self, other) {
+            (PhaseSet::Unanalyzable(m), _) | (_, PhaseSet::Unanalyzable(m)) => {
+                PhaseSet::Unanalyzable(m)
+            }
+            (PhaseSet::All, _) | (_, PhaseSet::All) => PhaseSet::All,
+            (PhaseSet::Only(mut a), PhaseSet::Only(b)) => {
+                for p in b {
+                    if !a.contains(&p) {
+                        a.push(p);
+                    }
+                }
+                PhaseSet::Only(a)
+            }
+        }
+    }
+
+    fn complement(self, all_phases: &[String]) -> PhaseSet {
+        match self {
+            PhaseSet::All => {
+                // Negating "no constraint" gives "no constraint" back —
+                // we can't derive a useful from-set. That's legitimate
+                // (e.g., `guard { !self.active }`), so leave as All.
+                PhaseSet::All
+            }
+            PhaseSet::Only(s) => {
+                let rest: Vec<String> = all_phases
+                    .iter()
+                    .filter(|p| !s.contains(p))
+                    .cloned()
+                    .collect();
+                if rest.is_empty() {
+                    PhaseSet::Unanalyzable(
+                        "negation of full phase set yields empty from-set".into(),
+                    )
+                } else {
+                    PhaseSet::Only(rest)
+                }
+            }
+            PhaseSet::Unanalyzable(m) => PhaseSet::Unanalyzable(m),
+        }
+    }
+}
+
+/// Compute the `PhaseSet` for a guard expression. For stored-phase machines,
+/// walks the expression and extracts phase constraints compositionally.
+///
+/// Pattern-matching is exhaustive over the shapes this compiler claims to
+/// understand. Anything else that *references the phase field* is reported
+/// as `Unanalyzable` so the caller can raise a compile error — never
+/// silently coerced to `All` (the historical behavior, which over-permitted
+/// the TLA+ model).
+pub(crate) fn compute_phase_set_stored(def: &MachineDef, expr: &ExprDef) -> PhaseSet {
+    use crate::ast::ExprDef;
+
+    let phase_field_name = match def.phase_field_name() {
+        Some(f) => f.to_string(),
+        None => {
+            // Should not happen — only called on stored-phase machines.
+            return PhaseSet::Unanalyzable(
+                "compute_phase_set_stored called on non-stored-phase machine".into(),
+            );
+        }
+    };
+
+    let all_phases: Vec<String> = def
+        .phase_enum
+        .variants
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    // If the expression doesn't reference the phase field at all, it can't
+    // constrain the phase set. Return All (legitimate non-phase guard).
+    if !references_phase_field(expr, &phase_field_name) {
+        return PhaseSet::All;
+    }
+
+    match expr {
+        // self.lifecycle_phase == Phase::Draft  (or the mirror orientation)
+        ExprDef::Eq(left, right) => {
+            if let Some(phase) = phase_eq_literal(left, right, &phase_field_name) {
+                PhaseSet::Only(vec![phase])
+            } else {
+                PhaseSet::Unanalyzable(format!(
+                    "guard `==` with phase field `{phase_field_name}` must compare against a \
+                     `Phase::Variant` literal (one side phase field, other side phase literal)"
+                ))
+            }
+        }
+        // self.lifecycle_phase != Phase::Draft  → all_phases \ {Draft}
+        ExprDef::Neq(left, right) => {
+            if let Some(phase) = phase_eq_literal(left, right, &phase_field_name) {
+                PhaseSet::Only(
+                    all_phases
+                        .iter()
+                        .filter(|p| *p != &phase)
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                PhaseSet::Unanalyzable(format!(
+                    "guard `!=` with phase field `{phase_field_name}` must compare against a \
+                     `Phase::Variant` literal"
+                ))
+            }
+        }
+        // helper(self.lifecycle_phase, ...) — expand helper body
+        ExprDef::Call { helper, args } => {
+            let has_phase_arg = args
+                .iter()
+                .any(|a| is_phase_field_expr(a, &phase_field_name));
+            if !has_phase_arg {
+                // Helper call that doesn't take the phase field can still
+                // reference it indirectly via state-field closures, but our
+                // helpers are pure functions of parameters, so this means
+                // the guard references the phase field elsewhere. Fall
+                // through to an error.
+                return PhaseSet::Unanalyzable(format!(
+                    "helper `{helper}` does not take the phase field — cannot derive from-set"
+                ));
+            }
+            match def.helpers.iter().find(|h| h.name == *helper) {
+                Some(h) => extract_phase_set_from_helper_body(&h.body, &all_phases, helper),
+                None => PhaseSet::Unanalyzable(format!("unknown helper `{helper}` in guard")),
+            }
+        }
+        // guard1 && guard2 — intersection of phase sets
+        ExprDef::And(exprs) => exprs
+            .iter()
+            .map(|e| compute_phase_set_stored(def, e))
+            .fold(PhaseSet::All, |acc, p| acc.intersect(p, &all_phases)),
+        // guard1 || guard2 — union of phase sets
+        ExprDef::Or(exprs) => exprs
+            .iter()
+            .map(|e| compute_phase_set_stored(def, e))
+            .fold(PhaseSet::Only(Vec::new()), PhaseSet::union),
+        // !guard — complement (only when the inner set is concrete)
+        ExprDef::Not(inner) => compute_phase_set_stored(def, inner).complement(&all_phases),
+        // Any other expression that references the phase field is
+        // something this compiler doesn't claim to analyze yet. Refuse
+        // to emit a schema for it rather than silently default to All.
+        _ => PhaseSet::Unanalyzable(format!(
+            "guard shape referencing phase field `{phase_field_name}` is not yet supported by \
+             schema from-phase derivation (extend `compute_phase_set_stored` to cover it)"
+        )),
+    }
+}
+
+fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
+    match expr {
+        ExprDef::Field(name) => name == phase_field_name,
+        ExprDef::CurrentPhase => true,
+        ExprDef::Not(inner)
+        | ExprDef::IsSome(inner)
+        | ExprDef::IsNone(inner)
+        | ExprDef::Len(inner)
+        | ExprDef::MapKeys(inner)
+        | ExprDef::Some(inner) => references_phase_field(inner, phase_field_name),
+        ExprDef::And(exprs) | ExprDef::Or(exprs) => exprs
+            .iter()
+            .any(|e| references_phase_field(e, phase_field_name)),
+        ExprDef::Eq(l, r)
+        | ExprDef::Neq(l, r)
+        | ExprDef::Gt(l, r)
+        | ExprDef::Gte(l, r)
+        | ExprDef::Lt(l, r)
+        | ExprDef::Lte(l, r)
+        | ExprDef::Add(l, r)
+        | ExprDef::Sub(l, r) => {
+            references_phase_field(l, phase_field_name)
+                || references_phase_field(r, phase_field_name)
+        }
+        ExprDef::Contains { collection, value }
+        | ExprDef::MapContainsKey {
+            map: collection,
+            key: value,
+        }
+        | ExprDef::MapGet {
+            map: collection,
+            key: value,
+        }
+        | ExprDef::MapGetCopied {
+            map: collection,
+            key: value,
+        } => {
+            references_phase_field(collection, phase_field_name)
+                || references_phase_field(value, phase_field_name)
+        }
+        ExprDef::Call { args, .. } => args
+            .iter()
+            .any(|a| references_phase_field(a, phase_field_name)),
+        ExprDef::ForAll { over, body, .. } | ExprDef::Exists { over, body, .. } => {
+            references_phase_field(over, phase_field_name)
+                || references_phase_field(body, phase_field_name)
+        }
+        ExprDef::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            references_phase_field(condition, phase_field_name)
+                || references_phase_field(then_expr, phase_field_name)
+                || references_phase_field(else_expr, phase_field_name)
+        }
+        _ => false,
+    }
+}
+
+/// If `left` and `right` form `self.<phase_field> == Phase::X` (or mirrored),
+/// return `Some("X")`. Otherwise `None`.
+fn phase_eq_literal(left: &ExprDef, right: &ExprDef, phase_field_name: &str) -> Option<String> {
+    if is_phase_field(left, phase_field_name)
+        && let ExprDef::Phase(variant) = right
+    {
+        return Some(variant.to_string());
+    }
+    if is_phase_field(right, phase_field_name)
+        && let ExprDef::Phase(variant) = left
+    {
+        return Some(variant.to_string());
+    }
+    None
+}
+
+/// Extract a `PhaseSet` from a helper body. Helpers are pure functions of
+/// their parameters, so the body typically looks like
+/// `param == Phase::A || param == Phase::B || ...`. Anything else yields
+/// `Unanalyzable`.
+fn extract_phase_set_from_helper_body(
+    expr: &ExprDef,
+    all_phases: &[String],
+    helper_name: &syn::Ident,
+) -> PhaseSet {
+    match expr {
+        // p == Phase::X  or  Phase::X == p
+        ExprDef::Eq(left, right) => {
+            if let ExprDef::Phase(variant) = right.as_ref() {
+                PhaseSet::Only(vec![variant.to_string()])
+            } else if let ExprDef::Phase(variant) = left.as_ref() {
+                PhaseSet::Only(vec![variant.to_string()])
+            } else {
+                PhaseSet::Unanalyzable(format!(
+                    "helper `{helper_name}` body must be a disjunction of \
+                     `param == Phase::X` equalities"
+                ))
+            }
+        }
+        // p != Phase::X  →  complement
+        ExprDef::Neq(left, right) => {
+            let variant = if let ExprDef::Phase(v) = right.as_ref() {
+                v.to_string()
+            } else if let ExprDef::Phase(v) = left.as_ref() {
+                v.to_string()
+            } else {
+                return PhaseSet::Unanalyzable(format!(
+                    "helper `{helper_name}` body must be a disjunction of \
+                     `param == Phase::X` equalities"
+                ));
+            };
+            PhaseSet::Only(
+                all_phases
+                    .iter()
+                    .filter(|p| *p != &variant)
+                    .cloned()
+                    .collect(),
+            )
+        }
+        // p == Phase::X || p == Phase::Y || ...
+        ExprDef::Or(exprs) => exprs
+            .iter()
+            .map(|e| extract_phase_set_from_helper_body(e, all_phases, helper_name))
+            .fold(PhaseSet::Only(Vec::new()), PhaseSet::union),
+        // p == Phase::X && p != Phase::Y (rare but valid)
+        ExprDef::And(exprs) => exprs
+            .iter()
+            .map(|e| extract_phase_set_from_helper_body(e, all_phases, helper_name))
+            .fold(PhaseSet::All, |acc, p| acc.intersect(p, all_phases)),
+        _ => PhaseSet::Unanalyzable(format!(
+            "helper `{helper_name}` body shape not supported for phase-set extraction — \
+             use a disjunction of `param == Phase::X` equalities"
+        )),
+    }
+}
+
 /// Derive `from` phases for a transition from its guard expression.
 ///
-/// For stored-phase machines: extract phase enum literals from the guard.
-/// If the guard contains `self.lifecycle_phase == Phase::Draft`, then from = ["Draft"].
-/// If the guard uses a helper like `is_active_phase(self.lifecycle_phase)`, we expand
-/// the helper body to find the phases.
-/// If the guard doesn't reference the phase field, from = all non-terminal phases.
+/// Returns a `Result` so the caller can emit a span-attached compile error
+/// if the guard shape prevents the compiler from producing a precise
+/// from-set. Historically this function returned `Vec<String>` and fell
+/// back to `all_phases` on any unanalyzable guard, weakening the TLA+
+/// model; that fallback is gone.
 ///
-/// For derived-phase machines: enumerate all phases, substitute the phase projection's
-/// defining conditions into the guard, and check if the result is trivially false.
-fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
+/// For stored-phase machines: compositional `PhaseSet` extraction over the
+/// combined guard. For derived-phase machines: per-phase satisfiability
+/// check against the phase projection's field facts.
+pub(crate) fn derive_from_phases(
+    def: &MachineDef,
+    t: &TransitionDef,
+) -> Result<Vec<String>, String> {
     // All phases are candidates for `from` — including terminal phases.
     // A transition CAN originate from a terminal phase (the schema records where
     // transitions are reachable, not where they're useful).
@@ -681,23 +1022,24 @@ fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
 
     let combined = match t.combined_guard() {
         Some(g) => g,
-        None => return all_phases, // no guards → all phases
+        None => return Ok(all_phases), // no guards → all phases (legitimate)
     };
 
     if def.is_stored_phase() {
-        // Extract phases from guard by pattern matching
-        let mut phases = Vec::new();
-        extract_phase_refs_from_guard(def, &combined, &mut phases);
-        if phases.is_empty() {
-            // Guard doesn't reference the phase field → all phases
-            all_phases
-        } else {
-            phases
+        match compute_phase_set_stored(def, &combined) {
+            PhaseSet::All => Ok(all_phases),
+            PhaseSet::Only(set) if set.is_empty() => Err(format!(
+                "transition `{}` derives to an empty phase set (unreachable)",
+                t.name
+            )),
+            PhaseSet::Only(set) => Ok(set),
+            PhaseSet::Unanalyzable(msg) => Err(format!("transition `{}`: {msg}", t.name)),
         }
     } else {
-        // Derived-phase: enumerate all non-terminal phases, substitute the phase
-        // projection's defining conditions into the guard, check if trivially false.
-        derive_from_phases_derived(def, &combined, &all_phases)
+        // Derived-phase: enumerate all phases, substitute the phase
+        // projection's defining conditions into the guard, check if
+        // trivially false.
+        derive_from_phases_derived(def, &combined, &all_phases, &t.name)
     }
 }
 
@@ -714,16 +1056,22 @@ fn derive_from_phases_derived(
     def: &MachineDef,
     guard: &ExprDef,
     all_phases: &[String],
-) -> Vec<String> {
+    transition_name: &syn::Ident,
+) -> Result<Vec<String>, String> {
     let proj = match &def.phase_projection {
         Some(p) => p,
-        None => return all_phases.to_vec(),
+        None => {
+            return Err(format!(
+                "transition `{transition_name}`: derived-phase machine lacks a \
+                 phase_projection block — cannot derive from-set"
+            ));
+        }
     };
 
-    // Collect the field constraints that each guard references
+    // Collect the field constraints that the guard references.
     let guard_fields = collect_field_refs(guard);
     if guard_fields.is_empty() {
-        return all_phases.to_vec();
+        return Ok(all_phases.to_vec());
     }
 
     let mut from = Vec::new();
@@ -768,10 +1116,17 @@ fn derive_from_phases_derived(
     }
 
     if from.is_empty() {
-        // Shouldn't happen — return all phases as fallback
-        all_phases.to_vec()
+        // This used to silently fall back to `all_phases`. That hid real
+        // bugs (the machine declares a guard that's unsatisfiable against
+        // every phase). Surface it as an error — the machine author should
+        // either fix the guard, add a phase to the projection, or tighten
+        // the projection's field conditions.
+        Err(format!(
+            "transition `{transition_name}`: guard is contradicted against every phase — \
+             no reachable from-phase (check projection conditions and guard field facts)"
+        ))
     } else {
-        from
+        Ok(from)
     }
 }
 
@@ -963,65 +1318,6 @@ fn is_contradicted(guard: &ExprDef, facts: &[(String, FieldFact)]) -> bool {
     }
 }
 
-/// Extract phase references from a guard expression for stored-phase machines.
-///
-/// Looks for patterns like:
-/// - `self.lifecycle_phase == Phase::Draft` → ["Draft"]
-/// - `self.lifecycle_phase != Phase::Completed` → all non-terminal except Completed
-/// - `helper(self.lifecycle_phase)` → expand helper body, extract phases
-/// - `guard1 && guard2` → intersection of extracted phases
-/// - `guard1 || guard2` → union of extracted phases
-fn extract_phase_refs_from_guard(def: &MachineDef, expr: &ExprDef, out: &mut Vec<String>) {
-    use crate::ast::ExprDef;
-
-    let phase_field_name = match def.phase_field_name() {
-        Some(f) => f.to_string(),
-        None => return,
-    };
-
-    match expr {
-        // self.lifecycle_phase == Phase::Draft
-        ExprDef::Eq(left, right) => {
-            if is_phase_field(left, &phase_field_name) {
-                if let ExprDef::Phase(variant) = right.as_ref() {
-                    out.push(variant.to_string());
-                }
-            } else if is_phase_field(right, &phase_field_name)
-                && let ExprDef::Phase(variant) = left.as_ref()
-            {
-                out.push(variant.to_string());
-            }
-        }
-        // is_active_phase(self.lifecycle_phase) — helper call with phase field
-        ExprDef::Call { helper, args } => {
-            // Check if any arg is the phase field
-            let has_phase_arg = args
-                .iter()
-                .any(|a| is_phase_field_expr(a, &phase_field_name));
-            if has_phase_arg {
-                // Find the helper and extract phase refs from its body
-                if let Some(h) = def.helpers.iter().find(|h| h.name == *helper) {
-                    extract_phases_from_helper_body(&h.body, out);
-                }
-            }
-        }
-        // guard1 && guard2 — both must hold, but for from-derivation we take the union
-        // (if either branch mentions specific phases, those are the valid ones)
-        ExprDef::And(exprs) => {
-            for e in exprs {
-                extract_phase_refs_from_guard(def, e, out);
-            }
-        }
-        // guard1 || guard2 — union
-        ExprDef::Or(exprs) => {
-            for e in exprs {
-                extract_phase_refs_from_guard(def, e, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn is_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
     matches!(expr, ExprDef::Field(name) if name == phase_field_name)
         || matches!(expr, ExprDef::CurrentPhase)
@@ -1029,24 +1325,6 @@ fn is_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
 
 fn is_phase_field_expr(expr: &ExprDef, phase_field_name: &str) -> bool {
     is_phase_field(expr, phase_field_name)
-}
-
-/// Extract phase literals from a helper body expression.
-/// Looks for `param == Phase::X || param == Phase::Y` patterns.
-fn extract_phases_from_helper_body(expr: &ExprDef, out: &mut Vec<String>) {
-    match expr {
-        ExprDef::Eq(_, right) => {
-            if let ExprDef::Phase(variant) = right.as_ref() {
-                out.push(variant.to_string());
-            }
-        }
-        ExprDef::Or(exprs) => {
-            for e in exprs {
-                extract_phases_from_helper_body(e, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Strip phase-field references from a guard expression.

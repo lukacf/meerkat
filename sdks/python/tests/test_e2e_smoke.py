@@ -326,8 +326,9 @@ if include_scenario(40):
             )
             assert lead["agent_identity"] == "lead-1"
             assert reviewer["agent_identity"] == "reviewer-1"
-            reviewer_runtime_id = reviewer["agent_runtime_id"]
-            reviewer_fence_token = reviewer["fence_token"]
+            assert isinstance(lead.get("member_ref"), str) and lead["member_ref"]
+            assert isinstance(reviewer.get("member_ref"), str) and reviewer["member_ref"]
+            reviewer_member_ref = reviewer["member_ref"]
             await mob.wire("lead-1", "reviewer-1")
 
             append = await mob.append_system_context(
@@ -344,8 +345,7 @@ if include_scenario(40):
                     "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
                 )
                 assert reviewer_receipt["agent_identity"] == "reviewer-1"
-                assert reviewer_receipt["agent_runtime_id"] == reviewer_runtime_id
-                assert reviewer_receipt["fence_token"] == reviewer_fence_token
+                assert reviewer_receipt["member_ref"] == reviewer_member_ref
                 observed = await next_subscription_event(subscription)
                 assert observed is not None
 
@@ -386,36 +386,29 @@ if include_scenario(40):
                 "reviewer-1",
                 "Come back online and say REVIEWER_RESPAWN_40.",
             )
-            respawned_runtime_id = respawn_result["receipt"]["agent_runtime_id"]
-            respawned_fence_token = respawn_result["receipt"]["fence_token"]
-            respawned_members = await wait_for(
-                "reviewer active after respawn",
-                mob.members,
-                lambda entries: any(
-                    entry["agent_identity"] == "reviewer-1"
-                    and entry["agent_runtime_id"] == respawned_runtime_id
-                    and entry.get("state") == "Active"
-                    for entry in entries
-                ),
+            respawned_member_ref = respawn_result["receipt"]["member_ref"]
+            respawned_snapshot = await wait_for(
+                "reviewer runtime id changes after respawn",
+                lambda: mob.member_status("reviewer-1"),
+                lambda state: state.get("agent_runtime_id")
+                and state.get("agent_runtime_id") != reviewer_state.get("agent_runtime_id"),
                 timeout_secs=60.0,
-            )
-            assert any(
-                entry["agent_identity"] == "reviewer-1"
-                and entry["agent_runtime_id"] == respawned_runtime_id
-                for entry in respawned_members
             )
             respawn_receipt = await mob.member("reviewer-1").send(
                 "Reply with REVIEWER_RESPAWN_40.",
             )
             assert respawn_receipt["agent_identity"] == "reviewer-1"
-            assert respawn_receipt["agent_runtime_id"] == respawned_runtime_id
-            assert respawn_receipt["fence_token"] == respawned_fence_token
+            assert respawn_receipt["member_ref"] == respawned_member_ref
             respawned_state = await wait_for(
                 "reviewer reply after respawn",
                 lambda: mob.member_status("reviewer-1"),
                 lambda state: "reviewer_respawn_40"
                 in (state.get("output_preview") or "").lower(),
                 timeout_secs=120.0,
+            )
+            assert (
+                respawned_state.get("agent_runtime_id")
+                == respawned_snapshot.get("agent_runtime_id")
             )
             assert "reviewer_respawn_40" in (
                 respawned_state.get("output_preview") or ""

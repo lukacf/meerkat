@@ -615,6 +615,23 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     assert.equal(respawn.receipt.fence_token, undefined);
     assert.equal(respawn.receipt.previous_fence_token, undefined);
 
+    mob.bindings.mob_respawn = async (_mobId, agentIdentity) =>
+      JSON.stringify({
+        status: "topology_restore_failed",
+        receipt: {
+          agent_identity: agentIdentity,
+          member_ref: `ref-${agentIdentity}`,
+        },
+        failed_peer_ids: ["peer-a", "peer-b"],
+      });
+    const topologyFailure = await mob.respawn("worker-1");
+    assert.equal(topologyFailure.status, "topology_restore_failed");
+    assert.equal(topologyFailure.receipt.agent_identity, "worker-1");
+    assert.equal(topologyFailure.receipt.member_ref, "ref-worker-1");
+    assert.deepEqual(topologyFailure.failed_peer_ids, ["peer-a", "peer-b"]);
+    assert.equal(topologyFailure.receipt.agent_runtime_id, undefined);
+    assert.equal(topologyFailure.receipt.fence_token, undefined);
+
     await mob.forceCancel("worker-1");
 
     const helper = await mob.spawnHelper("Summarize the thread.", {

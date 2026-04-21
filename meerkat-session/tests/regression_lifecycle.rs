@@ -19,8 +19,12 @@ use meerkat_core::service::{
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
 };
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_session::PersistentSessionService;
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_store::{MemoryStore, SessionStore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -1405,4 +1409,45 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         .expect("tool-surface snapshot should be present");
 
     assert_eq!(actual, expected_surface);
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn persistent_start_turn_recovers_after_discarding_stale_live_session() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let service = PersistentSessionService::new(
+        MockAgentBuilder,
+        4,
+        Arc::clone(&store),
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+
+    let created = service
+        .create_session(create_req_deferred("seed"))
+        .await
+        .expect("create deferred session");
+    let session_id = created.session_id.clone();
+
+    let mut stored = store
+        .load(&session_id)
+        .await
+        .expect("load should succeed")
+        .expect("persisted session should exist");
+    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    stored.touch();
+    store.save(&stored).await.expect("save updated session");
+
+    let result = service
+        .start_turn(&session_id, turn_req("follow up"))
+        .await
+        .expect("start_turn should recover a stale discarded live session");
+    assert_eq!(result.session_id, session_id);
+    assert!(
+        service
+            .has_live_session(&session_id)
+            .await
+            .expect("live session query should succeed"),
+        "recovered session should be live again after start_turn",
+    );
 }

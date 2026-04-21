@@ -327,7 +327,8 @@ export class Mob {
     if (!result.receipt || typeof result.receipt !== 'object') {
       throw new Error('Invalid mob respawn response: missing receipt');
     }
-    const receipt = result.receipt as Record<string, unknown>;
+    const receipt = result.receipt as unknown as Partial<MemberRespawnReceipt> &
+      Record<string, unknown>;
     const legacyIdentity = (receipt as { identity?: unknown }).identity;
     const memberRef =
       typeof receipt.member_ref === 'string' && receipt.member_ref.length > 0

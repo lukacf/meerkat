@@ -851,60 +851,8 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
 }
 
 pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
-    let driver = schema.driver.as_ref()?;
-    if schema.name != "flow_frame_loop" {
-        return None;
-    }
-
-    let imports = driver.required_imports.join("\n");
-    let selector_docs = if schema.route_target_selectors.is_empty() {
-        "// (none)".to_string()
-    } else {
-        schema
-            .route_target_selectors
-            .iter()
-            .map(|selector| {
-                let source = match &selector.source {
-                    RouteBindingSource::Field { from_field, .. } => {
-                        format!("effect/state field `{from_field}`")
-                    }
-                    RouteBindingSource::Literal(expr) => format!("literal `{expr:?}`"),
-                    RouteBindingSource::OwnerProvided => "owner-provided value".into(),
-                };
-                format!(
-                    "// - `{}` selects `{}` from {}",
-                    selector.route_name, selector.selector_field, source
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let transaction_plan_docs = if schema.transaction_plans.is_empty() {
-        "// (none)".to_string()
-    } else {
-        schema
-            .transaction_plans
-            .iter()
-            .map(|plan| {
-                format!(
-                    "// - `{}` via `{}` (`{}`): {}",
-                    plan.name, plan.trigger, plan.store_primitive, plan.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    Some(
-        include_str!("templates/flow_frame_loop_driver.rs.tmpl")
-            .replace("{{IMPORTS}}", &imports)
-            .replace("{{SELECTOR_DOCS}}", &selector_docs)
-            .replace("{{TRANSACTION_PLAN_DOCS}}", &transaction_plan_docs)
-            .replace("{{DRIVER_TYPE}}", &driver.driver_type)
-            .replace("{{STORE_PLAN_TYPE}}", &driver.store_plan_type)
-            .replace("{{WORK_TYPE}}", &driver.work_type)
-            .replace("{{DECISION_TYPE}}", &driver.decision_type),
-    )
+    let _ = schema;
+    None
 }
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {

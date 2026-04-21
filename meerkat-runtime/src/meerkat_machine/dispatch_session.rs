@@ -489,13 +489,14 @@ impl MeerkatMachine {
                             .tool_visibility_owner,
                     )
                 };
-                let filter_str = serde_json::to_string(&filter).unwrap_or_default();
-                // DSL-first: stage visibility filter before mutation
+                // DSL-first: stage visibility filter before mutation. Typed
+                // `ToolFilter` mirror crosses the seam directly — no
+                // JSON-stringification.
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::StageVisibilityFilter {
-                            filter: filter_str,
+                            filter: crate::meerkat_machine::dsl::ToolFilter::from(&filter),
                             // Use a placeholder revision — the real revision comes from the
                             // owner after mutation. DSL validates the transition shape, not
                             // the revision value.
@@ -640,13 +641,16 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                // DSL-first: stage CommitVisibilityFilter + CommitDeferredNames before mutation
+                // DSL-first: stage CommitVisibilityFilter + CommitDeferredNames
+                // before mutation. Typed `ToolFilter` mirror crosses the seam
+                // directly — no JSON-stringification.
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::CommitVisibilityFilter {
-                            filter: serde_json::to_string(&visibility_state.active_filter)
-                                .unwrap_or_default(),
+                            filter: crate::meerkat_machine::dsl::ToolFilter::from(
+                                &visibility_state.active_filter,
+                            ),
                             revision: visibility_state.active_revision,
                         },
                         "CommitVisibilityFilter",

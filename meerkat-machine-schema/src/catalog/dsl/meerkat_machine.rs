@@ -2405,7 +2405,16 @@ stub_newtype!(OperationId);
 stub_newtype!(SessionLlmIdentity);
 stub_newtype!(SessionToolVisibilityState);
 stub_newtype!(SessionLlmCapabilitySurface);
-stub_newtype!(SessionLlmCapabilitySurfaceStatus);
+/// Typed capability-surface resolution status. Closed mirror of
+/// `meerkat_runtime::meerkat_machine_types::SessionLlmCapabilitySurfaceStatus` —
+/// replaces the former `stub_newtype!` stringly wrapper the catalog DSL
+/// carried for the two-state discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionLlmCapabilitySurfaceStatus {
+    Resolved,
+    #[default]
+    Unresolved,
+}
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);

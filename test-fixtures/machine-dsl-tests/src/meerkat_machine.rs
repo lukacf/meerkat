@@ -1359,7 +1359,12 @@ stub_newtype!(OperationId);
 stub_newtype!(SessionLlmIdentity);
 stub_newtype!(SessionToolVisibilityState);
 stub_newtype!(SessionLlmCapabilitySurface);
-stub_newtype!(SessionLlmCapabilitySurfaceStatus);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionLlmCapabilitySurfaceStatus {
+    Resolved,
+    #[default]
+    Unresolved,
+}
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);

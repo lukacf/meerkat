@@ -108,9 +108,7 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {
-    use super::*;
-}
+pub mod helpers {}
 
 pub fn initial_state() -> State {
     State::default()
@@ -139,28 +137,28 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        revision: inner.revision.clone(),
+        revision: inner.revision,
         trigger_key: inner.trigger_key.clone(),
         target_binding_key: inner.target_binding_key.clone(),
         misfire_policy: inner.misfire_policy.clone(),
         overlap_policy: inner.overlap_policy.clone(),
         missing_target_policy: inner.missing_target_policy.clone(),
-        planning_cursor_utc_ms: inner.planning_cursor_utc_ms.clone(),
-        next_occurrence_ordinal: inner.next_occurrence_ordinal.clone(),
+        planning_cursor_utc_ms: inner.planning_cursor_utc_ms,
+        next_occurrence_ordinal: inner.next_occurrence_ordinal,
     }
 }
 
 fn state_to_inner(state: &State) -> InnerState {
     InnerState {
         lifecycle_phase: state.phase,
-        revision: state.revision.clone(),
+        revision: state.revision,
         trigger_key: state.trigger_key.clone(),
         target_binding_key: state.target_binding_key.clone(),
         misfire_policy: state.misfire_policy.clone(),
         overlap_policy: state.overlap_policy.clone(),
         missing_target_policy: state.missing_target_policy.clone(),
-        planning_cursor_utc_ms: state.planning_cursor_utc_ms.clone(),
-        next_occurrence_ordinal: state.next_occurrence_ordinal.clone(),
+        planning_cursor_utc_ms: state.planning_cursor_utc_ms,
+        next_occurrence_ordinal: state.next_occurrence_ordinal,
     }
 }
 

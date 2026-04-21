@@ -103,9 +103,7 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {
-    use super::*;
-}
+pub mod helpers {}
 
 pub fn initial_state() -> State {
     State::default()
@@ -134,18 +132,18 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        expires_at: inner.expires_at.clone(),
-        last_refresh: inner.last_refresh.clone(),
-        refresh_attempt: inner.refresh_attempt.clone(),
+        expires_at: inner.expires_at,
+        last_refresh: inner.last_refresh,
+        refresh_attempt: inner.refresh_attempt,
     }
 }
 
 fn state_to_inner(state: &State) -> InnerState {
     InnerState {
         lifecycle_phase: state.phase,
-        expires_at: state.expires_at.clone(),
-        last_refresh: state.last_refresh.clone(),
-        refresh_attempt: state.refresh_attempt.clone(),
+        expires_at: state.expires_at,
+        last_refresh: state.last_refresh,
+        refresh_attempt: state.refresh_attempt,
     }
 }
 
@@ -169,7 +167,6 @@ fn guard_rejections_for_trigger(
     phase: &Phase,
     trigger: &TriggerDiscriminant,
 ) -> Vec<GuardRejection> {
-    match (phase, trigger) {
-        _ => Vec::new(),
-    }
+    let _ = (phase, trigger);
+    Vec::new()
 }

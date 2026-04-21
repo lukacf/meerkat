@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
 meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
-meerkat-machine-kernels = { path = "../../meerkat-machine-kernels" }
+meerkat-machine-kernels = { path = "../../meerkat-machine-kernels", features = ["test-oracle"] }
 meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
 indexmap = "2" # used by DSL macro-generated schema code (invisible to cargo-machete)
 

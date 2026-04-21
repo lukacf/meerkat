@@ -1,7 +1,9 @@
 pub mod generated;
+#[cfg(feature = "test-oracle")]
 pub mod legacy_generated;
 mod runtime;
 
+#[cfg(feature = "test-oracle")]
 pub mod legacy {
     pub use crate::runtime::{
         KernelEffect, KernelInput, KernelSignal, KernelState, KernelValue, TransitionOutcome,

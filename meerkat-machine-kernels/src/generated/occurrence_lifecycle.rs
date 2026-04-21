@@ -121,7 +121,7 @@ impl Context for EmptyContext {}
 pub mod helpers {
     use super::*;
     pub fn is_live_claim_phase(
-        state: &State,
+        _state: &State,
         phase: substrate::OccurrenceLifecycleState,
         _context: &impl Context,
     ) -> Result<bool, KernelError> {
@@ -158,22 +158,22 @@ fn state_from_inner(inner: InnerState) -> State {
         phase: inner.phase(),
         occurrence_id: inner.occurrence_id.clone(),
         schedule_id: inner.schedule_id.clone(),
-        schedule_revision: inner.schedule_revision.clone(),
-        occurrence_ordinal: inner.occurrence_ordinal.clone(),
+        schedule_revision: inner.schedule_revision,
+        occurrence_ordinal: inner.occurrence_ordinal,
         target_binding_key: inner.target_binding_key.clone(),
-        due_at_utc_ms: inner.due_at_utc_ms.clone(),
+        due_at_utc_ms: inner.due_at_utc_ms,
         claimed_by: inner.claimed_by.clone(),
-        lease_expires_at_utc_ms: inner.lease_expires_at_utc_ms.clone(),
-        claimed_at_utc_ms: inner.claimed_at_utc_ms.clone(),
+        lease_expires_at_utc_ms: inner.lease_expires_at_utc_ms,
+        claimed_at_utc_ms: inner.claimed_at_utc_ms,
         claim_token: inner.claim_token.clone(),
         delivery_correlation_id: inner.delivery_correlation_id.clone(),
         last_receipt: inner.last_receipt.clone(),
         failure_class: inner.failure_class.clone(),
         failure_detail: inner.failure_detail.clone(),
-        dispatched_at_utc_ms: inner.dispatched_at_utc_ms.clone(),
-        completed_at_utc_ms: inner.completed_at_utc_ms.clone(),
-        attempt_count: inner.attempt_count.clone(),
-        superseded_by_revision: inner.superseded_by_revision.clone(),
+        dispatched_at_utc_ms: inner.dispatched_at_utc_ms,
+        completed_at_utc_ms: inner.completed_at_utc_ms,
+        attempt_count: inner.attempt_count,
+        superseded_by_revision: inner.superseded_by_revision,
     }
 }
 
@@ -182,22 +182,22 @@ fn state_to_inner(state: &State) -> InnerState {
         lifecycle_phase: state.phase,
         occurrence_id: state.occurrence_id.clone(),
         schedule_id: state.schedule_id.clone(),
-        schedule_revision: state.schedule_revision.clone(),
-        occurrence_ordinal: state.occurrence_ordinal.clone(),
+        schedule_revision: state.schedule_revision,
+        occurrence_ordinal: state.occurrence_ordinal,
         target_binding_key: state.target_binding_key.clone(),
-        due_at_utc_ms: state.due_at_utc_ms.clone(),
+        due_at_utc_ms: state.due_at_utc_ms,
         claimed_by: state.claimed_by.clone(),
-        lease_expires_at_utc_ms: state.lease_expires_at_utc_ms.clone(),
-        claimed_at_utc_ms: state.claimed_at_utc_ms.clone(),
+        lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
+        claimed_at_utc_ms: state.claimed_at_utc_ms,
         claim_token: state.claim_token.clone(),
         delivery_correlation_id: state.delivery_correlation_id.clone(),
         last_receipt: state.last_receipt.clone(),
         failure_class: state.failure_class.clone(),
         failure_detail: state.failure_detail.clone(),
-        dispatched_at_utc_ms: state.dispatched_at_utc_ms.clone(),
-        completed_at_utc_ms: state.completed_at_utc_ms.clone(),
-        attempt_count: state.attempt_count.clone(),
-        superseded_by_revision: state.superseded_by_revision.clone(),
+        dispatched_at_utc_ms: state.dispatched_at_utc_ms,
+        completed_at_utc_ms: state.completed_at_utc_ms,
+        attempt_count: state.attempt_count,
+        superseded_by_revision: state.superseded_by_revision,
     }
 }
 
@@ -221,7 +221,6 @@ fn guard_rejections_for_trigger(
     phase: &Phase,
     trigger: &TriggerDiscriminant,
 ) -> Vec<GuardRejection> {
-    match (phase, trigger) {
-        _ => Vec::new(),
-    }
+    let _ = (phase, trigger);
+    Vec::new()
 }

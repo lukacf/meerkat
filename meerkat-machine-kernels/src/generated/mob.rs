@@ -120,9 +120,7 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {
-    use super::*;
-}
+pub mod helpers {}
 
 pub fn initial_state() -> State {
     State::default()
@@ -167,9 +165,9 @@ fn state_from_inner(inner: InnerState) -> State {
         live_runtime_ids: inner.live_runtime_ids.clone(),
         externally_addressable_runtime_ids: inner.externally_addressable_runtime_ids.clone(),
         runtime_fence_tokens: inner.runtime_fence_tokens.clone(),
-        active_run_count: inner.active_run_count.clone(),
-        pending_spawn_count: inner.pending_spawn_count.clone(),
-        coordinator_bound: inner.coordinator_bound.clone(),
+        active_run_count: inner.active_run_count,
+        pending_spawn_count: inner.pending_spawn_count,
+        coordinator_bound: inner.coordinator_bound,
         member_state_markers: inner.member_state_markers.clone(),
         wiring_edges: inner.wiring_edges.clone(),
         identity_to_runtime: inner.identity_to_runtime.clone(),
@@ -186,9 +184,9 @@ fn state_to_inner(state: &State) -> InnerState {
         live_runtime_ids: state.live_runtime_ids.clone(),
         externally_addressable_runtime_ids: state.externally_addressable_runtime_ids.clone(),
         runtime_fence_tokens: state.runtime_fence_tokens.clone(),
-        active_run_count: state.active_run_count.clone(),
-        pending_spawn_count: state.pending_spawn_count.clone(),
-        coordinator_bound: state.coordinator_bound.clone(),
+        active_run_count: state.active_run_count,
+        pending_spawn_count: state.pending_spawn_count,
+        coordinator_bound: state.coordinator_bound,
         member_state_markers: state.member_state_markers.clone(),
         wiring_edges: state.wiring_edges.clone(),
         identity_to_runtime: state.identity_to_runtime.clone(),

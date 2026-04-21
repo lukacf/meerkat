@@ -140,9 +140,7 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {
-    use super::*;
-}
+pub mod helpers {}
 
 pub fn initial_state() -> State {
     State::default()
@@ -190,21 +188,21 @@ fn state_from_inner(inner: InnerState) -> State {
         current_run_id: inner.current_run_id.clone(),
         pre_run_phase: inner.pre_run_phase.clone(),
         silent_intent_overrides: inner.silent_intent_overrides.clone(),
-        realtime_intent_present: inner.realtime_intent_present.clone(),
+        realtime_intent_present: inner.realtime_intent_present,
         realtime_binding_state: inner.realtime_binding_state.clone(),
-        realtime_binding_authority_epoch: inner.realtime_binding_authority_epoch.clone(),
-        realtime_reattach_required: inner.realtime_reattach_required.clone(),
-        realtime_next_authority_epoch: inner.realtime_next_authority_epoch.clone(),
+        realtime_binding_authority_epoch: inner.realtime_binding_authority_epoch,
+        realtime_reattach_required: inner.realtime_reattach_required,
+        realtime_next_authority_epoch: inner.realtime_next_authority_epoch,
         live_topology_phase: inner.live_topology_phase.clone(),
         mcp_server_states: inner.mcp_server_states.clone(),
         pending_peer_requests: inner.pending_peer_requests.clone(),
         inbound_peer_requests: inner.inbound_peer_requests.clone(),
-        last_session_context_updated_at_ms: inner.last_session_context_updated_at_ms.clone(),
+        last_session_context_updated_at_ms: inner.last_session_context_updated_at_ms,
         reserved_interaction_streams: inner.reserved_interaction_streams.clone(),
         attached_interaction_streams: inner.attached_interaction_streams.clone(),
         realtime_product_turn_phase: inner.realtime_product_turn_phase.clone(),
         realtime_projection_freshness: inner.realtime_projection_freshness.clone(),
-        realtime_projection_frontier_ms: inner.realtime_projection_frontier_ms.clone(),
+        realtime_projection_frontier_ms: inner.realtime_projection_frontier_ms,
         realtime_reconnect_policy: inner.realtime_reconnect_policy.clone(),
         peer_ingress_owner_kind: inner.peer_ingress_owner_kind.clone(),
         peer_ingress_comms_runtime_id: inner.peer_ingress_comms_runtime_id.clone(),
@@ -213,7 +211,7 @@ fn state_from_inner(inner: InnerState) -> State {
         supervisor_bound_name: inner.supervisor_bound_name.clone(),
         supervisor_bound_peer_id: inner.supervisor_bound_peer_id.clone(),
         supervisor_bound_address: inner.supervisor_bound_address.clone(),
-        supervisor_bound_epoch: inner.supervisor_bound_epoch.clone(),
+        supervisor_bound_epoch: inner.supervisor_bound_epoch,
     }
 }
 
@@ -226,21 +224,21 @@ fn state_to_inner(state: &State) -> InnerState {
         current_run_id: state.current_run_id.clone(),
         pre_run_phase: state.pre_run_phase.clone(),
         silent_intent_overrides: state.silent_intent_overrides.clone(),
-        realtime_intent_present: state.realtime_intent_present.clone(),
+        realtime_intent_present: state.realtime_intent_present,
         realtime_binding_state: state.realtime_binding_state.clone(),
-        realtime_binding_authority_epoch: state.realtime_binding_authority_epoch.clone(),
-        realtime_reattach_required: state.realtime_reattach_required.clone(),
-        realtime_next_authority_epoch: state.realtime_next_authority_epoch.clone(),
+        realtime_binding_authority_epoch: state.realtime_binding_authority_epoch,
+        realtime_reattach_required: state.realtime_reattach_required,
+        realtime_next_authority_epoch: state.realtime_next_authority_epoch,
         live_topology_phase: state.live_topology_phase.clone(),
         mcp_server_states: state.mcp_server_states.clone(),
         pending_peer_requests: state.pending_peer_requests.clone(),
         inbound_peer_requests: state.inbound_peer_requests.clone(),
-        last_session_context_updated_at_ms: state.last_session_context_updated_at_ms.clone(),
+        last_session_context_updated_at_ms: state.last_session_context_updated_at_ms,
         reserved_interaction_streams: state.reserved_interaction_streams.clone(),
         attached_interaction_streams: state.attached_interaction_streams.clone(),
         realtime_product_turn_phase: state.realtime_product_turn_phase.clone(),
         realtime_projection_freshness: state.realtime_projection_freshness.clone(),
-        realtime_projection_frontier_ms: state.realtime_projection_frontier_ms.clone(),
+        realtime_projection_frontier_ms: state.realtime_projection_frontier_ms,
         realtime_reconnect_policy: state.realtime_reconnect_policy.clone(),
         peer_ingress_owner_kind: state.peer_ingress_owner_kind.clone(),
         peer_ingress_comms_runtime_id: state.peer_ingress_comms_runtime_id.clone(),
@@ -249,7 +247,7 @@ fn state_to_inner(state: &State) -> InnerState {
         supervisor_bound_name: state.supervisor_bound_name.clone(),
         supervisor_bound_peer_id: state.supervisor_bound_peer_id.clone(),
         supervisor_bound_address: state.supervisor_bound_address.clone(),
-        supervisor_bound_epoch: state.supervisor_bound_epoch.clone(),
+        supervisor_bound_epoch: state.supervisor_bound_epoch,
     }
 }
 

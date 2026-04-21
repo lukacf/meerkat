@@ -483,44 +483,57 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(&mut out, "impl Context for EmptyContext {{}}");
     pushln!(&mut out);
-    pushln!(&mut out, "pub mod helpers {{");
-    pushln!(&mut out, "    use super::*;");
-    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
-        let return_ty = rust_type_for_substrate(&helper.returns);
-        let params = helper
-            .params
-            .iter()
-            .map(|field| format!("{}: {}", field.name, rust_type_for_substrate(&field.ty)))
-            .collect::<Vec<_>>();
-        let call_args = helper
-            .params
-            .iter()
-            .map(|field| format!("&{}", field.name))
-            .collect::<Vec<_>>();
-        pushln!(&mut out, "    pub fn {}(", helper.name);
-        pushln!(&mut out, "        state: &State,");
-        for param in &params {
-            pushln!(&mut out, "        {param},");
+    let helper_entries = schema
+        .helpers
+        .iter()
+        .chain(schema.derived.iter())
+        .collect::<Vec<_>>();
+    if helper_entries.is_empty() {
+        pushln!(&mut out, "pub mod helpers {{}}");
+    } else {
+        pushln!(&mut out, "pub mod helpers {{");
+        pushln!(&mut out, "    use super::*;");
+        for helper in helper_entries {
+            let return_ty = rust_type_for_substrate(&helper.returns);
+            let params = helper
+                .params
+                .iter()
+                .map(|field| format!("{}: {}", field.name, rust_type_for_substrate(&field.ty)))
+                .collect::<Vec<_>>();
+            let call_args = helper
+                .params
+                .iter()
+                .map(|field| format!("&{}", field.name))
+                .collect::<Vec<_>>();
+            pushln!(&mut out, "    pub fn {}(", helper.name);
+            if helper.params.is_empty() {
+                pushln!(&mut out, "        state: &State,");
+            } else {
+                pushln!(&mut out, "        _state: &State,");
+            }
+            for param in &params {
+                pushln!(&mut out, "        {param},");
+            }
+            pushln!(&mut out, "        _context: &impl Context,");
+            pushln!(&mut out, "    ) -> Result<{return_ty}, KernelError> {{");
+            if helper.params.is_empty() {
+                pushln!(
+                    &mut out,
+                    "        let authority = Authority::from_state(state_to_inner(state));"
+                );
+                pushln!(&mut out, "        Ok(authority.{}())", helper.name);
+            } else {
+                pushln!(
+                    &mut out,
+                    "        Ok(Authority::{}({}))",
+                    helper.name,
+                    call_args.join(", ")
+                );
+            }
+            pushln!(&mut out, "    }}");
         }
-        pushln!(&mut out, "        _context: &impl Context,");
-        pushln!(&mut out, "    ) -> Result<{return_ty}, KernelError> {{");
-        if helper.params.is_empty() {
-            pushln!(
-                &mut out,
-                "        let authority = Authority::from_state(state_to_inner(state));"
-            );
-            pushln!(&mut out, "        Ok(authority.{}())", helper.name);
-        } else {
-            pushln!(
-                &mut out,
-                "        Ok(Authority::{}({}))",
-                helper.name,
-                call_args.join(", ")
-            );
-        }
-        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
     }
-    pushln!(&mut out, "}}");
     pushln!(&mut out);
     pushln!(&mut out, "pub fn initial_state() -> State {{");
     pushln!(&mut out, "    State::default()");
@@ -601,12 +614,12 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    State {{");
     pushln!(&mut out, "        phase: inner.phase(),");
     for field in &wrapper_fields {
-        pushln!(
-            &mut out,
-            "        {}: inner.{}.clone(),",
-            field.name,
-            field.name
-        );
+        let value = if type_is_copy_for_substrate(&field.ty) {
+            format!("inner.{}", field.name)
+        } else {
+            format!("inner.{}.clone()", field.name)
+        };
+        pushln!(&mut out, "        {}: {},", field.name, value);
     }
     pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
@@ -619,23 +632,23 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
         pushln!(&mut out, "    InnerState {{");
         pushln!(&mut out, "        {}: state.phase,", phase_field_name);
         for field in &wrapper_fields {
-            pushln!(
-                &mut out,
-                "        {}: state.{}.clone(),",
-                field.name,
-                field.name
-            );
+            let value = if type_is_copy_for_substrate(&field.ty) {
+                format!("state.{}", field.name)
+            } else {
+                format!("state.{}.clone()", field.name)
+            };
+            pushln!(&mut out, "        {}: {},", field.name, value);
         }
         pushln!(&mut out, "    }}");
     } else {
         pushln!(&mut out, "    let mut inner = InnerState::default();");
         for field in &wrapper_fields {
-            pushln!(
-                &mut out,
-                "    inner.{} = state.{}.clone();",
-                field.name,
-                field.name
-            );
+            let value = if type_is_copy_for_substrate(&field.ty) {
+                format!("state.{}", field.name)
+            } else {
+                format!("state.{}.clone()", field.name)
+            };
+            pushln!(&mut out, "    inner.{} = {};", field.name, value);
         }
         pushln!(&mut out, "    inner");
     }
@@ -663,7 +676,6 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
         &mut out,
         "fn guard_rejections_for_trigger(phase: &Phase, trigger: &TriggerDiscriminant) -> Vec<GuardRejection> {{"
     );
-    pushln!(&mut out, "    match (phase, trigger) {{");
     let mut grouped_rejections =
         std::collections::BTreeMap::<(String, String), Vec<(String, usize)>>::new();
     for transition in &schema.transitions {
@@ -693,26 +705,32 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
             }
         }
     }
-    for ((from_phase, trigger_expr), rejections) in grouped_rejections {
-        pushln!(
-            &mut out,
-            "        (Phase::{}, {}) => vec![",
-            from_phase,
-            trigger_expr
-        );
-        for (transition_name, index) in rejections {
+    if grouped_rejections.is_empty() {
+        pushln!(&mut out, "    let _ = (phase, trigger);");
+        pushln!(&mut out, "    Vec::new()");
+    } else {
+        pushln!(&mut out, "    match (phase, trigger) {{");
+        for ((from_phase, trigger_expr), rejections) in grouped_rejections {
             pushln!(
                 &mut out,
-                "            GuardRejection {{ transition_id: TransitionId::{}, guard_id: GuardId::{}Guard{} }},",
-                transition_name,
-                transition_name,
-                index
+                "        (Phase::{}, {}) => vec![",
+                from_phase,
+                trigger_expr
             );
+            for (transition_name, index) in rejections {
+                pushln!(
+                    &mut out,
+                    "            GuardRejection {{ transition_id: TransitionId::{}, guard_id: GuardId::{}Guard{} }},",
+                    transition_name,
+                    transition_name,
+                    index
+                );
+            }
+            pushln!(&mut out, "        ],");
         }
-        pushln!(&mut out, "        ],");
+        pushln!(&mut out, "        _ => Vec::new(),");
+        pushln!(&mut out, "    }}");
     }
-    pushln!(&mut out, "        _ => Vec::new(),");
-    pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
 
     out
@@ -962,6 +980,20 @@ fn rust_type_for_substrate(ty: &TypeRef) -> String {
             rust_type_for_substrate(key),
             rust_type_for_substrate(value)
         ),
+    }
+}
+
+#[cfg(not(test))]
+fn type_is_copy_for_substrate(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 => true,
+        TypeRef::Option(inner) => type_is_copy_for_substrate(inner),
+        TypeRef::String
+        | TypeRef::Named(_)
+        | TypeRef::Enum(_)
+        | TypeRef::Set(_)
+        | TypeRef::Seq(_)
+        | TypeRef::Map(_, _) => false,
     }
 }
 

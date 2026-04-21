@@ -22,7 +22,7 @@ meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-machine-dsl = { workspace = true }
-meerkat-machine-kernels = { workspace = true }
+meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 meerkat-machine-schema = { workspace = true }
 
 # Async runtime

@@ -2190,6 +2190,15 @@ machine! {
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
             StageDeferredNames { names: Set<String> },
             CommitDeferredNames { names: Set<String> },
+            // Sync the DSL monotonic staged-revision counter to at least the
+            // max of externally-installed active/staged revisions. Fired
+            // from the shell's `replace_visibility_state` path (recovery
+            // and LLM-reconfigure hot-swap), so subsequent
+            // `StageVisibilityFilter` / `StageDeferredNames` mints advance
+            // from the already-durable high-water mark rather than 0 —
+            // preserving `max(active, staged)`-advance across external
+            // state installs.
+            SyncVisibilityRevisions { active_revision: u64, staged_revision: u64 },
             SurfaceRegister { surface_id: String },
             SurfaceStageAdd { surface_id: String, now_ms: u64 },
             SurfaceStageRemove { surface_id: String, now_ms: u64 },
@@ -2853,7 +2862,17 @@ machine! {
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
-            update {}
+            update {
+                // Sync the DSL monotonic counter to at least the published
+                // active revision — guard `active_not_behind_staged` already
+                // ensures active >= staged, so max == active here. Keeps the
+                // counter honest when external callers install a visibility
+                // state that advanced past the DSL's local history
+                // (e.g. recovery, cross-session hot-swap).
+                if active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_visibility_revision;
+                }
+            }
             to Idle
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
@@ -2874,7 +2893,11 @@ machine! {
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
-            update {}
+            update {
+                if active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_visibility_revision;
+                }
+            }
             to Attached
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
@@ -2895,7 +2918,11 @@ machine! {
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
-            update {}
+            update {
+                if active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_visibility_revision;
+                }
+            }
             to Running
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
@@ -2916,7 +2943,11 @@ machine! {
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
-            update {}
+            update {
+                if active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_visibility_revision;
+                }
+            }
             to Retired
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
@@ -2937,7 +2968,11 @@ machine! {
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
-            update {}
+            update {
+                if active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_visibility_revision;
+                }
+            }
             to Stopped
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
@@ -5105,6 +5140,28 @@ machine! {
             }
             to Idle
             emit RefreshVisibleSurfaceSet
+        }
+
+        // SyncVisibilityRevisions: external-install water-mark reconciliation.
+        // Fired by the shell whenever an external durable visibility state is
+        // installed (recovery, cross-session hot-swap, LLM reconfigure). Keeps
+        // the DSL monotonic counter honest against externally-minted revisions
+        // so subsequent `StageVisibilityFilter` / `StageDeferredNames` mints
+        // continue advancing from the high-water mark rather than the DSL's
+        // local 0. Idempotent: guarded as a no-op when counter is already at
+        // or above the installed max.
+        transition SyncVisibilityRevisions {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SyncVisibilityRevisions { active_revision, staged_revision }
+            update {
+                if active_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = active_revision;
+                }
+                if staged_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = staged_revision;
+                }
+            }
+            to Idle
         }
 
         // =====================================================================

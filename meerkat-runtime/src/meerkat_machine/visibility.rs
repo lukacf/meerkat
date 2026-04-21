@@ -112,6 +112,35 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
+        // Sync the DSL monotonic counter up to the externally-installed
+        // revisions before we overwrite the owner-held state. The DSL owns
+        // `next_staged_visibility_revision`; without this sync, subsequent
+        // `stage_*` calls would mint revisions starting from 0 again and
+        // regress behind the durable state we just installed (dogma round
+        // 4, wave 2b #12 — single monotonic source, honest across recovery
+        // / hot-swap boundaries).
+        let slot = self
+            .dsl_authority
+            .read()
+            .map_err(|_| ToolScopeApplyError::Owner {
+                message: "machine visibility DSL authority slot lock poisoned".to_string(),
+            })?;
+        if let Some(authority) = slot.as_ref().cloned() {
+            drop(slot);
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
+                    active_revision: visibility_state.active_revision,
+                    staged_revision: visibility_state.staged_revision,
+                },
+            )
+            .map_err(|err| ToolScopeApplyError::Owner {
+                message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
+            })?;
+        }
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;

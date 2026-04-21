@@ -9538,13 +9538,13 @@ mod tests {
             .register_session_with_executor(session_id.clone(), executor)
             .await;
 
-        tokio::time::timeout(
+        Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
             pipeline.shutdown_after(async {
                 runtime_adapter.unregister_session(&session_id).await;
                 Ok(())
             }),
-        )
+        ))
         .await
         .expect("shutdown should finish once runtime executor is unregistered")
         .expect("shutdown should succeed");

@@ -280,27 +280,81 @@ impl MeerkatMachine {
             .map(|entry| Arc::clone(&entry.mutation_gate))
     }
 
+    async fn session_dsl_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>, String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(&entry.dsl_authority))
+            .ok_or_else(|| {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                .to_string()
+            })
+    }
+
+    fn preview_dsl_input_on_state(
+        state: &dsl::MeerkatMachineState,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
+        let mut preview = dsl::MeerkatMachineAuthority::from_state(state.clone());
+        dsl::MeerkatMachineMutator::apply(&mut preview, input)
+            .map(|transition| transition.effects)
+            .map_err(|err| dsl_authority::map_error(err, context))
+    }
+
+    async fn preview_session_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
+        let authority = self.session_dsl_authority(session_id).await?;
+        let state = {
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.state.clone()
+        };
+        Self::preview_dsl_input_on_state(&state, input, context)
+    }
+
     async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Box<dsl::MeerkatMachineState>, String> {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions.get_mut(session_id).ok_or_else(|| {
-            RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            }
-            .to_string()
-        })?;
-        let mut authority = entry
-            .dsl_authority
+        self.apply_session_dsl_input(session_id, input, context)
+            .await
+            .map(|(previous_state, _)| previous_state)
+    }
+
+    async fn apply_session_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<
+        (
+            Box<dsl::MeerkatMachineState>,
+            Vec<dsl::MeerkatMachineEffect>,
+        ),
+        String,
+    > {
+        let authority = self.session_dsl_authority(session_id).await?;
+        let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_state = Box::new(authority.state.clone());
-        dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .map(|transition| transition.effects)
             .map_err(|err| dsl_authority::map_error(err, context))?;
-        Ok(previous_state)
+        Ok((previous_state, effects))
     }
 
     async fn restore_session_dsl_state(
@@ -308,10 +362,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
         state: Box<dsl::MeerkatMachineState>,
     ) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id) {
-            let mut authority = entry
-                .dsl_authority
+        if let Ok(authority) = self.session_dsl_authority(session_id).await {
+            let mut authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *authority = dsl::MeerkatMachineAuthority::from_state(*state);
@@ -433,8 +485,27 @@ impl MeerkatMachine {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
     }
 
+    #[cfg(test)]
+    pub(crate) async fn debug_shared_ingress_authorities(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(
+        Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        crate::driver::ephemeral::SharedIngressDslAuthority,
+    )> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        let session_authority = Arc::clone(&entry.dsl_authority);
+        let driver = entry.driver.lock().await;
+        Some((session_authority, driver.shared_dsl_authority()))
+    }
+
     /// Create a driver entry for a session.
-    fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
+    fn make_driver(
+        &self,
+        session_id: &SessionId,
+        dsl_authority: crate::driver::ephemeral::SharedIngressDslAuthority,
+    ) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
         let control_projection = Arc::new(StdRwLock::new(
             crate::driver::ephemeral::RuntimeControlProjection::default(),
@@ -446,6 +517,7 @@ impl MeerkatMachine {
                     store.clone(),
                     blob_store.clone(),
                     control_projection,
+                    dsl_authority,
                 ))
             }
             (Some(_store), None) => {
@@ -454,14 +526,16 @@ impl MeerkatMachine {
                     "persistent runtime store present but blob store missing; \
                      falling back to ephemeral driver"
                 );
-                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control(
+                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control_and_dsl(
                     runtime_id,
                     control_projection,
+                    dsl_authority,
                 ))
             }
-            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control(
+            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control_and_dsl(
                 runtime_id,
                 control_projection,
+                dsl_authority,
             )),
         }
     }

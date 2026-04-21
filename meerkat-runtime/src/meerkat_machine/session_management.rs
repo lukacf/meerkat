@@ -1,6 +1,34 @@
 use super::*;
 
 impl MeerkatMachine {
+    fn sync_session_dsl_authority_from_driver(
+        dsl_authority: &Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>,
+        session_id: &SessionId,
+        control_projection: &Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
+        driver_runtime_id: &LogicalRuntimeId,
+        driver_silent_intents: std::collections::BTreeSet<String>,
+    ) {
+        let control = control_projection
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let mut authority = dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        authority.state.lifecycle_phase = super::dsl_authority::project_phase(control.phase);
+        authority.state.session_id = Some(super::dsl::SessionId::from_domain(session_id));
+        authority.state.active_runtime_id =
+            Some(super::dsl::AgentRuntimeId::from_domain(driver_runtime_id));
+        authority.state.current_run_id = control
+            .current_run_id
+            .as_ref()
+            .map(super::dsl::RunId::from_domain);
+        authority.state.pre_run_phase = control
+            .pre_run_phase
+            .and_then(super::dsl_authority::pre_run_phase_from_runtime_state);
+        authority.state.silent_intent_overrides = driver_silent_intents;
+    }
+
     pub(super) async fn register_session_inner(&self, session_id: SessionId) {
         {
             let mut sessions = self.sessions.write().await;
@@ -10,34 +38,39 @@ impl MeerkatMachine {
             }
         }
 
-        let mut entry = self.make_driver(&session_id);
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        let dsl_authority = Arc::new(std::sync::Mutex::new(
+            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
+                &session_id,
+                RuntimeState::Idle,
+                Some(&runtime_id),
+                None,
+                None,
+                std::collections::BTreeSet::new(),
+                None,
+            )),
+        ));
+        let mut entry = self.make_driver(&session_id, Arc::clone(&dsl_authority));
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return;
         }
-
-        let (ops_lifecycle, epoch_id, cursor_state) =
-            self.recover_or_create_ops_state(&session_id).await;
         let control_projection = entry.control_projection_handle();
         let driver_runtime_id = entry.runtime_id().clone();
         let driver_silent_intents = entry
             .silent_comms_intents()
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
-        let dsl_authority = Arc::new(std::sync::Mutex::new(
-            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
-                &session_id,
-                control_projection
-                    .read()
-                    .map(|guard| guard.phase)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
-                Some(&driver_runtime_id),
-                None,
-                None,
-                driver_silent_intents,
-                None,
-            )),
-        ));
+        Self::sync_session_dsl_authority_from_driver(
+            &dsl_authority,
+            &session_id,
+            &control_projection,
+            &driver_runtime_id,
+            driver_silent_intents,
+        );
+
+        let (ops_lifecycle, epoch_id, cursor_state) =
+            self.recover_or_create_ops_state(&session_id).await;
         let session_entry = RuntimeSessionEntry {
             mutation_gate: Arc::new(Mutex::new(())),
             control_projection,
@@ -164,7 +197,21 @@ impl MeerkatMachine {
                 }
                 (driver, completions, ops_lifecycle)
             } else {
-                let mut recovered_entry = self.make_driver(&session_id);
+                let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+                let dsl_authority = Arc::new(std::sync::Mutex::new(
+                    super::dsl::MeerkatMachineAuthority::from_state(
+                        super::dsl_authority::project_state(
+                            &session_id,
+                            RuntimeState::Idle,
+                            Some(&runtime_id),
+                            None,
+                            None,
+                            std::collections::BTreeSet::new(),
+                            None,
+                        ),
+                    ),
+                ));
+                let mut recovered_entry = self.make_driver(&session_id, Arc::clone(&dsl_authority));
                 if let Err(err) = recovered_entry.as_driver_mut().recover().await {
                     tracing::error!(
                         %session_id,
@@ -173,6 +220,19 @@ impl MeerkatMachine {
                     );
                     return;
                 }
+                let control_projection = recovered_entry.control_projection_handle();
+                let driver_runtime_id = recovered_entry.runtime_id().clone();
+                let driver_silent_intents = recovered_entry
+                    .silent_comms_intents()
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                Self::sync_session_dsl_authority_from_driver(
+                    &dsl_authority,
+                    &session_id,
+                    &control_projection,
+                    &driver_runtime_id,
+                    driver_silent_intents,
+                );
 
                 // Recover ops state OUTSIDE the sessions lock to avoid blocking
                 // other adapter operations behind potentially slow disk I/O.
@@ -195,30 +255,9 @@ impl MeerkatMachine {
                     )
                 } else {
                     let control_projection = recovered_entry.control_projection_handle();
-                    let driver_runtime_id = recovered_entry.runtime_id().clone();
-                    let driver_silent_intents = recovered_entry
-                        .silent_comms_intents()
-                        .into_iter()
-                        .collect::<std::collections::BTreeSet<_>>();
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    let dsl_authority = Arc::new(std::sync::Mutex::new(
-                        super::dsl::MeerkatMachineAuthority::from_state(
-                            super::dsl_authority::project_state(
-                                &session_id,
-                                control_projection
-                                    .read()
-                                    .map(|guard| guard.phase)
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
-                                Some(&driver_runtime_id),
-                                None,
-                                None,
-                                driver_silent_intents,
-                                None,
-                            ),
-                        ),
-                    ));
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {

@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use meerkat_core::lifecycle::{InputId, RunId};
 
+use crate::accept::{AcceptOutcome, ResolvedAdmission};
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::ContentShape;
+use crate::input::Input;
 use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputStateSeed, InputTerminalOutcome,
     StoredInputState,
@@ -102,6 +104,24 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) fn resolve_admission(&self, input: &Input) -> ResolvedAdmission {
+        match self {
+            DriverEntry::Ephemeral(d) => d.resolve_admission(input),
+            DriverEntry::Persistent(d) => d.resolve_admission(input),
+        }
+    }
+
+    pub(crate) async fn accept_resolved_input(
+        &mut self,
+        input: Input,
+        resolved: ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.accept_resolved_input(input, resolved).await,
+            DriverEntry::Persistent(d) => d.accept_resolved_input(input, resolved).await,
+        }
+    }
+
     pub(crate) fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         self.as_driver().input_phase(input_id)
     }
@@ -170,6 +190,26 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.post_admission_signal(),
             DriverEntry::Persistent(d) => d.post_admission_signal(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_dsl_authority(
+        &self,
+    ) -> crate::driver::ephemeral::SharedIngressDslAuthority {
+        match self {
+            DriverEntry::Ephemeral(d) => d.shared_dsl_authority(),
+            DriverEntry::Persistent(d) => d.inner_ref().shared_dsl_authority(),
+        }
+    }
+
+    pub(crate) fn absorb_post_admission_effects(
+        &mut self,
+        effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    ) {
+        match self {
+            DriverEntry::Ephemeral(d) => d.absorb_post_admission_effects(effects),
+            DriverEntry::Persistent(d) => d.absorb_post_admission_effects(effects),
         }
     }
 

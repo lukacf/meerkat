@@ -253,7 +253,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                             let router = self.router.clone();
                             let resp_tx = self.response_tx.clone();
                             tokio::spawn(async move {
-                                if let Some(response) = router.dispatch(request).await {
+                                if let Some(response) = Box::pin(router.dispatch(request)).await {
                                     let _ = resp_tx.send(response).await;
                                 }
                             });
@@ -380,9 +380,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let request = request.clone();
         let request_key_for_task = request_key.clone();
         let handle = tokio::spawn(async move {
-            if let Some(response) = router
-                .dispatch_with_request_context(request, Some(context))
-                .await
+            if let Some(response) =
+                Box::pin(router.dispatch_with_request_context(request, Some(context))).await
             {
                 let terminal = classify_long_running_response(&response, publish_on_success);
                 let _ = long_running_tx

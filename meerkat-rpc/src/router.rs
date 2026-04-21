@@ -838,7 +838,7 @@ impl MethodRouter {
     /// require a response.
     #[allow(clippy::if_not_else)]
     pub async fn dispatch(&self, request: RpcRequest) -> Option<RpcResponse> {
-        self.dispatch_with_request_context(request, None).await
+        Box::pin(self.dispatch_with_request_context(request, None)).await
     }
 
     /// Dispatch a request with optional host-level request context for
@@ -870,14 +870,14 @@ impl MethodRouter {
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
             ),
             "session/create" => {
-                handlers::session::handle_create(
+                Box::pin(handlers::session::handle_create(
                     id,
                     params,
                     self.runtime.clone(),
                     &self.notification_sink,
                     &self.runtime_adapter,
                     request_context.clone(),
-                )
+                ))
                 .await
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,

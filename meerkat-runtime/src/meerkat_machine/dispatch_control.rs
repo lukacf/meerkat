@@ -46,11 +46,30 @@ impl MeerkatMachine {
                     }
                 };
 
-                let request_immediate_processing =
-                    crate::accept::requests_immediate_processing(&input);
                 let (outcome, signal) = {
                     let mut drv = driver.lock().await;
-                    let result = match drv.as_driver_mut().accept_input(input).await {
+                    let resolved = drv.resolve_admission(&input);
+                    let preview_run_id = RunId::new();
+                    self.preview_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
+                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                &InputId::new(),
+                            ),
+                            request_immediate_processing: resolved
+                                .coarse_flags
+                                .request_immediate_processing,
+                            interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
+                            wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                                &preview_run_id,
+                            ),
+                        },
+                        "AcceptWithCompletion(Ingest)",
+                    )
+                    .await
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+                    let result = match drv.accept_resolved_input(input, resolved.clone()).await {
                         Ok(result) => result,
                         Err(err) => {
                             drop(drv);
@@ -59,8 +78,35 @@ impl MeerkatMachine {
                             return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                         }
                     };
-                    let signal =
-                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
+                    let signal = match &result {
+                        AcceptOutcome::Accepted { input_id, .. } => {
+                            let (_, effects) = self
+                                .apply_session_dsl_input(
+                                    &session_id,
+                                    crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
+                                        input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                            input_id,
+                                        ),
+                                        request_immediate_processing: resolved
+                                            .coarse_flags
+                                            .request_immediate_processing,
+                                        interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
+                                        wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                                        run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                                            &preview_run_id,
+                                        ),
+                                    },
+                                    "AcceptWithCompletion(Ingest)",
+                                )
+                                .await
+                                .map_err(RuntimeControlPlaneError::Internal)?;
+                            drv.absorb_post_admission_effects(&effects);
+                            Self::post_admission_signal_from_effects(&effects)
+                        }
+                        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
+                            crate::driver::ephemeral::PostAdmissionSignal::None
+                        }
+                    };
                     (result, signal)
                 };
 
@@ -360,26 +406,28 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Initializing) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy,
-                        "Destroy",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.preview_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy,
+                    "Destroy",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
                 let report = match machine_destroy(&mut drv).await {
                     Ok(report) => report,
-                    Err(err) => {
-                        drop(drv);
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                    }
+                    Err(err) => return Err(RuntimeControlPlaneError::Internal(err.to_string())),
                 };
                 drop(drv);
+
+                self.apply_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy,
+                    "Destroy",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");

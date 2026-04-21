@@ -45,32 +45,21 @@ impl MeerkatMachine {
                     });
                 }
 
-                let request_immediate_processing =
-                    crate::accept::requests_immediate_processing(&input);
-                // Machine-owned wake-if-idle intent: derived from the
-                // kind-level policy so the DSL's Running+Queued split
-                // picks the `AcceptWithCompletionRunningQueuedWakeIfIdle`
-                // arm (emit WakeLoop) vs the passive arm (no emit).
-                let wake_if_idle = crate::accept::requests_wake_if_idle(&input);
-
-                // DSL-first: validate the coarse AcceptWithCompletion transition
-                // before the driver realizes the effect.
                 let run_id_for_dsl = RunId::new();
-                // We don't have the input_id yet (driver hasn't accepted), so use a
-                // placeholder InputId. The DSL transition for AcceptWithCompletion
-                // doesn't gate on input_id value — it gates on phase/state.
-                let dsl_input_id =
-                    crate::meerkat_machine::dsl::InputId::from_domain(&InputId::new());
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
+                let (resolved, outcome, handle, accepted_input_id, signal) = {
+                    let mut driver = driver.lock().await;
+                    let resolved = driver.resolve_admission(&input);
+                    self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
-                            input_id: dsl_input_id,
-                            request_immediate_processing,
-                            // We don't know interrupt_yielding yet (depends on outcome),
-                            // but the DSL transition doesn't gate on this field.
-                            interrupt_yielding: false,
-                            wake_if_idle,
+                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                &InputId::new(),
+                            ),
+                            request_immediate_processing: resolved
+                                .coarse_flags
+                                .request_immediate_processing,
+                            interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
+                            wake_if_idle: resolved.coarse_flags.wake_if_idle,
                             run_id: crate::meerkat_machine::dsl::RunId::from_domain(
                                 &run_id_for_dsl,
                             ),
@@ -79,30 +68,21 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-
-                let (outcome, signal, handle) = {
-                    let mut driver = driver.lock().await;
                     let result = match driver
-                        .as_driver_mut()
-                        .accept_input(input)
+                        .accept_resolved_input(input, resolved.clone())
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {
                         Ok(r) => r,
-                        Err(err) => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(err);
-                        }
+                        Err(err) => return Err(err),
                     };
-                    let signal =
-                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
 
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
+                            let accepted_input_id = input_id.clone();
                             let is_terminal = driver
                                 .as_driver()
-                                .input_phase(input_id)
+                                .input_phase(&accepted_input_id)
                                 .map(|phase| phase.is_terminal())
                                 .unwrap_or(true);
                             let handle = if is_terminal {
@@ -110,10 +90,16 @@ impl MeerkatMachine {
                             } else {
                                 Some({
                                     let mut completions = completions.lock().await;
-                                    completions.register(input_id.clone())
+                                    completions.register(accepted_input_id.clone())
                                 })
                             };
-                            (result, signal, handle)
+                            (
+                                resolved,
+                                result,
+                                handle,
+                                Some(accepted_input_id),
+                                crate::driver::ephemeral::PostAdmissionSignal::None,
+                            )
                         }
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
                             let is_terminal = driver
@@ -123,71 +109,67 @@ impl MeerkatMachine {
                                 .unwrap_or(true);
 
                             if is_terminal {
-                                (result, signal, None)
+                                (
+                                    resolved,
+                                    result,
+                                    None,
+                                    None,
+                                    crate::driver::ephemeral::PostAdmissionSignal::None,
+                                )
                             } else {
                                 let handle = {
                                     let mut completions = completions.lock().await;
                                     completions.register(existing_id.clone())
                                 };
-                                (result, signal, Some(handle))
+                                (
+                                    resolved,
+                                    result,
+                                    Some(handle),
+                                    None,
+                                    crate::driver::ephemeral::PostAdmissionSignal::None,
+                                )
                             }
                         }
                         AcceptOutcome::Rejected { reason } => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
                             return Err(RuntimeDriverError::ValidationFailed {
                                 reason: reason.to_string(),
                             });
                         }
                     }
                 };
-
-                // Input lifecycle shadow: infer from outcome which transition fired
-                let shadow_input_id = match &outcome {
-                    AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
-                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
-                    AcceptOutcome::Rejected { .. } => {
-                        unreachable!("rejected case is returned above")
-                    }
-                };
-                {
-                    let is_terminal = match &outcome {
-                        AcceptOutcome::Accepted { input_id, .. } => {
-                            let drv = driver.lock().await;
-                            drv.as_driver()
-                                .input_phase(input_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true)
-                        }
-                        _ => false,
-                    };
-                    let shadow_input = if is_terminal {
-                        Some(
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeOnAccept {
-                                input_id: shadow_input_id.to_string(),
+                let signal = if let Some(input_id) = accepted_input_id {
+                    let (_, effects) = self
+                        .apply_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
+                                input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                    &input_id,
+                                ),
+                                request_immediate_processing: resolved
+                                    .coarse_flags
+                                    .request_immediate_processing,
+                                interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
+                                wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                                run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                                    &run_id_for_dsl,
+                                ),
                             },
+                            "AcceptWithCompletion",
                         )
-                    } else if matches!(&outcome, AcceptOutcome::Accepted { .. }) {
-                        Some(
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
-                                input_id: shadow_input_id.to_string(),
-                            },
-                        )
-                    } else {
-                        None // Deduplicated — no new input lifecycle transition
-                    };
-                    if let Some(input) = shadow_input
-                        && let Err(err) = self
-                            .stage_session_dsl_input(&session_id, input, "InputLifecycle(accept)")
-                            .await
+                        .await
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "canonical AcceptWithCompletion apply failed after admission: {reason}"
+                            ))
+                        })?;
                     {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err,
-                            "DSL/runtime DISAGREEMENT on input lifecycle after accept"
-                        );
+                        let mut driver = driver.lock().await;
+                        driver.absorb_post_admission_effects(&effects);
                     }
-                }
+                    Self::post_admission_signal_from_effects(&effects)
+                } else {
+                    signal
+                };
 
                 if signal.should_wake()
                     && let Some(ref wake_tx) = wake_tx
@@ -242,103 +224,68 @@ impl MeerkatMachine {
                     });
                 }
 
-                let request_immediate_processing =
-                    crate::accept::requests_immediate_processing(&input);
-
-                // DSL-first: validate AcceptWithoutWake before driver realizes the effect.
-                let dsl_input_id =
-                    crate::meerkat_machine::dsl::InputId::from_domain(&InputId::new());
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
+                let (outcome, accepted_input_id) = {
+                    let mut driver = driver.lock().await;
+                    let resolved = driver.resolve_admission(&input);
+                    self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
-                            input_id: dsl_input_id,
+                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                &InputId::new(),
+                            ),
                         },
                         "AcceptWithoutWake",
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-
-                let outcome = {
-                    let mut driver = driver.lock().await;
                     let result = match driver
-                        .as_driver_mut()
-                        .accept_input(input)
+                        .accept_resolved_input(input, resolved)
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {
                         Ok(r) => r,
-                        Err(err) => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(err);
-                        }
+                        Err(err) => return Err(err),
                     };
-                    let signal =
-                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
-                    debug_assert!(
-                        !signal.should_process_immediately(),
-                        "queue-only admission unexpectedly requested immediate processing"
-                    );
                     if let AcceptOutcome::Rejected { reason } = &result {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
                         return Err(RuntimeDriverError::ValidationFailed {
                             reason: reason.to_string(),
                         });
                     }
-                    result
-                };
-                let shadow_input_id = match &outcome {
-                    AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
-                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
-                    AcceptOutcome::Rejected { .. } => {
-                        unreachable!("rejected case handled above")
-                    }
-                };
-
-                // Input lifecycle shadow: infer from outcome which transition fired
-                {
-                    let is_terminal = match &outcome {
-                        AcceptOutcome::Accepted { input_id, .. } => {
-                            let drv = driver.lock().await;
-                            drv.as_driver()
-                                .input_phase(input_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true)
-                        }
-                        _ => false,
+                    let accepted_input_id = match &result {
+                        AcceptOutcome::Accepted { input_id, .. } => Some(input_id.clone()),
+                        AcceptOutcome::Deduplicated { .. } => None,
+                        AcceptOutcome::Rejected { .. } => unreachable!("handled above"),
                     };
-                    let shadow_input = if is_terminal {
-                        Some(
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeOnAccept {
-                                input_id: shadow_input_id.to_string(),
+                    (result, accepted_input_id)
+                };
+                if let Some(input_id) = accepted_input_id {
+                    let (_, effects) = self
+                        .apply_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
+                                input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                    &input_id,
+                                ),
                             },
+                            "AcceptWithoutWake",
                         )
-                    } else if matches!(&outcome, AcceptOutcome::Accepted { .. }) {
-                        Some(
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
-                                input_id: shadow_input_id.to_string(),
-                            },
-                        )
-                    } else {
-                        None // Deduplicated — no new input lifecycle transition
-                    };
-                    if let Some(input) = shadow_input
-                        && let Err(err) = self
-                            .stage_session_dsl_input(
-                                &session_id,
-                                input,
-                                "InputLifecycle(accept_without_wake)",
-                            )
-                            .await
+                        .await
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "canonical AcceptWithoutWake apply failed after admission: {reason}"
+                            ))
+                        })?;
                     {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err,
-                            "DSL/runtime DISAGREEMENT on input lifecycle after accept_without_wake"
-                        );
+                        let mut driver = driver.lock().await;
+                        driver.absorb_post_admission_effects(&effects);
                     }
+                    let signal = Self::post_admission_signal_from_effects(&effects);
+                    debug_assert!(
+                        !signal.should_wake()
+                            && !signal.should_interrupt_yielding()
+                            && !signal.should_process_immediately(),
+                        "AcceptWithoutWake unexpectedly emitted a post-admission signal"
+                    );
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
@@ -548,31 +495,6 @@ impl MeerkatMachine {
                     }
                 };
 
-                // Input lifecycle shadows: accept queued + stage for run
-                for shadow in [
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
-                        input_id: prepared.input_id.to_string(),
-                    },
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::StageForRun {
-                        input_id: prepared.input_id.to_string(),
-                        run_id: prepared.run_id.to_string(),
-                    },
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::IncrementAttemptCount {
-                        input_id: prepared.input_id.to_string(),
-                    },
-                ] {
-                    if let Err(err) = self
-                        .stage_session_dsl_input(&session_id, shadow, "InputLifecycle(prepare)")
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err,
-                            "DSL/runtime DISAGREEMENT on input lifecycle during prepare"
-                        );
-                    }
-                }
-
                 Ok(MeerkatMachineCommandResult::Prepared(prepared))
             }
             MeerkatMachineCommand::Commit {
@@ -614,24 +536,6 @@ impl MeerkatMachine {
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
-                // DSL-first: stage ConsumeInput before the driver commit realizes it.
-                if let Err(err) = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeInput {
-                            input_id: shadow_input_id.to_string(),
-                        },
-                        "InputLifecycle(commit)",
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %err,
-                        "DSL/runtime DISAGREEMENT on input lifecycle during commit"
-                    );
-                }
-
                 let commit_run_id = run_id.clone();
                 if let Err(err) = commit_runtime_loop_run(
                     &driver,
@@ -642,10 +546,10 @@ impl MeerkatMachine {
                 )
                 .await
                 {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    // Driver unwinds Running → pre-run phase on commit failure.
-                    // Apply DSL Fail to keep the machine phase in sync.
+                    let _ = previous_dsl_state;
+                    // Driver already unwinds the shared canonical ingress state
+                    // on commit failure. Only the coarse Fail transition remains
+                    // to keep the top-level machine phase in sync.
                     if let Err(dsl_err) = self
                         .stage_session_dsl_input(
                             &session_id,

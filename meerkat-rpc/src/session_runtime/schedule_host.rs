@@ -109,9 +109,7 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
         let runtime = self.upgrade_runtime()?;
-        runtime
-            .materialize_scheduled_session(create, prompt_system_prompt)
-            .await
+        Box::pin(runtime.materialize_scheduled_session(create, prompt_system_prompt)).await
     }
 
     async fn deliver_prompt(

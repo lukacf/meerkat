@@ -413,7 +413,13 @@ impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
         occurrence: &Occurrence,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-        deliver_scheduled_prompt(&self.context, session_id, occurrence, dispatch).await
+        Box::pin(deliver_scheduled_prompt(
+            &self.context,
+            session_id,
+            occurrence,
+            dispatch,
+        ))
+        .await
     }
 
     async fn deliver_event(
@@ -659,7 +665,7 @@ async fn deliver_scheduled_prompt(
     occurrence: &Occurrence,
     dispatch: ScheduledPromptDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match accept_scheduled_prompt_with_completion(
+    match Box::pin(accept_scheduled_prompt_with_completion(
         context,
         session_id,
         occurrence,
@@ -667,7 +673,7 @@ async fn deliver_scheduled_prompt(
         dispatch.render_metadata,
         dispatch.skill_references,
         dispatch.additional_instructions,
-    )
+    ))
     .await
     {
         Ok(accepted) => Ok(build_dispatch_from_accepted(

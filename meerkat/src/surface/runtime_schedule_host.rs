@@ -339,7 +339,7 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
     ) -> Result<SessionId, ScheduleDomainError> {
         let request = self.build_materialized_request(create, prompt_system_prompt);
         let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &self.service,
             &self.runtime_adapter,
             Session::new(),
@@ -349,7 +349,7 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
                 let runtime_adapter = Arc::clone(&self.runtime_adapter);
                 move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
             },
-        )
+        ))
         .await
         .map_err(schedule_internal)?;
         #[cfg(feature = "comms")]

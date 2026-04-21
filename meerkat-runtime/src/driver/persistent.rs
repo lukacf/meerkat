@@ -19,7 +19,7 @@ use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
-use super::ephemeral::EphemeralRuntimeDriver;
+use super::ephemeral::{EphemeralRuntimeDriver, SharedIngressDslAuthority};
 
 /// Persistent runtime driver — durable InputState via RuntimeStore.
 pub struct PersistentRuntimeDriver {
@@ -47,6 +47,7 @@ impl PersistentRuntimeDriver {
             Arc::new(StdRwLock::new(
                 crate::driver::ephemeral::RuntimeControlProjection::default(),
             )),
+            crate::driver::ephemeral::new_ingress_dsl_authority(),
         )
     }
 
@@ -55,9 +56,14 @@ impl PersistentRuntimeDriver {
         store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
         control: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
+        dsl: SharedIngressDslAuthority,
     ) -> Self {
         Self {
-            inner: EphemeralRuntimeDriver::new_with_control(runtime_id.clone(), control),
+            inner: EphemeralRuntimeDriver::new_with_control_and_dsl(
+                runtime_id.clone(),
+                control,
+                dsl,
+            ),
             store,
             blob_store,
             runtime_id,
@@ -172,6 +178,55 @@ impl PersistentRuntimeDriver {
         self.inner.has_queued_input_outside(excluded)
     }
 
+    pub(crate) fn absorb_post_admission_effects(
+        &mut self,
+        effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    ) {
+        self.inner.absorb_post_admission_effects(effects);
+    }
+
+    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
+        self.inner.resolve_admission(input)
+    }
+
+    pub(crate) async fn accept_resolved_input(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        let input_for_recovery = input.clone();
+
+        let mut outcome = self.inner.accept_resolved_input(input, resolved).await?;
+
+        if let AcceptOutcome::Accepted {
+            ref input_id,
+            ref mut state,
+            ..
+        } = outcome
+            && let Some(mut bundle) = self.inner.stored_input_state(input_id)
+        {
+            let mut input_for_recovery = input_for_recovery.clone();
+            if let Err(err) =
+                externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
+            {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to externalize runtime input images: {err}"
+                )));
+            }
+            bundle.state.persisted_input = Some(input_for_recovery);
+            self.inner.ledger_mut().accept(bundle.state.clone());
+            if let Err(err) = self.persist_state(&bundle).await {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+            *state = bundle.state;
+        }
+
+        Ok(outcome)
+    }
+
     /// Stage input (delegates to inner).
     pub fn stage_input(
         &mut self,
@@ -235,7 +290,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         reason: InputAbandonReason,
     ) -> Result<usize, RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         let abandoned = self.inner.abandon_pending_inputs(reason);
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
@@ -247,7 +302,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "pending input abandon persist failed: {err}"
             )));
@@ -263,9 +318,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         target_phase: RuntimeState,
     ) -> Result<usize, RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
-        let silent_intents = self.inner.silent_comms_intents();
-        let control = self.inner.control_handle();
+        let checkpoint = self.inner.rollback_snapshot();
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
@@ -276,15 +329,13 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "recycle persist failed: {err}"
             )));
         }
 
-        self.inner = EphemeralRuntimeDriver::new_with_control(self.runtime_id.clone(), control);
-        self.inner.set_silent_comms_intents(silent_intents);
-        let _ = RuntimeDriver::recover(self).await?;
+        let _ = self.inner.recycle_preserving_work()?;
         self.inner.set_control_projection(target_phase, None, None);
         Ok(self.inner.active_input_ids().len())
     }
@@ -292,7 +343,7 @@ impl PersistentRuntimeDriver {
     pub async fn finalize_retire(
         &mut self,
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.finalize_retire();
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
@@ -304,7 +355,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "retire persist failed: {err}"
             )));
@@ -325,7 +376,7 @@ impl PersistentRuntimeDriver {
     pub async fn finalize_reset(
         &mut self,
     ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.reset_cleanup();
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
@@ -337,7 +388,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "reset persist failed: {err}"
             )));
@@ -385,7 +436,7 @@ impl PersistentRuntimeDriver {
     }
 
     pub async fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         self.inner.stop_runtime_cleanup();
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
@@ -397,7 +448,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "stop persist failed: {err}"
             )));
@@ -429,7 +480,7 @@ impl PersistentRuntimeDriver {
         receipt: &RunBoundaryReceipt,
         session_snapshot: Option<&Vec<u8>>,
     ) -> Result<(), RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         self.inner
             .machine_realize_boundary_applied(run_id, receipt)?;
         if self
@@ -459,7 +510,7 @@ impl PersistentRuntimeDriver {
             )
             .await
             .map_err(|e| {
-                self.inner = checkpoint;
+                self.inner.restore_rollback_snapshot(checkpoint);
                 RuntimeDriverError::Internal(format!("runtime boundary commit failed: {e}"))
             })?;
         Ok(())
@@ -479,7 +530,7 @@ impl PersistentRuntimeDriver {
         run_id: &RunId,
         consumed_input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         self.inner
             .machine_realize_run_completed(run_id, consumed_input_ids)?;
         let input_states = self.inner.stored_input_states_snapshot();
@@ -492,7 +543,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal event persist failed: {err}"
             )));
@@ -526,7 +577,7 @@ impl PersistentRuntimeDriver {
         error: &str,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
+        let checkpoint = self.inner.rollback_snapshot();
         self.inner
             .machine_realize_run_failed(run_id, contributing_input_ids, replay_plan)?;
         tracing::debug!(
@@ -545,7 +596,7 @@ impl PersistentRuntimeDriver {
             )
             .await
         {
-            self.inner = checkpoint;
+            self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal event persist failed: {err}"
             )));
@@ -558,39 +609,8 @@ impl PersistentRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let checkpoint = self.inner.clone();
-        let input_for_recovery = input.clone();
-
-        // Delegate to ephemeral for state machine logic
-        let mut outcome = self.inner.accept_input(input).await?;
-
-        // Durable-before-ack: persist InputState before returning
-        if let AcceptOutcome::Accepted {
-            ref input_id,
-            ref mut state,
-            ..
-        } = outcome
-            && let Some(mut bundle) = self.inner.stored_input_state(input_id)
-        {
-            let mut input_for_recovery = input_for_recovery.clone();
-            if let Err(err) =
-                externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
-            {
-                self.inner = checkpoint;
-                return Err(RuntimeDriverError::Internal(format!(
-                    "failed to externalize runtime input images: {err}"
-                )));
-            }
-            bundle.state.persisted_input = Some(input_for_recovery);
-            self.inner.ledger_mut().accept(bundle.state.clone());
-            if let Err(err) = self.persist_state(&bundle).await {
-                self.inner = checkpoint;
-                return Err(err);
-            }
-            *state = bundle.state;
-        }
-
-        Ok(outcome)
+        let resolved = self.resolve_admission(&input);
+        self.accept_resolved_input(input, resolved).await
     }
 
     async fn on_runtime_event(

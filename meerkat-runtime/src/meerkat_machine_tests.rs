@@ -1032,6 +1032,47 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
 }
 
 #[tokio::test]
+async fn shared_ingress_authority_is_identical_after_register_recover_and_recycle() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    let (session_authority, driver_authority) = adapter
+        .debug_shared_ingress_authorities(&session_id)
+        .await
+        .expect("registered session should expose shared ingress authorities");
+    assert!(
+        Arc::ptr_eq(&session_authority, &driver_authority),
+        "fresh registration should share one ingress authority between session and driver",
+    );
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
+        .await
+        .expect("recover should succeed");
+    let (session_authority, driver_authority) = adapter
+        .debug_shared_ingress_authorities(&session_id)
+        .await
+        .expect("recovered session should expose shared ingress authorities");
+    assert!(
+        Arc::ptr_eq(&session_authority, &driver_authority),
+        "recover should preserve one shared ingress authority",
+    );
+
+    crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
+        .await
+        .expect("recycle should succeed");
+    let (session_authority, driver_authority) = adapter
+        .debug_shared_ingress_authorities(&session_id)
+        .await
+        .expect("recycled session should expose shared ingress authorities");
+    assert!(
+        Arc::ptr_eq(&session_authority, &driver_authority),
+        "recycle should preserve one shared ingress authority",
+    );
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recover() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -1092,6 +1133,81 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn deduplicated_accept_with_completion_emits_no_new_signal() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let mut first = make_prompt("dedup me");
+    let key = IdempotencyKey::new("runtime-dedup");
+    if let Input::Prompt(ref mut prompt) = first {
+        prompt.header.idempotency_key = Some(key.clone());
+    }
+    let accepted = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: first,
+            },
+        )
+        .await
+        .expect("first input should be accepted");
+    let MeerkatMachineCommandResult::AcceptWithCompletion {
+        outcome: first_outcome,
+        admission_signal: first_signal,
+        ..
+    } = accepted
+    else {
+        panic!("expected AcceptWithCompletion result");
+    };
+    assert!(first_outcome.is_accepted());
+    assert_eq!(
+        first_signal,
+        crate::driver::ephemeral::PostAdmissionSignal::WakeLoop
+    );
+
+    let mut duplicate = make_prompt("dedup me too");
+    if let Input::Prompt(ref mut prompt) = duplicate {
+        prompt.header.idempotency_key = Some(key);
+    }
+    let duplicate_result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: duplicate,
+            },
+        )
+        .await
+        .expect("duplicate input should return a deduplicated outcome");
+    let MeerkatMachineCommandResult::AcceptWithCompletion {
+        outcome,
+        admission_signal,
+        ..
+    } = duplicate_result
+    else {
+        panic!("expected AcceptWithCompletion result");
+    };
+    assert!(outcome.is_deduplicated());
+    assert_eq!(
+        admission_signal,
+        crate::driver::ephemeral::PostAdmissionSignal::None,
+        "dedup should not emit a fresh admission signal",
+    );
+
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after dedup");
+    assert_eq!(
+        snapshot.inputs.post_admission_signal, "WakeLoop",
+        "dedup should not overwrite the previously accumulated canonical signal",
+    );
 }
 
 #[tokio::test]

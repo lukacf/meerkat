@@ -3868,7 +3868,7 @@ impl MobActor {
             return Err(error);
         }
 
-        let spawn_result = async {
+        let spawn_result = Box::pin(async {
             let spawn_receipt = self.provisioner.provision_member(provision_request).await?;
             if runtime_mode == crate::MobRuntimeMode::AutonomousHost
                 && let Err(capability_error) =
@@ -3921,7 +3921,7 @@ impl MobActor {
             )
             .await
             .map(|outcome| outcome.receipt)
-        }
+        })
         .await;
 
         let (_pending, task_handle) =
@@ -4808,7 +4808,7 @@ impl MobActor {
 
         // 4. Provision and finalize the replacement member inline so the receipt reflects
         //    the committed canonical member/session state before we return.
-        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = async {
+        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = Box::pin(async {
             let spawn_receipt = self
                 .provisioner
                 .provision_member(provision_request)
@@ -4916,7 +4916,7 @@ impl MobActor {
                     failed_peer_ids: finalized.failed_restore_peer_ids.into_iter().map(|mid| AgentIdentity::from(mid.as_str())).collect(),
                 })
             }
-        }
+        })
         .await;
 
         let (_respawn_pending, respawn_task) =

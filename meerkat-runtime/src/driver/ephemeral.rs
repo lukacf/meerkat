@@ -11,7 +11,7 @@
 //! - S25 retire/reset/destroy lifecycle operations
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use chrono::Utc;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
@@ -105,6 +105,25 @@ pub struct ReplayQueuedContributorsPlan {
     pub notice_kind: &'static str,
 }
 
+#[derive(Clone)]
+pub(crate) struct EphemeralDriverRollbackSnapshot {
+    control_projection: RuntimeControlProjection,
+    dsl_state: mm_dsl::MeerkatMachineState,
+    ledger: InputLedger,
+    queue: InputQueue,
+    steer_queue: InputQueue,
+    events: Vec<RuntimeEventEnvelope>,
+    post_admission_signal: PostAdmissionSignal,
+    silent_comms_intents: Vec<String>,
+    handling_mode: HashMap<InputId, HandlingMode>,
+    is_prompt_set: std::collections::HashSet<InputId>,
+    content_shape: HashMap<InputId, ContentShape>,
+    request_id: HashMap<InputId, Option<RequestId>>,
+    reservation_key: HashMap<InputId, Option<ReservationKey>>,
+    policy_snapshot: HashMap<InputId, PolicyDecision>,
+    admission_order: Vec<InputId>,
+}
+
 /// Ephemeral runtime driver -- all state in-memory.
 #[derive(Clone)]
 pub struct EphemeralRuntimeDriver {
@@ -124,12 +143,8 @@ pub struct EphemeralRuntimeDriver {
     /// drain. `RequestImmediateProcessing` is strictly stronger than `WakeLoop`.
     post_admission_signal: PostAdmissionSignal,
     silent_comms_intents: Vec<String>,
-    /// DSL authority owning ingress semantics (queue/steer lanes, input
-    /// phases, admission ordering). The per-session DSL used by the dispatch
-    /// layer is a separate instance — this driver-local DSL carries the
-    /// mechanical state needed by the queue projections and readers. Both
-    /// are driven by the same DSL transitions and stay in step because the
-    /// shell is now just a reader, not a shadow authority.
+    /// Shared session-owned DSL authority for ingress semantics (queue/steer
+    /// lanes, input phases, admission ordering).
     dsl: DslAuthority,
     /// Per-input admission metadata with no DSL home (content shape,
     /// correlation IDs, policy snapshot, handling mode). These are pure
@@ -152,22 +167,32 @@ pub struct EphemeralRuntimeDriver {
 /// The generated `MeerkatMachineAuthority` does not derive `Debug`, but
 /// `EphemeralRuntimeDriver` requires `Clone` which is satisfied via the
 /// custom impl below.
-struct DslAuthority(mm_dsl::MeerkatMachineAuthority);
+pub(crate) type SharedIngressDslAuthority = Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>;
+
+struct DslAuthority(SharedIngressDslAuthority);
 
 impl Clone for DslAuthority {
     fn clone(&self) -> Self {
-        Self(mm_dsl::MeerkatMachineAuthority::from_state(
-            self.0.state.clone(),
-        ))
+        Self(Arc::clone(&self.0))
     }
 }
 
-fn new_ingress_dsl_authority() -> DslAuthority {
+impl DslAuthority {
+    fn lock(&self) -> std::sync::MutexGuard<'_, mm_dsl::MeerkatMachineAuthority> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
     let state = mm_dsl::MeerkatMachineState {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
         ..mm_dsl::MeerkatMachineState::default()
     };
-    DslAuthority(mm_dsl::MeerkatMachineAuthority::from_state(state))
+    Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
+        state,
+    )))
 }
 
 impl EphemeralRuntimeDriver {
@@ -194,15 +219,24 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn new(runtime_id: LogicalRuntimeId) -> Self {
-        Self::new_with_control(
+        Self::new_with_control_and_dsl(
             runtime_id,
             Arc::new(StdRwLock::new(RuntimeControlProjection::default())),
+            new_ingress_dsl_authority(),
         )
     }
 
     pub(crate) fn new_with_control(
         runtime_id: LogicalRuntimeId,
         control: Arc<StdRwLock<RuntimeControlProjection>>,
+    ) -> Self {
+        Self::new_with_control_and_dsl(runtime_id, control, new_ingress_dsl_authority())
+    }
+
+    pub(crate) fn new_with_control_and_dsl(
+        runtime_id: LogicalRuntimeId,
+        control: Arc<StdRwLock<RuntimeControlProjection>>,
+        dsl: SharedIngressDslAuthority,
     ) -> Self {
         Self {
             runtime_id,
@@ -213,7 +247,7 @@ impl EphemeralRuntimeDriver {
             events: Vec::new(),
             post_admission_signal: PostAdmissionSignal::None,
             silent_comms_intents: Vec::new(),
-            dsl: new_ingress_dsl_authority(),
+            dsl: DslAuthority(dsl),
             handling_mode: HashMap::new(),
             is_prompt_set: std::collections::HashSet::new(),
             content_shape: HashMap::new(),
@@ -222,6 +256,55 @@ impl EphemeralRuntimeDriver {
             policy_snapshot: HashMap::new(),
             admission_order: Vec::new(),
         }
+    }
+
+    pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
+        EphemeralDriverRollbackSnapshot {
+            control_projection: self.read_control_projection().clone(),
+            dsl_state: self.with_dsl_state(Clone::clone),
+            ledger: self.ledger.clone(),
+            queue: self.queue.clone(),
+            steer_queue: self.steer_queue.clone(),
+            events: self.events.clone(),
+            post_admission_signal: self.post_admission_signal,
+            silent_comms_intents: self.silent_comms_intents.clone(),
+            handling_mode: self.handling_mode.clone(),
+            is_prompt_set: self.is_prompt_set.clone(),
+            content_shape: self.content_shape.clone(),
+            request_id: self.request_id.clone(),
+            reservation_key: self.reservation_key.clone(),
+            policy_snapshot: self.policy_snapshot.clone(),
+            admission_order: self.admission_order.clone(),
+        }
+    }
+
+    pub(crate) fn restore_rollback_snapshot(&mut self, snapshot: EphemeralDriverRollbackSnapshot) {
+        {
+            let mut control = self.write_control_projection();
+            *control = snapshot.control_projection;
+        }
+        {
+            let mut authority = self.dsl.lock();
+            authority.state = snapshot.dsl_state;
+        }
+        self.ledger = snapshot.ledger;
+        self.queue = snapshot.queue;
+        self.steer_queue = snapshot.steer_queue;
+        self.events = snapshot.events;
+        self.post_admission_signal = snapshot.post_admission_signal;
+        self.silent_comms_intents = snapshot.silent_comms_intents;
+        self.handling_mode = snapshot.handling_mode;
+        self.is_prompt_set = snapshot.is_prompt_set;
+        self.content_shape = snapshot.content_shape;
+        self.request_id = snapshot.request_id;
+        self.reservation_key = snapshot.reservation_key;
+        self.policy_snapshot = snapshot.policy_snapshot;
+        self.admission_order = snapshot.admission_order;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_dsl_authority(&self) -> SharedIngressDslAuthority {
+        Arc::clone(&self.dsl.0)
     }
 
     /// Apply a DSL input locally, mapping any rejection into a driver error.
@@ -238,10 +321,12 @@ impl EphemeralRuntimeDriver {
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let transition =
-            mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map_err(|err| {
+        let transition = {
+            let mut authority = self.dsl.lock();
+            mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map_err(|err| {
                 RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
-            })?;
+            })?
+        };
         self.absorb_dsl_effects(&transition.effects);
         Ok(())
     }
@@ -268,8 +353,28 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    pub(crate) fn absorb_post_admission_effects(
+        &mut self,
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) {
+        self.absorb_dsl_effects(effects);
+    }
+
     fn dsl_key(input_id: &InputId) -> String {
         input_id.to_string()
+    }
+
+    fn with_dsl_state<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
+        let authority = self.dsl.lock();
+        body(&authority.state)
+    }
+
+    fn with_dsl_state_mut<R>(
+        &mut self,
+        body: impl FnOnce(&mut mm_dsl::MeerkatMachineState) -> R,
+    ) -> R {
+        let mut authority = self.dsl.lock();
+        body(&mut authority.state)
     }
 
     /// Read the current queue lane (FIFO) in admission order, as tracked by
@@ -283,23 +388,21 @@ impl EphemeralRuntimeDriver {
     }
 
     fn lane_in_admission_order(&self, lane: mm_dsl::InputLane) -> Vec<InputId> {
-        let mut candidates: Vec<(u64, InputId)> = self
-            .admission_order
-            .iter()
-            .filter(|id| self.dsl.0.state.input_lane.get(&Self::dsl_key(id)).copied() == Some(lane))
-            .cloned()
-            .map(|id| {
-                let seq = self
-                    .dsl
-                    .0
-                    .state
-                    .input_admission_seq
-                    .get(&Self::dsl_key(&id))
-                    .copied()
-                    .unwrap_or(u64::MAX);
-                (seq, id)
-            })
-            .collect();
+        let mut candidates: Vec<(u64, InputId)> = self.with_dsl_state(|state| {
+            self.admission_order
+                .iter()
+                .filter(|id| state.input_lane.get(&Self::dsl_key(id)).copied() == Some(lane))
+                .cloned()
+                .map(|id| {
+                    let seq = state
+                        .input_admission_seq
+                        .get(&Self::dsl_key(&id))
+                        .copied()
+                        .unwrap_or(u64::MAX);
+                    (seq, id)
+                })
+                .collect()
+        });
         candidates.sort_by_key(|(seq, _)| *seq);
         candidates.into_iter().map(|(_, id)| id).collect()
     }
@@ -311,7 +414,7 @@ impl EphemeralRuntimeDriver {
     /// post-GC).
     pub fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         let key = Self::dsl_key(input_id);
-        let phase = self.dsl.0.state.input_phases.get(&key).copied()?;
+        let phase = self.with_dsl_state(|state| state.input_phases.get(&key).copied())?;
         Some(Self::input_phase_to_lifecycle(phase))
     }
 
@@ -337,49 +440,52 @@ impl EphemeralRuntimeDriver {
     /// Read the run association an input was last staged for, from the DSL.
     pub fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
         let key = Self::dsl_key(input_id);
-        let raw = self.dsl.0.state.input_run_associations.get(&key)?;
+        let raw = self.with_dsl_state(|state| state.input_run_associations.get(&key).cloned())?;
         raw.parse::<uuid::Uuid>().ok().map(RunId::from_uuid)
     }
 
     /// Read the committed boundary sequence for an input, from the DSL.
     pub fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
         let key = Self::dsl_key(input_id);
-        self.dsl.0.state.input_boundary_sequences.get(&key).copied()
+        self.with_dsl_state(|state| state.input_boundary_sequences.get(&key).copied())
     }
 
     /// Read the typed terminal outcome for an input, reconstructed from the
     /// DSL's typed terminal metadata maps.
     pub fn input_terminal_outcome(&self, input_id: &InputId) -> Option<InputTerminalOutcome> {
         let key = Self::dsl_key(input_id);
-        let kind = self.dsl.0.state.input_terminal_kind.get(&key).copied()?;
+        let kind = self.with_dsl_state(|state| state.input_terminal_kind.get(&key).copied())?;
         match kind {
             mm_dsl::InputTerminalKind::Consumed => Some(InputTerminalOutcome::Consumed),
             mm_dsl::InputTerminalKind::Superseded => {
-                let raw = self.dsl.0.state.input_superseded_by.get(&key)?;
+                let raw =
+                    self.with_dsl_state(|state| state.input_superseded_by.get(&key).cloned())?;
                 let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
                 Some(InputTerminalOutcome::Superseded { superseded_by: id })
             }
             mm_dsl::InputTerminalKind::Coalesced => {
-                let raw = self.dsl.0.state.input_aggregate_id.get(&key)?;
+                let raw =
+                    self.with_dsl_state(|state| state.input_aggregate_id.get(&key).cloned())?;
                 let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
                 Some(InputTerminalOutcome::Coalesced { aggregate_id: id })
             }
             mm_dsl::InputTerminalKind::Abandoned => {
-                let reason = match self.dsl.0.state.input_abandon_reason.get(&key).copied()? {
+                let reason = match self
+                    .with_dsl_state(|state| state.input_abandon_reason.get(&key).copied())?
+                {
                     mm_dsl::InputAbandonReason::Retired => InputAbandonReason::Retired,
                     mm_dsl::InputAbandonReason::Reset => InputAbandonReason::Reset,
                     mm_dsl::InputAbandonReason::Stopped => InputAbandonReason::Stopped,
                     mm_dsl::InputAbandonReason::Destroyed => InputAbandonReason::Destroyed,
                     mm_dsl::InputAbandonReason::Cancelled => InputAbandonReason::Cancelled,
                     mm_dsl::InputAbandonReason::MaxAttemptsExhausted => {
-                        let attempts = self
-                            .dsl
-                            .0
-                            .state
-                            .input_abandon_attempt_count
-                            .get(&key)
-                            .copied()
-                            .unwrap_or(0) as u32;
+                        let attempts = self.with_dsl_state(|state| {
+                            state
+                                .input_abandon_attempt_count
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(0)
+                        }) as u32;
                         InputAbandonReason::MaxAttemptsExhausted { attempts }
                     }
                 };
@@ -391,13 +497,8 @@ impl EphemeralRuntimeDriver {
     /// Read the attempt count for an input from the DSL.
     pub fn input_attempt_count(&self, input_id: &InputId) -> u32 {
         let key = Self::dsl_key(input_id);
-        self.dsl
-            .0
-            .state
-            .input_attempt_counts
-            .get(&key)
-            .copied()
-            .unwrap_or(0) as u32
+        self.with_dsl_state(|state| state.input_attempt_counts.get(&key).copied().unwrap_or(0))
+            as u32
     }
 
     // ---- Admission metadata accessors (read-only) ----
@@ -609,130 +710,124 @@ impl EphemeralRuntimeDriver {
             request_id,
             reservation_key,
         );
-        self.dsl
-            .0
-            .state
-            .input_phases
-            .insert(key.clone(), Self::lifecycle_to_input_phase(lifecycle_state));
+        self.with_dsl_state_mut(|state| {
+            state
+                .input_phases
+                .insert(key.clone(), Self::lifecycle_to_input_phase(lifecycle_state));
+        });
         match recovered_seed.terminal_outcome.clone() {
             Some(InputTerminalOutcome::Consumed) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_terminal_kind
-                    .insert(key.clone(), mm_dsl::InputTerminalKind::Consumed);
-                self.dsl.0.state.input_superseded_by.remove(&key);
-                self.dsl.0.state.input_aggregate_id.remove(&key);
-                self.dsl.0.state.input_abandon_reason.remove(&key);
-                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state
+                        .input_terminal_kind
+                        .insert(key.clone(), mm_dsl::InputTerminalKind::Consumed);
+                    state.input_superseded_by.remove(&key);
+                    state.input_aggregate_id.remove(&key);
+                    state.input_abandon_reason.remove(&key);
+                    state.input_abandon_attempt_count.remove(&key);
+                });
             }
             Some(InputTerminalOutcome::Superseded { superseded_by }) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_terminal_kind
-                    .insert(key.clone(), mm_dsl::InputTerminalKind::Superseded);
-                self.dsl
-                    .0
-                    .state
-                    .input_superseded_by
-                    .insert(key.clone(), superseded_by.to_string());
-                self.dsl.0.state.input_aggregate_id.remove(&key);
-                self.dsl.0.state.input_abandon_reason.remove(&key);
-                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state
+                        .input_terminal_kind
+                        .insert(key.clone(), mm_dsl::InputTerminalKind::Superseded);
+                    state
+                        .input_superseded_by
+                        .insert(key.clone(), superseded_by.to_string());
+                    state.input_aggregate_id.remove(&key);
+                    state.input_abandon_reason.remove(&key);
+                    state.input_abandon_attempt_count.remove(&key);
+                });
             }
             Some(InputTerminalOutcome::Coalesced { aggregate_id }) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_terminal_kind
-                    .insert(key.clone(), mm_dsl::InputTerminalKind::Coalesced);
-                self.dsl
-                    .0
-                    .state
-                    .input_aggregate_id
-                    .insert(key.clone(), aggregate_id.to_string());
-                self.dsl.0.state.input_superseded_by.remove(&key);
-                self.dsl.0.state.input_abandon_reason.remove(&key);
-                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state
+                        .input_terminal_kind
+                        .insert(key.clone(), mm_dsl::InputTerminalKind::Coalesced);
+                    state
+                        .input_aggregate_id
+                        .insert(key.clone(), aggregate_id.to_string());
+                    state.input_superseded_by.remove(&key);
+                    state.input_abandon_reason.remove(&key);
+                    state.input_abandon_attempt_count.remove(&key);
+                });
             }
             Some(InputTerminalOutcome::Abandoned { reason }) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_terminal_kind
-                    .insert(key.clone(), mm_dsl::InputTerminalKind::Abandoned);
-                self.dsl
-                    .0
-                    .state
-                    .input_abandon_reason
-                    .insert(key.clone(), mm_dsl::InputAbandonReason::from(&reason));
-                self.dsl
-                    .0
-                    .state
-                    .input_abandon_attempt_count
-                    .insert(key.clone(), u64::from(recovered_seed.attempt_count));
-                self.dsl.0.state.input_superseded_by.remove(&key);
-                self.dsl.0.state.input_aggregate_id.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state
+                        .input_terminal_kind
+                        .insert(key.clone(), mm_dsl::InputTerminalKind::Abandoned);
+                    state
+                        .input_abandon_reason
+                        .insert(key.clone(), mm_dsl::InputAbandonReason::from(&reason));
+                    state
+                        .input_abandon_attempt_count
+                        .insert(key.clone(), u64::from(recovered_seed.attempt_count));
+                    state.input_superseded_by.remove(&key);
+                    state.input_aggregate_id.remove(&key);
+                });
             }
             None => {
-                self.dsl.0.state.input_terminal_kind.remove(&key);
-                self.dsl.0.state.input_superseded_by.remove(&key);
-                self.dsl.0.state.input_aggregate_id.remove(&key);
-                self.dsl.0.state.input_abandon_reason.remove(&key);
-                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state.input_terminal_kind.remove(&key);
+                    state.input_superseded_by.remove(&key);
+                    state.input_aggregate_id.remove(&key);
+                    state.input_abandon_reason.remove(&key);
+                    state.input_abandon_attempt_count.remove(&key);
+                });
             }
         }
-        self.dsl
-            .0
-            .state
-            .input_attempt_counts
-            .insert(key.clone(), u64::from(recovered_seed.attempt_count));
+        self.with_dsl_state_mut(|state| {
+            state
+                .input_attempt_counts
+                .insert(key.clone(), u64::from(recovered_seed.attempt_count));
+        });
         match recovered_seed.last_run_id.clone() {
             Some(run_id) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_run_associations
-                    .insert(key.clone(), run_id.to_string());
+                self.with_dsl_state_mut(|state| {
+                    state
+                        .input_run_associations
+                        .insert(key.clone(), run_id.to_string());
+                });
             }
             None => {
-                self.dsl.0.state.input_run_associations.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state.input_run_associations.remove(&key);
+                });
             }
         }
         match recovered_seed.last_boundary_sequence {
             Some(seq) => {
-                self.dsl
-                    .0
-                    .state
-                    .input_boundary_sequences
-                    .insert(key.clone(), seq);
+                self.with_dsl_state_mut(|state| {
+                    state.input_boundary_sequences.insert(key.clone(), seq);
+                });
             }
             None => {
-                self.dsl.0.state.input_boundary_sequences.remove(&key);
+                self.with_dsl_state_mut(|state| {
+                    state.input_boundary_sequences.remove(&key);
+                });
             }
         }
-        if !self.dsl.0.state.input_admission_seq.contains_key(&key) {
-            let seq = self.dsl.0.state.next_admission_seq;
-            self.dsl
-                .0
-                .state
-                .input_admission_seq
-                .insert(key.clone(), seq);
-            self.dsl.0.state.next_admission_seq = seq.saturating_add(1);
-        }
+        self.with_dsl_state_mut(|state| {
+            if !state.input_admission_seq.contains_key(&key) {
+                let seq = state.next_admission_seq;
+                state.input_admission_seq.insert(key.clone(), seq);
+                state.next_admission_seq = seq.saturating_add(1);
+            }
+        });
         // Recovery seeding is a direct DSL-state write from the persisted
         // snapshot by design — there are no transitions to replay. Only
         // Queued inputs carry lane membership; staged/terminal inputs are
         // not in any work lane.
-        self.dsl.0.state.input_lane.remove(&key);
-        if matches!(lifecycle_state, InputLifecycleState::Queued) {
-            self.dsl
-                .0
-                .state
-                .input_lane
-                .insert(key, mm_dsl::InputLane::from(handling_mode));
-        }
+        self.with_dsl_state_mut(|state| {
+            state.input_lane.remove(&key);
+            if matches!(lifecycle_state, InputLifecycleState::Queued) {
+                state
+                    .input_lane
+                    .insert(key, mm_dsl::InputLane::from(handling_mode));
+            }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -920,20 +1015,17 @@ impl EphemeralRuntimeDriver {
                 let key = Self::dsl_key(input_id);
                 // Priority routing: reassign the admission sequence so this
                 // input sorts ahead of existing entries in the lane.
-                let min_seq = self
-                    .dsl
-                    .0
-                    .state
-                    .input_admission_seq
-                    .values()
-                    .min()
-                    .copied()
-                    .unwrap_or(0);
-                self.dsl
-                    .0
-                    .state
-                    .input_admission_seq
-                    .insert(key.clone(), min_seq.saturating_sub(1));
+                self.with_dsl_state_mut(|state| {
+                    let min_seq = state
+                        .input_admission_seq
+                        .values()
+                        .min()
+                        .copied()
+                        .unwrap_or(0);
+                    state
+                        .input_admission_seq
+                        .insert(key.clone(), min_seq.saturating_sub(1));
+                });
                 let target_lane = mm_dsl::InputLane::from(target);
                 if target_lane != admission_lane {
                     self.dsl_apply(
@@ -1073,17 +1165,17 @@ impl EphemeralRuntimeDriver {
 
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
         let key = Self::dsl_key(input_id);
-        self.dsl.0.state.input_lane.contains_key(&key)
+        self.with_dsl_state(|state| state.input_lane.contains_key(&key))
     }
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         let excluded_keys: std::collections::HashSet<String> =
             excluded.iter().map(Self::dsl_key).collect();
-        self.dsl
-            .0
-            .state
-            .input_lane
-            .keys()
-            .any(|queued_key| !excluded_keys.contains(queued_key))
+        self.with_dsl_state(|state| {
+            state
+                .input_lane
+                .keys()
+                .any(|queued_key| !excluded_keys.contains(queued_key))
+        })
     }
     fn existing_superseded_input(
         &self,
@@ -1472,6 +1564,9 @@ impl EphemeralRuntimeDriver {
 
     pub(crate) fn destroy_cleanup(&mut self) -> usize {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+        self.queue.drain();
+        self.steer_queue.drain();
+        self.post_admission_signal = PostAdmissionSignal::None;
         self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
@@ -1563,6 +1658,173 @@ impl EphemeralRuntimeDriver {
             causation_id: None,
             correlation_id: None,
         }
+    }
+
+    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
+        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+        let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
+        crate::accept::resolve_admission(
+            input,
+            runtime_idle,
+            &self.silent_comms_intents,
+            existing_superseded_id,
+        )
+    }
+
+    pub(crate) async fn accept_resolved_input(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        match self.read_control_projection().phase {
+            RuntimeState::Retired | RuntimeState::Stopped => {
+                return Err(RuntimeDriverError::NotReady {
+                    state: self.read_control_projection().phase,
+                });
+            }
+            RuntimeState::Destroyed => return Err(RuntimeDriverError::Destroyed),
+            RuntimeState::Initializing
+            | RuntimeState::Idle
+            | RuntimeState::Attached
+            | RuntimeState::Running => {}
+        }
+
+        if let Err(e) = validate_durability(&input) {
+            match e {
+                DurabilityError::DerivedForbidden { .. }
+                | DurabilityError::ExternalDerivedForbidden => {
+                    return Ok(AcceptOutcome::Rejected {
+                        reason: crate::accept::RejectReason::DurabilityViolation {
+                            detail: e.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+        if let Err(e) = crate::peer_handling_mode::validate_peer_handling_mode(&input) {
+            return Ok(AcceptOutcome::Rejected {
+                reason: crate::accept::RejectReason::PeerHandlingModeInvalid {
+                    detail: e.to_string(),
+                },
+            });
+        }
+
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.durability = Some(input.header().durability);
+        state.idempotency_key = input.header().idempotency_key.clone();
+        if let Some(ref key) = input.header().idempotency_key {
+            if let Some(existing_id) = self
+                .ledger
+                .accept_with_idempotency(state.clone(), key.clone())
+            {
+                tracing::debug!(
+                    work_id = ?input_id,
+                    existing_id = ?existing_id,
+                    "input deduplicated"
+                );
+                self.emit_event(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Deduplicated {
+                        input_id: input_id.clone(),
+                        existing_id: existing_id.clone(),
+                    },
+                ));
+                return Ok(AcceptOutcome::Deduplicated {
+                    input_id,
+                    existing_id,
+                });
+            }
+        } else {
+            self.ledger.accept(state.clone());
+        }
+
+        if let Some(s) = self.ledger.get_mut(&input_id) {
+            s.policy = Some(PolicySnapshot {
+                version: resolved.policy.policy_version,
+                decision: resolved.policy.clone(),
+            });
+        }
+        self.emit_event(RuntimeEvent::InputLifecycle(
+            InputLifecycleEvent::Accepted {
+                input_id: input_id.clone(),
+            },
+        ));
+
+        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+        let handling_mode = resolved.handling_mode;
+        let content_shape = ContentShape(input.kind_id().to_string());
+        let is_prompt = matches!(input, Input::Prompt(_));
+        match resolved.admission_plan {
+            AdmissionPlan::ConsumedOnAccept => {
+                self.record_admission_metadata(
+                    &input_id,
+                    &content_shape,
+                    handling_mode,
+                    is_prompt,
+                    &resolved.policy,
+                    None,
+                    None,
+                );
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::QueueAccepted {
+                        input_id: Self::dsl_key(&input_id),
+                    },
+                    "QueueAccepted(consumed_on_accept)",
+                )?;
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::ConsumeOnAccept {
+                        input_id: Self::dsl_key(&input_id),
+                    },
+                    "ConsumeOnAccept",
+                )?;
+                let now = Utc::now();
+                if let Some(s) = self.ledger.get_mut(&input_id) {
+                    s.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: InputLifecycleState::Accepted,
+                        to: InputLifecycleState::Consumed,
+                        reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
+                    });
+                    s.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                    s.updated_at = now;
+                }
+                tracing::debug!(work_id = ?input_id, "input consumed on accept");
+            }
+            AdmissionPlan::Queued {
+                persist_and_queue,
+                queue_action,
+                existing_action,
+            } => {
+                if persist_and_queue {
+                    self.apply_persist_and_queue(
+                        &input_id,
+                        &input,
+                        &content_shape,
+                        handling_mode,
+                        is_prompt,
+                        &resolved.policy,
+                        queue_action,
+                        existing_action.as_ref(),
+                    )?;
+                }
+            }
+        }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+
+        if !runtime_idle
+            && matches!(resolved.policy.wake_mode, crate::WakeMode::WakeIfIdle)
+            && PostAdmissionSignal::WakeLoop > self.post_admission_signal
+        {
+            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
+        }
+
+        let final_state = self.ledger.get(&input_id).cloned().unwrap_or(state);
+        Ok(AcceptOutcome::Accepted {
+            input_id,
+            policy: resolved.policy,
+            state: final_state,
+        })
     }
 
     pub fn abandon_all_non_terminal(&mut self, reason: InputAbandonReason) -> usize {
@@ -1718,7 +1980,7 @@ impl EphemeralRuntimeDriver {
 
         for input_id in &receipt.contributing_input_ids {
             let key = Self::dsl_key(input_id);
-            if !self.dsl.0.state.input_phases.contains_key(&key) {
+            if !self.with_dsl_state(|state| state.input_phases.contains_key(&key)) {
                 continue;
             }
             // The matches_last_run guard on the DSL / shell is enforced by
@@ -1783,195 +2045,8 @@ impl EphemeralRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        match self.runtime_state() {
-            RuntimeState::Retired | RuntimeState::Stopped => {
-                return Err(RuntimeDriverError::NotReady {
-                    state: self.runtime_state(),
-                });
-            }
-            RuntimeState::Destroyed => return Err(RuntimeDriverError::Destroyed),
-            RuntimeState::Initializing
-            | RuntimeState::Idle
-            | RuntimeState::Attached
-            | RuntimeState::Running => {}
-        }
-
-        if let Err(e) = validate_durability(&input) {
-            match e {
-                DurabilityError::DerivedForbidden { .. }
-                | DurabilityError::ExternalDerivedForbidden => {
-                    return Ok(AcceptOutcome::Rejected {
-                        reason: crate::accept::RejectReason::DurabilityViolation {
-                            detail: e.to_string(),
-                        },
-                    });
-                }
-            }
-        }
-        if let Err(e) = crate::peer_handling_mode::validate_peer_handling_mode(&input) {
-            return Ok(AcceptOutcome::Rejected {
-                reason: crate::accept::RejectReason::PeerHandlingModeInvalid {
-                    detail: e.to_string(),
-                },
-            });
-        }
-        let input_id = input.id().clone();
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.durability = Some(input.header().durability);
-        state.idempotency_key = input.header().idempotency_key.clone();
-        if let Some(ref key) = input.header().idempotency_key {
-            if let Some(existing_id) = self
-                .ledger
-                .accept_with_idempotency(state.clone(), key.clone())
-            {
-                // Dedup is a pure observational outcome — emit the lifecycle
-                // event and return. No DSL mutation fires because the new
-                // input never enters the admission pipeline.
-                tracing::debug!(
-                    work_id = ?input_id,
-                    existing_id = ?existing_id,
-                    "input deduplicated"
-                );
-                self.emit_event(RuntimeEvent::InputLifecycle(
-                    InputLifecycleEvent::Deduplicated {
-                        input_id: input_id.clone(),
-                        existing_id: existing_id.clone(),
-                    },
-                ));
-                return Ok(AcceptOutcome::Deduplicated {
-                    input_id,
-                    existing_id,
-                });
-            }
-        } else {
-            self.ledger.accept(state.clone());
-        }
-        let runtime_idle = self.runtime_state().is_idle_or_attached();
-        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
-        let resolved = crate::accept::resolve_admission(
-            &input,
-            runtime_idle,
-            &self.silent_comms_intents,
-            existing_superseded_id,
-        );
-        if let Some(s) = self.ledger.get_mut(&input_id) {
-            s.policy = Some(PolicySnapshot {
-                version: resolved.policy.policy_version,
-                decision: resolved.policy.clone(),
-            });
-        }
-        self.emit_event(RuntimeEvent::InputLifecycle(
-            InputLifecycleEvent::Accepted {
-                input_id: input_id.clone(),
-            },
-        ));
-
-        // Machine-owned admission plan. The checked-in admission plan
-        // decides the semantic path (consume-on-accept, queue, priority,
-        // coalesce, supersede); the driver applies the plan directly via
-        // DSL transitions and shell mechanics.
-        let handling_mode = resolved.handling_mode;
-        let content_shape = ContentShape(input.kind_id().to_string());
-        let is_prompt = matches!(input, Input::Prompt(_));
-        match resolved.admission_plan {
-            AdmissionPlan::ConsumedOnAccept => {
-                self.record_admission_metadata(
-                    &input_id,
-                    &content_shape,
-                    handling_mode,
-                    is_prompt,
-                    &resolved.policy,
-                    None,
-                    None,
-                );
-                self.dsl_apply(
-                    mm_dsl::MeerkatMachineInput::QueueAccepted {
-                        input_id: Self::dsl_key(&input_id),
-                    },
-                    "QueueAccepted(consumed_on_accept)",
-                )?;
-                self.dsl_apply(
-                    mm_dsl::MeerkatMachineInput::ConsumeOnAccept {
-                        input_id: Self::dsl_key(&input_id),
-                    },
-                    "ConsumeOnAccept",
-                )?;
-                let now = Utc::now();
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: InputLifecycleState::Accepted,
-                        to: InputLifecycleState::Consumed,
-                        reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
-                    });
-                    s.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                    s.updated_at = now;
-                }
-                tracing::debug!(work_id = ?input_id, "input consumed on accept");
-            }
-            AdmissionPlan::Queued {
-                persist_and_queue,
-                queue_action,
-                existing_action,
-            } => {
-                if persist_and_queue {
-                    self.apply_persist_and_queue(
-                        &input_id,
-                        &input,
-                        &content_shape,
-                        handling_mode,
-                        is_prompt,
-                        &resolved.policy,
-                        queue_action,
-                        existing_action.as_ref(),
-                    )?;
-                }
-            }
-        }
-        self.rebuild_queue_projections();
-        self.debug_assert_queue_projection_alignment();
-
-        // Driver-side projection of the machine-owned admission signal.
-        //
-        // Long-form intent: the MeerkatMachine DSL's `AcceptWithCompletion`
-        // transitions are the canonical authority for the typed admission
-        // signal (WakeLoop / InterruptYielding / RequestImmediateProcessing).
-        // In production that transition runs on the machine's per-session
-        // DSL authority in `dispatch_ingress::stage_session_dsl_input`,
-        // where `session_id` / `lifecycle_phase` are kept in sync with the
-        // control projection. The driver's *local* DSL authority is a
-        // parallel copy whose `session_id` / `lifecycle_phase` are not
-        // synchronized from `contract_set_control_projection`, so firing
-        // `AcceptWithCompletion` on the driver-local DSL in this path
-        // silently rejects on the `session_registered` / phase guards.
-        //
-        // Until the two DSL authorities collapse into one (the right
-        // architectural endpoint, but a separate PR), mirror the policy
-        // decision directly into the driver-owned accumulator so
-        // `take_post_admission_signal` / `take_wake_requested` observe the
-        // same signal the DSL would have emitted:
-        //   - Idle runtime: the outcome-side signal is the authority and
-        //     the caller wakes the loop themselves; the driver stores
-        //     nothing.
-        //   - Running + `WakeIfIdle`: accumulate `WakeLoop` so the loop's
-        //     next idle re-check fires.
-        //   - `InterruptYielding` is a right-now cooperative interrupt,
-        //     not persisted for later — dropping it if missed is correct.
-        //
-        // Monotonic; never demote a stronger signal already set elsewhere.
-        if !runtime_idle
-            && matches!(resolved.policy.wake_mode, crate::WakeMode::WakeIfIdle)
-            && PostAdmissionSignal::WakeLoop > self.post_admission_signal
-        {
-            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
-        }
-
-        let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
-        Ok(AcceptOutcome::Accepted {
-            input_id,
-            policy: resolved.policy,
-            state: final_state,
-        })
+        let resolved = self.resolve_admission(&input);
+        self.accept_resolved_input(input, resolved).await
     }
 
     async fn on_runtime_event(

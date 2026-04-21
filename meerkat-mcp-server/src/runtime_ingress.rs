@@ -230,7 +230,7 @@ impl McpRuntimeIngressContext {
             .await
             .insert(session_id.clone(), state.clone());
         let context = self.clone();
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &self.service,
             &self.runtime_adapter,
             session,
@@ -242,7 +242,7 @@ impl McpRuntimeIngressContext {
                     state,
                 ))
             },
-        )
+        ))
         .await;
 
         match result {

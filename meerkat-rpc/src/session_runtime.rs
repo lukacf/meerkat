@@ -2873,17 +2873,16 @@ impl SessionRuntime {
         };
 
         if self.live_session_is_stale(session_id).await? {
-            return self
-                .try_recover_persisted_session(
-                    session_id,
-                    turn_prompt,
-                    event_tx,
-                    keep_alive,
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
-                )
-                .await;
+            return Box::pin(self.try_recover_persisted_session(
+                session_id,
+                turn_prompt,
+                event_tx,
+                keep_alive,
+                skill_references,
+                flow_tool_overlay,
+                additional_instructions,
+            ))
+            .await;
         }
 
         // Persist explicit keep_alive override so subsequent inheriting calls
@@ -2930,7 +2929,7 @@ impl SessionRuntime {
             Err(SessionError::NotFound { .. }) => {
                 // Attempt persisted session recovery: the session may exist in the
                 // store from a previous runtime lifetime.
-                self.try_recover_persisted_session(
+                Box::pin(self.try_recover_persisted_session(
                     session_id,
                     turn_prompt,
                     event_tx,
@@ -2938,7 +2937,7 @@ impl SessionRuntime {
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
-                )
+                ))
                 .await
             }
             Err(err) => Err(session_error_to_rpc(err)),

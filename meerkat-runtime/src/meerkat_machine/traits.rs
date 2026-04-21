@@ -187,14 +187,27 @@ impl MeerkatMachine {
         LogicalRuntimeId::new(session_id.to_string())
     }
 
-    pub(super) fn machine_owned_admission_signal(
-        outcome: &AcceptOutcome,
-        request_immediate_processing: bool,
+    pub(super) fn post_admission_signal_from_effects(
+        effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
     ) -> crate::driver::ephemeral::PostAdmissionSignal {
-        crate::accept::post_admission_signal_from_accept_outcome(
-            outcome,
-            request_immediate_processing,
-        )
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::PostAdmissionSignal {
+                    signal,
+                } => Some(match signal.as_str() {
+                    "WakeLoop" => crate::driver::ephemeral::PostAdmissionSignal::WakeLoop,
+                    "InterruptYielding" => {
+                        crate::driver::ephemeral::PostAdmissionSignal::InterruptYielding
+                    }
+                    "RequestImmediateProcessing" => {
+                        crate::driver::ephemeral::PostAdmissionSignal::RequestImmediateProcessing
+                    }
+                    _ => crate::driver::ephemeral::PostAdmissionSignal::None,
+                }),
+                _ => None,
+            })
+            .unwrap_or(crate::driver::ephemeral::PostAdmissionSignal::None)
     }
 
     pub(super) fn driver_error_from_command_error(

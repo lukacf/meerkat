@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
     let service = Arc::new(service);
-    let result = materialize_session(
+    let result = Box::pin(materialize_session(
         &service,
         &runtime_adapter,
         meerkat::Session::new(),
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let adapter = Arc::clone(&runtime_adapter);
             move |session_id| default_persistent_executor(service, adapter, session_id)
         },
-    )
+    ))
     .await?;
 
     let (_outcome, handle) = runtime_adapter

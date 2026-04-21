@@ -4283,11 +4283,14 @@ machine! {
             emit SubmitOpEvent { operation_id: operation_id }
         }
 
-        // StartOp: advance to Running
+        // StartOp: Provisioning -> Running.
         transition StartOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StartOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Running);
             }
@@ -4295,11 +4298,15 @@ machine! {
             emit SubmitOpEvent { operation_id: operation_id }
         }
 
-        // CompleteOp: terminal success — record completion sequence
+        // CompleteOp: terminal success from Running|Retiring.
         transition CompleteOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CompleteOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Completed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -4312,11 +4319,20 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // FailOp: terminal failure
+        // FailOp: terminal failure from any non-terminal state.
+        // Shell callers: `provisioning_failed` (only Provisioning) and
+        // `fail_operation` (Provisioning|Running|Retiring). The DSL guard
+        // allows the union; the shell exposes distinct entry points for
+        // callers that only care about one sub-state.
         transition FailOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input FailOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Failed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -4327,11 +4343,16 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // CancelOp: terminal cancellation
+        // CancelOp: terminal cancellation from any non-terminal state.
         transition CancelOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CancelOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Cancelled);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -4342,11 +4363,17 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // AbortOp: terminal abort
+        // AbortOp: terminal abort from Provisioning only.
+        // The sole shell caller (`abort_provisioning`) aborts a spawn-in-flight
+        // op; the DSL guard narrows legality to `Provisioning` to keep the
+        // semantic boundary crisp.
         transition AbortOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AbortOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Aborted);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -4357,11 +4384,15 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // PeerReadyOp: mark operation's peer as ready
+        // PeerReadyOp: mark operation's peer as ready (Running|Retiring only).
         transition PeerReadyOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerReadyOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_peer_ready.insert(operation_id, true);
             }
@@ -4369,11 +4400,15 @@ machine! {
             emit SubmitOpEvent { operation_id: operation_id }
         }
 
-        // ProgressReportedOp: progress tick (increments per-op counter)
+        // ProgressReportedOp: progress tick (Running|Retiring only).
         transition ProgressReportedOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ProgressReportedOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_progress_counts.increment(operation_id, 1);
             }
@@ -4381,12 +4416,14 @@ machine! {
             emit SubmitOpEvent { operation_id: operation_id }
         }
 
-        // RetireRequestedOp: advance Running -> Retiring (non-terminal).
-        // Shell enforces Running pre-state; DSL records the status transition.
+        // RetireRequestedOp: Running -> Retiring (non-terminal).
         transition RetireRequestedOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RetireRequestedOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Retiring);
             }
@@ -4399,6 +4436,10 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RetireCompletedOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Retired);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -4411,11 +4452,17 @@ machine! {
 
         // TerminateOp: bulk-terminate variant used by owner-terminated cascade.
         // Shell loops across non-terminal ops and issues one TerminateOp each;
-        // the session lock provides cascade atomicity.
+        // the session lock provides cascade atomicity. Legal only from any
+        // non-terminal state — terminal-state TerminateOp is a guard rejection.
         transition TerminateOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input TerminateOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Terminated);
                 self.op_terminal_outcomes.insert(operation_id, outcome);

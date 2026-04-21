@@ -273,6 +273,15 @@ pub enum ExprDef {
         map: Box<ExprDef>,
         key: Box<ExprDef>,
     },
+    /// Map lookup returning `Option<V>` (not `Option<&V>`) — emits
+    /// `.get(&k).copied()`. Required when the guard compares a map value
+    /// against a typed enum literal like `Some(OperationStatus::Running)`:
+    /// plain `MapGet` returns `Option<&V>` which has no `PartialEq` impl
+    /// against `Option<V>`. `V` must be `Copy`.
+    MapGetCopied {
+        map: Box<ExprDef>,
+        key: Box<ExprDef>,
+    },
     MapKeys(Box<ExprDef>),
 
     // Quantifiers

@@ -696,6 +696,15 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     key: Box::new(key),
                 };
             }
+            "get_copied" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let key = parse_expr(&paren)?;
+                expr = ExprDef::MapGetCopied {
+                    map: Box::new(expr),
+                    key: Box::new(key),
+                };
+            }
             _ => {
                 return Err(syn::Error::new(
                     method.span(),

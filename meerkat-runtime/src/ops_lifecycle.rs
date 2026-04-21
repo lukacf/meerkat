@@ -7,6 +7,13 @@
 //! channels, timestamps, peer handles, snapshot assembly, FIFO eviction
 //! bookkeeping, the completion feed buffer, and concurrency-limit / duplicate
 //! / peer-expectation admission checks run BEFORE the DSL apply.
+//!
+//! Per-transition legality ("is `CompleteOp` legal on a `Provisioning` op?")
+//! is NOT owned by the shell — it lives in the DSL's `from_status_valid`
+//! guards on each op-lifecycle transition. The shell's only job on a
+//! `GuardRejected` rejection is to surface the pre-read status back to the
+//! caller as [`OpsLifecycleError::InvalidTransition`]; see
+//! [`classify_op_rejection`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -376,20 +383,33 @@ impl ShellState {
     }
 
     /// Apply a DSL input, mapping transition errors into
-    /// [`OpsLifecycleError::Internal`]. Callers are expected to have
-    /// validated preconditions already; a DSL rejection here indicates a
-    /// shell/DSL desync that should surface as an internal error.
+    /// [`OpsLifecycleError::Internal`]. Callers that need to distinguish
+    /// guard rejections (legal-transition violations) from internal desync
+    /// should use [`Self::dsl_apply_raw`] and classify the error themselves;
+    /// this helper is for DSL inputs whose preconditions the caller has
+    /// already fully validated (e.g., `RequestWaitAll`, `SatisfyWaitAll`).
     fn dsl_apply(
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<(), OpsLifecycleError> {
-        match mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input) {
-            Ok(_) => Ok(()),
-            Err(err) => Err(OpsLifecycleError::Internal(format!(
-                "DSL rejected ops transition ({context}): {err:?}"
-            ))),
-        }
+        self.dsl_apply_raw(input).map_err(|err| {
+            OpsLifecycleError::Internal(format!("DSL rejected ops transition ({context}): {err:?}"))
+        })
+    }
+
+    /// Apply a DSL input, returning the raw kernel-level rejection so callers
+    /// can distinguish `GuardRejected` (a legitimate legality violation, e.g.,
+    /// `complete_operation` on a `Provisioning` op) from
+    /// `NoMatchingTransition` (a shell/DSL desync). Every op-lifecycle entry
+    /// point (complete/fail/abort/cancel/start/retire/terminate/progress)
+    /// uses this form and synthesises [`OpsLifecycleError::InvalidTransition`]
+    /// on `GuardRejected`.
+    fn dsl_apply_raw(
+        &mut self,
+        input: mm_dsl::MeerkatMachineInput,
+    ) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
+        mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map(|_transition| ())
     }
 
     /// Serialize the provided terminal outcome for DSL storage.
@@ -1112,36 +1132,46 @@ impl Drop for WaitAllFuture<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for status-transition legality pre-checks
+// Shell → DSL error classification
 // ---------------------------------------------------------------------------
+//
+// Transition legality (which "from" statuses each op-lifecycle transition is
+// legal from) is owned by the MeerkatMachine DSL's `from_status_valid` guards.
+// The shell's only job when a DSL transition is rejected is to surface the
+// pre-read status back to the caller as [`OpsLifecycleError::InvalidTransition`].
+//
+// Each op-lifecycle entry point follows the same shape:
+//   1. Pre-read `status(id)` under the write lock. `None` → `NotFound`.
+//   2. Fire the DSL input via `dsl_apply_raw`.
+//   3. On `GuardRejected`, synthesise `InvalidTransition { status, action }`.
+//   4. On `NoMatchingTransition`, surface as `Internal` (genuine desync).
+//
+// The `action` label is a short, human-readable name of the shell entry point
+// — matches the names formerly passed to the deleted `require_status`.
 
-fn terminal_action(status: OperationStatus) -> &'static str {
-    match status {
-        OperationStatus::Completed => "complete_operation",
-        OperationStatus::Failed => "fail_operation",
-        OperationStatus::Aborted => "abort_provisioning",
-        OperationStatus::Cancelled => "cancel_operation",
-        OperationStatus::Retired => "mark_retired",
-        OperationStatus::Terminated => "terminate_owner",
-        _ => "unknown_terminal",
-    }
-}
-
-/// Check that the current status is in `allowed` for the named `action`.
-fn require_status(
+/// Classify a kernel rejection from an op-lifecycle DSL apply.
+///
+/// `GuardRejected` → `InvalidTransition { id, status, action }`. The pre-read
+/// `status` and the DSL's guard observation come from the same canonical map
+/// under a single write lock, so they cannot diverge.
+/// `NoMatchingTransition` → `Internal` (genuine shell/DSL desync).
+fn classify_op_rejection(
+    err: mm_dsl::MeerkatMachineTransitionError,
     id: &OperationId,
-    current: OperationStatus,
-    allowed: &[OperationStatus],
+    status: OperationStatus,
     action: &'static str,
-) -> Result<(), OpsLifecycleError> {
-    if allowed.contains(&current) {
-        Ok(())
-    } else {
-        Err(OpsLifecycleError::InvalidTransition {
-            id: id.clone(),
-            status: current,
-            action,
-        })
+) -> OpsLifecycleError {
+    match err {
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
+            OpsLifecycleError::InvalidTransition {
+                id: id.clone(),
+                status,
+                action,
+            }
+        }
+        other => OpsLifecycleError::Internal(format!(
+            "DSL rejected ops transition ({action}): {other:?}"
+        )),
     }
 }
 
@@ -1185,19 +1215,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Provisioning],
-            "provisioning_succeeded",
-        )?;
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::StartOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-            },
-            "StartOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::StartOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+        }) {
+            return Err(classify_op_rejection(
+                err,
+                id,
+                status,
+                "provisioning_succeeded",
+            ));
+        }
 
         // Shell concern: record the started timestamp.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1216,23 +1244,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Provisioning],
-            terminal_action(OperationStatus::Failed),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::FailOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "FailOp (provisioning_failed)",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "fail_operation"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1253,28 +1274,20 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .kind(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
-        // Guard: must be MobMemberChild.
+        // Shell-owned guards (domain-shape concerns, not transition legality):
+        // peer-ready is only meaningful for MobMemberChild ops, and only once.
         if kind != OperationKind::MobMemberChild {
             return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
         }
-        // Guard: must not already be peer-ready.
         if state.peer_ready(id).unwrap_or(false) {
             return Err(OpsLifecycleError::AlreadyPeerReady(id.clone()));
         }
-        // Guard: must be Running or Retiring.
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Running, OperationStatus::Retiring],
-            "peer_ready",
-        )?;
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::PeerReadyOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-            },
-            "PeerReadyOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::PeerReadyOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "peer_ready"));
+        }
 
         // Shell concern: store the peer handle.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1315,19 +1328,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Running, OperationStatus::Retiring],
-            "report_progress",
-        )?;
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::ProgressReportedOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-            },
-            "ProgressReportedOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::ProgressReportedOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "report_progress"));
+        }
         Ok(())
     }
 
@@ -1341,23 +1347,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Running, OperationStatus::Retiring],
-            terminal_action(OperationStatus::Completed),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::CompleteOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "CompleteOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CompleteOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "complete_operation"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1370,27 +1369,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[
-                OperationStatus::Provisioning,
-                OperationStatus::Running,
-                OperationStatus::Retiring,
-            ],
-            terminal_action(OperationStatus::Failed),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::FailOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "FailOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "fail_operation"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1407,23 +1395,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Provisioning],
-            terminal_action(OperationStatus::Aborted),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::AbortOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "AbortOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::AbortOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1440,27 +1421,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[
-                OperationStatus::Provisioning,
-                OperationStatus::Running,
-                OperationStatus::Retiring,
-            ],
-            terminal_action(OperationStatus::Cancelled),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::CancelOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "CancelOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CancelOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "cancel_operation"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1473,14 +1443,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(id, status, &[OperationStatus::Running], "request_retire")?;
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::RetireRequestedOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-            },
-            "RetireRequestedOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireRequestedOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "request_retire"));
+        }
         Ok(())
     }
 
@@ -1490,23 +1458,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        require_status(
-            id,
-            status,
-            &[OperationStatus::Running, OperationStatus::Retiring],
-            terminal_action(OperationStatus::Retired),
-        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Retired;
         let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.dsl_apply(
-            mm_dsl::MeerkatMachineInput::RetireCompletedOp {
-                operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: outcome_serialized,
-            },
-            "RetireCompletedOp",
-        )?;
+        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireCompletedOp {
+            operation_id: mm_dsl::OperationId::from_domain(id).0,
+            outcome: outcome_serialized,
+        }) {
+            return Err(classify_op_rejection(err, id, status, "mark_retired"));
+        }
 
         state.finalize_terminal(id);
         state.maybe_persist();
@@ -1536,26 +1497,34 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         // Collect non-terminal op IDs — the shell loop mirrors the old
-        // OwnerTerminated cascade; session lock serialises the batch.
-        let to_terminate: Vec<OperationId> = state
+        // OwnerTerminated cascade; session lock serialises the batch. The
+        // DSL's `TerminateOp` transition guards on the same non-terminal set,
+        // so guard rejection here indicates a genuine state desync rather
+        // than the common already-terminal no-op.
+        let to_terminate: Vec<(OperationId, OperationStatus)> = state
             .operation_ids()
             .into_iter()
-            .filter(|id| state.status(id).is_some_and(|s| !s.is_terminal()))
+            .filter_map(|id| state.status(&id).map(|s| (id, s)))
+            .filter(|(_, s)| !s.is_terminal())
             .collect();
 
-        for op_id in &to_terminate {
+        for (op_id, status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
             let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-            state.dsl_apply(
-                mm_dsl::MeerkatMachineInput::TerminateOp {
-                    operation_id: mm_dsl::OperationId::from_domain(op_id).0,
-                    outcome: outcome_serialized,
-                },
-                "TerminateOp",
-            )?;
+            if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
+                operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+                outcome: outcome_serialized,
+            }) {
+                return Err(classify_op_rejection(
+                    err,
+                    op_id,
+                    *status,
+                    "terminate_owner",
+                ));
+            }
 
             state.finalize_terminal(op_id);
         }

@@ -336,6 +336,14 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let key_e = gen_schema_expr(key);
             quote! { Expr::MapGet { map: Box::new(#map_e), key: Box::new(#key_e) } }
         }
+        ExprDef::MapGetCopied { map, key } => {
+            // Schema-side, `get_copied` is indistinguishable from `get` — both
+            // are lookups into the same map keyed on the same expression. The
+            // `.copied()` difference is a Rust codegen detail.
+            let map_e = gen_schema_expr(map);
+            let key_e = gen_schema_expr(key);
+            quote! { Expr::MapGet { map: Box::new(#map_e), key: Box::new(#key_e) } }
+        }
         ExprDef::MapKeys(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::MapKeys(Box::new(#inner_e)) }

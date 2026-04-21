@@ -419,6 +419,11 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let k = gen_expr(key, prefix);
             quote! { #m.get(&#k) }
         }
+        ExprDef::MapGetCopied { map, key } => {
+            let m = gen_expr(map, prefix);
+            let k = gen_expr(key, prefix);
+            quote! { #m.get(&#k).copied() }
+        }
         ExprDef::MapKeys(inner) => {
             let e = gen_expr(inner, prefix);
             quote! { #e.keys().cloned().collect::<std::collections::BTreeSet<_>>() }

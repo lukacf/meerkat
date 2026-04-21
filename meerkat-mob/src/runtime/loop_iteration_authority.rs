@@ -178,6 +178,7 @@ fn parse_loop_id(effect: &KernelEffect, field: &KernelField) -> Result<LoopId, M
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn until_request_parses_from_kernel_effect() {

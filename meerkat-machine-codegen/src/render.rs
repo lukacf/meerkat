@@ -357,7 +357,7 @@ fn render_include_kernel_source(path: &str, catalog_fn: &str) -> String {
         }
     };
     format!(
-        "mod source {{\n#![allow(warnings)]\n#![allow(clippy::expect_used)]\n{source}\n}}\npub use source::*;\n\npub fn schema() -> meerkat_machine_schema::MachineSchema {{\n    meerkat_machine_schema::{catalog_fn}()\n}}\n"
+        "mod source {{\n#![allow(clippy::expect_used)]\n{source}\n}}\npub use source::*;\n\npub fn schema() -> meerkat_machine_schema::MachineSchema {{\n    meerkat_machine_schema::{catalog_fn}()\n}}\n"
     )
 }
 

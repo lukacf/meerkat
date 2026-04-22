@@ -22,7 +22,7 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine,
+    compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine},
 };
 use serde::Serialize;
 

@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_machine_schema::{
-    Expr, MachineSchema, canonical_machine_schemas, flow_frame_machine, flow_run_machine,
-    loop_iteration_machine,
+    Expr, MachineSchema, canonical_machine_schemas,
+    compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine},
 };
 
 fn row22_machine_schemas() -> Vec<MachineSchema> {

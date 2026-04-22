@@ -812,7 +812,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.status != expected || run.status.is_terminal() {
                 return Ok(false);
             }
@@ -857,7 +857,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected {
                 return Ok(false);
             }
@@ -900,7 +900,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.status != expected_status
                 || run.status.is_terminal()
                 || run.flow_state != expected_flow_state
@@ -947,7 +947,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             run.step_ledger.push(entry);
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -983,7 +983,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             let is_duplicate = run.step_ledger.iter().any(|existing| {
                 existing.step_id == entry.step_id
                     && existing.agent_identity == entry.agent_identity
@@ -1029,7 +1029,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if let Some(entry) = run
                 .step_ledger
                 .iter_mut()
@@ -1076,7 +1076,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             run.failure_ledger.push(entry);
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -1108,7 +1108,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             run.loops.insert(loop_instance_id, snapshot);
             if let Some(entry) = ledger_entry {
                 append_loop_iteration_ledger_if_absent(&mut run, entry);
@@ -1139,7 +1139,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             let current = run.frames.get(&frame_id);
             let matches = match (expected.as_ref(), current) {
                 (None, None) => true,
@@ -1179,7 +1179,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -1219,7 +1219,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.frames.get(&frame_id) != Some(&expected_frame) {
                 return Ok(false);
             }
@@ -1276,7 +1276,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -1318,7 +1318,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -1361,7 +1361,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -1410,7 +1410,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -1458,7 +1458,7 @@ impl MobRunStore for SqliteMobRunStore {
             let Some(bytes) = bytes else {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
-            let mut run: MobRun = decode_json(&bytes)?;
+            let mut run = decode_run_json(&bytes)?;
             if run.flow_state != expected_run_state {
                 return Ok(false);
             }
@@ -2170,6 +2170,41 @@ mod tests {
 
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, target_run_id);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_cas_run_status_rejects_active_pre_row22_rows() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let run_store = stores.run_store();
+        let run_id = RunId::new();
+        let mob_id = MobId::from("legacy-mob");
+        let flow_id = FlowId::from("legacy-flow");
+
+        {
+            let conn = open_connection(&path).expect("open sqlite");
+            conn.execute(
+                "INSERT INTO mob_runs (run_id, run_json) VALUES (?1, ?2)",
+                params![
+                    run_id.to_string(),
+                    legacy_run_json(&run_id, &mob_id, &flow_id, MobRunStatus::Running)
+                ],
+            )
+            .expect("insert legacy row");
+        }
+
+        let error = run_store
+            .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Canceled)
+            .await
+            .expect_err("active legacy row should fail typed hard cut");
+
+        assert!(matches!(
+            error,
+            MobStoreError::UnsupportedRunSchema {
+                schema_version: 4,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use meerkat_machine_schema::catalog::{
 };
 use meerkat_machine_schema::{
     CompositionSchema, MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine,
+    compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine},
 };
 
 #[test]

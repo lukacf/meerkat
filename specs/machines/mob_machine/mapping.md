@@ -52,6 +52,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `KickoffMarkStartingCompleted`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffResolveCallbackPendingRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffResolveCallbackPendingStopped`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffResolveCallbackPendingCompleted`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `KickoffResolveStartedRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`

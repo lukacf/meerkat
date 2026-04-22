@@ -1397,9 +1397,9 @@ impl MobSessionService for MockSessionService {
                 "session {session_id}"
             )));
         }
-        Ok(Box::pin(
-            futures::stream::empty::<EventEnvelope<AgentEvent>>(),
-        ))
+        Ok(Box::pin(futures::stream::pending::<
+            EventEnvelope<AgentEvent>,
+        >()))
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -1435,20 +1435,31 @@ impl MobSessionService for MockSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        <Self as SessionService>::start_turn(self, session_id, req).await?;
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                run_id,
-                boundary,
-                contributing_input_ids,
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            terminal: None,
-            run_result: None,
-        })
+        let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+            run_id,
+            boundary,
+            contributing_input_ids,
+            conversation_digest: None,
+            message_count: 0,
+            sequence: 0,
+        };
+        match <Self as SessionService>::start_turn(self, session_id, req).await {
+            Ok(_) => Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt,
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            }),
+            Err(SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+                tool_name,
+                args,
+            })) => Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_callback_pending(
+                    receipt, None, tool_name, args,
+                ),
+            ),
+            Err(error) => Err(error),
+        }
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -5703,6 +5714,100 @@ async fn test_failed_respawn_releases_preserved_realtime_binding() {
 }
 
 #[tokio::test]
+async fn test_failed_respawn_releases_rotated_realtime_binding_identity() {
+    use super::state::MemberRealtimeBindingEvent;
+
+    let (handle, service) = create_test_mob(sample_definition_with_auto_wire()).await;
+    let lead = MeerkatId::from("respawn-rotate-lead");
+    let worker = MeerkatId::from("respawn-rotate-worker");
+    let worker_identity = AgentIdentity::from(worker.as_str());
+
+    handle
+        .spawn(ProfileName::from("lead"), lead.clone(), None)
+        .await
+        .expect("spawn lead");
+    let original_session_id = handle
+        .spawn(ProfileName::from("worker"), worker.clone(), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .cloned()
+        .expect("worker session");
+
+    service
+        .set_comms_behavior(
+            &test_comms_name("lead", lead.as_str()),
+            MockCommsBehavior {
+                fail_send_peer_added: true,
+                fail_remove_trust_once: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let mut rx = handle.subscribe_realtime_binding_events();
+
+    let error = handle
+        .respawn(worker_identity.clone(), Some("continue work".into()))
+        .await
+        .expect_err("respawn should fail after rotating the binding");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::handle::MobRespawnError::SpawnAfterRetire { .. }
+        ),
+        "respawn should surface a post-retire replacement failure: {error:?}"
+    );
+
+    let rotated_event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("rotated binding event timeout")
+        .expect("rotated binding event");
+    let rotated_session_id = match rotated_event {
+        MemberRealtimeBindingEvent::Rotated {
+            agent_identity,
+            old_session_id,
+            new_session_id,
+            ..
+        } => {
+            assert_eq!(agent_identity, worker_identity);
+            assert_eq!(old_session_id, original_session_id);
+            assert_ne!(new_session_id, original_session_id);
+            new_session_id
+        }
+        other => panic!("respawn failure should still rotate before cleanup, got {other:?}"),
+    };
+
+    let released_event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("released binding event timeout")
+        .expect("released binding event");
+    match released_event {
+        MemberRealtimeBindingEvent::Released {
+            agent_identity,
+            session_id,
+            ..
+        } => {
+            assert_eq!(agent_identity, worker_identity);
+            assert_eq!(
+                session_id, rotated_session_id,
+                "cleanup must release the binding that was actually current after rotation"
+            );
+        }
+        other => panic!("respawn cleanup should emit Released, got {other:?}"),
+    }
+
+    assert_eq!(
+        handle
+            .current_realtime_binding(worker_identity.clone())
+            .await
+            .expect("current binding readable after failed respawn"),
+        None,
+        "failed respawn cleanup must clear the canonical realtime binding map"
+    );
+}
+
+#[tokio::test]
 async fn test_wait_one_returns_terminal_unknown_for_missing_member() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let snapshot = handle
@@ -5926,7 +6031,7 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
 }
 
 #[tokio::test]
-async fn test_wait_for_kickoff_complete_returns_failed_snapshot_for_callback_boundary() {
+async fn test_wait_for_kickoff_complete_times_out_while_callback_boundary_is_pending() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_keep_alive_turns_callback_pending(true);
 
@@ -5936,27 +6041,32 @@ async fn test_wait_for_kickoff_complete_returns_failed_snapshot_for_callback_bou
         .await
         .expect("spawn lead");
 
-    let snapshots = handle
-        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+    let error = handle
+        .wait_for_kickoff_complete(Some(Duration::from_millis(50)))
         .await
-        .expect("callback boundary should resolve kickoff as failed");
+        .expect_err("callback boundary should remain resumable rather than failing");
 
-    let kickoff = snapshots[0]
-        .1
+    assert!(
+        matches!(error, MobError::KickoffWaitTimedOut { .. }),
+        "callback-pending kickoff should keep the barrier waiting"
+    );
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from(member.as_str()))
+        .await
+        .expect("member status");
+    let kickoff = snapshot
         .kickoff
         .as_ref()
         .expect("autonomous member should expose kickoff state");
     assert_eq!(
         kickoff.phase,
-        crate::roster::MobMemberKickoffPhase::Failed,
-        "unsupported kickoff callback boundary must become a terminal failed kickoff"
+        crate::roster::MobMemberKickoffPhase::CallbackPending,
+        "callback boundary should stay resumable until the interaction resolves"
     );
     assert!(
-        kickoff
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("external_mock")),
-        "callback failure should preserve the tool identity in the kickoff error"
+        kickoff.error.is_none(),
+        "callback-pending kickoff should not carry a terminal error"
     );
 }
 
@@ -20590,6 +20700,7 @@ struct MobRuntimeParitySnapshotSummary {
     member_startup_ready: BTreeSet<String>,
     member_kickoff_pending: BTreeSet<String>,
     member_kickoff_starting: BTreeSet<String>,
+    member_kickoff_callback_pending: BTreeSet<String>,
     member_kickoff_started: BTreeSet<String>,
     member_kickoff_failed: BTreeSet<String>,
     member_kickoff_cancelled: BTreeSet<String>,
@@ -21295,6 +21406,11 @@ async fn mob_runtime_parity_snapshot_summary(
             .expect("serialize member_kickoff_starting"),
     );
     formal_available_fields.insert(
+        "member_kickoff_callback_pending".into(),
+        serde_json::to_string(&startup_kickoff.member_kickoff_callback_pending_ids)
+            .expect("serialize member_kickoff_callback_pending"),
+    );
+    formal_available_fields.insert(
         "member_kickoff_started".into(),
         serde_json::to_string(&startup_kickoff.member_kickoff_started_ids)
             .expect("serialize member_kickoff_started"),
@@ -21380,6 +21496,7 @@ async fn mob_runtime_parity_snapshot_summary(
         member_startup_ready: startup_kickoff.member_startup_ready,
         member_kickoff_pending: startup_kickoff.member_kickoff_pending_ids,
         member_kickoff_starting: startup_kickoff.member_kickoff_starting_ids,
+        member_kickoff_callback_pending: startup_kickoff.member_kickoff_callback_pending_ids,
         member_kickoff_started: startup_kickoff.member_kickoff_started_ids,
         member_kickoff_failed: startup_kickoff.member_kickoff_failed_ids,
         member_kickoff_cancelled: startup_kickoff.member_kickoff_cancelled_ids,
@@ -21483,6 +21600,9 @@ fn mob_runtime_parity_field_value(
         )),
         "member_kickoff_starting" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_kickoff_starting.clone(),
+        )),
+        "member_kickoff_callback_pending" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.member_kickoff_callback_pending.clone(),
         )),
         "member_kickoff_started" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_kickoff_started.clone(),

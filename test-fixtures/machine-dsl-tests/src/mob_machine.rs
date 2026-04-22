@@ -1,4 +1,5 @@
 use meerkat_machine_dsl::machine;
+use meerkat_machine_schema::catalog::dsl::mob_machine::SessionId;
 
 machine! {
     machine MobMachine {
@@ -37,7 +38,7 @@ machine! {
             RunFlow,
             CancelFlow,
             FlowStatus,
-            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
+            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
             Retire { agent_runtime_id: AgentRuntimeId },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
@@ -165,7 +166,7 @@ machine! {
         // Spawn is a Running self-loop: the real runtime starts in Running
         // and does not expose a durable pre-start top-level phase.
         transition SpawnRunning {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {
@@ -1087,6 +1088,8 @@ mod tests {
                 fence_token: FenceToken(1),
                 generation: Generation(0),
                 external_addressable: true,
+                bridge_session_id: SessionId::from("session-1"),
+                replacing: None,
             },
         )
         .unwrap();
@@ -1200,6 +1203,8 @@ mod tests {
                 fence_token: FenceToken(1),
                 generation: Generation(0),
                 external_addressable: true,
+                bridge_session_id: SessionId::from("session-1"),
+                replacing: None,
             },
         )
         .unwrap();
@@ -1226,6 +1231,14 @@ mod tests {
                 (
                     "external_addressable".into(),
                     meerkat_machine_kernels::KernelValue::Bool(true),
+                ),
+                (
+                    "bridge_session_id".into(),
+                    meerkat_machine_kernels::KernelValue::String("session-1".into()),
+                ),
+                (
+                    "replacing".into(),
+                    meerkat_machine_kernels::KernelValue::None,
                 ),
             ]),
         };

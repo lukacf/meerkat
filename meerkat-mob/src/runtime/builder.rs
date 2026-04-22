@@ -148,6 +148,12 @@ fn seed_mob_authority_sync_from_roster(
                         .member_kickoff_starting
                         .insert(member_id.clone());
                 }
+                crate::roster::MobMemberKickoffPhase::CallbackPending => {
+                    authority
+                        .state
+                        .member_kickoff_callback_pending
+                        .insert(member_id.clone());
+                }
                 crate::roster::MobMemberKickoffPhase::Started => {
                     authority
                         .state

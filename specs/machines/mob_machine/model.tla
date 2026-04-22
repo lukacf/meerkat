@@ -26,9 +26,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings
+VARIABLES phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings
 
-vars == << phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+vars == << phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 Init ==
     /\ phase = "Running"
@@ -44,6 +44,7 @@ Init ==
     /\ member_startup_ready = {}
     /\ member_kickoff_pending = {}
     /\ member_kickoff_starting = {}
+    /\ member_kickoff_callback_pending = {}
     /\ member_kickoff_started = {}
     /\ member_kickoff_failed = {}
     /\ member_kickoff_cancelled = {}
@@ -75,7 +76,7 @@ SpawnRunningFresh(agent_identity, agent_runtime_id, fence_token, generation, ext
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
     /\ member_realtime_bindings' = MapSet(member_realtime_bindings, agent_identity, bridge_session_id)
-    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 SpawnRunningReplacing(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing) ==
@@ -93,7 +94,7 @@ SpawnRunningReplacing(agent_identity, agent_runtime_id, fence_token, generation,
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
     /\ member_realtime_bindings' = MapSet(member_realtime_bindings, agent_identity, bridge_session_id)
-    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 ObserveRuntimeReady(agent_runtime_id, fence_token) ==
@@ -104,7 +105,7 @@ ObserveRuntimeReady(agent_runtime_id, fence_token) ==
     /\ member_startup_binding_requested' = (member_startup_binding_requested \ {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \cup {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StartupMarkReadyRunning(agent_runtime_id, fence_token) ==
@@ -115,7 +116,7 @@ StartupMarkReadyRunning(agent_runtime_id, fence_token) ==
     /\ member_startup_binding_requested' = (member_startup_binding_requested \ {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \cup {agent_runtime_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StartupMarkReadyStopped(agent_runtime_id, fence_token) ==
@@ -126,7 +127,7 @@ StartupMarkReadyStopped(agent_runtime_id, fence_token) ==
     /\ member_startup_binding_requested' = (member_startup_binding_requested \ {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \cup {agent_runtime_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StartupMarkReadyCompleted(agent_runtime_id, fence_token) ==
@@ -137,16 +138,17 @@ StartupMarkReadyCompleted(agent_runtime_id, fence_token) ==
     /\ member_startup_binding_requested' = (member_startup_binding_requested \ {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \cup {agent_runtime_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 KickoffMarkPendingRunning(member_id) ==
     /\ phase = "Running"
-    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
+    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_callback_pending)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \cup {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -156,11 +158,12 @@ KickoffMarkPendingRunning(member_id) ==
 
 KickoffMarkPendingStopped(member_id) ==
     /\ phase = "Stopped"
-    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
+    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_callback_pending)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \cup {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -170,11 +173,12 @@ KickoffMarkPendingStopped(member_id) ==
 
 KickoffMarkPendingCompleted(member_id) ==
     /\ phase = "Completed"
-    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
+    /\ (~((member_id \in member_kickoff_pending)) /\ ~((member_id \in member_kickoff_starting)) /\ ~((member_id \in member_kickoff_callback_pending)) /\ ~((member_id \in member_kickoff_started)) /\ ~((member_id \in member_kickoff_failed)) /\ ~((member_id \in member_kickoff_cancelled)))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \cup {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -189,6 +193,7 @@ KickoffMarkStartingRunning(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \cup {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -203,6 +208,7 @@ KickoffMarkStartingStopped(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \cup {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -217,6 +223,52 @@ KickoffMarkStartingCompleted(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \cup {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+
+
+KickoffResolveCallbackPendingRunning(member_id) ==
+    /\ phase = "Running"
+    /\ (member_id \in member_kickoff_starting)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \cup {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+
+
+KickoffResolveCallbackPendingStopped(member_id) ==
+    /\ phase = "Stopped"
+    /\ (member_id \in member_kickoff_starting)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \cup {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+
+
+KickoffResolveCallbackPendingCompleted(member_id) ==
+    /\ phase = "Completed"
+    /\ (member_id \in member_kickoff_starting)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \cup {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -226,11 +278,12 @@ KickoffMarkStartingCompleted(member_id) ==
 
 KickoffResolveStartedRunning(member_id) ==
     /\ phase = "Running"
-    /\ (member_id \in member_kickoff_starting)
+    /\ ((member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \cup {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -240,11 +293,12 @@ KickoffResolveStartedRunning(member_id) ==
 
 KickoffResolveStartedStopped(member_id) ==
     /\ phase = "Stopped"
-    /\ (member_id \in member_kickoff_starting)
+    /\ ((member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \cup {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -254,11 +308,12 @@ KickoffResolveStartedStopped(member_id) ==
 
 KickoffResolveStartedCompleted(member_id) ==
     /\ phase = "Completed"
-    /\ (member_id \in member_kickoff_starting)
+    /\ ((member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \cup {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -268,11 +323,12 @@ KickoffResolveStartedCompleted(member_id) ==
 
 KickoffResolveFailedFromStartingRunning(member_id, error) ==
     /\ phase = "Running"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \cup {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -282,11 +338,12 @@ KickoffResolveFailedFromStartingRunning(member_id, error) ==
 
 KickoffResolveFailedFromStartingStopped(member_id, error) ==
     /\ phase = "Stopped"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \cup {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -296,11 +353,12 @@ KickoffResolveFailedFromStartingStopped(member_id, error) ==
 
 KickoffResolveFailedFromStartingCompleted(member_id, error) ==
     /\ phase = "Completed"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \cup {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -315,6 +373,7 @@ KickoffResolveCancelledRunning(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -329,6 +388,7 @@ KickoffResolveCancelledStopped(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -343,6 +403,7 @@ KickoffResolveCancelledCompleted(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -352,11 +413,12 @@ KickoffResolveCancelledCompleted(member_id) ==
 
 KickoffCancelRequestedRunning(member_id) ==
     /\ phase = "Running"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -366,11 +428,12 @@ KickoffCancelRequestedRunning(member_id) ==
 
 KickoffCancelRequestedStopped(member_id) ==
     /\ phase = "Stopped"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -380,11 +443,12 @@ KickoffCancelRequestedStopped(member_id) ==
 
 KickoffCancelRequestedCompleted(member_id) ==
     /\ phase = "Completed"
-    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting))
+    /\ ((member_id \in member_kickoff_pending) \/ (member_id \in member_kickoff_starting) \/ (member_id \in member_kickoff_callback_pending))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \cup {member_id})
@@ -398,6 +462,7 @@ KickoffClearRunning(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -411,6 +476,7 @@ KickoffClearStopped(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -424,6 +490,7 @@ KickoffClearCompleted(member_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -439,7 +506,7 @@ SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ (agent_runtime_id \in externally_addressable_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin) ==
@@ -449,7 +516,7 @@ SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ (origin = "Internal")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireMember(agent_runtime_id, fence_token) ==
@@ -458,7 +525,7 @@ RetireMember(agent_runtime_id, fence_token) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
@@ -474,7 +541,7 @@ ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
     /\ member_state_markers' = MapRemove(member_state_markers, agent_runtime_id)
-    /\ UNCHANGED << pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id) ==
@@ -491,6 +558,7 @@ ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -513,6 +581,7 @@ RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, externa
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
     /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
     /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
     /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
     /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
     /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
@@ -526,7 +595,7 @@ MarkCompleted ==
     /\ (active_run_count = 0)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 DestroyMob ==
@@ -544,6 +613,7 @@ DestroyMob ==
     /\ member_startup_ready' = {}
     /\ member_kickoff_pending' = {}
     /\ member_kickoff_starting' = {}
+    /\ member_kickoff_callback_pending' = {}
     /\ member_kickoff_started' = {}
     /\ member_kickoff_failed' = {}
     /\ member_kickoff_cancelled' = {}
@@ -584,62 +654,63 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ in_progress_task_ids' = {}
     /\ completed_task_ids' = {}
     /\ member_realtime_bindings' = [x \in {} |-> None]
+    /\ UNCHANGED << member_kickoff_callback_pending >>
 
 
 RecordOperatorActionProvenanceRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RecordOperatorActionProvenanceStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RecordOperatorActionProvenanceCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RecordOperatorActionProvenanceDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SetSpawnPolicyRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SetSpawnPolicyStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SetSpawnPolicyCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SetSpawnPolicyDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StopRunning ==
@@ -649,7 +720,7 @@ StopRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResumeStopped ==
@@ -657,7 +728,7 @@ ResumeStopped ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CompleteRunning ==
@@ -665,7 +736,7 @@ CompleteRunning ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResetToRunning ==
@@ -675,14 +746,14 @@ ResetToRunning ==
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 WireRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 TaskCreateRunning(task_id, task_payload) ==
@@ -691,7 +762,7 @@ TaskCreateRunning(task_id, task_payload) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ tasks' = MapSet(tasks, task_id, task_payload)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 TaskUpdateRunningPending(task_id, new_status) ==
@@ -702,7 +773,7 @@ TaskUpdateRunningPending(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
 
 
 TaskUpdateRunningInProgress(task_id, new_status) ==
@@ -713,7 +784,7 @@ TaskUpdateRunningInProgress(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \cup {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
 
 
 TaskUpdateRunningCompleted(task_id, new_status) ==
@@ -724,7 +795,7 @@ TaskUpdateRunningCompleted(task_id, new_status) ==
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
     /\ completed_task_ids' = (completed_task_ids \cup {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, member_realtime_bindings >>
 
 
 TaskUpdateRunningCancelled(task_id, new_status) ==
@@ -735,7 +806,7 @@ TaskUpdateRunningCancelled(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_realtime_bindings >>
 
 
 ForceCancelRunning ==
@@ -743,7 +814,7 @@ ForceCancelRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAgentEventsRunning ==
@@ -751,7 +822,7 @@ SubscribeAgentEventsRunning ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAgentEventsStopped ==
@@ -759,7 +830,7 @@ SubscribeAgentEventsStopped ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAgentEventsCompleted ==
@@ -767,7 +838,7 @@ SubscribeAgentEventsCompleted ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAgentEventsDestroyed ==
@@ -775,63 +846,63 @@ SubscribeAgentEventsDestroyed ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAllAgentEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAllAgentEventsStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAllAgentEventsCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeAllAgentEventsDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeMobEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeMobEventsStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeMobEventsCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 SubscribeMobEventsDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ShutdownRunning ==
@@ -840,7 +911,7 @@ ShutdownRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ShutdownStopped ==
@@ -849,7 +920,7 @@ ShutdownStopped ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ShutdownCompleted ==
@@ -858,7 +929,7 @@ ShutdownCompleted ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CancelFlowRunning ==
@@ -866,7 +937,7 @@ CancelFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 InitializeOrchestratorRunning ==
@@ -874,7 +945,7 @@ InitializeOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 BindCoordinatorRunning ==
@@ -882,7 +953,7 @@ BindCoordinatorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 UnbindCoordinatorRunning ==
@@ -890,7 +961,7 @@ UnbindCoordinatorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StageSpawnRunning ==
@@ -898,7 +969,7 @@ StageSpawnRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StopOrchestratorRunning ==
@@ -906,7 +977,7 @@ StopOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StopOrchestratorStopped ==
@@ -914,7 +985,7 @@ StopOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StopOrchestratorCompleted ==
@@ -922,7 +993,7 @@ StopOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResumeOrchestratorRunning ==
@@ -930,7 +1001,7 @@ ResumeOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResumeOrchestratorStopped ==
@@ -938,7 +1009,7 @@ ResumeOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ResumeOrchestratorCompleted ==
@@ -946,7 +1017,7 @@ ResumeOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 DestroyOrchestratorRunning ==
@@ -954,7 +1025,7 @@ DestroyOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 DestroyOrchestratorStopped ==
@@ -962,7 +1033,7 @@ DestroyOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 DestroyOrchestratorCompleted ==
@@ -970,70 +1041,70 @@ DestroyOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ForceCancelMemberRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 MemberPeerExposedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 MemberTerminalizedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 OperationPeerTrustedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 PeerInputAdmittedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 BeginCleanupStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 BeginCleanupCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 FinishCleanupStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 FinishCleanupCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RunFlowRunning ==
@@ -1042,7 +1113,7 @@ RunFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StartFlowRunning ==
@@ -1051,7 +1122,7 @@ StartFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CreateRunRunning ==
@@ -1059,7 +1130,7 @@ CreateRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 StartRunRunning ==
@@ -1067,14 +1138,14 @@ StartRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 UnwireRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CompleteFlowRunning ==
@@ -1083,7 +1154,7 @@ CompleteFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CompleteFlowRunningZero ==
@@ -1091,7 +1162,7 @@ CompleteFlowRunningZero ==
     /\ (active_run_count = 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 FinishRunRunning ==
@@ -1100,7 +1171,7 @@ FinishRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 FinishRunRunningZero ==
@@ -1108,7 +1179,7 @@ FinishRunRunningZero ==
     /\ (active_run_count = 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireRunningReleasing(agent_runtime_id, agent_identity, releasing) ==
@@ -1121,7 +1192,7 @@ RetireRunningReleasing(agent_runtime_id, agent_identity, releasing) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
@@ -1133,7 +1204,7 @@ RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing) ==
@@ -1145,7 +1216,7 @@ RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing) ==
@@ -1158,7 +1229,7 @@ RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
@@ -1170,7 +1241,7 @@ RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
@@ -1182,7 +1253,7 @@ RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ReleaseRealtimeBindingRunning(agent_identity, session_id) ==
@@ -1191,7 +1262,7 @@ ReleaseRealtimeBindingRunning(agent_identity, session_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 ReleaseRealtimeBindingStopped(agent_identity, session_id) ==
@@ -1200,7 +1271,7 @@ ReleaseRealtimeBindingStopped(agent_identity, session_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 ReleaseRealtimeBindingCompleted(agent_identity, session_id) ==
@@ -1209,7 +1280,7 @@ ReleaseRealtimeBindingCompleted(agent_identity, session_id) ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 ReleaseRealtimeBindingDestroyed(agent_identity, session_id) ==
@@ -1218,7 +1289,7 @@ ReleaseRealtimeBindingDestroyed(agent_identity, session_id) ==
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 RetireAllRunning ==
@@ -1227,7 +1298,7 @@ RetireAllRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireAllStopped ==
@@ -1236,7 +1307,7 @@ RetireAllStopped ==
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CompleteSpawnRunning ==
@@ -1245,7 +1316,7 @@ CompleteSpawnRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 DestroyFromAny ==
@@ -1274,6 +1345,7 @@ DestroyFromAny ==
     /\ in_progress_task_ids' = {}
     /\ completed_task_ids' = {}
     /\ member_realtime_bindings' = [x \in {} |-> None]
+    /\ UNCHANGED << member_kickoff_callback_pending >>
 
 
 RespawnRunning(agent_runtime_id) ==
@@ -1282,7 +1354,7 @@ RespawnRunning(agent_runtime_id) ==
     /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 CancelAllWorkRunning(agent_runtime_id, fence_token) ==
@@ -1292,7 +1364,7 @@ CancelAllWorkRunning(agent_runtime_id, fence_token) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 Next ==
@@ -1308,6 +1380,9 @@ Next ==
     \/ \E member_id \in StringValues : KickoffMarkStartingRunning(member_id)
     \/ \E member_id \in StringValues : KickoffMarkStartingStopped(member_id)
     \/ \E member_id \in StringValues : KickoffMarkStartingCompleted(member_id)
+    \/ \E member_id \in StringValues : KickoffResolveCallbackPendingRunning(member_id)
+    \/ \E member_id \in StringValues : KickoffResolveCallbackPendingStopped(member_id)
+    \/ \E member_id \in StringValues : KickoffResolveCallbackPendingCompleted(member_id)
     \/ \E member_id \in StringValues : KickoffResolveStartedRunning(member_id)
     \/ \E member_id \in StringValues : KickoffResolveStartedStopped(member_id)
     \/ \E member_id \in StringValues : KickoffResolveStartedCompleted(member_id)
@@ -1418,8 +1493,8 @@ Next ==
 
 bindings_require_known_identity == (\A id \in DOMAIN member_realtime_bindings : (id \in DOMAIN identity_to_runtime))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(live_runtime_ids) <= 1 /\ Cardinality(externally_addressable_runtime_ids) <= 1 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 1 /\ Cardinality(member_startup_binding_requested) <= 1 /\ Cardinality(member_startup_runtime_ready) <= 1 /\ Cardinality(member_startup_ready) <= 1 /\ Cardinality(member_kickoff_pending) <= 1 /\ Cardinality(member_kickoff_starting) <= 1 /\ Cardinality(member_kickoff_started) <= 1 /\ Cardinality(member_kickoff_failed) <= 1 /\ Cardinality(member_kickoff_cancelled) <= 1 /\ Cardinality(DOMAIN member_kickoff_error) <= 1 /\ Cardinality(DOMAIN member_state_markers) <= 1 /\ Cardinality(wiring_edges) <= 1 /\ Cardinality(DOMAIN identity_to_runtime) <= 1 /\ Cardinality(DOMAIN tasks) <= 1 /\ Cardinality(in_progress_task_ids) <= 1 /\ Cardinality(completed_task_ids) <= 1 /\ Cardinality(DOMAIN member_realtime_bindings) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(live_runtime_ids) <= 2 /\ Cardinality(externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 2 /\ Cardinality(member_startup_binding_requested) <= 2 /\ Cardinality(member_startup_runtime_ready) <= 2 /\ Cardinality(member_startup_ready) <= 2 /\ Cardinality(member_kickoff_pending) <= 2 /\ Cardinality(member_kickoff_starting) <= 2 /\ Cardinality(member_kickoff_started) <= 2 /\ Cardinality(member_kickoff_failed) <= 2 /\ Cardinality(member_kickoff_cancelled) <= 2 /\ Cardinality(DOMAIN member_kickoff_error) <= 2 /\ Cardinality(DOMAIN member_state_markers) <= 2 /\ Cardinality(wiring_edges) <= 2 /\ Cardinality(DOMAIN identity_to_runtime) <= 2 /\ Cardinality(DOMAIN tasks) <= 2 /\ Cardinality(in_progress_task_ids) <= 2 /\ Cardinality(completed_task_ids) <= 2 /\ Cardinality(DOMAIN member_realtime_bindings) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(live_runtime_ids) <= 1 /\ Cardinality(externally_addressable_runtime_ids) <= 1 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 1 /\ Cardinality(member_startup_binding_requested) <= 1 /\ Cardinality(member_startup_runtime_ready) <= 1 /\ Cardinality(member_startup_ready) <= 1 /\ Cardinality(member_kickoff_pending) <= 1 /\ Cardinality(member_kickoff_starting) <= 1 /\ Cardinality(member_kickoff_callback_pending) <= 1 /\ Cardinality(member_kickoff_started) <= 1 /\ Cardinality(member_kickoff_failed) <= 1 /\ Cardinality(member_kickoff_cancelled) <= 1 /\ Cardinality(DOMAIN member_kickoff_error) <= 1 /\ Cardinality(DOMAIN member_state_markers) <= 1 /\ Cardinality(wiring_edges) <= 1 /\ Cardinality(DOMAIN identity_to_runtime) <= 1 /\ Cardinality(DOMAIN tasks) <= 1 /\ Cardinality(in_progress_task_ids) <= 1 /\ Cardinality(completed_task_ids) <= 1 /\ Cardinality(DOMAIN member_realtime_bindings) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(live_runtime_ids) <= 2 /\ Cardinality(externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 2 /\ Cardinality(member_startup_binding_requested) <= 2 /\ Cardinality(member_startup_runtime_ready) <= 2 /\ Cardinality(member_startup_ready) <= 2 /\ Cardinality(member_kickoff_pending) <= 2 /\ Cardinality(member_kickoff_starting) <= 2 /\ Cardinality(member_kickoff_callback_pending) <= 2 /\ Cardinality(member_kickoff_started) <= 2 /\ Cardinality(member_kickoff_failed) <= 2 /\ Cardinality(member_kickoff_cancelled) <= 2 /\ Cardinality(DOMAIN member_kickoff_error) <= 2 /\ Cardinality(DOMAIN member_state_markers) <= 2 /\ Cardinality(wiring_edges) <= 2 /\ Cardinality(DOMAIN identity_to_runtime) <= 2 /\ Cardinality(DOMAIN tasks) <= 2 /\ Cardinality(in_progress_task_ids) <= 2 /\ Cardinality(completed_task_ids) <= 2 /\ Cardinality(DOMAIN member_realtime_bindings) <= 2
 
 Spec == Init /\ [][Next]_vars
 

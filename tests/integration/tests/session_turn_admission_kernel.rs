@@ -26,6 +26,13 @@ fn string(value: &str) -> KernelValue {
     KernelValue::String(value.to_string())
 }
 
+fn named(type_name: &str, value: &str) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: value.into(),
+    }
+}
+
 fn input_with_fields(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
     KernelInput {
         variant: variant.into(),
@@ -75,7 +82,7 @@ fn session_turn_admission_kernel_attached_state_reached() {
         state.fields.get("active_runtime_id"),
         Some(&KernelValue::Map(BTreeMap::from([(
             KernelValue::String("value".to_string()),
-            KernelValue::String("runtime-7".to_string()),
+            named("AgentRuntimeId", "runtime-7"),
         )])))
     );
 }

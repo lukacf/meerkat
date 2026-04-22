@@ -90,6 +90,10 @@ pub mod field {
         super::KernelField::new_static("member_kickoff_starting")
     }
     #[must_use]
+    pub fn member_kickoff_callback_pending() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_callback_pending")
+    }
+    #[must_use]
     pub fn member_kickoff_started() -> super::KernelField {
         super::KernelField::new_static("member_kickoff_started")
     }
@@ -381,6 +385,10 @@ pub mod input {
         super::KernelInputVariant::new_static("StartupMarkReady")
     }
     #[must_use]
+    pub fn kickoff_resolve_callback_pending() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffResolveCallbackPending")
+    }
+    #[must_use]
     pub fn kickoff_resolve_started() -> super::KernelInputVariant {
         super::KernelInputVariant::new_static("KickoffResolveStarted")
     }
@@ -662,6 +670,18 @@ pub mod transition {
     #[must_use]
     pub fn kickoff_mark_starting_completed() -> super::KernelTransitionName {
         super::KernelTransitionName::new_static("KickoffMarkStartingCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingRunning")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingStopped")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingCompleted")
     }
     #[must_use]
     pub fn kickoff_resolve_started_running() -> super::KernelTransitionName {

@@ -398,7 +398,7 @@ enum TypeValidationMode {
 
 impl TypeValidationMode {
     const fn allows_named_string_coercion(self) -> bool {
-        matches!(self, Self::SchemaOwned)
+        matches!(self, Self::Boundary | Self::SchemaOwned)
     }
 }
 
@@ -2577,11 +2577,11 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
-    fn flow_frame_rejects_plain_string_for_named_id_payload() {
+    fn flow_frame_coerces_plain_string_named_id_payload_at_boundary() {
         let kernel = GeneratedMachineKernel::new(flow_frame_machine());
         let state = kernel.initial_state().expect("initial state");
 
-        let refusal = kernel
+        let outcome = kernel
             .transition(
                 &state,
                 &KernelInput {
@@ -2603,12 +2603,12 @@ mod tests {
                     ]),
                 },
             )
-            .expect_err("plain string frame_id should fail typed kernel validation");
+            .expect("plain string frame_id should be normalized at the public boundary");
 
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::InvalidInputPayload { .. }
-        ));
+        assert_eq!(
+            outcome.next_state.field(&KernelField::from("frame_id")),
+            Some(&named("FrameId", "frame-1"))
+        );
     }
 
     #[allow(clippy::expect_used)]

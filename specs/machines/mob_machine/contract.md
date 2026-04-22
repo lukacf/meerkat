@@ -18,6 +18,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_startup_ready`: `Set<AgentRuntimeId>`
 - `member_kickoff_pending`: `Set<String>`
 - `member_kickoff_starting`: `Set<String>`
+- `member_kickoff_callback_pending`: `Set<String>`
 - `member_kickoff_started`: `Set<String>`
 - `member_kickoff_failed`: `Set<String>`
 - `member_kickoff_cancelled`: `Set<String>`
@@ -71,6 +72,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `KickoffMarkPending`(member_id: String)
 - `KickoffMarkStarting`(member_id: String)
 - `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `KickoffResolveCallbackPending`(member_id: String)
 - `KickoffResolveStarted`(member_id: String)
 - `KickoffResolveFailed`(member_id: String, error: String)
 - `KickoffResolveCancelled`(member_id: String)
@@ -247,11 +249,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Completed`
 
+### `KickoffResolveCallbackPendingRunning`
+- From: `Running`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffResolveCallbackPendingStopped`
+- From: `Stopped`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffResolveCallbackPendingCompleted`
+- From: `Completed`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
 ### `KickoffResolveStartedRunning`
 - From: `Running`
 - On: `KickoffResolveStarted`(member_id)
 - Guards:
-  - `kickoff_starting`
+  - `kickoff_starting_or_callback_pending`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Running`
 
@@ -259,7 +285,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `KickoffResolveStarted`(member_id)
 - Guards:
-  - `kickoff_starting`
+  - `kickoff_starting_or_callback_pending`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Stopped`
 
@@ -267,7 +293,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `KickoffResolveStarted`(member_id)
 - Guards:
-  - `kickoff_starting`
+  - `kickoff_starting_or_callback_pending`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Completed`
 

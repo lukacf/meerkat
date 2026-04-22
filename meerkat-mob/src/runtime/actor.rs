@@ -227,8 +227,6 @@ struct RespawnSnapshot {
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
     binding: crate::RuntimeBinding,
-    /// Canonical realtime binding preserved through the retire-half of respawn.
-    preserved_realtime_binding: Option<mob_dsl::SessionId>,
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
@@ -938,6 +936,7 @@ impl MobActor {
         dsl.member_kickoff_pending
             .iter()
             .chain(dsl.member_kickoff_starting.iter())
+            .chain(dsl.member_kickoff_callback_pending.iter())
             .cloned()
             .collect()
     }
@@ -1074,6 +1073,9 @@ impl MobActor {
         match phase {
             crate::roster::MobMemberKickoffPhase::Pending => mob_dsl::KickoffPhase::Pending,
             crate::roster::MobMemberKickoffPhase::Starting => mob_dsl::KickoffPhase::Starting,
+            crate::roster::MobMemberKickoffPhase::CallbackPending => {
+                mob_dsl::KickoffPhase::CallbackPending
+            }
             crate::roster::MobMemberKickoffPhase::Started => mob_dsl::KickoffPhase::Started,
             crate::roster::MobMemberKickoffPhase::Failed => mob_dsl::KickoffPhase::Failed,
             crate::roster::MobMemberKickoffPhase::Cancelled => mob_dsl::KickoffPhase::Cancelled,
@@ -1086,6 +1088,9 @@ impl MobActor {
         match phase {
             mob_dsl::KickoffPhase::Pending => crate::roster::MobMemberKickoffPhase::Pending,
             mob_dsl::KickoffPhase::Starting => crate::roster::MobMemberKickoffPhase::Starting,
+            mob_dsl::KickoffPhase::CallbackPending => {
+                crate::roster::MobMemberKickoffPhase::CallbackPending
+            }
             mob_dsl::KickoffPhase::Started => crate::roster::MobMemberKickoffPhase::Started,
             mob_dsl::KickoffPhase::Failed => crate::roster::MobMemberKickoffPhase::Failed,
             mob_dsl::KickoffPhase::Cancelled => crate::roster::MobMemberKickoffPhase::Cancelled,
@@ -1099,7 +1104,10 @@ impl MobActor {
         match intent {
             KickoffIntent::Failed => Some("mob.kickoff_failed"),
             KickoffIntent::Cancelled => Some("mob.kickoff_cancelled"),
-            KickoffIntent::Pending | KickoffIntent::Starting | KickoffIntent::Started => None,
+            KickoffIntent::Pending
+            | KickoffIntent::Starting
+            | KickoffIntent::CallbackPending
+            | KickoffIntent::Started => None,
         }
     }
 
@@ -1149,25 +1157,35 @@ impl MobActor {
         Ok(true)
     }
 
+    fn current_realtime_binding_session_id(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<mob_dsl::SessionId> {
+        self.dsl_state()
+            .member_realtime_bindings
+            .get(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+            .cloned()
+    }
+
     async fn finalize_respawn_failure(
         &self,
         agent_identity: &MeerkatId,
-        preserved_realtime_binding: Option<&mob_dsl::SessionId>,
         error: MobRespawnError,
     ) -> MobRespawnError {
         let MobRespawnError::SpawnAfterRetire { .. } = error else {
             return error;
         };
-        if let Some(session_id) = preserved_realtime_binding
+        if let Some(session_id) =
+            self.current_realtime_binding_session_id(&AgentIdentity::from(agent_identity.as_str()))
             && let Err(release_error) = self.release_realtime_binding_if_present(
                 &AgentIdentity::from(agent_identity.as_str()),
-                session_id,
+                &session_id,
             )
         {
             return MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: format!(
-                    "{error}; failed releasing preserved realtime binding: {release_error}"
+                    "{error}; failed releasing realtime binding after respawn failure: {release_error}"
                 ),
             };
         }
@@ -1214,6 +1232,9 @@ impl MobActor {
                 .member_kickoff_starting
                 .contains(&agent_identity.to_string())
             && !dsl
+                .member_kickoff_callback_pending
+                .contains(&agent_identity.to_string())
+            && !dsl
                 .member_kickoff_started
                 .contains(&agent_identity.to_string())
             && !dsl
@@ -1236,6 +1257,12 @@ impl MobActor {
                         authority
                             .state
                             .member_kickoff_starting
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::CallbackPending => {
+                        authority
+                            .state
+                            .member_kickoff_callback_pending
                             .insert(agent_identity.to_string());
                     }
                     mob_dsl::KickoffPhase::Started => {
@@ -1855,89 +1882,77 @@ impl MobActor {
             )?;
         }
 
-        let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
+        member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
                 "autonomous member '{agent_identity}' must be session-backed"
             ))
         })?;
 
-        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
-            MobError::Internal(format!(
-                "autonomous member '{agent_identity}' requires admission-capable substrate (runtime adapter)"
-            ))
-        })?;
-
-        {
-            // Runtime-backed path: true admission ack via accept_input_with_completion.
-            use meerkat_runtime::{Input, InputHeader, PromptInput};
-
-            let input = Input::Prompt(PromptInput {
-                header: InputHeader {
-                    id: meerkat_core::lifecycle::InputId::new(),
-                    timestamp: chrono::Utc::now(),
-                    source: meerkat_runtime::InputOrigin::Operator,
-                    durability: meerkat_runtime::InputDurability::Durable,
-                    visibility: meerkat_runtime::InputVisibility::default(),
-                    idempotency_key: None,
-                    supersession_key: None,
-                    correlation_id: None,
-                },
-                text: prompt.text_content(),
-                blocks: if prompt.has_images() {
-                    Some(prompt.into_blocks())
-                } else {
-                    None
-                },
-                turn_metadata: None,
-            });
-
-            let (_outcome, completion_handle) = adapter
-                .accept_input_with_completion(bridge_session_id, input)
+        let member_ref = member_ref.clone();
+        let kickoff_prompt = prompt.clone();
+        let provisioner = self.provisioner.clone();
+        let log_id = agent_identity.clone();
+        let completion_command_tx = self.command_tx.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = match provisioner
+                .start_turn(
+                    &member_ref,
+                    meerkat_core::service::StartTurnRequest {
+                        prompt: kickoff_prompt,
+                        system_prompt: None,
+                        render_metadata: None,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
+                        event_tx: None,
+                        skill_references: None,
+                        flow_tool_overlay: None,
+                        additional_instructions: None,
+                        execution_kind: None,
+                    },
+                )
                 .await
-                .map_err(|e| {
-                    MobError::Internal(format!(
-                        "autonomous prompt admission failed for '{agent_identity}': {e}"
-                    ))
-                })?;
-
-            // Spawn background task for completion wait.
-            let log_id = agent_identity.clone();
-            let completion_command_tx = self.command_tx.clone();
-            let handle = tokio::spawn(async move {
-                if let Some(h) = completion_handle {
-                    let outcome = h.wait().await;
-                    let (ack_tx, ack_rx) = oneshot::channel();
-                    if completion_command_tx
-                        .send(MobCommand::KickoffOutcomeResolved {
-                            agent_identity: log_id.clone(),
-                            agent_runtime_id: startup_marker.0.clone(),
-                            fence_token: startup_marker.1,
-                            outcome,
-                            ack_tx,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            agent_identity = %log_id,
-                            "mob actor dropped before kickoff outcome could be recorded"
-                        );
-                    } else {
-                        let _ = ack_rx.await;
-                    }
-                }
-            });
-
-            let mut kickoff_handles = self.autonomous_initial_turns.lock().await;
-            if let Some(previous) =
-                kickoff_handles.insert(agent_identity.clone(), InitialTurnHandle { handle })
             {
-                tracing::debug!(
-                    agent_identity = %agent_identity,
-                    "aborting superseded autonomous kickoff waiter"
+                Ok(()) => meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult,
+                Err(MobError::CallbackPending {
+                    tool_name, args, ..
+                }) => meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                    tool_name,
+                    args,
+                },
+                Err(error) => meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                    error.to_string(),
+                ),
+            };
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if completion_command_tx
+                .send(MobCommand::KickoffOutcomeResolved {
+                    agent_identity: log_id.clone(),
+                    agent_runtime_id: startup_marker.0.clone(),
+                    fence_token: startup_marker.1,
+                    outcome,
+                    ack_tx,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    agent_identity = %log_id,
+                    "mob actor dropped before kickoff outcome could be recorded"
                 );
-                previous.abort();
+            } else {
+                let _ = ack_rx.await;
             }
+        });
+
+        let mut kickoff_handles = self.autonomous_initial_turns.lock().await;
+        if let Some(previous) =
+            kickoff_handles.insert(agent_identity.clone(), InitialTurnHandle { handle })
+        {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                "aborting superseded autonomous kickoff waiter"
+            );
+            previous.abort();
         }
 
         tracing::debug!(agent_identity = %agent_identity, "autonomous member started");
@@ -2032,6 +2047,10 @@ impl MobActor {
         fence_token: FenceToken,
         outcome: meerkat_runtime::completion::CompletionOutcome,
     ) -> Result<(), MobError> {
+        let callback_pending = matches!(
+            &outcome,
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }
+        );
         let Some(current_entry) = self.roster.read().await.get(agent_identity).cloned() else {
             tracing::debug!(
                 agent_identity = %agent_identity,
@@ -2065,9 +2084,6 @@ impl MobActor {
             );
         }
 
-        // Autonomous kickoff does not support resumable callback boundaries:
-        // startup must either complete or fail before the member is considered
-        // ready for orchestration.
         let _ = self
             .apply_kickoff_input(
                 agent_identity,
@@ -2078,13 +2094,11 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                        tool_name,
-                        ..
-                    } => mob_dsl::MobMachineInput::KickoffResolveFailed {
-                        member_id: agent_identity.to_string(),
-                        error: format!("autonomous kickoff blocked on callback tool '{tool_name}'"),
-                    },
+                    meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
+                        mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
+                            member_id: agent_identity.to_string(),
+                        }
+                    }
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
@@ -2095,6 +2109,107 @@ impl MobActor {
                 },
             )
             .await?;
+        if callback_pending {
+            self.watch_callback_pending_kickoff(agent_identity, agent_runtime_id, fence_token)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn watch_callback_pending_kickoff(
+        &self,
+        agent_identity: &MeerkatId,
+        agent_runtime_id: &AgentRuntimeId,
+        fence_token: FenceToken,
+    ) -> Result<(), MobError> {
+        let session_id = {
+            let roster = self.roster.read().await;
+            roster
+                .get(agent_identity)
+                .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "callback-pending kickoff for '{agent_identity}' is missing a session binding"
+                    ))
+                })?
+        };
+        let session_service = self.session_service.clone();
+        let completion_command_tx = self.command_tx.clone();
+        let log_id = agent_identity.clone();
+        let runtime_id = agent_runtime_id.clone();
+        let handle = tokio::spawn(async move {
+            let mut stream =
+                match crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                    &*session_service,
+                    &session_id,
+                )
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_identity = %log_id,
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to subscribe to callback-pending kickoff event stream"
+                        );
+                        return;
+                    }
+                };
+
+            let terminal_outcome = loop {
+                let Some(envelope) = stream.next().await else {
+                    break meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                        "kickoff callback stream closed before terminal resolution".to_string(),
+                    );
+                };
+                match envelope.payload {
+                    meerkat_core::event::AgentEvent::RunCompleted { .. }
+                    | meerkat_core::event::AgentEvent::InteractionComplete { .. } => {
+                        break meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult;
+                    }
+                    meerkat_core::event::AgentEvent::RunFailed { error, .. }
+                    | meerkat_core::event::AgentEvent::InteractionFailed { error, .. } => {
+                        break meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                            error,
+                        );
+                    }
+                    meerkat_core::event::AgentEvent::InteractionCallbackPending { .. } => continue,
+                    _ => continue,
+                }
+            };
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if completion_command_tx
+                .send(MobCommand::KickoffOutcomeResolved {
+                    agent_identity: log_id.clone(),
+                    agent_runtime_id: runtime_id,
+                    fence_token,
+                    outcome: terminal_outcome,
+                    ack_tx,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    agent_identity = %log_id,
+                    "mob actor dropped before callback-pending kickoff resolution could be recorded"
+                );
+            } else {
+                let _ = ack_rx.await;
+            }
+        });
+        let mut kickoff_handles = self.autonomous_initial_turns.lock().await;
+        if let Some(previous) =
+            kickoff_handles.insert(agent_identity.clone(), InitialTurnHandle { handle })
+        {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                "aborting superseded callback-pending kickoff watcher"
+            );
+            previous.abort();
+        }
         Ok(())
     }
 
@@ -2301,6 +2416,27 @@ impl MobActor {
                     agent_identity = %entry.agent_identity,
                     error = %error,
                     "failed marking restored autonomous runtime startup-ready"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+
+            #[cfg(feature = "runtime-adapter")]
+            if entry.kickoff.as_ref().is_some_and(|kickoff| {
+                kickoff.phase == crate::roster::MobMemberKickoffPhase::CallbackPending
+            }) && let Err(error) = self
+                .watch_callback_pending_kickoff(
+                    &entry.agent_identity,
+                    &entry.agent_runtime_id,
+                    entry.fence_token,
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "failed restoring callback-pending kickoff watcher"
                 );
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -2595,6 +2731,11 @@ impl MobActor {
                         pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
                         member_kickoff_starting_ids: dsl
                             .member_kickoff_starting
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_callback_pending_ids: dsl
+                            .member_kickoff_callback_pending
                             .iter()
                             .cloned()
                             .collect(),
@@ -4815,11 +4956,6 @@ impl MobActor {
                 .get(&agent_identity)
                 .cloned()
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-            let preserved_realtime_binding = self
-                .dsl_state()
-                .member_realtime_bindings
-                .get(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
-                .cloned();
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
@@ -4853,7 +4989,6 @@ impl MobActor {
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
                 binding,
-                preserved_realtime_binding,
                 effective_profile_override: entry.effective_profile_override,
             }
         };
@@ -5183,13 +5318,7 @@ impl MobActor {
         let _replacement = match replacement_result {
             Ok(replacement) => replacement,
             Err(error) => {
-                return Err(self
-                    .finalize_respawn_failure(
-                        &agent_identity,
-                        snapshot.preserved_realtime_binding.as_ref(),
-                        error,
-                    )
-                    .await);
+                return Err(self.finalize_respawn_failure(&agent_identity, error).await);
             }
         };
 

@@ -45,10 +45,7 @@ pub enum MobMemberKickoffPhase {
     Pending,
     Starting,
     Started,
-    // Compatibility migration: older snapshots could persist
-    // `callback_pending`, but autonomous kickoff no longer supports
-    // resumable callback boundaries. Deserialize them as `Failed`.
-    #[serde(alias = "callback_pending")]
+    CallbackPending,
     Failed,
     Cancelled,
 }
@@ -1666,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_callback_pending_kickoff_deserializes_as_failed() {
+    fn callback_pending_kickoff_deserializes() {
         let snapshot: MobMemberKickoffSnapshot = serde_json::from_value(serde_json::json!({
             "phase": "callback_pending",
             "updated_at": {
@@ -1676,6 +1673,6 @@ mod tests {
         }))
         .expect("legacy kickoff snapshot should deserialize");
 
-        assert_eq!(snapshot.phase, MobMemberKickoffPhase::Failed);
+        assert_eq!(snapshot.phase, MobMemberKickoffPhase::CallbackPending);
     }
 }

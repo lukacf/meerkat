@@ -12,7 +12,7 @@ pub struct CompositionSchema {
     pub entry_inputs: Vec<EntryInput>,
     pub routes: Vec<Route>,
     pub route_target_selectors: Vec<RouteTargetSelector>,
-    pub driver: Option<CompositionDriverRustBinding>,
+    pub driver: Option<CompositionDriver>,
     pub transaction_plans: Vec<CompositionTransactionPlan>,
     pub actor_priorities: Vec<ActorPriority>,
     pub scheduler_rules: Vec<SchedulerRule>,
@@ -154,6 +154,10 @@ pub enum ProtocolHelperReturnShape {
 }
 
 /// Explicit Rust binding metadata for generated composition drivers.
+///
+/// Nested inside [`CompositionDriver`]. This carries the Rust-side rendering
+/// details (module path, emitted type names, imports) that the codegen
+/// consumes when producing the generated driver module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriverRustBinding {
     /// Output file path relative to the repo root.
@@ -168,6 +172,60 @@ pub struct CompositionDriverRustBinding {
     pub decision_type: String,
     /// `use ...;` lines inserted at the top of the generated driver module.
     pub required_imports: Vec<String>,
+}
+
+/// Declarative description of a composition-level driver.
+///
+/// Compositions that need cross-machine orchestration — e.g. projecting a
+/// wiring graph owned by one machine onto peer endpoints owned by another —
+/// declare a driver that **watches** specific effect variants on producer
+/// machines and **dispatches** a typed decision as new inputs on target
+/// machines. The runtime (`meerkat-runtime::composition_dispatch`) consumes
+/// this descriptor to install the driver and route observed effects through
+/// its decision function.
+///
+/// This is the declarative seam that replaces the previously hand-crafted
+/// `flow_frame_loop` driver template: any composition can now declare a
+/// driver without the codegen knowing about it by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionDriver {
+    /// Stable logical name — used for driver registration at runtime and
+    /// referenced in diagnostics.
+    pub name: String,
+    /// Rust emission/runtime binding metadata.
+    pub rust: CompositionDriverRustBinding,
+    /// Effects this driver observes. Each entry pairs a producer machine
+    /// instance with a specific effect variant on that machine.
+    pub watched_effects: Vec<WatchedEffect>,
+    /// Inputs this driver may dispatch. Each entry names a target machine
+    /// instance + input variant. At runtime, the driver's decision function
+    /// returns dispatched inputs that the dispatcher routes via these
+    /// declarations.
+    pub dispatch_routes: Vec<DriverDispatchRoute>,
+}
+
+/// A single effect the driver observes from a producer machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedEffect {
+    /// Producer machine instance id within the composition.
+    pub producer_instance: String,
+    /// Effect variant name on that producer's effect enum.
+    pub effect_variant: String,
+}
+
+/// A single dispatch route — the driver may emit inputs on this target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverDispatchRoute {
+    /// Stable logical dispatch name — the decision function references
+    /// this when emitting an input, and the runtime dispatcher uses it
+    /// to route the payload.
+    pub name: String,
+    /// Target machine instance id within the composition.
+    pub target_instance: String,
+    /// Whether the dispatch lands on an input or a signal.
+    pub target_kind: RouteTargetKind,
+    /// Variant name on the target's input/signal enum.
+    pub input_variant: String,
 }
 
 /// Declares how a routed effect selects its concrete target machine instance.
@@ -511,16 +569,22 @@ impl CompositionSchema {
         }
 
         if let Some(driver) = &self.driver {
-            if driver.module_path.is_empty() {
+            if driver.name.is_empty() {
+                return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                    composition: self.name.clone(),
+                    detail: "driver name must not be empty".into(),
+                });
+            }
+            if driver.rust.module_path.is_empty() {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
                     composition: self.name.clone(),
                     detail: "module_path must not be empty".into(),
                 });
             }
-            if driver.driver_type.is_empty()
-                || driver.store_plan_type.is_empty()
-                || driver.work_type.is_empty()
-                || driver.decision_type.is_empty()
+            if driver.rust.driver_type.is_empty()
+                || driver.rust.store_plan_type.is_empty()
+                || driver.rust.work_type.is_empty()
+                || driver.rust.decision_type.is_empty()
             {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
                     composition: self.name.clone(),
@@ -528,6 +592,27 @@ impl CompositionSchema {
                         .into(),
                 });
             }
+
+            // Each `(producer_instance, effect_variant)` pair must appear at
+            // most once — duplicates would cause the dispatcher to deliver
+            // the same effect to the same driver twice.
+            let watched_keys: Vec<String> = driver
+                .watched_effects
+                .iter()
+                .map(|watched| format!("{}::{}", watched.producer_instance, watched.effect_variant))
+                .collect();
+            let _ = unique_names(
+                watched_keys.iter().map(String::as_str),
+                "composition driver watched effect",
+            )?;
+
+            let _ = unique_names(
+                driver
+                    .dispatch_routes
+                    .iter()
+                    .map(|route| route.name.as_str()),
+                "composition driver dispatch route",
+            )?;
         }
 
         let protocol_names = self
@@ -1010,6 +1095,81 @@ impl CompositionSchema {
                     machine: entry_input.machine.clone(),
                     input: entry_input.input_variant.clone(),
                 });
+            }
+        }
+
+        if let Some(driver) = &self.driver {
+            for watched in &driver.watched_effects {
+                let producer_schema = schemas
+                    .iter()
+                    .find(|schema| {
+                        self.machines.iter().any(|instance| {
+                            instance.instance_id == watched.producer_instance
+                                && instance.machine_name == schema.machine
+                        })
+                    })
+                    .ok_or_else(|| {
+                        CompositionSchemaError::UnknownCompositionDriverWatchedMachine {
+                            composition: self.name.clone(),
+                            driver: driver.name.clone(),
+                            instance: watched.producer_instance.clone(),
+                        }
+                    })?;
+
+                let effect_variants = producer_schema
+                    .effects
+                    .variants_by_name()
+                    .map_err(CompositionSchemaError::MachineSchema)?;
+                if !effect_variants.contains(&watched.effect_variant) {
+                    return Err(
+                        CompositionSchemaError::UnknownCompositionDriverWatchedEffect {
+                            composition: self.name.clone(),
+                            driver: driver.name.clone(),
+                            instance: watched.producer_instance.clone(),
+                            effect_variant: watched.effect_variant.clone(),
+                        },
+                    );
+                }
+            }
+
+            for dispatch in &driver.dispatch_routes {
+                let target_schema = schemas
+                    .iter()
+                    .find(|schema| {
+                        self.machines.iter().any(|instance| {
+                            instance.instance_id == dispatch.target_instance
+                                && instance.machine_name == schema.machine
+                        })
+                    })
+                    .ok_or_else(|| {
+                        CompositionSchemaError::UnknownCompositionDriverDispatchMachine {
+                            composition: self.name.clone(),
+                            driver: driver.name.clone(),
+                            instance: dispatch.target_instance.clone(),
+                        }
+                    })?;
+
+                let known_variants = match dispatch.target_kind {
+                    RouteTargetKind::Input => target_schema
+                        .inputs
+                        .variants_by_name()
+                        .map_err(CompositionSchemaError::MachineSchema)?,
+                    RouteTargetKind::Signal => target_schema
+                        .signals
+                        .variants_by_name()
+                        .map_err(CompositionSchemaError::MachineSchema)?,
+                };
+                if !known_variants.contains(&dispatch.input_variant) {
+                    return Err(
+                        CompositionSchemaError::UnknownCompositionDriverDispatchVariant {
+                            composition: self.name.clone(),
+                            driver: driver.name.clone(),
+                            instance: dispatch.target_instance.clone(),
+                            target_kind: dispatch.target_kind,
+                            variant: dispatch.input_variant.clone(),
+                        },
+                    );
+                }
             }
         }
 
@@ -1745,6 +1905,29 @@ pub enum CompositionSchemaError {
         composition: String,
         detail: String,
     },
+    UnknownCompositionDriverWatchedMachine {
+        composition: String,
+        driver: String,
+        instance: String,
+    },
+    UnknownCompositionDriverWatchedEffect {
+        composition: String,
+        driver: String,
+        instance: String,
+        effect_variant: String,
+    },
+    UnknownCompositionDriverDispatchMachine {
+        composition: String,
+        driver: String,
+        instance: String,
+    },
+    UnknownCompositionDriverDispatchVariant {
+        composition: String,
+        driver: String,
+        instance: String,
+        target_kind: RouteTargetKind,
+        variant: String,
+    },
     InvalidTransactionPlan {
         plan: String,
         detail: String,
@@ -2064,6 +2247,41 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "invalid composition driver binding for `{composition}`: {detail}"
+            ),
+            Self::UnknownCompositionDriverWatchedMachine {
+                composition,
+                driver,
+                instance,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` watches effect on unknown machine instance `{instance}`"
+            ),
+            Self::UnknownCompositionDriverWatchedEffect {
+                composition,
+                driver,
+                instance,
+                effect_variant,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` watches unknown effect `{effect_variant}` on machine instance `{instance}`"
+            ),
+            Self::UnknownCompositionDriverDispatchMachine {
+                composition,
+                driver,
+                instance,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` dispatches to unknown machine instance `{instance}`"
+            ),
+            Self::UnknownCompositionDriverDispatchVariant {
+                composition,
+                driver,
+                instance,
+                target_kind,
+                variant,
+            } => write!(
+                f,
+                "composition `{composition}` driver `{driver}` dispatches unknown {target_kind:?} variant `{variant}` on machine instance `{instance}`"
             ),
             Self::InvalidTransactionPlan { plan, detail } => {
                 write!(f, "invalid transaction plan `{plan}`: {detail}")

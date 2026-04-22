@@ -28,6 +28,7 @@ pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_drain;
 pub mod completion;
+pub mod composition_dispatch;
 pub(crate) mod control_plane;
 pub mod detached_wake;
 pub mod driver;
@@ -62,6 +63,10 @@ pub use coalescing::{
     check_supersession, create_aggregate_input, is_coalescing_eligible,
 };
 pub use completion::{CompletionHandle, CompletionOutcome};
+pub use composition_dispatch::{
+    CompositionDispatcher, CompositionDriverTrait, DispatchedInput, DispatcherError, DriverError,
+    NoopCompositionDriver, ObservedEffect, RegisteredDriver, RoutedDispatch,
+};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
 pub use handles::{

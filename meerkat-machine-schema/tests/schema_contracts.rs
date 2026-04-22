@@ -6,7 +6,8 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
 };
 use meerkat_machine_schema::{
-    CompositionSchemaError, canonical_composition_coverage_manifests,
+    CompositionDriver, CompositionDriverRustBinding, CompositionSchemaError, DriverDispatchRoute,
+    RouteTargetKind, WatchedEffect, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
     meerkat_mob_seam_composition,
 };
@@ -742,6 +743,193 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
             "MobMachine query command {required} should no longer require transition coverage"
         );
     }
+}
+
+// --------------------------------------------------------------------------
+// Composition driver execution framework (Track-B, R5).
+//
+// The declarative `CompositionDriver` descriptor replaces the hand-crafted
+// `flow_frame_loop` template specialization. It is the schema-side seam that
+// the runtime dispatcher (meerkat-runtime::composition_dispatch) consumes to
+// know which effects to watch and where to route driver decisions.
+//
+// These tests pin the framework contract: the schema must accept a fully
+// declared driver, must reject a driver that references unknown machines or
+// variants, and must accept `driver: None` on compositions that do not need
+// one.
+// --------------------------------------------------------------------------
+
+fn sample_driver_rust_binding() -> CompositionDriverRustBinding {
+    CompositionDriverRustBinding {
+        module_path: "meerkat-runtime/src/generated/noop_driver.rs".into(),
+        driver_type: "NoopDriver".into(),
+        store_plan_type: "NoopStorePlan".into(),
+        work_type: "NoopWork".into(),
+        decision_type: "NoopDecision".into(),
+        required_imports: vec![],
+    }
+}
+
+fn noop_driver_on_meerkat_mob_seam() -> CompositionDriver {
+    // Watch a single effect that already exists on MobMachine in the
+    // canonical schema (`RuntimeBound` round-trip flow). This keeps the
+    // test decoupled from the Track-B MobMachine extensions landing in
+    // the next commit — the framework here only cares that the declared
+    // watched variant exists on the producer machine.
+    CompositionDriver {
+        name: "noop_driver".into(),
+        rust: sample_driver_rust_binding(),
+        watched_effects: vec![WatchedEffect {
+            producer_instance: "mob".into(),
+            effect_variant: "RequestRuntimeBinding".into(),
+        }],
+        dispatch_routes: vec![DriverDispatchRoute {
+            name: "noop_dispatch".into(),
+            target_instance: "meerkat".into(),
+            target_kind: RouteTargetKind::Input,
+            input_variant: "PrepareBindings".into(),
+        }],
+    }
+}
+
+#[test]
+fn composition_driver_with_declared_watches_and_routes_validates_against_canonical_machines() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    composition.driver = Some(noop_driver_on_meerkat_mob_seam());
+
+    assert_eq!(
+        composition.validate_against(&[&meerkat, &mob]),
+        Ok(()),
+        "declarative composition driver should validate against canonical machines",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_watched_effect_on_unknown_producer_instance() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.watched_effects[0].producer_instance = "ghost_machine".into();
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::UnknownCompositionDriverWatchedMachine { .. })
+        ),
+        "expected UnknownCompositionDriverWatchedMachine, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_watched_variant_missing_on_producer_effects() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.watched_effects[0].effect_variant = "NoSuchEffect".into();
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::UnknownCompositionDriverWatchedEffect { .. })
+        ),
+        "expected UnknownCompositionDriverWatchedEffect, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_dispatch_route_to_unknown_target_instance() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.dispatch_routes[0].target_instance = "ghost_target".into();
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::UnknownCompositionDriverDispatchMachine { .. })
+        ),
+        "expected UnknownCompositionDriverDispatchMachine, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_dispatch_route_input_variant_missing_on_target() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver.dispatch_routes[0].input_variant = "NoSuchInput".into();
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::UnknownCompositionDriverDispatchVariant { .. })
+        ),
+        "expected UnknownCompositionDriverDispatchVariant, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_duplicate_watched_effect_declarations() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver
+        .watched_effects
+        .push(driver.watched_effects[0].clone());
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(result, Err(CompositionSchemaError::DuplicateName { .. })),
+        "expected DuplicateName, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_driver_rejects_duplicate_dispatch_route_names() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let mut driver = noop_driver_on_meerkat_mob_seam();
+    driver
+        .dispatch_routes
+        .push(driver.dispatch_routes[0].clone());
+    composition.driver = Some(driver);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(result, Err(CompositionSchemaError::DuplicateName { .. })),
+        "expected DuplicateName, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_with_driver_none_still_validates_as_before() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let composition = meerkat_mob_seam_composition();
+    assert!(composition.driver.is_none());
+
+    assert_eq!(
+        composition.validate_against(&[&meerkat, &mob]),
+        Ok(()),
+        "composition without a driver must validate",
+    );
 }
 
 #[test]

@@ -379,10 +379,35 @@ pub fn render_composition_contract_markdown(
     if let Some(driver) = &schema.driver {
         pushln!(
             &mut out,
-            "- `{}` in `{}`",
-            driver.driver_type,
-            driver.module_path
+            "- `{}` (`{}` in `{}`)",
+            driver.name,
+            driver.rust.driver_type,
+            driver.rust.module_path
         );
+        if !driver.watched_effects.is_empty() {
+            pushln!(&mut out, "  - watches:");
+            for watched in &driver.watched_effects {
+                pushln!(
+                    &mut out,
+                    "    - `{}::{}`",
+                    watched.producer_instance,
+                    watched.effect_variant
+                );
+            }
+        }
+        if !driver.dispatch_routes.is_empty() {
+            pushln!(&mut out, "  - dispatches:");
+            for dispatch in &driver.dispatch_routes {
+                pushln!(
+                    &mut out,
+                    "    - `{}` → `{}::{}` ({:?})",
+                    dispatch.name,
+                    dispatch.target_instance,
+                    dispatch.input_variant,
+                    dispatch.target_kind
+                );
+            }
+        }
     } else {
         pushln!(&mut out, "- `(none)`");
     }
@@ -850,62 +875,142 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
     }
 }
 
+/// Renders the generated composition driver module.
+///
+/// This is a declarative-framework emission: any composition that declares a
+/// `CompositionDriver` descriptor gets a generated Rust module listing the
+/// watched effects and dispatch routes as typed constants, plus a marker
+/// trait reference the implementer consumes.
+///
+/// The generated module intentionally stays thin — it is the schema-to-code
+/// surface the runtime dispatcher
+/// (`meerkat-runtime::composition_dispatch`) and the composition
+/// implementer use to stay in lockstep with the declarative schema.
+///
+/// Returns `None` when the composition has no driver descriptor.
 pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
     let driver = schema.driver.as_ref()?;
-    if schema.name != "flow_frame_loop" {
-        return None;
+
+    let mut out = String::new();
+    pushln!(
+        &mut out,
+        "// @generated — composition driver descriptor for `{}`",
+        schema.name
+    );
+    pushln!(
+        &mut out,
+        "// DO NOT EDIT. Emitted by meerkat-machine-codegen::render_composition_driver."
+    );
+    pushln!(
+        &mut out,
+        "// Source of truth: catalog::compositions::{}",
+        schema.name
+    );
+    out.push('\n');
+
+    for import in &driver.rust.required_imports {
+        pushln!(&mut out, "{import}");
+    }
+    if !driver.rust.required_imports.is_empty() {
+        out.push('\n');
     }
 
-    let imports = driver.required_imports.join("\n");
-    let selector_docs = if schema.route_target_selectors.is_empty() {
-        "// (none)".to_string()
-    } else {
-        schema
-            .route_target_selectors
-            .iter()
-            .map(|selector| {
-                let source = match &selector.source {
-                    RouteBindingSource::Field { from_field, .. } => {
-                        format!("effect/state field `{from_field}`")
-                    }
-                    RouteBindingSource::Literal(expr) => format!("literal `{expr:?}`"),
-                    RouteBindingSource::OwnerProvided => "owner-provided value".into(),
-                };
-                format!(
-                    "// - `{}` selects `{}` from {}",
-                    selector.route_name, selector.selector_field, source
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let transaction_plan_docs = if schema.transaction_plans.is_empty() {
-        "// (none)".to_string()
-    } else {
-        schema
-            .transaction_plans
-            .iter()
-            .map(|plan| {
-                format!(
-                    "// - `{}` via `{}` (`{}`): {}",
-                    plan.name, plan.trigger, plan.store_primitive, plan.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    pushln!(
+        &mut out,
+        "/// Logical name of this composition driver. Used at runtime for"
+    );
+    pushln!(&mut out, "/// registration and diagnostics.");
+    pushln!(
+        &mut out,
+        "pub const DRIVER_NAME: &str = \"{}\";",
+        driver.name
+    );
+    out.push('\n');
 
-    Some(
-        include_str!("templates/flow_frame_loop_driver.rs.tmpl")
-            .replace("{{IMPORTS}}", &imports)
-            .replace("{{SELECTOR_DOCS}}", &selector_docs)
-            .replace("{{TRANSACTION_PLAN_DOCS}}", &transaction_plan_docs)
-            .replace("{{DRIVER_TYPE}}", &driver.driver_type)
-            .replace("{{STORE_PLAN_TYPE}}", &driver.store_plan_type)
-            .replace("{{WORK_TYPE}}", &driver.work_type)
-            .replace("{{DECISION_TYPE}}", &driver.decision_type),
-    )
+    pushln!(&mut out, "/// Effect variants this driver observes.");
+    pushln!(
+        &mut out,
+        "/// Each entry is `(producer_instance, effect_variant)`."
+    );
+    pushln!(&mut out, "pub const WATCHED_EFFECTS: &[(&str, &str)] = &[");
+    for watched in &driver.watched_effects {
+        pushln!(
+            &mut out,
+            "    (\"{}\", \"{}\"),",
+            watched.producer_instance,
+            watched.effect_variant
+        );
+    }
+    pushln!(&mut out, "];");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Dispatch routes this driver may emit. Each entry is"
+    );
+    pushln!(
+        &mut out,
+        "/// `(route_name, target_instance, target_kind, input_variant)`."
+    );
+    pushln!(
+        &mut out,
+        "pub const DISPATCH_ROUTES: &[(&str, &str, &str, &str)] = &["
+    );
+    for dispatch in &driver.dispatch_routes {
+        let kind_name = match dispatch.target_kind {
+            RouteTargetKind::Input => "Input",
+            RouteTargetKind::Signal => "Signal",
+        };
+        pushln!(
+            &mut out,
+            "    (\"{}\", \"{}\", \"{}\", \"{}\"),",
+            dispatch.name,
+            dispatch.target_instance,
+            kind_name,
+            dispatch.input_variant
+        );
+    }
+    pushln!(&mut out, "];");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated marker: the driver type name declared in the schema."
+    );
+    pushln!(&mut out, "/// The application-side driver must satisfy the");
+    pushln!(
+        &mut out,
+        "/// `meerkat_runtime::composition_dispatch::CompositionDriverTrait`"
+    );
+    pushln!(&mut out, "/// contract under this name.");
+    pushln!(
+        &mut out,
+        "pub const DRIVER_TYPE: &str = \"{}\";",
+        driver.rust.driver_type
+    );
+    pushln!(
+        &mut out,
+        "pub const STORE_PLAN_TYPE: &str = \"{}\";",
+        driver.rust.store_plan_type
+    );
+    pushln!(
+        &mut out,
+        "pub const WORK_TYPE: &str = \"{}\";",
+        driver.rust.work_type
+    );
+    pushln!(
+        &mut out,
+        "pub const DECISION_TYPE: &str = \"{}\";",
+        driver.rust.decision_type
+    );
+
+    Some(out)
 }
+
+// Keep the legacy module import alive so existing consumers that reference
+// `meerkat_machine_codegen::templates` continue to resolve during the
+// transition. The hand-crafted `flow_frame_loop_driver.rs.tmpl` template
+// has been deleted — the generic emission above replaces it.
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {
     let mut compiler = MachineTlaCompiler::new(schema);

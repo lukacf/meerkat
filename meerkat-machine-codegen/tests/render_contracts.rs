@@ -2,8 +2,9 @@
 
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
-    render_composition_mapping_coverage, render_composition_module, render_generated_kernel_mod,
-    render_machine_kernel_module, render_machine_mapping_coverage, render_machine_module,
+    render_composition_driver, render_composition_mapping_coverage, render_composition_module,
+    render_generated_kernel_mod, render_machine_kernel_module, render_machine_mapping_coverage,
+    render_machine_module,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -12,7 +13,10 @@ use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
     meerkat_mob_seam_composition,
 };
-use meerkat_machine_schema::{canonical_machine_schemas, flow_run_machine};
+use meerkat_machine_schema::{
+    CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, RouteTargetKind,
+    WatchedEffect, canonical_machine_schemas, flow_run_machine,
+};
 
 #[test]
 fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
@@ -276,5 +280,108 @@ fn generated_kernel_inventory_contract_lists_all_typed_machine_modules() {
     assert!(
         !rendered.contains("GeneratedMachineKernel"),
         "typed generated inventory should not expose the legacy GeneratedMachineKernel wrapper:\n{rendered}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Composition driver codegen (Track-B, R5).
+//
+// These tests pin the contract that `render_composition_driver` returns
+// `None` for driverless compositions and emits a declarative descriptor
+// module for compositions that declare a `CompositionDriver`. This
+// replaces the hand-crafted `flow_frame_loop` template specialization
+// with a generic framework emission.
+// --------------------------------------------------------------------------
+
+fn sample_driver() -> CompositionDriver {
+    CompositionDriver {
+        name: "noop_driver".into(),
+        rust: CompositionDriverRustBinding {
+            module_path: "meerkat-runtime/src/generated/noop_driver.rs".into(),
+            driver_type: "NoopDriver".into(),
+            store_plan_type: "NoopStorePlan".into(),
+            work_type: "NoopWork".into(),
+            decision_type: "NoopDecision".into(),
+            required_imports: vec!["use meerkat_runtime::composition_dispatch::*;".into()],
+        },
+        watched_effects: vec![WatchedEffect {
+            producer_instance: "mob".into(),
+            effect_variant: "RequestRuntimeBinding".into(),
+        }],
+        dispatch_routes: vec![DriverDispatchRoute {
+            name: "noop_dispatch".into(),
+            target_instance: "meerkat".into(),
+            target_kind: RouteTargetKind::Input,
+            input_variant: "PrepareBindings".into(),
+        }],
+    }
+}
+
+#[test]
+fn render_composition_driver_returns_none_for_driverless_composition() {
+    let composition = meerkat_mob_seam_composition();
+    assert!(composition.driver.is_none());
+    assert!(
+        render_composition_driver(&composition).is_none(),
+        "driverless composition must not produce driver module output"
+    );
+}
+
+#[test]
+fn render_composition_driver_emits_descriptor_constants_for_declared_driver() {
+    let mut composition = meerkat_mob_seam_composition();
+    composition.driver = Some(sample_driver());
+
+    let rendered =
+        render_composition_driver(&composition).expect("driver-bearing composition emits");
+
+    assert!(
+        rendered.contains("pub const DRIVER_NAME: &str = \"noop_driver\";"),
+        "rendered driver module must declare DRIVER_NAME:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub const WATCHED_EFFECTS:"),
+        "rendered driver module must declare WATCHED_EFFECTS:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(\"mob\", \"RequestRuntimeBinding\")"),
+        "WATCHED_EFFECTS must list declared (producer, variant) pairs:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub const DISPATCH_ROUTES:"),
+        "rendered driver module must declare DISPATCH_ROUTES:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(\"noop_dispatch\", \"meerkat\", \"Input\", \"PrepareBindings\")"),
+        "DISPATCH_ROUTES must list declared (name, target, kind, variant) tuples:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub const DRIVER_TYPE: &str = \"NoopDriver\";"),
+        "rendered driver module must declare DRIVER_TYPE:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("use meerkat_runtime::composition_dispatch::*;"),
+        "rendered driver module must include driver-declared imports:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("@generated"),
+        "rendered driver module must carry the @generated marker:\n{rendered}"
+    );
+}
+
+#[test]
+fn render_composition_driver_emission_is_composition_name_agnostic() {
+    // The framework must work for any composition with a driver, not just
+    // one hardcoded name — this pins the replacement of the old
+    // `if schema.name != "flow_frame_loop"` specialization.
+    let mut composition = meerkat_mob_seam_composition();
+    composition.name = "arbitrary_composition".into();
+    composition.driver = Some(sample_driver());
+
+    let rendered =
+        render_composition_driver(&composition).expect("driver-bearing composition emits");
+    assert!(
+        rendered.contains("composition driver descriptor for `arbitrary_composition`"),
+        "codegen must use the composition name in the header, not a hardcoded name:\n{rendered}"
     );
 }

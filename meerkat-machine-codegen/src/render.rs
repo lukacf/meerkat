@@ -159,10 +159,29 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
         Some(driver) => {
             pushln!(
                 &mut out,
-                "  {} @ {}",
-                driver.driver_type,
-                driver.module_path
+                "  {} ({} @ {})",
+                driver.name,
+                driver.rust.driver_type,
+                driver.rust.module_path
             );
+            for watched in &driver.watched_effects {
+                pushln!(
+                    &mut out,
+                    "    watches {}::{}",
+                    watched.producer_instance,
+                    watched.effect_variant
+                );
+            }
+            for dispatch in &driver.dispatch_routes {
+                pushln!(
+                    &mut out,
+                    "    dispatches {} -> {}::{} ({:?})",
+                    dispatch.name,
+                    dispatch.target_instance,
+                    dispatch.input_variant,
+                    dispatch.target_kind
+                );
+            }
         }
         None => pushln!(&mut out, "  (none)"),
     }

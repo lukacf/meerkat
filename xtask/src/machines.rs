@@ -2088,7 +2088,7 @@ fn composition_driver_path(root: &Path, schema: &CompositionSchema) -> Result<Pa
             schema.name
         )
     })?;
-    Ok(root.join(&driver.module_path))
+    Ok(root.join(&driver.rust.module_path))
 }
 
 fn composition_dir(root: &Path, slug: &str) -> PathBuf {

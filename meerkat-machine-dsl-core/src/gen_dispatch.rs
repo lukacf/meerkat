@@ -389,7 +389,10 @@ fn pascal_case_ident(raw: &str) -> Ident {
 pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
     match expr {
         ExprDef::Bool(v) => quote! { #v },
-        ExprDef::U64(v) => quote! { #v },
+        ExprDef::U64(v) => {
+            let lit = proc_macro2::Literal::u64_unsuffixed(*v);
+            quote! { #lit }
+        }
         ExprDef::StringLit(s) => quote! { #s.to_string() },
         ExprDef::None => quote! { None },
         ExprDef::Some(inner) => {
@@ -398,6 +401,10 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
         }
         ExprDef::EmptySet => quote! { std::collections::BTreeSet::new() },
         ExprDef::EmptyMap => quote! { std::collections::BTreeMap::new() },
+        ExprDef::SeqLiteral(items) => {
+            let values: Vec<_> = items.iter().map(|item| gen_expr(item, prefix)).collect();
+            quote! { vec![#(#values),*] }
+        }
         ExprDef::Field(name) => match prefix {
             FieldPrefix::AuthorityState => quote! { self.state.#name },
             FieldPrefix::DirectSelf => quote! { self.#name },
@@ -413,6 +420,9 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
         ExprDef::NamedVariant { enum_name, variant } => {
             quote! { #enum_name::#variant }
         }
+        ExprDef::ConstructNamed { type_name, value } => {
+            quote! { #type_name(#value.to_string()) }
+        }
         ExprDef::Not(inner) => {
             let e = gen_expr(inner, prefix);
             quote! { !(#e) }
@@ -425,16 +435,8 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let parts: Vec<_> = exprs.iter().map(|e| gen_expr(e, prefix)).collect();
             quote! { (#(#parts)||*) }
         }
-        ExprDef::Eq(l, r) => {
-            let left = gen_expr(l, prefix);
-            let right = gen_expr(r, prefix);
-            quote! { (#left == #right) }
-        }
-        ExprDef::Neq(l, r) => {
-            let left = gen_expr(l, prefix);
-            let right = gen_expr(r, prefix);
-            quote! { (#left != #right) }
-        }
+        ExprDef::Eq(l, r) => gen_comparison_expr(l, r, prefix, false),
+        ExprDef::Neq(l, r) => gen_comparison_expr(l, r, prefix, true),
         ExprDef::Gt(l, r) => {
             let left = gen_expr(l, prefix);
             let right = gen_expr(r, prefix);
@@ -475,14 +477,40 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let k = gen_expr(key, prefix);
             quote! { #m.contains_key(&#k) }
         }
+        ExprDef::SeqStartsWith {
+            seq,
+            prefix: seq_prefix,
+        } => {
+            let seq_e = gen_expr(seq, prefix);
+            let prefix_e = gen_expr(seq_prefix, prefix);
+            quote! { #seq_e.starts_with(&#prefix_e) }
+        }
+        ExprDef::SeqElements(inner) => {
+            let e = gen_expr(inner, prefix);
+            quote! { #e.iter().cloned().collect::<std::collections::BTreeSet<_>>() }
+        }
         ExprDef::Len(inner) => {
             let e = gen_expr(inner, prefix);
             quote! { #e.len() }
+        }
+        ExprDef::Head(inner) => {
+            let e = gen_expr(inner, prefix);
+            quote! { #e.first().cloned().expect("Head on empty sequence") }
         }
         ExprDef::MapGet { map, key } => {
             let m = gen_expr(map, prefix);
             let k = gen_expr(key, prefix);
             quote! { #m.get(&#k) }
+        }
+        ExprDef::MapGetFlatten { map, key } => {
+            let m = gen_expr(map, prefix);
+            let k = gen_expr(key, prefix);
+            quote! { #m.get(&#k).and_then(|value| value.as_ref()) }
+        }
+        ExprDef::MapGetCloned { map, key } => {
+            let m = gen_expr(map, prefix);
+            let k = gen_expr(key, prefix);
+            quote! { #m.get(&#k).cloned().expect("missing map entry") }
         }
         ExprDef::MapGetCopied { map, key } => {
             let m = gen_expr(map, prefix);
@@ -527,7 +555,7 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
                     quote! { &#e }
                 })
                 .collect();
-            quote! { Self::#helper(#(#arg_exprs),*) }
+            quote! { self.#helper(#(#arg_exprs),*) }
         }
         ExprDef::IfElse {
             condition,
@@ -538,6 +566,129 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let then_e = gen_expr(then_expr, prefix);
             let else_e = gen_expr(else_expr, prefix);
             quote! { if #cond { #then_e } else { #else_e } }
+        }
+    }
+}
+
+fn gen_comparison_expr(
+    left: &ExprDef,
+    right: &ExprDef,
+    prefix: FieldPrefix,
+    invert: bool,
+) -> TokenStream {
+    match (left, right) {
+        (ExprDef::MapGet { .. }, ExprDef::None) => {
+            let left_e = gen_expr(left, prefix);
+            if invert {
+                quote! { (#left_e.is_some()) }
+            } else {
+                quote! { (#left_e.is_none()) }
+            }
+        }
+        (ExprDef::MapGetFlatten { .. }, ExprDef::None) => {
+            let left_e = gen_expr(left, prefix);
+            if invert {
+                quote! { (#left_e.is_some()) }
+            } else {
+                quote! { (#left_e.is_none()) }
+            }
+        }
+        (ExprDef::MapGet { .. }, ExprDef::Some(inner)) => {
+            let left_e = gen_expr(left, prefix);
+            let inner_e = gen_expr(inner, prefix);
+            if invert {
+                quote! { (#left_e != Some(&(Some(#inner_e)))) }
+            } else {
+                quote! { (#left_e == Some(&(Some(#inner_e)))) }
+            }
+        }
+        (ExprDef::MapGetFlatten { .. }, ExprDef::Some(inner)) => {
+            let left_e = gen_expr(left, prefix);
+            let inner_e = gen_expr(inner, prefix);
+            if invert {
+                quote! { (#left_e != Some(&(#inner_e))) }
+            } else {
+                quote! { (#left_e == Some(&(#inner_e))) }
+            }
+        }
+        (ExprDef::MapGet { .. }, _) => {
+            let left_e = gen_expr(left, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (#left_e != Some(&(#right_e))) }
+            } else {
+                quote! { (#left_e == Some(&(#right_e))) }
+            }
+        }
+        (ExprDef::MapGetFlatten { .. }, _) => {
+            let left_e = gen_expr(left, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (#left_e != Some(&(#right_e))) }
+            } else {
+                quote! { (#left_e == Some(&(#right_e))) }
+            }
+        }
+        (ExprDef::None, ExprDef::MapGet { .. }) => {
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (#right_e.is_some()) }
+            } else {
+                quote! { (#right_e.is_none()) }
+            }
+        }
+        (ExprDef::None, ExprDef::MapGetFlatten { .. }) => {
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (#right_e.is_some()) }
+            } else {
+                quote! { (#right_e.is_none()) }
+            }
+        }
+        (ExprDef::Some(inner), ExprDef::MapGet { .. }) => {
+            let inner_e = gen_expr(inner, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (Some(&(Some(#inner_e))) != #right_e) }
+            } else {
+                quote! { (Some(&(Some(#inner_e))) == #right_e) }
+            }
+        }
+        (ExprDef::Some(inner), ExprDef::MapGetFlatten { .. }) => {
+            let inner_e = gen_expr(inner, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (Some(&(#inner_e)) != #right_e) }
+            } else {
+                quote! { (Some(&(#inner_e)) == #right_e) }
+            }
+        }
+        (_, ExprDef::MapGet { .. }) => {
+            let left_e = gen_expr(left, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (Some(&(#left_e)) != #right_e) }
+            } else {
+                quote! { (Some(&(#left_e)) == #right_e) }
+            }
+        }
+        (_, ExprDef::MapGetFlatten { .. }) => {
+            let left_e = gen_expr(left, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (Some(&(#left_e)) != #right_e) }
+            } else {
+                quote! { (Some(&(#left_e)) == #right_e) }
+            }
+        }
+        _ => {
+            let left_e = gen_expr(left, prefix);
+            let right_e = gen_expr(right, prefix);
+            if invert {
+                quote! { (#left_e != #right_e) }
+            } else {
+                quote! { (#left_e == #right_e) }
+            }
         }
     }
 }
@@ -583,6 +734,72 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             match prefix {
                 FieldPrefix::AuthorityState => quote! { self.state.#field.remove(&#val); },
                 FieldPrefix::DirectSelf => quote! { self.#field.remove(&#val); },
+            }
+        }
+        UpdateDef::SeqAppend { field, value } => {
+            let val = gen_expr(value, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! { self.state.#field.push(#val); },
+                FieldPrefix::DirectSelf => quote! { self.#field.push(#val); },
+            }
+        }
+        UpdateDef::SeqPrepend { field, values } => {
+            let vals = gen_expr(values, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! {
+                    {
+                        let mut prefix_values = #vals;
+                        prefix_values.extend(self.state.#field.clone());
+                        self.state.#field = prefix_values;
+                    }
+                },
+                FieldPrefix::DirectSelf => quote! {
+                    {
+                        let mut prefix_values = #vals;
+                        prefix_values.extend(self.#field.clone());
+                        self.#field = prefix_values;
+                    }
+                },
+            }
+        }
+        UpdateDef::SeqPopFront { field } => match prefix {
+            FieldPrefix::AuthorityState => quote! {
+                if !self.state.#field.is_empty() {
+                    self.state.#field.remove(0);
+                }
+            },
+            FieldPrefix::DirectSelf => quote! {
+                if !self.#field.is_empty() {
+                    self.#field.remove(0);
+                }
+            },
+        },
+        UpdateDef::SeqRemoveValue { field, value } => {
+            let val = gen_expr(value, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! {
+                    self.state.#field.retain(|item| item != &#val);
+                },
+                FieldPrefix::DirectSelf => quote! {
+                    self.#field.retain(|item| item != &#val);
+                },
+            }
+        }
+        UpdateDef::SeqRemoveAll { field, values } => {
+            let vals = gen_expr(values, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! {
+                    {
+                        let values = #vals;
+                        self.state.#field.retain(|item| !values.contains(item));
+                    }
+                },
+                FieldPrefix::DirectSelf => quote! {
+                    {
+                        let values = #vals;
+                        self.#field.retain(|item| !values.contains(item));
+                    }
+                },
             }
         }
         UpdateDef::MapInsert { field, key, value } => {
@@ -650,6 +867,19 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
                 quote! { if #cond { #(#then_stmts)* } else { #(#else_stmts)* } }
             }
         }
+        UpdateDef::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            let over_e = gen_expr(over, prefix);
+            let update_stmts: Vec<_> = updates.iter().map(|u| gen_update(u, prefix)).collect();
+            quote! {
+                for #binding in #over_e.iter() {
+                    #(#update_stmts)*
+                }
+            }
+        }
     }
 }
 
@@ -668,17 +898,9 @@ fn gen_helper(helper: &HelperDef) -> TokenStream {
         })
         .collect();
 
-    if helper.params.is_empty() {
-        quote! {
-            pub fn #name(&self) -> #return_ty {
-                #body
-            }
-        }
-    } else {
-        quote! {
-            pub fn #name(#(#params),*) -> #return_ty {
-                #body
-            }
+    quote! {
+        pub fn #name(&self #(, #params)*) -> #return_ty {
+            #body
         }
     }
 }

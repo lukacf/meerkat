@@ -13,7 +13,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+meerkat-machine-dsl-core = { path = "../meerkat-machine-dsl-core" }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
 
 [dev-dependencies]
 meerkat-runtime = { path = "../meerkat-runtime" }

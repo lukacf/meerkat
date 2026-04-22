@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+#### Row 22 typed modeled-kernel hard cut
+- The modeled-kernel boundary is now fully typed for the canonical machine surface, and `meerkat-mob` flow runtime uses runtime-local generated flow kernels instead of the shared compat-flow bridge path.
+- `meerkat-machine-kernels` returns to the canonical five-machine production surface; compat flow/frame/loop kernels are feature-gated for `test-oracle` use only.
+- `MobRun.schema_version` is now `5` for typed flow/frame/loop snapshots.
+
+### Removed
+
+#### Pre-row-22 active snapshot compatibility
+- There is no upgrade-on-read path for pre-row-22 active flow/frame/loop snapshots.
+- Loading or resuming an active run with `schema_version < 5` now fails explicitly and the run remains unrecoverable until operators archive or drop the old row.
+
 ## [0.5.2] - 2026-04-12
 
 ### Added

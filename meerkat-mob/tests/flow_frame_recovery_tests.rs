@@ -11,6 +11,7 @@ use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
     FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
 };
+use meerkat_mob::runtime::flow_kernels::flow_run;
 use meerkat_mob::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
 use std::collections::{BTreeMap, BTreeSet};
 use test_oracle_support::{
@@ -80,10 +81,7 @@ fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> Fra
 }
 
 /// Insert a frame_id into the ready_frames Seq and ready_frame_membership Set of flow_state.
-fn insert_frame_to_ready_queue(
-    flow_state: &mut meerkat_machine_kernels::compat_generated::flow_run::State,
-    frame_id: &str,
-) {
+fn insert_frame_to_ready_queue(flow_state: &mut flow_run::State, frame_id: &str) {
     let mut raw = flow_run_state_to_raw(flow_state);
     if let Some(KernelValue::Seq(seq)) = raw.fields.get_mut("ready_frames") {
         seq.push(KernelValue::String(frame_id.to_string()));
@@ -94,9 +92,7 @@ fn insert_frame_to_ready_queue(
     *flow_state = flow_run_state_from_raw(raw);
 }
 
-fn get_ready_frames_from_run_state(
-    flow_state: &meerkat_machine_kernels::compat_generated::flow_run::State,
-) -> Vec<String> {
+fn get_ready_frames_from_run_state(flow_state: &flow_run::State) -> Vec<String> {
     let raw = flow_run_state_to_raw(flow_state);
     match raw.fields.get("ready_frames") {
         Some(KernelValue::Seq(seq)) => seq
@@ -313,9 +309,7 @@ fn test_pre_row22_pending_run_is_accepted() {
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────
 
-fn get_pending_body_frame_loops_from_run_state(
-    flow_state: &meerkat_machine_kernels::compat_generated::flow_run::State,
-) -> Vec<String> {
+fn get_pending_body_frame_loops_from_run_state(flow_state: &flow_run::State) -> Vec<String> {
     let raw = flow_run_state_to_raw(flow_state);
     match raw.fields.get("pending_body_frame_loops") {
         Some(KernelValue::Seq(seq)) => seq

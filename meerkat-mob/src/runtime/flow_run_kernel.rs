@@ -7,10 +7,10 @@ use crate::flow_machine_types::{
 };
 use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
+use crate::runtime::flow_kernels::flow_run;
 use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_machine_kernels::compat_generated::flow_run;
 use meerkat_machine_schema::compat::types as kernel_types;
 use std::sync::Arc;
 
@@ -318,12 +318,12 @@ impl FlowRunKernel {
             persist_output: matches!(step_status, crate::run::StepRunStatus::Completed),
             append_failure_ledger: has_step_effect(
                 &effects,
-                flow_run::FlowRunEffectKind::AppendFailureLedger,
+                flow_run::EffectKind::AppendFailureLedger,
                 step_id,
             )?,
             escalate_supervisor: has_step_effect(
                 &effects,
-                flow_run::FlowRunEffectKind::EscalateSupervisor,
+                flow_run::EffectKind::EscalateSupervisor,
                 step_id,
             )?,
         }))
@@ -1094,7 +1094,7 @@ impl FlowRunMutator for FlowRunKernel {
 
 fn has_step_effect(
     effects: &[flow_run::Effect],
-    variant: flow_run::FlowRunEffectKind,
+    variant: flow_run::EffectKind,
     step_id: &StepId,
 ) -> Result<bool, MobError> {
     for effect in effects {
@@ -1141,18 +1141,12 @@ mod tests {
     impl FlowRunEffectKind {
         fn parse(effect: &flow_run::Effect) -> Option<Self> {
             match effect.kind() {
-                flow_run::FlowRunEffectKind::AdmitStepWork => Some(Self::AdmitStepWork),
-                flow_run::FlowRunEffectKind::AppendFailureLedger => Some(Self::AppendFailureLedger),
-                flow_run::FlowRunEffectKind::EscalateSupervisor => Some(Self::EscalateSupervisor),
-                flow_run::FlowRunEffectKind::ProjectTargetSuccess => {
-                    Some(Self::ProjectTargetSuccess)
-                }
-                flow_run::FlowRunEffectKind::ProjectTargetFailure => {
-                    Some(Self::ProjectTargetFailure)
-                }
-                flow_run::FlowRunEffectKind::ProjectTargetCanceled => {
-                    Some(Self::ProjectTargetCanceled)
-                }
+                flow_run::EffectKind::AdmitStepWork => Some(Self::AdmitStepWork),
+                flow_run::EffectKind::AppendFailureLedger => Some(Self::AppendFailureLedger),
+                flow_run::EffectKind::EscalateSupervisor => Some(Self::EscalateSupervisor),
+                flow_run::EffectKind::ProjectTargetSuccess => Some(Self::ProjectTargetSuccess),
+                flow_run::EffectKind::ProjectTargetFailure => Some(Self::ProjectTargetFailure),
+                flow_run::EffectKind::ProjectTargetCanceled => Some(Self::ProjectTargetCanceled),
                 _ => None,
             }
         }

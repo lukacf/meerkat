@@ -672,7 +672,9 @@ pub fn flow_frame_machine() -> MachineSchema {
                 // its BranchId is added here to suppress all sibling branch nodes.
                 field(
                     "branch_winners",
-                    TypeRef::Set(Box::new(TypeRef::Named("BranchId".into()))),
+                    TypeRef::Set(Box::new(TypeRef::Option(Box::new(TypeRef::Named(
+                        "BranchId".into(),
+                    ))))),
                 ),
                 // Status
                 field(

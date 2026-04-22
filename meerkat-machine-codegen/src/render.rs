@@ -1,5 +1,8 @@
 use std::fmt::Write;
 
+#[cfg(not(test))]
+use crate::compat_substrate;
+
 fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
     let _ignored = out.write_fmt(args);
 }
@@ -508,30 +511,22 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
                 .map(|field| format!("&{}", field.name))
                 .collect::<Vec<_>>();
             pushln!(&mut out, "    pub fn {}(", helper.name);
-            if helper.params.is_empty() {
-                pushln!(&mut out, "        state: &State,");
-            } else {
-                pushln!(&mut out, "        _state: &State,");
-            }
+            pushln!(&mut out, "        state: &State,");
             for param in &params {
                 pushln!(&mut out, "        {param},");
             }
             pushln!(&mut out, "        _context: &impl Context,");
             pushln!(&mut out, "    ) -> Result<{return_ty}, KernelError> {{");
-            if helper.params.is_empty() {
-                pushln!(
-                    &mut out,
-                    "        let authority = Authority::from_state(state_to_inner(state));"
-                );
-                pushln!(&mut out, "        Ok(authority.{}())", helper.name);
-            } else {
-                pushln!(
-                    &mut out,
-                    "        Ok(Authority::{}({}))",
-                    helper.name,
-                    call_args.join(", ")
-                );
-            }
+            pushln!(
+                &mut out,
+                "        let authority = Authority::from_state(state_to_inner(state));"
+            );
+            pushln!(
+                &mut out,
+                "        Ok(authority.{}({}))",
+                helper.name,
+                call_args.join(", ")
+            );
             pushln!(&mut out, "    }}");
         }
         pushln!(&mut out, "}}");
@@ -735,17 +730,20 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
 
 #[cfg(not(test))]
 fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
+    render_compat_machine_kernel_module_direct(schema)
+}
+
+#[cfg(not(test))]
+fn render_compat_machine_kernel_module_direct(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let schema_fn = schema_constructor_path(schema);
     let has_signals = !schema.signals.variants.is_empty();
-    let input_kind_name = format!("{}Kind", schema.inputs.name);
-    let effect_kind_name = format!("{}Kind", schema.effects.name);
-    let signal_kind_name = format!("{}Kind", schema.signals.name);
     let helper_entries = schema
         .helpers
         .iter()
         .chain(schema.derived.iter())
         .collect::<Vec<_>>();
+    let substrate = compat_substrate::render_substrate(schema);
 
     pushln!(
         &mut out,
@@ -753,40 +751,34 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(
         &mut out,
-        "#![allow(clippy::clone_on_copy, clippy::expect_used, clippy::ptr_arg, clippy::redundant_closure)]"
+        "#![allow(clippy::bool_comparison, clippy::clone_on_copy, clippy::cloned_instead_of_copied, clippy::collapsible_else_if, clippy::expect_used, clippy::explicit_iter_loop, clippy::if_not_else, clippy::len_zero, clippy::overly_complex_bool_expr, clippy::partialeq_to_none, clippy::ptr_arg, clippy::redundant_clone, clippy::redundant_closure, clippy::uninlined_format_args, dead_code, non_camel_case_types, non_snake_case, unused_imports, unused_parens, unused_variables)]"
     );
-    pushln!(&mut out, "use crate::runtime::{{");
-    pushln!(
-        &mut out,
-        "    GeneratedMachineKernel, KernelEffect as LegacyEffect, KernelInput as LegacyInput,"
-    );
-    if has_signals {
-        pushln!(
-            &mut out,
-            "    KernelSignal as LegacySignal, KernelState as LegacyState, KernelValue,"
-        );
-    } else {
-        pushln!(&mut out, "    KernelState as LegacyState, KernelValue,");
-    }
-    pushln!(
-        &mut out,
-        "    TransitionOutcome as LegacyTransitionOutcome, TransitionRefusal as LegacyTransitionRefusal,"
-    );
-    pushln!(&mut out, "}};");
     pushln!(
         &mut out,
         "use meerkat_machine_schema::compat::types as compat_types;"
     );
     pushln!(&mut out);
-    pushln!(
-        &mut out,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
-    );
-    pushln!(&mut out, "pub enum Phase {{");
-    for variant in &schema.state.phase.variants {
-        pushln!(&mut out, "    {},", variant.name);
+    pushln!(&mut out, "mod substrate {{");
+    pushln!(&mut out, "    use super::compat_types::*;");
+    pushln!(&mut out, "    use serde::{{Deserialize, Serialize}};");
+    for line in substrate.lines() {
+        pushln!(&mut out, "    {line}");
     }
     pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "pub type Phase = substrate::CompatPhase;");
+    pushln!(
+        &mut out,
+        "pub type TransitionId = substrate::CompatMachineTransitionId;"
+    );
+    pushln!(
+        &mut out,
+        "pub type GuardId = substrate::CompatMachineGuardId;"
+    );
+    pushln!(
+        &mut out,
+        "pub type HelperId = substrate::CompatMachineHelperId;"
+    );
     pushln!(&mut out);
 
     render_compat_payload_module(&mut out, "inputs", &schema.inputs.variants);
@@ -797,7 +789,7 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
     render_compat_variant_enum(
         &mut out,
         "Input",
-        &input_kind_name,
+        "InputKind",
         "inputs",
         &schema.inputs.variants,
     );
@@ -805,7 +797,7 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
         render_compat_variant_enum(
             &mut out,
             "Signal",
-            &signal_kind_name,
+            "SignalKind",
             "signals",
             &schema.signals.variants,
         );
@@ -813,13 +805,10 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
     render_compat_variant_enum(
         &mut out,
         "Effect",
-        &effect_kind_name,
+        "EffectKind",
         "effects",
         &schema.effects.variants,
     );
-    render_compat_transition_id_enum(&mut out, schema);
-    render_compat_guard_id_enum(&mut out, schema);
-    render_compat_helper_id_enum(&mut out, schema);
     render_compat_state_struct(&mut out, schema);
 
     pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
@@ -837,9 +826,9 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
     pushln!(&mut out, "pub enum TriggerDiscriminant {{");
-    pushln!(&mut out, "    Input({input_kind_name}),");
+    pushln!(&mut out, "    Input(InputKind),");
     if has_signals {
-        pushln!(&mut out, "    Signal({signal_kind_name}),");
+        pushln!(&mut out, "    Signal(SignalKind),");
     }
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -892,18 +881,10 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    {schema_fn}()");
     pushln!(&mut out, "}}");
     pushln!(&mut out);
-    pushln!(&mut out, "pub fn kernel() -> GeneratedMachineKernel {{");
-    pushln!(&mut out, "    GeneratedMachineKernel::new(schema())");
-    pushln!(&mut out, "}}");
-    pushln!(&mut out);
     pushln!(&mut out, "pub fn initial_state() -> State {{");
     pushln!(
         &mut out,
-        "    let legacy = kernel().initial_state().expect(\"compat machine initial state must derive from schema init\");"
-    );
-    pushln!(
-        &mut out,
-        "    state_from_kernel(legacy).expect(\"compat machine initial state must decode to typed state\")"
+        "    state_from_substrate(substrate::CompatMachineState::default())"
     );
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -916,20 +897,21 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
         &mut out,
         "    let trigger = TriggerDiscriminant::Input(input.kind());"
     );
-    pushln!(&mut out, "    let legacy_state = state_to_kernel(state);");
-    pushln!(&mut out, "    let legacy_input = input_to_kernel(&input);");
-    pushln!(&mut out, "    let legacy = kernel()");
     pushln!(
         &mut out,
-        "        .transition(&legacy_state, &legacy_input)"
+        "    let mut authority = substrate::CompatMachineAuthority::from_state(state_to_substrate(state));"
     );
     pushln!(
         &mut out,
-        "        .map_err(|error| map_legacy_error(error, state.phase.clone(), trigger.clone()))?;"
+        "    let transition = substrate::CompatMachineMutator::apply(&mut authority, input_to_substrate(input))"
     );
     pushln!(
         &mut out,
-        "    outcome_from_kernel(legacy).map_err(TransitionError::Kernel)"
+        "        .map_err(|error| map_substrate_error(error, state.phase, trigger.clone()))?;"
+    );
+    pushln!(
+        &mut out,
+        "    Ok(outcome_from_substrate(&authority, transition))"
     );
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -943,23 +925,21 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
             &mut out,
             "    let trigger = TriggerDiscriminant::Signal(signal.kind());"
         );
-        pushln!(&mut out, "    let legacy_state = state_to_kernel(state);");
         pushln!(
             &mut out,
-            "    let legacy_signal = signal_to_kernel(&signal);"
-        );
-        pushln!(&mut out, "    let legacy = kernel()");
-        pushln!(
-            &mut out,
-            "        .transition_signal(&legacy_state, &legacy_signal)"
+            "    let mut authority = substrate::CompatMachineAuthority::from_state(state_to_substrate(state));"
         );
         pushln!(
             &mut out,
-            "        .map_err(|error| map_legacy_error(error, state.phase.clone(), trigger.clone()))?;"
+            "    let transition = authority.apply_signal(signal_to_substrate(signal))"
         );
         pushln!(
             &mut out,
-            "    outcome_from_kernel(legacy).map_err(TransitionError::Kernel)"
+            "        .map_err(|error| map_substrate_error(error, state.phase, trigger.clone()))?;"
+        );
+        pushln!(
+            &mut out,
+            "    Ok(outcome_from_substrate(&authority, transition))"
         );
         pushln!(&mut out, "}}");
         pushln!(&mut out);
@@ -974,7 +954,7 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
         for helper in &helper_entries {
             let fn_name = to_snake_case(&helper.name);
             let return_ty = compat_rust_type(&helper.returns);
-            let helper_id = rust_enum_variant_ident(&helper.name);
+            let helper_name = rust_enum_variant_ident(&helper.name);
             pushln!(&mut out, "    pub fn {fn_name}(");
             pushln!(&mut out, "        state: &State,");
             for param in &helper.params {
@@ -987,62 +967,335 @@ fn render_compat_machine_kernel_module(schema: &MachineSchema) -> String {
             }
             pushln!(&mut out, "        _context: &impl Context,");
             pushln!(&mut out, "    ) -> Result<{return_ty}, KernelError> {{");
+            pushln!(
+                &mut out,
+                "        let authority = substrate::CompatMachineAuthority::from_state(super::state_to_substrate(state));"
+            );
             if helper.params.is_empty() {
-                pushln!(
-                    &mut out,
-                    "        let args = std::collections::BTreeMap::new();"
-                );
+                pushln!(&mut out, "        Ok(authority.{helper_name}())");
             } else {
-                pushln!(
-                    &mut out,
-                    "        let mut args = std::collections::BTreeMap::new();"
-                );
+                let args = helper
+                    .params
+                    .iter()
+                    .map(|param| format!("&{}", param.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                pushln!(&mut out, "        Ok(authority.{helper_name}({args}))");
             }
-            for param in &helper.params {
-                pushln!(
-                    &mut out,
-                    "        args.insert(\"{}\".to_string(), {});",
-                    param.name,
-                    compat_value_to_kernel_call(&param.ty, &param.name, false)
-                );
-            }
-            pushln!(&mut out, "        let value = kernel()");
-            pushln!(
-                &mut out,
-                "            .evaluate_helper(&state_to_kernel(state), \"{}\", &args)",
-                helper.name
-            );
-            pushln!(
-                &mut out,
-                "            .map_err(|error| map_helper_error(HelperId::{helper_id}, error))?;"
-            );
-            pushln!(
-                &mut out,
-                "        {}",
-                compat_value_from_kernel_call(
-                    &helper.returns,
-                    "value",
-                    &format!("\"helper `{}` return\"", helper.name)
-                )
-            );
             pushln!(&mut out, "    }}");
         }
         pushln!(&mut out, "}}");
         pushln!(&mut out);
     }
 
-    render_compat_input_to_kernel(&mut out, schema);
+    render_compat_input_to_substrate(&mut out, schema);
     if has_signals {
-        render_compat_signal_to_kernel(&mut out, schema);
+        render_compat_signal_to_substrate(&mut out, schema);
     }
-    render_compat_effect_from_kernel(&mut out, schema);
+    render_compat_effect_from_substrate(&mut out, schema);
+    render_compat_state_substrate_converters(&mut out, schema);
+    render_compat_direct_error_helpers(&mut out, schema);
+
+    out
+}
+
+#[cfg(not(test))]
+pub fn render_compat_test_oracle_module(schema: &MachineSchema) -> String {
+    let mut out = String::new();
+    let module_slug = machine_slug(&schema.machine);
+
+    pushln!(
+        &mut out,
+        "// Generated by `cargo xtask machine-codegen --all`."
+    );
+    pushln!(
+        &mut out,
+        "#![allow(clippy::expect_used, clippy::ptr_arg, clippy::redundant_clone, clippy::redundant_closure, clippy::uninlined_format_args, dead_code)]"
+    );
+    pushln!(
+        &mut out,
+        "use crate::compat_generated::{module_slug}::{{Effect, KernelError, Phase, State}};"
+    );
+    pushln!(
+        &mut out,
+        "use crate::runtime::{{KernelEffect as LegacyEffect, KernelState as LegacyState, KernelValue}};"
+    );
+    pushln!(
+        &mut out,
+        "use meerkat_machine_schema::compat::types as compat_types;"
+    );
+    pushln!(&mut out);
+
     render_compat_effect_to_kernel(&mut out, schema);
     render_compat_state_converters(&mut out, schema);
-    render_compat_outcome_converters(&mut out, schema);
-    render_compat_error_helpers(&mut out, schema);
     render_compat_value_helpers(&mut out, schema);
 
     out
+}
+
+#[cfg(not(test))]
+fn render_compat_input_to_substrate(out: &mut String, schema: &MachineSchema) {
+    pushln!(
+        out,
+        "fn input_to_substrate(input: Input) -> substrate::CompatInput {{"
+    );
+    pushln!(out, "    match input {{");
+    for variant in &schema.inputs.variants {
+        let payload_binding = if variant.fields.is_empty() {
+            "_payload"
+        } else {
+            "payload"
+        };
+        pushln!(
+            out,
+            "        Input::{}({payload_binding}) => {{",
+            variant.name
+        );
+        if variant.fields.is_empty() {
+            pushln!(out, "            substrate::CompatInput::{}", variant.name);
+        } else {
+            pushln!(
+                out,
+                "            substrate::CompatInput::{} {{",
+                variant.name
+            );
+            for field in &variant.fields {
+                pushln!(
+                    out,
+                    "                {}: payload.{},",
+                    field.name,
+                    field.name
+                );
+            }
+            pushln!(out, "            }}");
+        }
+        pushln!(out, "        }},");
+    }
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+}
+
+#[cfg(not(test))]
+fn render_compat_signal_to_substrate(out: &mut String, schema: &MachineSchema) {
+    pushln!(
+        out,
+        "fn signal_to_substrate(signal: Signal) -> substrate::CompatSignal {{"
+    );
+    pushln!(out, "    match signal {{");
+    for variant in &schema.signals.variants {
+        let payload_binding = if variant.fields.is_empty() {
+            "_payload"
+        } else {
+            "payload"
+        };
+        pushln!(
+            out,
+            "        Signal::{}({payload_binding}) => {{",
+            variant.name
+        );
+        if variant.fields.is_empty() {
+            pushln!(out, "            substrate::CompatSignal::{}", variant.name);
+        } else {
+            pushln!(
+                out,
+                "            substrate::CompatSignal::{} {{",
+                variant.name
+            );
+            for field in &variant.fields {
+                pushln!(
+                    out,
+                    "                {}: payload.{},",
+                    field.name,
+                    field.name
+                );
+            }
+            pushln!(out, "            }}");
+        }
+        pushln!(out, "        }},");
+    }
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+}
+
+#[cfg(not(test))]
+fn render_compat_effect_from_substrate(out: &mut String, schema: &MachineSchema) {
+    pushln!(
+        out,
+        "fn effect_from_substrate(effect: substrate::CompatEffect) -> Effect {{"
+    );
+    pushln!(out, "    match effect {{");
+    for variant in &schema.effects.variants {
+        if variant.fields.is_empty() {
+            pushln!(
+                out,
+                "        substrate::CompatEffect::{} => Effect::{}(effects::{}),",
+                variant.name,
+                variant.name,
+                variant.name
+            );
+        } else {
+            pushln!(out, "        substrate::CompatEffect::{} {{", variant.name);
+            for field in &variant.fields {
+                pushln!(out, "            {},", field.name);
+            }
+            pushln!(
+                out,
+                "        }} => Effect::{}(effects::{} {{",
+                variant.name,
+                variant.name
+            );
+            for field in &variant.fields {
+                pushln!(out, "            {},", field.name);
+            }
+            pushln!(out, "        }}),");
+        }
+    }
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+}
+
+#[cfg(not(test))]
+fn render_compat_state_substrate_converters(out: &mut String, schema: &MachineSchema) {
+    pushln!(
+        out,
+        "fn state_to_substrate(state: &State) -> substrate::CompatMachineState {{"
+    );
+    pushln!(out, "    substrate::CompatMachineState {{");
+    pushln!(out, "        phase: state.phase,");
+    for field in &schema.state.fields {
+        pushln!(out, "        {}: state.{}.clone(),", field.name, field.name);
+    }
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+    pushln!(
+        out,
+        "fn state_from_substrate(state: substrate::CompatMachineState) -> State {{"
+    );
+    pushln!(out, "    State {{");
+    pushln!(out, "        phase: state.phase,");
+    for field in &schema.state.fields {
+        pushln!(out, "        {}: state.{},", field.name, field.name);
+    }
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+    pushln!(
+        out,
+        "fn outcome_from_substrate(authority: &substrate::CompatMachineAuthority, transition: substrate::CompatMachineTransition) -> Outcome {{"
+    );
+    pushln!(out, "    Outcome {{");
+    pushln!(out, "        transition_id: transition.transition_id,");
+    pushln!(
+        out,
+        "        next_state: state_from_substrate(authority.state.clone()),"
+    );
+    pushln!(
+        out,
+        "        effects: transition.effects.into_iter().map(effect_from_substrate).collect(),"
+    );
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+}
+
+#[cfg(not(test))]
+fn render_compat_direct_error_helpers(out: &mut String, schema: &MachineSchema) {
+    pushln!(out, "fn map_substrate_error(");
+    pushln!(out, "    error: substrate::CompatMachineTransitionError,");
+    pushln!(out, "    phase: Phase,");
+    pushln!(out, "    trigger: TriggerDiscriminant,");
+    pushln!(out, ") -> TransitionError {{");
+    pushln!(out, "    match error {{");
+    pushln!(
+        out,
+        "        substrate::CompatMachineTransitionError::NoMatchingTransition {{ .. }} => {{"
+    );
+    pushln!(
+        out,
+        "            let rejections = guard_rejections_for_trigger(&phase, &trigger);"
+    );
+    pushln!(out, "            if rejections.is_empty() {{");
+    pushln!(
+        out,
+        "                TransitionError::Refusal(TransitionRefusal::NoMatchingTransition {{ phase, trigger }})"
+    );
+    pushln!(out, "            }} else {{");
+    pushln!(
+        out,
+        "                TransitionError::Refusal(TransitionRefusal::GuardRejected {{ rejections }})"
+    );
+    pushln!(out, "            }}");
+    pushln!(out, "        }}");
+    pushln!(
+        out,
+        "        substrate::CompatMachineTransitionError::GuardRejected {{ .. }} => {{"
+    );
+    pushln!(
+        out,
+        "            TransitionError::Refusal(TransitionRefusal::GuardRejected {{ rejections: guard_rejections_for_trigger(&phase, &trigger) }})"
+    );
+    pushln!(out, "        }}");
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
+    pushln!(
+        out,
+        "fn guard_rejections_for_trigger(phase: &Phase, trigger: &TriggerDiscriminant) -> Vec<GuardRejection> {{"
+    );
+    let mut grouped_rejections =
+        std::collections::BTreeMap::<(String, String), Vec<(String, usize)>>::new();
+    for transition in &schema.transitions {
+        if transition.guards.is_empty() {
+            continue;
+        }
+        let trigger_expr = match transition.on.kind {
+            TriggerKind::Input => format!(
+                "TriggerDiscriminant::Input(InputKind::{})",
+                transition.on.variant
+            ),
+            TriggerKind::Signal => format!(
+                "TriggerDiscriminant::Signal(SignalKind::{})",
+                transition.on.variant
+            ),
+        };
+        for from_phase in &transition.from {
+            grouped_rejections
+                .entry((from_phase.clone(), trigger_expr.clone()))
+                .or_default()
+                .extend(
+                    transition
+                        .guards
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| (transition.name.clone(), index + 1)),
+                );
+        }
+    }
+    pushln!(out, "    match (phase, trigger) {{");
+    for ((phase_name, trigger_expr), rejections) in grouped_rejections {
+        pushln!(
+            out,
+            "        (Phase::{phase_name}, {trigger_expr}) => vec!["
+        );
+        for (transition_name, index) in rejections {
+            pushln!(
+                out,
+                "            GuardRejection {{ transition_id: TransitionId::{}, guard_id: GuardId::{}Guard{} }},",
+                transition_name,
+                transition_name,
+                index
+            );
+        }
+        pushln!(out, "        ],");
+    }
+    pushln!(out, "        _ => Vec::new(),");
+    pushln!(out, "    }}");
+    pushln!(out, "}}");
+    pushln!(out);
 }
 
 #[cfg(not(test))]
@@ -1192,6 +1445,7 @@ fn render_compat_variant_enum(
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_transition_id_enum(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
@@ -1223,6 +1477,7 @@ fn render_compat_transition_id_enum(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_guard_id_enum(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
@@ -1244,6 +1499,7 @@ fn render_compat_guard_id_enum(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_helper_id_enum(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
@@ -1284,6 +1540,7 @@ fn render_compat_state_struct(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_input_to_kernel(out: &mut String, schema: &MachineSchema) {
     pushln!(out, "fn input_to_kernel(input: &Input) -> LegacyInput {{");
     pushln!(out, "    match input {{");
@@ -1335,6 +1592,7 @@ fn render_compat_input_to_kernel(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_signal_to_kernel(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
@@ -1389,6 +1647,7 @@ fn render_compat_signal_to_kernel(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_effect_from_kernel(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
@@ -1611,6 +1870,7 @@ fn render_compat_state_converters(out: &mut String, schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_outcome_converters(out: &mut String, _schema: &MachineSchema) {
     pushln!(
         out,
@@ -1641,6 +1901,7 @@ fn render_compat_outcome_converters(out: &mut String, _schema: &MachineSchema) {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn render_compat_error_helpers(out: &mut String, schema: &MachineSchema) {
     pushln!(out, "fn map_legacy_error(");
     pushln!(out, "    error: LegacyTransitionRefusal,");

@@ -3,12 +3,12 @@
 use std::fs;
 use std::path::PathBuf;
 
-use meerkat_machine_kernels::compat_generated::loop_iteration;
 use meerkat_machine_schema::compat::types as kernel_types;
 use meerkat_mob::protocol_flow_loop_until_evaluation::{
     FlowLoopUntilEvaluationContext, accept_evaluate_until_condition, submit_until_condition_failed,
     submit_until_condition_met,
 };
+use meerkat_mob::runtime::flow_kernels::loop_iteration;
 
 struct EmptyContext;
 

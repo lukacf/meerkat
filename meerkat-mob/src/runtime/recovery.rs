@@ -7,7 +7,7 @@
 use crate::flow_machine_types::{frame_id, local_frame_id, loop_instance_id};
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
-use meerkat_machine_kernels::compat_generated::loop_iteration;
+use crate::runtime::flow_kernels::loop_iteration;
 use meerkat_machine_schema::compat::types as kernel_types;
 
 /// Errors that prevent a run from being resumed.
@@ -240,46 +240,74 @@ mod tests {
     use super::*;
     use crate::ids::RunId;
     use crate::run::{MobRun, MobRunStatus};
-    use meerkat_machine_kernels::compat_generated;
+    use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
     use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run as raw_flow_run;
     use meerkat_machine_kernels::test_oracle::{KernelState, KernelValue};
+    use serde::{Serialize, de::DeserializeOwned};
     use std::collections::BTreeMap;
 
-    fn flow_run_state_from_raw(mut state: KernelState) -> compat_generated::flow_run::State {
+    fn compat_to_local<TLocal, TCompat>(value: TCompat) -> TLocal
+    where
+        TLocal: DeserializeOwned,
+        TCompat: Serialize,
+    {
+        serde_json::from_value(serde_json::to_value(value).expect("serialize compat state"))
+            .expect("deserialize local state")
+    }
+
+    fn local_to_compat<TCompat, TLocal>(value: &TLocal) -> TCompat
+    where
+        TCompat: DeserializeOwned,
+        TLocal: Serialize,
+    {
+        serde_json::from_value(serde_json::to_value(value).expect("serialize local state"))
+            .expect("deserialize compat state")
+    }
+
+    fn flow_run_state_from_raw(mut state: KernelState) -> flow_run::State {
         let mut seeded =
             meerkat_machine_kernels::test_oracle::legacy_generated::flow_run::initial_state()
                 .expect("raw flow_run init");
         seeded.phase = state.phase;
         seeded.fields.extend(state.fields);
         state = seeded;
-        compat_generated::flow_run::from_test_oracle_state(state).expect("typed flow_run state")
+        let compat_state =
+            meerkat_machine_kernels::test_oracle::compat_generated::flow_run::from_test_oracle_state(state)
+                .expect("typed flow_run state");
+        compat_to_local(compat_state)
     }
 
-    fn flow_run_state_to_raw(state: &compat_generated::flow_run::State) -> KernelState {
-        compat_generated::flow_run::to_test_oracle_state(state)
+    fn flow_run_state_to_raw(state: &flow_run::State) -> KernelState {
+        let compat_state: meerkat_machine_kernels::compat_generated::flow_run::State =
+            local_to_compat(state);
+        meerkat_machine_kernels::test_oracle::compat_generated::flow_run::to_test_oracle_state(
+            &compat_state,
+        )
     }
 
-    fn flow_frame_state_from_raw(mut state: KernelState) -> compat_generated::flow_frame::State {
+    fn flow_frame_state_from_raw(mut state: KernelState) -> flow_frame::State {
         let mut seeded =
             meerkat_machine_kernels::test_oracle::legacy_generated::flow_frame::initial_state()
                 .expect("raw flow_frame init");
         seeded.phase = state.phase;
         seeded.fields.extend(state.fields);
         state = seeded;
-        compat_generated::flow_frame::from_test_oracle_state(state).expect("typed flow_frame state")
+        let compat_state =
+            meerkat_machine_kernels::test_oracle::compat_generated::flow_frame::from_test_oracle_state(state)
+                .expect("typed flow_frame state");
+        compat_to_local(compat_state)
     }
 
-    fn loop_iteration_state_from_raw(
-        mut state: KernelState,
-    ) -> compat_generated::loop_iteration::State {
+    fn loop_iteration_state_from_raw(mut state: KernelState) -> loop_iteration::State {
         let mut seeded =
             meerkat_machine_kernels::test_oracle::legacy_generated::loop_iteration::initial_state()
                 .expect("raw loop_iteration init");
         seeded.phase = state.phase;
         seeded.fields.extend(state.fields);
         state = seeded;
-        compat_generated::loop_iteration::from_test_oracle_state(state)
-            .expect("typed loop_iteration state")
+        let compat_state = meerkat_machine_kernels::test_oracle::compat_generated::loop_iteration::from_test_oracle_state(state)
+            .expect("typed loop_iteration state");
+        compat_to_local(compat_state)
     }
 
     fn minimal_v2_run_running() -> MobRun {

@@ -7,7 +7,7 @@ use crate::flow_machine_types::{
     local_flow_node_id, local_frame_id, local_loop_id, local_loop_instance_id,
 };
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
-use meerkat_machine_kernels::compat_generated::loop_iteration;
+use crate::runtime::flow_kernels::loop_iteration;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

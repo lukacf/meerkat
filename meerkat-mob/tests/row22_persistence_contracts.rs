@@ -3,6 +3,7 @@
 use indexmap::IndexMap;
 use meerkat_mob::ids::RunId;
 use meerkat_mob::run::{FlowContext, LoopContextHistory, MobRun, MobRunStatus};
+use meerkat_mob::runtime::flow_kernels::flow_run;
 use meerkat_mob::runtime::recovery::reconcile_run_state;
 use std::collections::BTreeMap;
 
@@ -12,7 +13,7 @@ fn minimal_run(schema_version: u32, status: MobRunStatus) -> MobRun {
         mob_id: meerkat_mob::MobId::from("row22-mob"),
         flow_id: meerkat_mob::FlowId::from("row22-flow"),
         status,
-        flow_state: meerkat_machine_kernels::compat_generated::flow_run::initial_state(),
+        flow_state: flow_run::initial_state(),
         activation_params: serde_json::json!({}),
         created_at: chrono::Utc::now(),
         completed_at: None,

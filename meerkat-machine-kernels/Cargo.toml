@@ -17,6 +17,7 @@ default = []
 test-oracle = []
 
 [dependencies]
+indexmap.workspace = true
 meerkat-machine-schema.workspace = true
 serde.workspace = true
 thiserror.workspace = true

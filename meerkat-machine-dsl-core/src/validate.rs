@@ -318,10 +318,17 @@ fn validate_expr(
         ExprDef::Not(inner)
         | ExprDef::IsSome(inner)
         | ExprDef::IsNone(inner)
+        | ExprDef::SeqElements(inner)
         | ExprDef::Len(inner)
+        | ExprDef::Head(inner)
         | ExprDef::MapKeys(inner)
         | ExprDef::Some(inner) => {
             validate_expr(inner, fields, bindings, helpers, errors);
+        }
+        ExprDef::SeqLiteral(items) => {
+            for item in items {
+                validate_expr(item, fields, bindings, helpers, errors);
+            }
         }
         ExprDef::And(exprs) | ExprDef::Or(exprs) => {
             for e in exprs {
@@ -347,7 +354,14 @@ fn validate_expr(
             validate_expr(map, fields, bindings, helpers, errors);
             validate_expr(key, fields, bindings, helpers, errors);
         }
-        ExprDef::MapGet { map, key } | ExprDef::MapGetCopied { map, key } => {
+        ExprDef::SeqStartsWith { seq, prefix } => {
+            validate_expr(seq, fields, bindings, helpers, errors);
+            validate_expr(prefix, fields, bindings, helpers, errors);
+        }
+        ExprDef::MapGet { map, key }
+        | ExprDef::MapGetFlatten { map, key }
+        | ExprDef::MapGetCloned { map, key }
+        | ExprDef::MapGetCopied { map, key } => {
             validate_expr(map, fields, bindings, helpers, errors);
             validate_expr(key, fields, bindings, helpers, errors);
         }
@@ -384,7 +398,8 @@ fn validate_expr(
         | ExprDef::EmptyMap
         | ExprDef::CurrentPhase
         | ExprDef::Phase(_)
-        | ExprDef::NamedVariant { .. } => {}
+        | ExprDef::NamedVariant { .. }
+        | ExprDef::ConstructNamed { .. } => {}
     }
 }
 
@@ -450,6 +465,32 @@ fn validate_update(
             }
             validate_expr(value, fields, bindings, helpers, errors);
         }
+        UpdateDef::SeqAppend { field, value } | UpdateDef::SeqRemoveValue { field, value } => {
+            if !fields.contains(&field.to_string()) {
+                errors.push(Error::new(
+                    field.span(),
+                    format!("unknown state field `{field}`"),
+                ));
+            }
+            validate_expr(value, fields, bindings, helpers, errors);
+        }
+        UpdateDef::SeqPrepend { field, values } | UpdateDef::SeqRemoveAll { field, values } => {
+            if !fields.contains(&field.to_string()) {
+                errors.push(Error::new(
+                    field.span(),
+                    format!("unknown state field `{field}`"),
+                ));
+            }
+            validate_expr(values, fields, bindings, helpers, errors);
+        }
+        UpdateDef::SeqPopFront { field } => {
+            if !fields.contains(&field.to_string()) {
+                errors.push(Error::new(
+                    field.span(),
+                    format!("unknown state field `{field}`"),
+                ));
+            }
+        }
         UpdateDef::MapInsert { field, key, value } => {
             if !fields.contains(&field.to_string()) {
                 errors.push(Error::new(
@@ -492,6 +533,18 @@ fn validate_update(
             }
             for u in else_updates {
                 validate_update(u, fields, bindings, helpers, errors);
+            }
+        }
+        UpdateDef::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            validate_expr(over, fields, bindings, helpers, errors);
+            let mut inner_bindings = bindings.clone();
+            inner_bindings.insert(binding.to_string());
+            for update in updates {
+                validate_update(update, fields, &inner_bindings, helpers, errors);
             }
         }
     }

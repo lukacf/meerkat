@@ -8,7 +8,7 @@
 use crate::error::MobError;
 use crate::flow_machine_types::{local_frame_id, local_loop_instance_id};
 use crate::ids::{FrameId, LoopInstanceId};
-use meerkat_machine_kernels::compat_generated::flow_run;
+use crate::runtime::flow_kernels::flow_run;
 
 /// A scheduler grant produced by pumping.
 #[derive(Debug, Clone)]

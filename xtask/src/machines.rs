@@ -11,8 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use meerkat_machine_codegen::{
     composition_route_coverage_operator_name, composition_scheduler_coverage_operator_name,
-    composition_witness_cfg_name, merge_mapping_document, render_composition_ci_cfg,
-    render_composition_contract_markdown, render_composition_driver,
+    composition_witness_cfg_name, merge_mapping_document, render_compat_test_oracle_module,
+    render_composition_ci_cfg, render_composition_contract_markdown, render_composition_driver,
     render_composition_mapping_coverage, render_composition_semantic_model,
     render_composition_witness_cfg, render_generated_kernel_mod, render_machine_ci_cfg,
     render_machine_contract_markdown, render_machine_kernel_module,
@@ -22,7 +22,7 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine,
+    flow_frame_machine, flow_run_machine, loop_iteration_machine, runtime_local,
 };
 use serde::Serialize;
 
@@ -335,10 +335,22 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
             &generated_kernel_module_path(root, &generated_slug),
             &render_machine_kernel_module(&schema),
         )?;
+        write_generated(
+            &compat_test_oracle_module_path(root, &generated_slug),
+            &render_compat_test_oracle_module(&schema),
+        )?;
         println!(
             "generated {}",
             generated_kernel_module_path(root, &generated_slug).display()
         );
+    }
+
+    for schema in runtime_local_machine_schemas() {
+        let generated_slug = generated_kernel_module_slug(&schema.machine);
+        write_generated(
+            &runtime_local_kernel_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&schema),
+        )?;
     }
 
     for composition in &selection.compositions {
@@ -2128,8 +2140,29 @@ fn generated_kernel_root(root: &Path) -> PathBuf {
         .join("generated")
 }
 
+fn compat_test_oracle_root(root: &Path) -> PathBuf {
+    root.join("meerkat-machine-kernels")
+        .join("src")
+        .join("test_oracle_compat_generated")
+}
+
+fn runtime_local_kernel_root(root: &Path) -> PathBuf {
+    root.join("meerkat-mob")
+        .join("src")
+        .join("runtime")
+        .join("flow_kernels")
+}
+
 pub fn generated_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
     generated_kernel_root(root).join(format!("{slug}.rs"))
+}
+
+fn compat_test_oracle_module_path(root: &Path, slug: &str) -> PathBuf {
+    compat_test_oracle_root(root).join(format!("{slug}.rs"))
+}
+
+fn runtime_local_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
+    runtime_local_kernel_root(root).join(format!("{slug}.rs"))
 }
 
 pub fn generated_kernel_mod_path(root: &Path) -> PathBuf {
@@ -2164,6 +2197,14 @@ fn compat_machine_schemas() -> Vec<MachineSchema> {
         flow_frame_machine(),
         flow_run_machine(),
         loop_iteration_machine(),
+    ]
+}
+
+fn runtime_local_machine_schemas() -> Vec<MachineSchema> {
+    vec![
+        runtime_local::flow_frame_machine(),
+        runtime_local::flow_run_machine(),
+        runtime_local::loop_iteration_machine(),
     ]
 }
 

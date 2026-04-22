@@ -72,6 +72,10 @@ pub(crate) fn gen_type(ty: &TypeDef) -> TokenStream {
             let inner_ty = gen_type(inner);
             quote! { std::collections::BTreeSet<#inner_ty> }
         }
+        TypeDef::Seq(inner) => {
+            let inner_ty = gen_type(inner);
+            quote! { Vec<#inner_ty> }
+        }
         TypeDef::Map(k, v) => {
             let key_ty = gen_type(k);
             let val_ty = gen_type(v);
@@ -86,8 +90,12 @@ fn gen_init_value(expr: &crate::ast::ExprDef) -> TokenStream {
     use crate::ast::ExprDef;
     match expr {
         ExprDef::Bool(v) => quote! { #v },
-        ExprDef::U64(v) => quote! { #v },
+        ExprDef::U64(v) => {
+            let lit = proc_macro2::Literal::u64_unsuffixed(*v);
+            quote! { #lit }
+        }
         ExprDef::StringLit(s) => quote! { #s.into() },
+        ExprDef::ConstructNamed { type_name, value } => quote! { #type_name(#value.into()) },
         ExprDef::None => quote! { None },
         ExprDef::Some(inner) => {
             let inner_val = gen_init_value(inner);
@@ -95,6 +103,10 @@ fn gen_init_value(expr: &crate::ast::ExprDef) -> TokenStream {
         }
         ExprDef::EmptySet => quote! { std::collections::BTreeSet::new() },
         ExprDef::EmptyMap => quote! { std::collections::BTreeMap::new() },
+        ExprDef::SeqLiteral(items) => {
+            let values: Vec<_> = items.iter().map(gen_init_value).collect();
+            quote! { vec![#(#values),*] }
+        }
         ExprDef::NamedVariant { enum_name, variant } => quote! { #enum_name::#variant },
         ExprDef::Phase(variant) => {
             // Phase variant in init — for stored-phase machines

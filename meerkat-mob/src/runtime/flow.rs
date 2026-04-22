@@ -15,11 +15,12 @@ use crate::definition::{
 };
 use crate::error::MobError;
 use crate::flow_machine_types::{local_step_id, local_step_run_status, local_target_id};
-use crate::generated::flow_frame_loop_driver::FlowFrameTerminalPhase;
 use crate::ids::{AgentIdentity, FlowId, MeerkatId, RunId, StepId};
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
+use crate::runtime::flow_frame_loop_driver::FlowFrameTerminalPhase;
+use crate::runtime::flow_kernels::flow_run;
 use crate::store::{MobEventStore, MobRunStore};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -29,7 +30,6 @@ use indexmap::IndexMap;
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::compat_generated::flow_run;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -421,7 +421,7 @@ impl FlowEngine {
             };
             if !has_effect(
                 &dispatch_effects,
-                flow_run::FlowRunEffectKind::AdmitStepWork,
+                flow_run::EffectKind::AdmitStepWork,
                 Some(&step_id),
                 None,
             ) {
@@ -493,7 +493,7 @@ impl FlowEngine {
                     if let Some(output_effects) = output_effects
                         && has_effect(
                             &output_effects,
-                            flow_run::FlowRunEffectKind::PersistStepOutput,
+                            flow_run::EffectKind::PersistStepOutput,
                             Some(&step_id),
                             None,
                         )
@@ -1416,7 +1416,7 @@ impl FlowEngine {
         if append_failure_ledger
             && has_effect(
                 &effects,
-                flow_run::FlowRunEffectKind::AppendFailureLedger,
+                flow_run::EffectKind::AppendFailureLedger,
                 Some(step_id),
                 None,
             )
@@ -1434,7 +1434,7 @@ impl FlowEngine {
         }
         Ok(has_effect(
             &effects,
-            flow_run::FlowRunEffectKind::EscalateSupervisor,
+            flow_run::EffectKind::EscalateSupervisor,
             Some(step_id),
             None,
         ))
@@ -1579,7 +1579,7 @@ fn find_step_notice_effect(
 
 fn has_effect(
     effects: &[flow_run::Effect],
-    expected: flow_run::FlowRunEffectKind,
+    expected: flow_run::EffectKind,
     expected_step_id: Option<&StepId>,
     expected_target_id: Option<&MeerkatId>,
 ) -> bool {

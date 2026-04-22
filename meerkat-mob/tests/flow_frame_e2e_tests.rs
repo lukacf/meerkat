@@ -11,10 +11,7 @@ mod test_oracle_support;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_machine_kernels::test_oracle::KernelState;
-use meerkat_machine_kernels::{
-    compat_generated::{flow_frame as typed_flow_frame, loop_iteration as typed_loop_iteration},
-    test_oracle::legacy_generated::flow_run as raw_flow_run,
-};
+use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run as raw_flow_run;
 use meerkat_mob::definition::{
     ConditionExpr, DependencyMode, FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec,
 };
@@ -24,6 +21,9 @@ use meerkat_mob::run::{FlowContext, LoopSnapshot, MobRun};
 use meerkat_mob::runtime::FlowFrameKernel;
 use meerkat_mob::runtime::flow_frame_engine::{
     FlowFrameEngine, FrameStepExecutor, FrameStepResult,
+};
+use meerkat_mob::runtime::flow_kernels::{
+    flow_frame as typed_flow_frame, loop_iteration as typed_loop_iteration,
 };
 use meerkat_mob::store::MobRunStore as _;
 use meerkat_mob::{FlowFrameMutator, FlowId, InMemoryMobRunStore, MobId};

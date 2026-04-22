@@ -8,6 +8,7 @@ use crate::event::MobEvent;
 use crate::profile::{Profile, ProfileBinding, ToolConfig};
 use crate::run::MobRunStatus;
 use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
 use crate::storage::MobStorage;
 use crate::store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
@@ -47,12 +48,12 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
-use meerkat_machine_kernels::compat_generated::{flow_frame, flow_run, loop_iteration};
 use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
 use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
@@ -63,6 +64,24 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+fn compat_to_local<TLocal, TCompat>(value: TCompat) -> TLocal
+where
+    TLocal: DeserializeOwned,
+    TCompat: Serialize,
+{
+    serde_json::from_value(serde_json::to_value(value).expect("serialize compat state"))
+        .expect("deserialize local state")
+}
+
+fn local_to_compat<TCompat, TLocal>(value: &TLocal) -> TCompat
+where
+    TCompat: DeserializeOwned,
+    TLocal: Serialize,
+{
+    serde_json::from_value(serde_json::to_value(value).expect("serialize local state"))
+        .expect("deserialize compat state")
+}
+
 fn flow_run_state_from_raw(
     mut state: meerkat_machine_kernels::test_oracle::KernelState,
 ) -> flow_run::State {
@@ -72,13 +91,22 @@ fn flow_run_state_from_raw(
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);
     state = seeded;
-    flow_run::from_test_oracle_state(state).expect("typed flow_run state")
+    let compat_state =
+        meerkat_machine_kernels::test_oracle::compat_generated::flow_run::from_test_oracle_state(
+            state,
+        )
+        .expect("typed flow_run state");
+    compat_to_local(compat_state)
 }
 
 fn flow_run_state_to_raw(
     state: &flow_run::State,
 ) -> meerkat_machine_kernels::test_oracle::KernelState {
-    flow_run::to_test_oracle_state(state)
+    let compat_state: meerkat_machine_kernels::compat_generated::flow_run::State =
+        local_to_compat(state);
+    meerkat_machine_kernels::test_oracle::compat_generated::flow_run::to_test_oracle_state(
+        &compat_state,
+    )
 }
 
 fn flow_frame_state_from_raw(
@@ -90,13 +118,22 @@ fn flow_frame_state_from_raw(
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);
     state = seeded;
-    flow_frame::from_test_oracle_state(state).expect("typed flow_frame state")
+    let compat_state =
+        meerkat_machine_kernels::test_oracle::compat_generated::flow_frame::from_test_oracle_state(
+            state,
+        )
+        .expect("typed flow_frame state");
+    compat_to_local(compat_state)
 }
 
 fn flow_frame_state_to_raw(
     state: &flow_frame::State,
 ) -> meerkat_machine_kernels::test_oracle::KernelState {
-    flow_frame::to_test_oracle_state(state)
+    let compat_state: meerkat_machine_kernels::compat_generated::flow_frame::State =
+        local_to_compat(state);
+    meerkat_machine_kernels::test_oracle::compat_generated::flow_frame::to_test_oracle_state(
+        &compat_state,
+    )
 }
 
 fn loop_iteration_state_from_raw(
@@ -108,7 +145,9 @@ fn loop_iteration_state_from_raw(
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);
     state = seeded;
-    loop_iteration::from_test_oracle_state(state).expect("typed loop_iteration state")
+    let compat_state = meerkat_machine_kernels::test_oracle::compat_generated::loop_iteration::from_test_oracle_state(state)
+        .expect("typed loop_iteration state");
+    compat_to_local(compat_state)
 }
 
 // -----------------------------------------------------------------------
@@ -18739,7 +18778,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
     assert_eq!(
         frame_snap.kernel_state.phase,
-        meerkat_machine_kernels::compat_generated::flow_frame::Phase::Completed,
+        flow_frame::Phase::Completed,
         "frame should be in Completed phase"
     );
 }

@@ -55,7 +55,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let state_name = state_struct_name(def);
 
     quote! {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         pub enum #phase_name {
             #(#variants),*
         }

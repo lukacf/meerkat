@@ -12,19 +12,19 @@ use crate::error::MobError;
 use crate::flow_machine_types::{
     flow_node_id, local_flow_node_id, local_frame_id, local_loop_id, local_loop_instance_id,
 };
-use crate::generated::flow_frame_loop_driver::{
-    FlowFrameLoopDecision, FlowFrameLoopDriver, FlowFrameLoopStorePlan, FlowFrameLoopWork,
-    FlowFrameTerminalPhase,
-};
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::{FlowContext, FrameSnapshot, LoopSnapshot, MobRun, StepRunStatus};
 use crate::runtime::conditions::evaluate_condition;
 use crate::runtime::flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator, StepCompletionOpts};
+use crate::runtime::flow_frame_loop_driver::{
+    FlowFrameLoopDecision, FlowFrameLoopDriver, FlowFrameLoopStorePlan, FlowFrameLoopWork,
+    FlowFrameTerminalPhase,
+};
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
 use crate::store::MobRunStore;
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::compat_generated::{flow_frame, flow_run, loop_iteration};
 use meerkat_machine_schema::compat::types as kernel_types;
 use std::future::Future;
 use std::pin::Pin;
@@ -960,7 +960,7 @@ impl FlowFrameEngine {
         root_frame_id: &FrameId,
         root_spec: &FrameSpec,
         context: &FlowContext,
-        obligation: crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
+        obligation: crate::runtime::flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
     ) -> Result<(), MobError> {
         for _ in 0..=5usize {
             let run = self.require_run(run_id).await?;

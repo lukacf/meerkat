@@ -15,12 +15,12 @@ use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
 };
+use crate::runtime::flow_kernels::flow_run;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::compat_generated::flow_run;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

@@ -10,9 +10,9 @@ use crate::ids::{
     AgentIdentity, BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MobId, ProfileName, RunId,
     StepId,
 };
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::compat_generated::{flow_frame, flow_run, loop_iteration};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 

@@ -40,7 +40,6 @@ pub mod definition;
 pub mod error;
 pub mod event;
 mod flow_machine_types;
-mod generated;
 pub mod ids;
 pub mod launch;
 #[doc(hidden)]
@@ -72,7 +71,6 @@ pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
 pub use mob_machine::canonical_mob_machine_command_manifest;
 
-pub use generated::protocol_flow_loop_until_evaluation;
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
@@ -89,6 +87,7 @@ pub use runtime::bridge_protocol::{
     BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
     BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
+pub use runtime::flow_loop_until_evaluation as protocol_flow_loop_until_evaluation;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};

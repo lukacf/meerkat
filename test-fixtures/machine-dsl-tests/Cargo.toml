@@ -12,6 +12,7 @@ meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
 meerkat-machine-kernels = { path = "../../meerkat-machine-kernels", features = ["test-oracle"] }
 meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
 indexmap = "2" # used by DSL macro-generated schema code (invisible to cargo-machete)
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 meerkat-core = { path = "../../meerkat-core" }

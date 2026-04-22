@@ -17,6 +17,7 @@ use meerkat_machine_schema::catalog::{
 };
 use meerkat_machine_schema::{
     CompositionSchema, MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
+    flow_frame_machine, flow_run_machine, loop_iteration_machine,
 };
 
 #[test]
@@ -159,7 +160,13 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
 }
 
 fn row22_machine_schemas() -> Vec<MachineSchema> {
-    canonical_machine_schemas()
+    let mut schemas = canonical_machine_schemas();
+    schemas.extend([
+        flow_run_machine(),
+        flow_frame_machine(),
+        loop_iteration_machine(),
+    ]);
+    schemas
 }
 
 fn repo_root() -> PathBuf {

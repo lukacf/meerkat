@@ -19,9 +19,9 @@ use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
 };
+use crate::runtime::flow_kernels::flow_run;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_machine_kernels::compat_generated::flow_run;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};

@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod compat;
 mod composition;
 mod machine;
+pub mod runtime_local;
 pub mod types;
 
 pub use types::{

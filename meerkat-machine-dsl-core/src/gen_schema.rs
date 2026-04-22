@@ -143,6 +143,10 @@ fn gen_type_ref(ty: &crate::ast::TypeDef) -> TokenStream {
             let inner_ref = gen_type_ref(inner);
             quote! { TypeRef::Set(Box::new(#inner_ref)) }
         }
+        crate::ast::TypeDef::Seq(inner) => {
+            let inner_ref = gen_type_ref(inner);
+            quote! { TypeRef::Seq(Box::new(#inner_ref)) }
+        }
         crate::ast::TypeDef::Map(k, v) => {
             let key_ref = gen_type_ref(k);
             let val_ref = gen_type_ref(v);
@@ -226,12 +230,63 @@ fn rewrite_phase_field_to_current(expr: &ExprDef, phase_field: &str) -> ExprDef 
         ExprDef::IsNone(inner) => {
             ExprDef::IsNone(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
         }
+        ExprDef::SeqLiteral(items) => ExprDef::SeqLiteral(
+            items
+                .iter()
+                .map(|e| rewrite_phase_field_to_current(e, phase_field))
+                .collect(),
+        ),
         ExprDef::Call { helper, args } => ExprDef::Call {
             helper: helper.clone(),
             args: args
                 .iter()
                 .map(|a| rewrite_phase_field_to_current(a, phase_field))
                 .collect(),
+        },
+        ExprDef::SeqStartsWith { seq, prefix } => ExprDef::SeqStartsWith {
+            seq: Box::new(rewrite_phase_field_to_current(seq, phase_field)),
+            prefix: Box::new(rewrite_phase_field_to_current(prefix, phase_field)),
+        },
+        ExprDef::SeqElements(inner) => {
+            ExprDef::SeqElements(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
+        }
+        ExprDef::Head(inner) => {
+            ExprDef::Head(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
+        }
+        ExprDef::MapGetCloned { map, key } => ExprDef::MapGetCloned {
+            map: Box::new(rewrite_phase_field_to_current(map, phase_field)),
+            key: Box::new(rewrite_phase_field_to_current(key, phase_field)),
+        },
+        ExprDef::MapGetFlatten { map, key } => ExprDef::MapGetFlatten {
+            map: Box::new(rewrite_phase_field_to_current(map, phase_field)),
+            key: Box::new(rewrite_phase_field_to_current(key, phase_field)),
+        },
+        ExprDef::ForAll {
+            binding,
+            over,
+            body,
+        } => ExprDef::ForAll {
+            binding: binding.clone(),
+            over: Box::new(rewrite_phase_field_to_current(over, phase_field)),
+            body: Box::new(rewrite_phase_field_to_current(body, phase_field)),
+        },
+        ExprDef::Exists {
+            binding,
+            over,
+            body,
+        } => ExprDef::Exists {
+            binding: binding.clone(),
+            over: Box::new(rewrite_phase_field_to_current(over, phase_field)),
+            body: Box::new(rewrite_phase_field_to_current(body, phase_field)),
+        },
+        ExprDef::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => ExprDef::IfElse {
+            condition: Box::new(rewrite_phase_field_to_current(condition, phase_field)),
+            then_expr: Box::new(rewrite_phase_field_to_current(then_expr, phase_field)),
+            else_expr: Box::new(rewrite_phase_field_to_current(else_expr, phase_field)),
         },
         _ => expr.clone(),
     }
@@ -259,6 +314,10 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
         }
         ExprDef::EmptySet => quote! { Expr::EmptySet },
         ExprDef::EmptyMap => quote! { Expr::EmptyMap },
+        ExprDef::SeqLiteral(items) => {
+            let values: Vec<_> = items.iter().map(gen_schema_expr).collect();
+            quote! { Expr::SeqLiteral(vec![#(#values),*]) }
+        }
         ExprDef::Field(name) => {
             let n = name.to_string();
             quote! { Expr::Field(#n.into()) }
@@ -276,6 +335,9 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let e = enum_name.to_string();
             let v = variant.to_string();
             quote! { Expr::NamedVariant { enum_name: #e.into(), variant: #v.into() } }
+        }
+        ExprDef::ConstructNamed { value, .. } => {
+            quote! { Expr::String(#value.into()) }
         }
         ExprDef::Not(inner) => {
             let inner_e = gen_schema_expr(inner);
@@ -339,11 +401,34 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let k = gen_schema_expr(key);
             quote! { Expr::MapContainsKey { map: Box::new(#m), key: Box::new(#k) } }
         }
+        ExprDef::SeqStartsWith { seq, prefix } => {
+            let seq_e = gen_schema_expr(seq);
+            let prefix_e = gen_schema_expr(prefix);
+            quote! { Expr::SeqStartsWith { seq: Box::new(#seq_e), prefix: Box::new(#prefix_e) } }
+        }
+        ExprDef::SeqElements(inner) => {
+            let inner_e = gen_schema_expr(inner);
+            quote! { Expr::SeqElements(Box::new(#inner_e)) }
+        }
         ExprDef::Len(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Len(Box::new(#inner_e)) }
         }
+        ExprDef::Head(inner) => {
+            let inner_e = gen_schema_expr(inner);
+            quote! { Expr::Head(Box::new(#inner_e)) }
+        }
         ExprDef::MapGet { map, key } => {
+            let map_e = gen_schema_expr(map);
+            let key_e = gen_schema_expr(key);
+            quote! { Expr::MapGet { map: Box::new(#map_e), key: Box::new(#key_e) } }
+        }
+        ExprDef::MapGetCloned { map, key } => {
+            let map_e = gen_schema_expr(map);
+            let key_e = gen_schema_expr(key);
+            quote! { Expr::MapGet { map: Box::new(#map_e), key: Box::new(#key_e) } }
+        }
+        ExprDef::MapGetFlatten { map, key } => {
             let map_e = gen_schema_expr(map);
             let key_e = gen_schema_expr(key);
             quote! { Expr::MapGet { map: Box::new(#map_e), key: Box::new(#key_e) } }
@@ -619,6 +704,30 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                     let v = gen_schema_expr(value);
                     quote! { Update::SetRemove { field: #f.into(), value: #v } }
                 }
+                UpdateDef::SeqAppend { field, value } => {
+                    let f = field.to_string();
+                    let v = gen_schema_expr(value);
+                    quote! { Update::SeqAppend { field: #f.into(), value: #v } }
+                }
+                UpdateDef::SeqPrepend { field, values } => {
+                    let f = field.to_string();
+                    let values_e = gen_schema_expr(values);
+                    quote! { Update::SeqPrepend { field: #f.into(), values: #values_e } }
+                }
+                UpdateDef::SeqPopFront { field } => {
+                    let f = field.to_string();
+                    quote! { Update::SeqPopFront { field: #f.into() } }
+                }
+                UpdateDef::SeqRemoveValue { field, value } => {
+                    let f = field.to_string();
+                    let v = gen_schema_expr(value);
+                    quote! { Update::SeqRemoveValue { field: #f.into(), value: #v } }
+                }
+                UpdateDef::SeqRemoveAll { field, values } => {
+                    let f = field.to_string();
+                    let values_e = gen_schema_expr(values);
+                    quote! { Update::SeqRemoveAll { field: #f.into(), values: #values_e } }
+                }
                 UpdateDef::MapInsert { field, key, value } => {
                     let f = field.to_string();
                     let k = gen_schema_expr(key);
@@ -662,6 +771,20 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                         condition: #cond,
                         then_updates: vec![#(#then_u),*],
                         else_updates: vec![#(#else_u),*],
+                    } }
+                }
+                UpdateDef::ForEach {
+                    binding,
+                    over,
+                    updates,
+                } => {
+                    let b = binding.to_string();
+                    let over_e = gen_schema_expr(over);
+                    let body = gen_schema_updates(updates);
+                    quote! { Update::ForEach {
+                        binding: #b.into(),
+                        over: #over_e,
+                        updates: vec![#(#body),*],
                     } }
                 }
             }
@@ -889,6 +1012,10 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
             key: value,
         }
         | ExprDef::MapGet {
+            map: collection,
+            key: value,
+        }
+        | ExprDef::MapGetFlatten {
             map: collection,
             key: value,
         }

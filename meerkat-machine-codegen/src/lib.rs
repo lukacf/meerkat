@@ -14,6 +14,8 @@
 
 #[cfg(not(test))]
 mod artifacts;
+#[cfg(not(test))]
+mod compat_substrate;
 mod render;
 
 #[cfg(not(test))]
@@ -27,6 +29,7 @@ pub use render::render_machine_module;
 #[cfg(not(test))]
 pub use render::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
-    render_composition_mapping_coverage, render_composition_module, render_generated_kernel_mod,
-    render_machine_kernel_module, render_machine_mapping_coverage,
+    render_compat_test_oracle_module, render_composition_mapping_coverage,
+    render_composition_module, render_generated_kernel_mod, render_machine_kernel_module,
+    render_machine_mapping_coverage,
 };

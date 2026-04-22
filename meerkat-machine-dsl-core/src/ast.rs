@@ -65,6 +65,7 @@ pub enum TypeDef {
     String,
     Option(Box<TypeDef>),
     Set(Box<TypeDef>),
+    Seq(Box<TypeDef>),
     Map(Box<TypeDef>, Box<TypeDef>),
     Named(Ident),
     /// Enum type reference (maps to TypeRef::Enum in schema)
@@ -239,6 +240,12 @@ pub enum ExprDef {
         enum_name: Ident,
         variant: Ident,
     },
+    ConstructNamed {
+        type_name: Ident,
+        value: String,
+    },
+
+    SeqLiteral(Vec<ExprDef>),
 
     // Boolean operators
     Not(Box<ExprDef>),
@@ -268,8 +275,22 @@ pub enum ExprDef {
         map: Box<ExprDef>,
         key: Box<ExprDef>,
     },
+    SeqStartsWith {
+        seq: Box<ExprDef>,
+        prefix: Box<ExprDef>,
+    },
+    SeqElements(Box<ExprDef>),
     Len(Box<ExprDef>),
+    Head(Box<ExprDef>),
     MapGet {
+        map: Box<ExprDef>,
+        key: Box<ExprDef>,
+    },
+    MapGetFlatten {
+        map: Box<ExprDef>,
+        key: Box<ExprDef>,
+    },
+    MapGetCloned {
         map: Box<ExprDef>,
         key: Box<ExprDef>,
     },
@@ -341,6 +362,25 @@ pub enum UpdateDef {
         field: Ident,
         value: ExprDef,
     },
+    SeqAppend {
+        field: Ident,
+        value: ExprDef,
+    },
+    SeqPrepend {
+        field: Ident,
+        values: ExprDef,
+    },
+    SeqPopFront {
+        field: Ident,
+    },
+    SeqRemoveValue {
+        field: Ident,
+        value: ExprDef,
+    },
+    SeqRemoveAll {
+        field: Ident,
+        values: ExprDef,
+    },
     MapInsert {
         field: Ident,
         key: ExprDef,
@@ -364,6 +404,11 @@ pub enum UpdateDef {
         condition: ExprDef,
         then_updates: Vec<UpdateDef>,
         else_updates: Vec<UpdateDef>,
+    },
+    ForEach {
+        binding: Ident,
+        over: ExprDef,
+        updates: Vec<UpdateDef>,
     },
 }
 

@@ -1,4 +1,4 @@
-mod ast;
+pub mod ast;
 mod gen_dispatch;
 mod gen_enums;
 mod gen_phase;
@@ -120,16 +120,25 @@ fn fix_updates_remove_types(
 
 pub fn expand_machine(input: TokenStream) -> Result<TokenStream, Error> {
     let mut def = parse::parse_machine(input)?;
-    expand_per_phase(&mut def);
-    fix_remove_types(&mut def);
-    validate::validate(&def)?;
+    generate_with_schema_from_def(&mut def)
+}
+
+pub fn generate_from_def(def: &mut ast::MachineDef) -> Result<TokenStream, Error> {
+    expand_per_phase(def);
+    fix_remove_types(def);
+    validate::validate(def)?;
 
     let mut output = TokenStream::new();
-    output.extend(gen_state::generate(&def));
-    output.extend(gen_phase::generate(&def));
-    output.extend(gen_enums::generate(&def));
-    output.extend(gen_dispatch::generate(&def));
-    output.extend(gen_schema::generate(&def));
+    output.extend(gen_state::generate(def));
+    output.extend(gen_phase::generate(def));
+    output.extend(gen_enums::generate(def));
+    output.extend(gen_dispatch::generate(def));
 
+    Ok(output)
+}
+
+pub fn generate_with_schema_from_def(def: &mut ast::MachineDef) -> Result<TokenStream, Error> {
+    let mut output = generate_from_def(def)?;
+    output.extend(gen_schema::generate(def));
     Ok(output)
 }

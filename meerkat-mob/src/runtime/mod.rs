@@ -77,6 +77,12 @@ mod events;
 mod flow;
 pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
+#[path = "../generated/flow_frame_loop_driver.rs"]
+mod flow_frame_loop_driver;
+pub mod flow_kernels;
+#[path = "../generated/protocol_flow_loop_until_evaluation.rs"]
+#[doc(hidden)]
+pub mod flow_loop_until_evaluation;
 mod flow_run_kernel;
 mod handle;
 #[cfg(feature = "runtime-adapter")]

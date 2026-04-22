@@ -121,11 +121,12 @@ impl Context for EmptyContext {}
 pub mod helpers {
     use super::*;
     pub fn is_live_claim_phase(
-        _state: &State,
+        state: &State,
         phase: substrate::OccurrenceLifecycleState,
         _context: &impl Context,
     ) -> Result<bool, KernelError> {
-        Ok(Authority::is_live_claim_phase(&phase))
+        let authority = Authority::from_state(state_to_inner(state));
+        Ok(authority.is_live_claim_phase(&phase))
     }
 }
 

@@ -20,14 +20,14 @@ use crate::flow_machine_types::{
     flow_node_id, frame_id, local_flow_node_id, local_frame_id, local_loop_id,
     local_loop_instance_id, loop_id, loop_instance_id,
 };
-use crate::generated::protocol_flow_loop_until_evaluation::{
+use crate::runtime::flow_loop_until_evaluation::{
     FlowLoopUntilEvaluationContext, FlowLoopUntilEvaluationObligation,
     accept_evaluate_until_condition, submit_until_condition_failed, submit_until_condition_met,
 };
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, StepId};
 use crate::run::{FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot};
 use crate::runtime::flow_frame_kernel::{build_start_body_frame_input, topological_order};
-use meerkat_machine_kernels::compat_generated::{flow_frame, flow_run, loop_iteration};
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
 use meerkat_machine_schema::compat::types as kernel_types;
 
 struct EmptyFlowLoopUntilEvaluationContext;
@@ -670,7 +670,7 @@ impl FlowFrameLoopDriver {
 }
 
 struct CompleteLoopDecisionRequest<'a> {
-    loop_terminal: loop_iteration::LoopIterationEffectKind,
+    loop_terminal: loop_iteration::EffectKind,
     expected_run_state: &'a flow_run::State,
     next_run_state: flow_run::State,
     loop_instance_id: &'a LoopInstanceId,
@@ -696,18 +696,17 @@ fn build_complete_loop_decision(
         parent_node_id,
     } = request;
     let parent_input = match loop_terminal {
-        loop_iteration::LoopIterationEffectKind::LoopCompleted => {
+        loop_iteration::EffectKind::LoopCompleted => {
             flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
                 node_id: flow_node_id(parent_node_id),
             })
         }
-        loop_iteration::LoopIterationEffectKind::LoopExhausted
-        | loop_iteration::LoopIterationEffectKind::LoopFailed => {
+        loop_iteration::EffectKind::LoopExhausted | loop_iteration::EffectKind::LoopFailed => {
             flow_frame::Input::FailNode(flow_frame::inputs::FailNode {
                 node_id: flow_node_id(parent_node_id),
             })
         }
-        loop_iteration::LoopIterationEffectKind::LoopCanceled => {
+        loop_iteration::EffectKind::LoopCanceled => {
             flow_frame::Input::CancelNode(flow_frame::inputs::CancelNode {
                 node_id: flow_node_id(parent_node_id),
             })
@@ -959,19 +958,19 @@ fn loop_evaluate_until_condition(
 
 fn first_terminal_loop_effect(
     effects: &[loop_iteration::Effect],
-) -> Option<loop_iteration::LoopIterationEffectKind> {
+) -> Option<loop_iteration::EffectKind> {
     effects.iter().find_map(|effect| match effect {
         loop_iteration::Effect::LoopCompleted(_) => {
-            Some(loop_iteration::LoopIterationEffectKind::LoopCompleted)
+            Some(loop_iteration::EffectKind::LoopCompleted)
         }
         loop_iteration::Effect::LoopExhausted(_) => {
-            Some(loop_iteration::LoopIterationEffectKind::LoopExhausted)
+            Some(loop_iteration::EffectKind::LoopExhausted)
         }
         loop_iteration::Effect::LoopFailed(_) => {
-            Some(loop_iteration::LoopIterationEffectKind::LoopFailed)
+            Some(loop_iteration::EffectKind::LoopFailed)
         }
         loop_iteration::Effect::LoopCanceled(_) => {
-            Some(loop_iteration::LoopIterationEffectKind::LoopCanceled)
+            Some(loop_iteration::EffectKind::LoopCanceled)
         }
         _ => None,
     })
@@ -1023,12 +1022,12 @@ fn state_is_awaiting_body_frame(state: &loop_iteration::State) -> bool {
 
 fn loop_terminal_effect(
     phase: &loop_iteration::Phase,
-) -> Option<loop_iteration::LoopIterationEffectKind> {
+) -> Option<loop_iteration::EffectKind> {
     match phase {
-        loop_iteration::Phase::Completed => Some(loop_iteration::LoopIterationEffectKind::LoopCompleted),
-        loop_iteration::Phase::Exhausted => Some(loop_iteration::LoopIterationEffectKind::LoopExhausted),
-        loop_iteration::Phase::Failed => Some(loop_iteration::LoopIterationEffectKind::LoopFailed),
-        loop_iteration::Phase::Canceled => Some(loop_iteration::LoopIterationEffectKind::LoopCanceled),
+        loop_iteration::Phase::Completed => Some(loop_iteration::EffectKind::LoopCompleted),
+        loop_iteration::Phase::Exhausted => Some(loop_iteration::EffectKind::LoopExhausted),
+        loop_iteration::Phase::Failed => Some(loop_iteration::EffectKind::LoopFailed),
+        loop_iteration::Phase::Canceled => Some(loop_iteration::EffectKind::LoopCanceled),
         _ => None,
     }
 }

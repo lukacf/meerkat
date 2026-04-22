@@ -147,10 +147,10 @@ mod tests {
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, MobId, RunId, StepId};
     use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+    use crate::runtime::flow_kernels::flow_run;
     use crate::store::{InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError};
     use async_trait::async_trait;
     use chrono::Utc;
-    use meerkat_machine_kernels::compat_generated::flow_run;
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::sync::RwLock;

@@ -22,7 +22,6 @@ use crate::run::{
 use crate::runtime::flow_kernels::flow_run;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
@@ -83,24 +82,8 @@ struct LegacyStoredRunEnvelope {
     run_id: RunId,
     mob_id: MobId,
     flow_id: FlowId,
-    status: MobRunStatus,
-    #[serde(default)]
-    activation_params: serde_json::Value,
-    created_at: DateTime<Utc>,
-    completed_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    step_ledger: Vec<StepLedgerEntry>,
-    #[serde(default)]
-    failure_ledger: Vec<FailureLedgerEntry>,
-    #[serde(default)]
-    loop_iteration_ledger: Vec<LoopIterationLedgerEntry>,
     #[serde(default)]
     schema_version: u32,
-    #[serde(default)]
-    root_step_outputs: IndexMap<StepId, serde_json::Value>,
-    #[serde(default)]
-    loop_iteration_outputs:
-        std::collections::BTreeMap<LoopId, Vec<IndexMap<StepId, serde_json::Value>>>,
 }
 
 fn decode_run_json(bytes: &[u8]) -> Result<MobRun, MobStoreError> {

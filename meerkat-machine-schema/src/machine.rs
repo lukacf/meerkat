@@ -1,5 +1,8 @@
 use indexmap::{IndexMap, IndexSet};
-use std::fmt;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineSchema {
@@ -118,6 +121,17 @@ impl MachineSchema {
                 .iter()
                 .map(|transition| transition.name.as_str()),
         )?;
+        let named_variants = collect_named_variant_accessors(self);
+        validate_generated_accessor_names_allowing_keywords(
+            "named variant enum",
+            named_variants.keys().map(String::as_str),
+        )?;
+        for variants in named_variants.values() {
+            validate_generated_accessor_names_allowing_keywords(
+                "named variant value",
+                variants.iter().map(String::as_str),
+            )?;
+        }
 
         if !phase_names.contains(&self.state.init.phase) {
             return Err(MachineSchemaError::UnknownPhase {
@@ -1136,6 +1150,21 @@ fn validate_generated_accessor_names<'a>(
     namespace: &'static str,
     names: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), MachineSchemaError> {
+    validate_generated_accessor_names_with_keywords(namespace, names, false)
+}
+
+fn validate_generated_accessor_names_allowing_keywords<'a>(
+    namespace: &'static str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), MachineSchemaError> {
+    validate_generated_accessor_names_with_keywords(namespace, names, true)
+}
+
+fn validate_generated_accessor_names_with_keywords<'a>(
+    namespace: &'static str,
+    names: impl IntoIterator<Item = &'a str>,
+    allow_keywords: bool,
+) -> Result<(), MachineSchemaError> {
     let mut raw_seen = IndexSet::new();
     let mut accessor_to_raw = IndexMap::<String, String>::new();
 
@@ -1172,7 +1201,7 @@ fn validate_generated_accessor_names<'a>(
                 reason: "normalizes to an identifier with unsupported characters",
             });
         }
-        if rust_keyword(&accessor) {
+        if !allow_keywords && rust_keyword(&accessor) {
             return Err(MachineSchemaError::InvalidGeneratedAccessorName {
                 namespace,
                 name: raw_name.to_owned(),
@@ -1194,6 +1223,158 @@ fn validate_generated_accessor_names<'a>(
     }
 
     Ok(())
+}
+
+fn collect_named_variant_accessors(schema: &MachineSchema) -> BTreeMap<String, BTreeSet<String>> {
+    let mut variants = BTreeMap::new();
+
+    for init in &schema.state.init.fields {
+        collect_named_variants_from_expr(&init.expr, &mut variants);
+    }
+
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        collect_named_variants_from_expr(&helper.body, &mut variants);
+    }
+
+    for invariant in &schema.invariants {
+        collect_named_variants_from_expr(&invariant.expr, &mut variants);
+    }
+
+    for transition in &schema.transitions {
+        for guard in &transition.guards {
+            collect_named_variants_from_expr(&guard.expr, &mut variants);
+        }
+        for update in &transition.updates {
+            collect_named_variants_from_update(update, &mut variants);
+        }
+        for effect in &transition.emit {
+            for expr in effect.fields.values() {
+                collect_named_variants_from_expr(expr, &mut variants);
+            }
+        }
+    }
+
+    variants
+}
+
+fn collect_named_variants_from_update(
+    update: &Update,
+    variants: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match update {
+        Update::Assign { expr, .. } => collect_named_variants_from_expr(expr, variants),
+        Update::MapInsert { key, value, .. } => {
+            collect_named_variants_from_expr(key, variants);
+            collect_named_variants_from_expr(value, variants);
+        }
+        Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. }
+        | Update::MapRemove { key, .. } => collect_named_variants_from_expr(key, variants),
+        Update::SetInsert { value, .. }
+        | Update::SetRemove { value, .. }
+        | Update::SeqAppend { value, .. }
+        | Update::SeqRemoveValue { value, .. } => collect_named_variants_from_expr(value, variants),
+        Update::SeqPrepend { values, .. } | Update::SeqRemoveAll { values, .. } => {
+            collect_named_variants_from_expr(values, variants);
+        }
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            collect_named_variants_from_expr(condition, variants);
+            for update in then_updates {
+                collect_named_variants_from_update(update, variants);
+            }
+            for update in else_updates {
+                collect_named_variants_from_update(update, variants);
+            }
+        }
+        Update::ForEach { over, updates, .. } => {
+            collect_named_variants_from_expr(over, variants);
+            for update in updates {
+                collect_named_variants_from_update(update, variants);
+            }
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+    }
+}
+
+fn collect_named_variants_from_expr(
+    expr: &Expr,
+    variants: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match expr {
+        Expr::NamedVariant { enum_name, variant } => {
+            variants
+                .entry(enum_name.clone())
+                .or_default()
+                .insert(variant.clone());
+        }
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_named_variants_from_expr(item, variants);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_named_variants_from_expr(condition, variants);
+            collect_named_variants_from_expr(then_expr, variants);
+            collect_named_variants_from_expr(else_expr, variants);
+        }
+        Expr::Not(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::SeqElements(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner) => collect_named_variants_from_expr(inner, variants),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            collect_named_variants_from_expr(left, variants);
+            collect_named_variants_from_expr(right, variants);
+        }
+        Expr::Contains { collection, value }
+        | Expr::SeqStartsWith {
+            seq: collection,
+            prefix: value,
+        } => {
+            collect_named_variants_from_expr(collection, variants);
+            collect_named_variants_from_expr(value, variants);
+        }
+        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
+            collect_named_variants_from_expr(map, variants);
+            collect_named_variants_from_expr(key, variants);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_named_variants_from_expr(arg, variants);
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_named_variants_from_expr(over, variants);
+            collect_named_variants_from_expr(body, variants);
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+    }
 }
 
 fn generated_accessor_name(value: &str) -> String {

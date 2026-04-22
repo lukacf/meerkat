@@ -2,8 +2,9 @@
 #![allow(dead_code)]
 use meerkat_machine_kernels::{
     GeneratedMachineKernel, KernelEffectVariant, KernelField, KernelFields, KernelHelperName,
-    KernelInput, KernelInputVariant, KernelPhase, KernelSignal, KernelSignalVariant, KernelState,
-    KernelTransitionName, KernelValue, TransitionOutcome, TransitionRefusal,
+    KernelInput, KernelInputVariant, KernelNamedVariant, KernelPhase, KernelSignal,
+    KernelSignalVariant, KernelState, KernelTransitionName, KernelValue, TransitionOutcome,
+    TransitionRefusal,
 };
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -615,6 +616,208 @@ pub mod transition {
     #[must_use]
     pub fn terminalize_canceled() -> super::KernelTransitionName {
         super::KernelTransitionName::new_static("TerminalizeCanceled")
+    }
+}
+
+pub mod named_variant {
+    pub mod collection_policy_kind {
+        #[must_use]
+        pub fn all() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("CollectionPolicyKind", "All")
+        }
+        #[must_use]
+        pub fn any() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("CollectionPolicyKind", "Any")
+        }
+        #[must_use]
+        pub fn quorum() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("CollectionPolicyKind", "Quorum")
+        }
+    }
+    pub mod dependency_mode {
+        #[must_use]
+        pub fn all() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("DependencyMode", "All")
+        }
+        #[must_use]
+        pub fn any() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("DependencyMode", "Any")
+        }
+    }
+    pub mod flow_run_status {
+        #[must_use]
+        pub fn canceled() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("FlowRunStatus", "Canceled")
+        }
+        #[must_use]
+        pub fn completed() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("FlowRunStatus", "Completed")
+        }
+        #[must_use]
+        pub fn failed() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("FlowRunStatus", "Failed")
+        }
+        #[must_use]
+        pub fn pending() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("FlowRunStatus", "Pending")
+        }
+        #[must_use]
+        pub fn running() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("FlowRunStatus", "Running")
+        }
+    }
+    pub mod step_run_status {
+        #[must_use]
+        pub fn canceled() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("StepRunStatus", "Canceled")
+        }
+        #[must_use]
+        pub fn completed() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("StepRunStatus", "Completed")
+        }
+        #[must_use]
+        pub fn dispatched() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("StepRunStatus", "Dispatched")
+        }
+        #[must_use]
+        pub fn failed() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("StepRunStatus", "Failed")
+        }
+        #[must_use]
+        pub fn skipped() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("StepRunStatus", "Skipped")
+        }
+    }
+}
+
+pub mod named_value {
+    pub mod collection_policy_kind {
+        #[must_use]
+        pub fn all() -> super::super::KernelValue {
+            let named = super::super::named_variant::collection_policy_kind::all();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn any() -> super::super::KernelValue {
+            let named = super::super::named_variant::collection_policy_kind::any();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn quorum() -> super::super::KernelValue {
+            let named = super::super::named_variant::collection_policy_kind::quorum();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+    }
+    pub mod dependency_mode {
+        #[must_use]
+        pub fn all() -> super::super::KernelValue {
+            let named = super::super::named_variant::dependency_mode::all();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn any() -> super::super::KernelValue {
+            let named = super::super::named_variant::dependency_mode::any();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+    }
+    pub mod flow_run_status {
+        #[must_use]
+        pub fn canceled() -> super::super::KernelValue {
+            let named = super::super::named_variant::flow_run_status::canceled();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn completed() -> super::super::KernelValue {
+            let named = super::super::named_variant::flow_run_status::completed();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn failed() -> super::super::KernelValue {
+            let named = super::super::named_variant::flow_run_status::failed();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn pending() -> super::super::KernelValue {
+            let named = super::super::named_variant::flow_run_status::pending();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn running() -> super::super::KernelValue {
+            let named = super::super::named_variant::flow_run_status::running();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+    }
+    pub mod step_run_status {
+        #[must_use]
+        pub fn canceled() -> super::super::KernelValue {
+            let named = super::super::named_variant::step_run_status::canceled();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn completed() -> super::super::KernelValue {
+            let named = super::super::named_variant::step_run_status::completed();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn dispatched() -> super::super::KernelValue {
+            let named = super::super::named_variant::step_run_status::dispatched();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn failed() -> super::super::KernelValue {
+            let named = super::super::named_variant::step_run_status::failed();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn skipped() -> super::super::KernelValue {
+            let named = super::super::named_variant::step_run_status::skipped();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
     }
 }
 

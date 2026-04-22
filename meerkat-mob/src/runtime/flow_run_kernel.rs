@@ -258,15 +258,18 @@ impl FlowRunKernel {
     }
 
     fn step_status_value(status: &crate::run::StepRunStatus) -> KernelValue {
-        KernelValue::NamedVariant {
-            enum_name: "StepRunStatus".into(),
-            variant: match status {
-                crate::run::StepRunStatus::Dispatched => "Dispatched".into(),
-                crate::run::StepRunStatus::Completed => "Completed".into(),
-                crate::run::StepRunStatus::Failed => "Failed".into(),
-                crate::run::StepRunStatus::Skipped => "Skipped".into(),
-                crate::run::StepRunStatus::Canceled => "Canceled".into(),
-            },
+        match status {
+            crate::run::StepRunStatus::Dispatched => {
+                flow_run::named_value::step_run_status::dispatched()
+            }
+            crate::run::StepRunStatus::Completed => {
+                flow_run::named_value::step_run_status::completed()
+            }
+            crate::run::StepRunStatus::Failed => flow_run::named_value::step_run_status::failed(),
+            crate::run::StepRunStatus::Skipped => flow_run::named_value::step_run_status::skipped(),
+            crate::run::StepRunStatus::Canceled => {
+                flow_run::named_value::step_run_status::canceled()
+            }
         }
     }
 

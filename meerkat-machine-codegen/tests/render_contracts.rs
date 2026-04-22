@@ -3,15 +3,18 @@
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_driver, render_composition_mapping_coverage, render_composition_module,
-    render_machine_mapping_coverage, render_machine_module,
+    render_machine_kernel_module, render_machine_mapping_coverage, render_machine_module,
 };
-use meerkat_machine_schema::CompositionDriverRustBinding;
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
 use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
     meerkat_mob_seam_composition,
+};
+use meerkat_machine_schema::{
+    CompositionDriverRustBinding, EnumSchema, FieldInit, FieldSchema, InitSchema, MachineSchema,
+    RustBinding, StateSchema, TypeRef, VariantSchema,
 };
 
 #[test]
@@ -186,4 +189,67 @@ fn non_legacy_composition_drivers_fail_closed() {
     assert!(rendered.contains("compile_error!"));
     assert!(rendered.contains("unsupported composition driver codegen"));
     assert!(rendered.contains("meerkat_mob_seam"));
+}
+
+#[test]
+fn kernel_module_renders_named_variant_accessors_with_keyword_escaping() {
+    let schema = MachineSchema {
+        machine: "KeywordEnumMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "meerkat-test".into(),
+            module: "keyword_enum".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "KeywordEnumPhase".into(),
+                variants: vec![VariantSchema {
+                    name: "Idle".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![FieldSchema {
+                name: "kind".into(),
+                ty: TypeRef::Enum("FlowNodeKind".into()),
+            }],
+            init: InitSchema {
+                phase: "Idle".into(),
+                fields: vec![FieldInit {
+                    field: "kind".into(),
+                    expr: meerkat_machine_schema::Expr::NamedVariant {
+                        enum_name: "FlowNodeKind".into(),
+                        variant: "Loop".into(),
+                    },
+                }],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "KeywordEnumInput".into(),
+            variants: vec![],
+        },
+        surface_only_inputs: vec![],
+        signals: EnumSchema {
+            name: "KeywordEnumSignal".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "KeywordEnumEffect".into(),
+            variants: vec![],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![],
+        ci_step_limit: None,
+    };
+
+    let rendered = render_machine_kernel_module(&schema);
+
+    assert!(rendered.contains("pub mod named_variant {"));
+    assert!(rendered.contains("pub mod flow_node_kind {"));
+    assert!(rendered.contains("pub fn r#loop() -> super::super::KernelNamedVariant {"));
+    assert!(rendered.contains("pub mod named_value {"));
+    assert!(rendered.contains("named_variant::flow_node_kind::r#loop()"));
 }

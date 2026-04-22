@@ -1446,21 +1446,21 @@ fn step_status_rank(status: &StepRunStatus) -> u8 {
 }
 
 fn frame_scope_body() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("FrameScope", "Body")
+    flow_frame::named_variant::frame_scope::body()
 }
 
 fn node_run_status_running() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Running")
+    flow_frame::named_variant::node_run_status::running()
 }
 
 fn node_run_status_completed() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Completed")
+    flow_frame::named_variant::node_run_status::completed()
 }
 
 fn node_run_status_skipped() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Skipped")
+    flow_frame::named_variant::node_run_status::skipped()
 }
 
 fn node_run_status_failed() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Failed")
+    flow_frame::named_variant::node_run_status::failed()
 }

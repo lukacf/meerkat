@@ -324,19 +324,19 @@ fn kernel_value_string(v: &KernelValue) -> Option<String> {
 }
 
 fn node_run_status_ready() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Ready")
+    flow_frame::named_variant::node_run_status::ready()
 }
 
 fn node_run_status_running() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Running")
+    flow_frame::named_variant::node_run_status::running()
 }
 
 fn flow_node_kind_step() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("FlowNodeKind", "Step")
+    flow_frame::named_variant::flow_node_kind::step()
 }
 
 fn loop_stage_awaiting_body_frame() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("LoopIterationStage", "AwaitingBodyFrame")
+    loop_iteration::named_variant::loop_iteration_stage::awaiting_body_frame()
 }
 
 #[cfg(test)]

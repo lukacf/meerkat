@@ -948,31 +948,31 @@ fn frame_id_fields(frame_id: &FrameId) -> KernelFields {
 }
 
 fn frame_scope_body() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("FrameScope", "Body")
+    flow_frame::named_variant::frame_scope::body()
 }
 
 fn node_run_status_completed() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Completed")
+    flow_frame::named_variant::node_run_status::completed()
 }
 
 fn node_run_status_failed() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Failed")
+    flow_frame::named_variant::node_run_status::failed()
 }
 
 fn node_run_status_skipped() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Skipped")
+    flow_frame::named_variant::node_run_status::skipped()
 }
 
 fn node_run_status_canceled() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("NodeRunStatus", "Canceled")
+    flow_frame::named_variant::node_run_status::canceled()
 }
 
 fn loop_iteration_stage_awaiting_body_frame() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("LoopIterationStage", "AwaitingBodyFrame")
+    loop_iteration::named_variant::loop_iteration_stage::awaiting_body_frame()
 }
 
 fn loop_iteration_stage_awaiting_until() -> KernelNamedVariant {
-    KernelNamedVariant::new_static("LoopIterationStage", "AwaitingUntil")
+    loop_iteration::named_variant::loop_iteration_stage::awaiting_until()
 }
 
 fn all_nodes_terminal(state: &KernelState, spec: &FrameSpec) -> bool {

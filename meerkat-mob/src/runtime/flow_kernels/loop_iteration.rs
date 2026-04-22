@@ -2,8 +2,9 @@
 #![allow(dead_code)]
 use meerkat_machine_kernels::{
     GeneratedMachineKernel, KernelEffectVariant, KernelField, KernelFields, KernelHelperName,
-    KernelInput, KernelInputVariant, KernelPhase, KernelSignal, KernelSignalVariant, KernelState,
-    KernelTransitionName, KernelValue, TransitionOutcome, TransitionRefusal,
+    KernelInput, KernelInputVariant, KernelNamedVariant, KernelPhase, KernelSignal,
+    KernelSignalVariant, KernelState, KernelTransitionName, KernelValue, TransitionOutcome,
+    TransitionRefusal,
 };
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -206,6 +207,52 @@ pub mod transition {
     #[must_use]
     pub fn cancel_loop() -> super::KernelTransitionName {
         super::KernelTransitionName::new_static("CancelLoop")
+    }
+}
+
+pub mod named_variant {
+    pub mod loop_iteration_stage {
+        #[must_use]
+        pub fn awaiting_body_frame() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("LoopIterationStage", "AwaitingBodyFrame")
+        }
+        #[must_use]
+        pub fn awaiting_until() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("LoopIterationStage", "AwaitingUntil")
+        }
+        #[must_use]
+        pub fn body_frame_active() -> super::super::KernelNamedVariant {
+            super::super::KernelNamedVariant::new_static("LoopIterationStage", "BodyFrameActive")
+        }
+    }
+}
+
+pub mod named_value {
+    pub mod loop_iteration_stage {
+        #[must_use]
+        pub fn awaiting_body_frame() -> super::super::KernelValue {
+            let named = super::super::named_variant::loop_iteration_stage::awaiting_body_frame();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn awaiting_until() -> super::super::KernelValue {
+            let named = super::super::named_variant::loop_iteration_stage::awaiting_until();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
+        #[must_use]
+        pub fn body_frame_active() -> super::super::KernelValue {
+            let named = super::super::named_variant::loop_iteration_stage::body_frame_active();
+            super::super::KernelValue::NamedVariant {
+                enum_name: named.enum_name,
+                variant: named.variant,
+            }
+        }
     }
 }
 

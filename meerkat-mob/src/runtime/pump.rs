@@ -8,8 +8,7 @@
 use crate::error::MobError;
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::runtime::flow_kernels::flow_run;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
-use std::collections::BTreeMap;
+use meerkat_machine_kernels::{KernelState, KernelValue};
 
 /// A scheduler grant produced by pumping.
 #[derive(Debug, Clone)]
@@ -41,16 +40,14 @@ pub fn pump_schedulers_to_exhaustion(
         let mut any_grant = false;
 
         // Try PumpNodeScheduler
-        let node_pump = KernelInput {
-            variant: "PumpNodeScheduler".into(),
-            fields: BTreeMap::new(),
-        };
+        let node_pump =
+            flow_run::input(flow_run::input::pump_node_scheduler(), flow_run::fields([]));
         if let Ok(outcome) = flow_run::transition(&state, &node_pump) {
             let node_grants: Vec<SchedulerGrant> = outcome
                 .effects
                 .iter()
-                .filter(|e| e.variant == "GrantNodeSlot")
-                .filter_map(|e| e.fields.get("frame_id"))
+                .filter(|e| e.variant_is(&flow_run::effect::grant_node_slot()))
+                .filter_map(|e| e.field(&flow_run::field::frame_id()))
                 .filter_map(|v| {
                     if let KernelValue::String(fid) = v {
                         Some(SchedulerGrant::NodeSlot(FrameId::from(fid.as_str())))
@@ -67,16 +64,16 @@ pub fn pump_schedulers_to_exhaustion(
         }
 
         // Try PumpFrameScheduler
-        let frame_pump = KernelInput {
-            variant: "PumpFrameScheduler".into(),
-            fields: BTreeMap::new(),
-        };
+        let frame_pump = flow_run::input(
+            flow_run::input::pump_frame_scheduler(),
+            flow_run::fields([]),
+        );
         if let Ok(outcome) = flow_run::transition(&state, &frame_pump) {
             let frame_grants: Vec<SchedulerGrant> = outcome
                 .effects
                 .iter()
-                .filter(|e| e.variant == "GrantBodyFrameStart")
-                .filter_map(|e| e.fields.get("loop_instance_id"))
+                .filter(|e| e.variant_is(&flow_run::effect::grant_body_frame_start()))
+                .filter_map(|e| e.field(&flow_run::field::loop_instance_id()))
                 .filter_map(|v| {
                     if let KernelValue::String(lid) = v {
                         Some(SchedulerGrant::BodyFrameStart(LoopInstanceId::from(

@@ -453,13 +453,7 @@ fn build_frame_start_fields(
         let k = KernelValue::String(node_id.to_string());
         match node_spec {
             FlowNodeSpec::Step(s) => {
-                node_kind.insert(
-                    k.clone(),
-                    KernelValue::NamedVariant {
-                        enum_name: "FlowNodeKind".into(),
-                        variant: "Step".into(),
-                    },
-                );
+                node_kind.insert(k.clone(), flow_frame::named_value::flow_node_kind::step());
                 node_deps.insert(
                     k.clone(),
                     KernelValue::Seq(
@@ -478,13 +472,7 @@ fn build_frame_start_fields(
                 );
             }
             FlowNodeSpec::RepeatUntil(l) => {
-                node_kind.insert(
-                    k.clone(),
-                    KernelValue::NamedVariant {
-                        enum_name: "FlowNodeKind".into(),
-                        variant: "Loop".into(),
-                    },
-                );
+                node_kind.insert(k.clone(), flow_frame::named_value::flow_node_kind::r#loop());
                 node_deps.insert(
                     k.clone(),
                     KernelValue::Seq(
@@ -559,13 +547,9 @@ pub(crate) fn build_start_body_frame_input(
 }
 
 fn dep_mode_kv(mode: &DependencyMode) -> KernelValue {
-    let variant = match mode {
-        DependencyMode::All => "All",
-        DependencyMode::Any => "Any",
-    };
-    KernelValue::NamedVariant {
-        enum_name: "DependencyMode".into(),
-        variant: variant.into(),
+    match mode {
+        DependencyMode::All => flow_frame::named_value::dependency_mode::all(),
+        DependencyMode::Any => flow_frame::named_value::dependency_mode::any(),
     }
 }
 

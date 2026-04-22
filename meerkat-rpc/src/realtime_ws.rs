@@ -2415,7 +2415,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         // W3-H: for MobMember channels, a poll-loop
                                         // status error against a Destroyed bridge
                                         // session is a legitimate transient — the
-                                        // MobMachine's MemberRealtimeBindingRotated
+                                        // MobMachine's MemberSessionBindingRotated
                                         // event may arrive microseconds later,
                                         // pointing at the replacement session. Don't
                                         // hard-close; skip this tick and let the

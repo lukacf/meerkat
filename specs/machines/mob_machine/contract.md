@@ -19,7 +19,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `tasks`: `Map<TaskId, MobTask>`
 - `in_progress_task_ids`: `Set<TaskId>`
 - `completed_task_ids`: `Set<TaskId>`
-- `member_realtime_bindings`: `Map<AgentIdentity, SessionId>`
+- `member_session_bindings`: `Map<AgentIdentity, SessionId>`
+- `topology_epoch`: `u64`
 
 ## Inputs
 - `RunFlow`
@@ -31,6 +32,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireAll`
 - `Wire`
 - `Unwire`
+- `WireMembers`(edge: WiringEdge)
+- `UnwireMembers`(edge: WiringEdge)
+- `BindMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
+- `RotateMemberSession`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
+- `ReleaseMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -122,9 +128,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
-- `MemberRealtimeBindingSet`(agent_identity: AgentIdentity, bridge_session_id: SessionId)
-- `MemberRealtimeBindingRotated`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
-- `MemberRealtimeBindingReleased`(agent_identity: AgentIdentity, session_id: SessionId)
+- `MemberSessionBindingSet`(agent_identity: AgentIdentity, bridge_session_id: SessionId)
+- `MemberSessionBindingRotated`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
+- `MemberSessionBindingReleased`(agent_identity: AgentIdentity, session_id: SessionId)
+- `WiringGraphChanged`(epoch: u64)
+- `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -135,9 +143,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
-  - `no_prior_realtime_binding`
+  - `no_prior_session_binding`
   - `replacing_absent`
-- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberRealtimeBindingSet`
+- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberSessionBindingSet`
 - To: `Running`
 
 ### `SpawnRunningReplacing`
@@ -145,9 +153,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
-  - `prior_realtime_binding_present`
+  - `prior_session_binding_present`
   - `replacing_present`
-- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberRealtimeBindingRotated`
+- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberSessionBindingRotated`
 - To: `Running`
 
 ### `ObserveRuntimeReady`
@@ -296,6 +304,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Wire`()
 - Emits: `NotifyCoordinator`
+- To: `Running`
+
+### `WireMembersRunning`
+- From: `Running`
+- On: `WireMembers`(edge)
+- Guards:
+  - `edge_not_already_wired`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `UnwireMembersRunning`
+- From: `Running`
+- On: `UnwireMembers`(edge)
+- Guards:
+  - `edge_currently_wired`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `BindMemberSessionRunning`
+- From: `Running`
+- On: `BindMemberSession`(agent_identity, session_id)
+- Guards:
+  - `identity_has_runtime`
+  - `no_prior_session_binding`
+- Emits: `MemberSessionBindingSet`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `RotateMemberSessionRunning`
+- From: `Running`
+- On: `RotateMemberSession`(agent_identity, old_session_id, new_session_id)
+- Guards:
+  - `identity_has_runtime`
+  - `prior_session_binding_present`
+- Emits: `MemberSessionBindingRotated`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ReleaseMemberSessionRunning`
+- From: `Running`
+- On: `ReleaseMemberSession`(agent_identity, session_id)
+- Guards:
+  - `prior_session_binding_present`
+- Emits: `MemberSessionBindingReleased`, `MemberSessionBindingChanged`
 - To: `Running`
 
 ### `TaskCreateRunning`
@@ -647,9 +697,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `prior_realtime_binding_present`
+  - `prior_session_binding_present`
   - `releasing_present`
-- Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
+- Emits: `RequestRuntimeRetire`, `MemberSessionBindingReleased`
 - To: `Running`
 
 ### `RetireRunningPreservingBinding`
@@ -658,7 +708,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `prior_realtime_binding_present`
+  - `prior_session_binding_present`
   - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
@@ -669,7 +719,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `no_prior_realtime_binding`
+  - `no_prior_session_binding`
   - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
@@ -680,9 +730,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `prior_realtime_binding_present`
+  - `prior_session_binding_present`
   - `releasing_present`
-- Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
+- Emits: `RequestRuntimeRetire`, `MemberSessionBindingReleased`
 - To: `Stopped`
 
 ### `RetireStoppedPreservingBinding`
@@ -691,7 +741,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `prior_realtime_binding_present`
+  - `prior_session_binding_present`
   - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Stopped`
@@ -702,7 +752,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
-  - `no_prior_realtime_binding`
+  - `no_prior_session_binding`
   - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Stopped`

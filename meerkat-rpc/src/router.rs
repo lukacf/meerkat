@@ -554,7 +554,7 @@ impl MethodRouter {
 
     /// W3-H: async variant of [`session_id_from_realtime_target_params`] that
     /// resolves `mob_member` targets against the MobMachine's canonical
-    /// `member_realtime_bindings` map via [`MobMcpState::resolve_realtime_target_session`].
+    /// `member_session_bindings` map via [`MobMcpState::resolve_realtime_target_session`].
     ///
     /// Returns `Ok(Some(session_id))` for both `session_target` (parsed from
     /// the wire) and `mob_member` (resolved from the mob state). The caller

@@ -314,7 +314,7 @@ impl SessionId {
 /// attachment's concrete session target (MeerkatMachine-owned).
 ///
 /// `Unbound` entries are never actually stored — absence of a key in
-/// `member_realtime_bindings` is the Unbound state. The variant exists so
+/// `member_session_bindings` is the Unbound state. The variant exists so
 /// that the DSL has a tagged type to reason about and shell consumers can
 /// pattern match on it without relying on map-absence semantics.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -759,11 +759,35 @@ machine! {
             // the current bridge session id that identity's realtime channel
             // should pin to. Respawn updates the value atomically in the same
             // DSL transition that rebinds the runtime id, emitting a typed
-            // `MemberRealtimeBindingRotated` effect — the observer handles
+            // `MemberSessionBindingRotated` effect — the observer handles
             // rotation as a first-class machine-emitted meaning, not a
             // shell-side pattern-match over a Cleared+Set debounce window
             // (dogma #3: one owner of meaning).
-            member_realtime_bindings: Map<AgentIdentity, SessionId>,
+            //
+            // Track-B (R5): this map is the identity-level "member is bound to
+            // *some* session" fact. Realtime WS observers were the first
+            // consumer; the `RecomputeMobPeerOverlay` composition driver is
+            // the second and reads the same map plus `wiring_edges` to
+            // project peer endpoints onto live sessions.
+            member_session_bindings: Map<AgentIdentity, SessionId>,
+            // Track-B (R5): monotonically increasing counter that advances
+            // on every Track-B identity-level mutation
+            // (`WireMembers`/`UnwireMembers`/`BindMemberSession`/
+            // `RotateMemberSession`/`ReleaseMemberSession`). The machine
+            // emits `WiringGraphChanged { epoch }` or
+            // `MemberSessionBindingChanged { epoch, ... }` on the same
+            // transition that bumps this counter. Consumers (notably the
+            // `RecomputeMobPeerOverlay` composition driver) use the
+            // epoch to linearize recomputation and reject stale overlays
+            // against newer topology.
+            //
+            // The lifecycle-coupled `Spawn`/`Retire` transitions still
+            // emit the fine-grained `MemberSessionBindingSet`/
+            // `Rotated`/`Released` effects directly and do NOT advance
+            // this counter. Commit 4's driver watches both paths;
+            // Commit 5's cutover consolidates the lifecycle-coupled
+            // updates onto this canonical bump point.
+            topology_epoch: u64,
         }
 
         init(Running) {
@@ -843,7 +867,8 @@ machine! {
             tasks = EmptyMap,
             in_progress_task_ids = EmptySet,
             completed_task_ids = EmptySet,
-            member_realtime_bindings = EmptyMap,
+            member_session_bindings = EmptyMap,
+            topology_epoch = 0,
         }
 
         terminal [Destroyed]
@@ -921,6 +946,23 @@ machine! {
             RetireAll,
             Wire,
             Unwire,
+            // Track-B (R5): explicit identity-level wiring and session-binding
+            // mutation inputs. These drive `wiring_edges` and
+            // `member_session_bindings` directly at DSL authority,
+            // independent of the Spawn/Retire lifecycle. The existing
+            // no-arg `Wire`/`Unwire` and lifecycle-coupled binding
+            // updates on `Spawn`/`Retire` remain in place; the new inputs
+            // are the canonical path for surfaces that mutate topology
+            // without invoking the member lifecycle.
+            //
+            // The `edge` field on `WireMembers`/`UnwireMembers` carries a
+            // pre-normalized `WiringEdge` (a <= b). Callers construct the
+            // edge via `WiringEdge::new(a, b)` before submitting.
+            WireMembers { edge: WiringEdge },
+            UnwireMembers { edge: WiringEdge },
+            BindMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
+            RotateMemberSession { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
+            ReleaseMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
             SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1036,9 +1078,25 @@ machine! {
             // emits Set vs Rotated; guard-split Retire emits Released vs
             // nothing, so each transition picks the correct typed effect
             // atomically.
-            MemberRealtimeBindingSet { agent_identity: AgentIdentity, bridge_session_id: SessionId },
-            MemberRealtimeBindingRotated { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
-            MemberRealtimeBindingReleased { agent_identity: AgentIdentity, session_id: SessionId },
+            MemberSessionBindingSet { agent_identity: AgentIdentity, bridge_session_id: SessionId },
+            MemberSessionBindingRotated { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
+            MemberSessionBindingReleased { agent_identity: AgentIdentity, session_id: SessionId },
+            // Track-B (R5): canonical topology-change signals consumed by
+            // the `RecomputeMobPeerOverlay` composition driver.
+            //
+            // - `WiringGraphChanged` fires when `wiring_edges` mutates.
+            // - `MemberSessionBindingChanged` fires on every binding
+            //   mutation (set, rotated, or released), carrying the
+            //   before/after session ids as `Option<SessionId>`. Absence
+            //   of a value means "no binding on this side of the
+            //   transition": `old=None, new=Some` → set, `Some, Some` →
+            //   rotate, `Some, None` → release.
+            //
+            // Both carry the post-transition `topology_epoch` so the
+            // driver can linearize recomputes against the newest topology
+            // snapshot.
+            WiringGraphChanged { epoch: u64 },
+            MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -1060,9 +1118,11 @@ machine! {
         disposition PersistKickoffUpdate => local,
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
-        disposition MemberRealtimeBindingSet => external,
-        disposition MemberRealtimeBindingRotated => external,
-        disposition MemberRealtimeBindingReleased => external,
+        disposition MemberSessionBindingSet => external,
+        disposition MemberSessionBindingRotated => external,
+        disposition MemberSessionBindingReleased => external,
+        disposition WiringGraphChanged => external,
+        disposition MemberSessionBindingChanged => external,
 
         // =====================================================================
         // Invariants
@@ -1072,10 +1132,10 @@ machine! {
         // has a bound session must also appear in `identity_to_runtime` (i.e.
         // must be an identity MobMachine has spawned). Ensures the binding map
         // cannot reference identities the machine has never admitted. Paired
-        // with the Retire transition's `member_realtime_bindings.remove` and
+        // with the Retire transition's `member_session_bindings.remove` and
         // Spawn's guard/state consistency: keys(bindings) ⊆ keys(identity_to_runtime).
         invariant bindings_require_known_identity {
-            for_all(id in self.member_realtime_bindings.keys(), self.identity_to_runtime.contains_key(id))
+            for_all(id in self.member_session_bindings.keys(), self.identity_to_runtime.contains_key(id))
         }
 
         // =====================================================================
@@ -1086,7 +1146,7 @@ machine! {
         // realtime binding for the identity) and Replacing (identity already
         // has a `BoundToSession`, i.e. this Spawn is the second half of a
         // shell-orchestrated respawn). Guards check BOTH the input's
-        // `replacing` witness AND the state's `member_realtime_bindings` key
+        // `replacing` witness AND the state's `member_session_bindings` key
         // presence so a caller cannot invoke the wrong branch — the DSL
         // enforces caller/state consistency, and a mismatched caller fails
         // loudly with "no transition matched" rather than silently picking a
@@ -1095,7 +1155,7 @@ machine! {
             on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
-            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "replacing_absent" { replacing == None }
             update {
                 // Spawn is the "member joined live_runtime_ids" fact. The
@@ -1119,19 +1179,19 @@ machine! {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
-                self.member_realtime_bindings.insert(agent_identity, bridge_session_id);
+                self.member_session_bindings.insert(agent_identity, bridge_session_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
-            emit MemberRealtimeBindingSet { agent_identity: agent_identity, bridge_session_id: bridge_session_id }
+            emit MemberSessionBindingSet { agent_identity: agent_identity, bridge_session_id: bridge_session_id }
         }
 
         transition SpawnRunningReplacing {
             on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
-            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "replacing_present" { replacing != None }
             update {
                 self.live_runtime_ids.insert(agent_runtime_id);
@@ -1145,12 +1205,12 @@ machine! {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
-                self.member_realtime_bindings.insert(agent_identity, bridge_session_id);
+                self.member_session_bindings.insert(agent_identity, bridge_session_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
-            emit MemberRealtimeBindingRotated { agent_identity: agent_identity, old_session_id: replacing.get("value"), new_session_id: bridge_session_id }
+            emit MemberSessionBindingRotated { agent_identity: agent_identity, old_session_id: replacing.get("value"), new_session_id: bridge_session_id }
         }
 
         transition ObserveRuntimeReady {
@@ -1607,6 +1667,91 @@ machine! {
             update {}
             to Running
             emit NotifyCoordinator
+        }
+
+        // =====================================================================
+        // Track-B (R5): identity-level wiring mutations.
+        //
+        // `WireMembers`/`UnwireMembers` mutate `wiring_edges` at DSL
+        // authority and bump `topology_epoch`. The `WiringGraphChanged`
+        // effect lets the `RecomputeMobPeerOverlay` composition driver
+        // linearize peer-overlay recomputation against graph changes.
+        // =====================================================================
+
+        transition WireMembersRunning {
+            on input WireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        transition UnwireMembersRunning {
+            on input UnwireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            update {
+                self.wiring_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        // =====================================================================
+        // Track-B (R5): identity-level session-binding mutations.
+        //
+        // `BindMemberSession`/`RotateMemberSession`/`ReleaseMemberSession`
+        // are the explicit-driven counterparts to the Spawn/Retire-coupled
+        // binding updates. Each bumps `topology_epoch` and emits
+        // `MemberSessionBindingChanged { epoch, agent_identity, old, new }`
+        // so the composition driver can recompute overlay endpoints
+        // keyed on the updated session.
+        // =====================================================================
+
+        transition BindMemberSessionRunning {
+            on input BindMemberSession { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_has_runtime" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {
+                self.member_session_bindings.insert(agent_identity, session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingSet { agent_identity: agent_identity, bridge_session_id: session_id }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(session_id) }
+        }
+
+        transition RotateMemberSessionRunning {
+            on input RotateMemberSession { agent_identity, old_session_id, new_session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_has_runtime" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {
+                self.member_session_bindings.insert(agent_identity, new_session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingRotated { agent_identity: agent_identity, old_session_id: old_session_id, new_session_id: new_session_id }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(old_session_id), new_session_id: Some(new_session_id) }
+        }
+
+        transition ReleaseMemberSessionRunning {
+            on input ReleaseMemberSession { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {
+                self.member_session_bindings.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: session_id }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
         }
 
         // TaskCreate: real mutator. Rejects duplicate task ids.
@@ -2254,13 +2399,13 @@ machine! {
         // consistency explicit at the DSL:
         //   * Releasing — identity has a realtime binding AND caller
         //     witnesses it with `releasing = Some(prior)`. Binding is
-        //     cleared; MemberRealtimeBindingReleased is emitted. This is
+        //     cleared; MemberSessionBindingReleased is emitted. This is
         //     a terminal retire (user-initiated).
         //   * PreservingBinding — identity has a realtime binding but
         //     caller passes `releasing = None`. This is the retire-half
         //     of a respawn: the binding map is intentionally left alone
         //     so the replacement spawn's SpawnRunningReplacing path can
-        //     emit MemberRealtimeBindingRotated against the same entry.
+        //     emit MemberSessionBindingRotated against the same entry.
         //     No binding-release effect is emitted.
         //   * NoBinding — identity has no realtime binding and caller
         //     passes `releasing = None`. No-op on the map.
@@ -2273,15 +2418,15 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_present" { releasing != None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_realtime_bindings.remove(agent_identity);
+                self.member_session_bindings.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeRetire
-            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+            emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
         }
 
         transition RetireRunningPreservingBinding {
@@ -2289,7 +2434,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
@@ -2303,7 +2448,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
@@ -2317,15 +2462,15 @@ machine! {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_present" { releasing != None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_realtime_bindings.remove(agent_identity);
+                self.member_session_bindings.remove(agent_identity);
             }
             to Stopped
             emit RequestRuntimeRetire
-            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+            emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
         }
 
         transition RetireStoppedPreservingBinding {
@@ -2333,7 +2478,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
@@ -2347,7 +2492,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);

@@ -578,7 +578,7 @@ impl MobHandle {
 
     /// W3-H: read the current bridge session id bound to `agent_identity`
     /// in this mob, projected from the MobMachine's canonical
-    /// `member_realtime_bindings` map. Returns `None` if the identity has
+    /// `member_session_bindings` map. Returns `None` if the identity has
     /// no binding. Used by the realtime WS surface at `MobMember` channel
     /// open time to initialize the task-local current_session_id before
     /// subscribing to binding events.
@@ -986,6 +986,52 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+            // Track-B (R5): new explicit identity-level wiring and
+            // session-binding commands. Runtime handlers land with
+            // Commit 4's `RecomputeMobPeerOverlay` driver wiring;
+            // today they surface `MobError::Internal` to any surface
+            // that tries to drive them — the DSL accepts them but no
+            // shell-side handler exists yet.
+            MobMachineCommand::WireMembers { edge: _ } => Err(MobError::Internal(
+                "MobMachineCommand::WireMembers is declared on the DSL surface \
+                 but the runtime handler lands with the Track-B composition \
+                 driver in a follow-up commit"
+                    .into(),
+            )),
+            MobMachineCommand::UnwireMembers { edge: _ } => Err(MobError::Internal(
+                "MobMachineCommand::UnwireMembers is declared on the DSL surface \
+                 but the runtime handler lands with the Track-B composition \
+                 driver in a follow-up commit"
+                    .into(),
+            )),
+            MobMachineCommand::BindMemberSession {
+                agent_identity: _,
+                session_id: _,
+            } => Err(MobError::Internal(
+                "MobMachineCommand::BindMemberSession is declared on the DSL surface \
+                 but the runtime handler lands with the Track-B composition \
+                 driver in a follow-up commit"
+                    .into(),
+            )),
+            MobMachineCommand::RotateMemberSession {
+                agent_identity: _,
+                old_session_id: _,
+                new_session_id: _,
+            } => Err(MobError::Internal(
+                "MobMachineCommand::RotateMemberSession is declared on the DSL surface \
+                 but the runtime handler lands with the Track-B composition \
+                 driver in a follow-up commit"
+                    .into(),
+            )),
+            MobMachineCommand::ReleaseMemberSession {
+                agent_identity: _,
+                session_id: _,
+            } => Err(MobError::Internal(
+                "MobMachineCommand::ReleaseMemberSession is declared on the DSL surface \
+                 but the runtime handler lands with the Track-B composition \
+                 driver in a follow-up commit"
+                    .into(),
+            )),
             MobMachineCommand::SubmitWork(cmd) => {
                 // Shell dispatch is a thin forward: the mob actor owns
                 // work-origin legality via the MobMachine DSL. There is no

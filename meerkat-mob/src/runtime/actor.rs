@@ -306,7 +306,7 @@ pub(super) struct MobActor {
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     /// W3-H: broadcast channel for `MemberRealtimeBindingEvent`s. The actor
     /// publishes on this sender from `log_realtime_binding_effects` whenever
-    /// the MobMachine emits a `MemberRealtimeBindingSet / Rotated /
+    /// the MobMachine emits a `MemberSessionBindingSet / Rotated /
     /// Released` DSL effect. Downstream consumers (notably the realtime WS
     /// in meerkat-rpc) subscribe via `MobHandle::subscribe_binding_events`.
     ///
@@ -777,14 +777,14 @@ impl MobActor {
             };
         for effect in effects {
             match effect {
-                mob_dsl::MobMachineEffect::MemberRealtimeBindingSet {
+                mob_dsl::MobMachineEffect::MemberSessionBindingSet {
                     bridge_session_id, ..
                 } => {
                     tracing::debug!(
                         %mob_id,
                         %agent_identity,
                         bridge_session_id = %bridge_session_id.0,
-                        "MemberRealtimeBindingSet"
+                        "MemberSessionBindingSet"
                     );
                     let Some(bridge_session_id) =
                         parse_session_id(&bridge_session_id.0, "bridge_session_id")
@@ -801,7 +801,7 @@ impl MobActor {
                     // the DSL binding map remains authoritative.
                     let _ = self.realtime_binding_tx.send(event);
                 }
-                mob_dsl::MobMachineEffect::MemberRealtimeBindingRotated {
+                mob_dsl::MobMachineEffect::MemberSessionBindingRotated {
                     old_session_id,
                     new_session_id,
                     ..
@@ -811,7 +811,7 @@ impl MobActor {
                         %agent_identity,
                         old_session_id = %old_session_id.0,
                         new_session_id = %new_session_id.0,
-                        "MemberRealtimeBindingRotated"
+                        "MemberSessionBindingRotated"
                     );
                     let (Some(old_session_id), Some(new_session_id)) = (
                         parse_session_id(&old_session_id.0, "old_session_id"),
@@ -827,12 +827,12 @@ impl MobActor {
                     };
                     let _ = self.realtime_binding_tx.send(event);
                 }
-                mob_dsl::MobMachineEffect::MemberRealtimeBindingReleased { session_id, .. } => {
+                mob_dsl::MobMachineEffect::MemberSessionBindingReleased { session_id, .. } => {
                     tracing::debug!(
                         %mob_id,
                         %agent_identity,
                         session_id = %session_id.0,
-                        "MemberRealtimeBindingReleased"
+                        "MemberSessionBindingReleased"
                     );
                     let Some(session_id) = parse_session_id(&session_id.0, "session_id") else {
                         continue;
@@ -2425,7 +2425,7 @@ impl MobActor {
                         tasks: dsl.tasks.clone(),
                         in_progress_task_ids: dsl.in_progress_task_ids.clone(),
                         completed_task_ids: dsl.completed_task_ids.clone(),
-                        member_realtime_bindings: dsl.member_realtime_bindings.clone(),
+                        member_session_bindings: dsl.member_session_bindings.clone(),
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
@@ -2442,7 +2442,7 @@ impl MobActor {
                     let binding = self
                         .dsl_authority
                         .state
-                        .member_realtime_bindings
+                        .member_session_bindings
                         .get(&dsl_identity)
                         .and_then(|dsl_session_id| {
                             meerkat_core::types::SessionId::parse(&dsl_session_id.0).ok()
@@ -4116,7 +4116,7 @@ impl MobActor {
         // bridge session id if this identity was already bound (respawn
         // case); the DSL's guard-split between SpawnRunningFresh vs
         // SpawnRunningReplacing then emits the correct
-        // MemberRealtimeBindingSet vs MemberRealtimeBindingRotated effect.
+        // MemberSessionBindingSet vs MemberSessionBindingRotated effect.
         // Members without a session-backed binding (e.g. `MemberRef::BackendPeer`)
         // pass a synthetic empty session id — they are not realtime-WS
         // targets and their binding map entry is inert.
@@ -4128,7 +4128,7 @@ impl MobActor {
         let replacing = self
             .dsl_authority
             .state
-            .member_realtime_bindings
+            .member_session_bindings
             .get(&dsl_identity)
             .cloned();
         let spawn_effects = self.apply_dsl_input_with_effects(
@@ -4499,12 +4499,12 @@ impl MobActor {
         // W3-H: populate `releasing` from the current DSL binding state. For
         // a terminal retire (user-initiated), `releasing = Some(prior)` drives
         // the `RetireRunningReleasing` path which clears the binding and emits
-        // `MemberRealtimeBindingReleased`. For the retire-half of a respawn
+        // `MemberSessionBindingReleased`. For the retire-half of a respawn
         // (caller sets `preserve_realtime_binding = true`), pass
         // `releasing = None` even though the binding is present — this drives
         // the `RetireRunningPreservingBinding` path, which leaves the binding
         // map alone so the replacement spawn's `SpawnRunningReplacing` can
-        // emit the atomic `MemberRealtimeBindingRotated` effect. Without this
+        // emit the atomic `MemberSessionBindingRotated` effect. Without this
         // the respawn path would emit `Released → Set` instead of `Rotated`,
         // closing MobMember WS channels mid-rotation (s58 root cause).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
@@ -4513,7 +4513,7 @@ impl MobActor {
         } else {
             self.dsl_authority
                 .state
-                .member_realtime_bindings
+                .member_session_bindings
                 .get(&dsl_identity)
                 .cloned()
         };
@@ -4656,7 +4656,7 @@ impl MobActor {
         // 2. Retire the existing member (archives the session, removes from roster).
         // W3-H: preserve the realtime binding map entry through the retire so
         // the replacement spawn's `SpawnRunningReplacing` emits the atomic
-        // `MemberRealtimeBindingRotated` effect. Without this the binding
+        // `MemberSessionBindingRotated` effect. Without this the binding
         // would be cleared here, then re-set by the replacement spawn — a
         // `Released → Set` pair that would break MobMember WS channel
         // continuity across respawn (s58 root cause).
@@ -5991,7 +5991,7 @@ impl MobActor {
         let releasing = self
             .dsl_authority
             .state
-            .member_realtime_bindings
+            .member_session_bindings
             .get(&dsl_identity)
             .cloned();
         let retire_effects = self.apply_dsl_input_with_effects(

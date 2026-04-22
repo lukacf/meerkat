@@ -114,10 +114,10 @@ pub(crate) struct MobDslT2Snapshot {
     pub in_progress_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
     pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
-    // `MobMachineAuthority.state.member_realtime_bindings`. Used by the
+    // `MobMachineAuthority.state.member_session_bindings`. Used by the
     // runtime-parity snapshot to expose the DSL's realtime binding map to
     // integration tests.
-    pub member_realtime_bindings: std::collections::BTreeMap<
+    pub member_session_bindings: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::SessionId,
     >,
@@ -130,7 +130,7 @@ pub(crate) struct MobStartupKickoffSnapshot {
 }
 
 /// W3-H: mob-side event mirror of the MobMachine's
-/// `MemberRealtimeBindingSet / Rotated / Released` DSL effects. The mob
+/// `MemberSessionBindingSet / Rotated / Released` DSL effects. The mob
 /// actor forwards each DSL effect onto a `broadcast::Sender` so external
 /// observers (notably the realtime WS in meerkat-rpc, which needs this
 /// type at its visibility boundary to type the receiver) can subscribe to
@@ -300,7 +300,7 @@ pub(super) enum MobCommand {
     },
     /// W3-H: query the current realtime binding for an identity. Returns
     /// the bridge session id currently bound (projected from the canonical
-    /// `member_realtime_bindings` map) or `None` if the identity has no
+    /// `member_session_bindings` map) or `None` if the identity has no
     /// binding. Used by the realtime WS surface at open time to initialize
     /// the task-local `current_session_id` for a `MobMember` target.
     CurrentRealtimeBinding {

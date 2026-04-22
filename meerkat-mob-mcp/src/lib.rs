@@ -1360,7 +1360,7 @@ impl MobMcpState {
     /// W3-H: resolve a realtime channel target to the concrete bridge
     /// session id. `SessionTarget` returns its parsed session id directly;
     /// `MobMember` resolves `(mob_id, agent_identity)` against the
-    /// MobMachine's canonical `member_realtime_bindings` map via the mob
+    /// MobMachine's canonical `member_session_bindings` map via the mob
     /// handle — a single read through the authoritative source (dogma #1).
     ///
     /// Surfaces that receive a `RealtimeChannelTarget` from a caller route

@@ -20780,7 +20780,12 @@ struct MobRuntimeParitySnapshotSummary {
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
-    member_realtime_bindings: BTreeMap<String, String>,
+    member_session_bindings: BTreeMap<String, String>,
+    // Track-B (R5): monotonically increasing topology epoch. Incremented on
+    // every mutation of `wiring_edges` or `member_session_bindings`. Stubbed
+    // here as 0 for the parity evaluator; full projection lands with the
+    // observer wiring PR alongside `member_session_bindings`.
+    topology_epoch: u64,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -21448,7 +21453,7 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks_map,
         in_progress_task_ids,
         completed_task_ids,
-        member_realtime_bindings,
+        member_session_bindings,
     ) = dsl_t2
         .map(|snap| {
             (
@@ -21476,7 +21481,7 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
-                snap.member_realtime_bindings
+                snap.member_session_bindings
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
@@ -21517,7 +21522,11 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks: tasks_map,
         in_progress_task_ids,
         completed_task_ids,
-        member_realtime_bindings,
+        member_session_bindings,
+        // Track-B (R5): stubbed 0 here; full projection lands alongside
+        // `member_session_bindings` wiring-through when the observer
+        // runtime exposes the field.
+        topology_epoch: 0,
     })
 }
 
@@ -21568,13 +21577,14 @@ fn mob_runtime_parity_field_value(
         "completed_task_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.completed_task_ids.clone(),
         )),
-        "member_realtime_bindings" => Some(MobRuntimeParityExprValue::Map(
+        "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot
-                .member_realtime_bindings
+                .member_session_bindings
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
         )),
+        "topology_epoch" => Some(MobRuntimeParityExprValue::U64(snapshot.topology_epoch)),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.externally_addressable_runtime_ids.clone(),
         )),
@@ -23609,7 +23619,7 @@ async fn test_list_members_matching_filters_by_label_and_role() {
 // after every transition. This exercises the full actor dispatch path
 // (MobCommand → DSL apply → log_realtime_binding_effects →
 // realtime_binding_tx.send) that the DSL-only tests in
-// `meerkat-mob/tests/member_realtime_bindings.rs` cannot cover.
+// `meerkat-mob/tests/member_session_bindings.rs` cannot cover.
 #[tokio::test]
 async fn test_member_realtime_binding_events_broadcast_through_spawn_respawn_retire() {
     use super::state::MemberRealtimeBindingEvent;

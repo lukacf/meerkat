@@ -73,6 +73,47 @@ pub(crate) enum MobMachineCommand {
         local: MeerkatId,
         target: crate::PeerTarget,
     },
+    /// Track-B (R5): explicit identity-level wiring mutation. Mutates
+    /// `MobMachine.wiring_edges` and bumps `topology_epoch`. Emits
+    /// `WiringGraphChanged { epoch }` which the
+    /// `RecomputeMobPeerOverlay` composition driver (Commit 4)
+    /// consumes. The runtime handler lands alongside that driver; this
+    /// variant exists today so the runtime-alphabet parity gate stays
+    /// green against the DSL.
+    #[allow(dead_code)]
+    WireMembers {
+        edge: crate::machines::mob_machine::WiringEdge,
+    },
+    /// Track-B (R5): explicit identity-level wiring removal. Mutates
+    /// `MobMachine.wiring_edges` and bumps `topology_epoch`. See
+    /// `WireMembers` for the composition-driver wiring rationale.
+    #[allow(dead_code)]
+    UnwireMembers {
+        edge: crate::machines::mob_machine::WiringEdge,
+    },
+    /// Track-B (R5): explicit identity-level session-binding
+    /// mutation (no prior binding). Runtime handler lands with the
+    /// composition driver (Commit 4).
+    #[allow(dead_code)]
+    BindMemberSession {
+        agent_identity: crate::machines::mob_machine::AgentIdentity,
+        session_id: crate::machines::mob_machine::SessionId,
+    },
+    /// Track-B (R5): explicit identity-level session-binding rotation.
+    /// Runtime handler lands with the composition driver (Commit 4).
+    #[allow(dead_code)]
+    RotateMemberSession {
+        agent_identity: crate::machines::mob_machine::AgentIdentity,
+        old_session_id: crate::machines::mob_machine::SessionId,
+        new_session_id: crate::machines::mob_machine::SessionId,
+    },
+    /// Track-B (R5): explicit identity-level session-binding release.
+    /// Runtime handler lands with the composition driver (Commit 4).
+    #[allow(dead_code)]
+    ReleaseMemberSession {
+        agent_identity: crate::machines::mob_machine::AgentIdentity,
+        session_id: crate::machines::mob_machine::SessionId,
+    },
     /// Submit a unit of work to a mob member. Fence-token freshness is
     /// validated in the actor; work-origin legality (External vs Internal,
     /// external-addressability, live-runtime membership, phase gates) is

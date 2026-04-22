@@ -114,7 +114,7 @@ pub enum RealtimeErrorCode {
     ChannelReconnecting,
     /// W3-H: the mob member this channel was bound to has been retired and
     /// its realtime binding released by the MobMachine
-    /// (`MemberRealtimeBindingReleased` effect). Signalled only for
+    /// (`MemberSessionBindingReleased` effect). Signalled only for
     /// `MobMember` targets; `SessionTarget` channels do not encounter this.
     BindingReleased,
 }
@@ -213,10 +213,10 @@ pub struct ToolCallTimeoutContext {
 ///
 /// - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 ///   canonical anchor, and the server resolves the current bridge session
-///   on every tick from the MobMachine's `member_realtime_bindings` map.
+///   on every tick from the MobMachine's `member_session_bindings` map.
 ///   Respawn atomically rotates the bound session via the
-///   `MemberRealtimeBindingRotated` effect; the channel survives without
-///   any SDK round-trip. A terminal `MemberRealtimeBindingReleased`
+///   `MemberSessionBindingRotated` effect; the channel survives without
+///   any SDK round-trip. A terminal `MemberSessionBindingReleased`
 ///   closes the channel with `RealtimeErrorCode::BindingReleased`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

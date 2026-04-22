@@ -256,10 +256,11 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
     if awaiting_body_frame {
         return no_active_body_frame;
     }
-    matches!(
-        snap.kernel_state.field(&loop_iteration::field::stage()),
-        None if no_active_body_frame
-    )
+    no_active_body_frame
+        && snap
+            .kernel_state
+            .field(&loop_iteration::field::stage())
+            .is_none()
 }
 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {

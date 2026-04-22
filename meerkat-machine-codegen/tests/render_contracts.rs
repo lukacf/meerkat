@@ -177,10 +177,13 @@ fn flow_frame_loop_driver_codegen_is_explicitly_retired() {
 }
 
 #[test]
-#[should_panic(expected = "unsupported composition driver codegen")]
 fn non_legacy_composition_drivers_fail_closed() {
     let mut schema = meerkat_mob_seam_composition();
     schema.driver = Some(dummy_driver_binding());
 
-    let _ = render_composition_driver(&schema);
+    let rendered = render_composition_driver(&schema)
+        .expect("non-legacy composition drivers should render a fail-closed stub");
+    assert!(rendered.contains("compile_error!"));
+    assert!(rendered.contains("unsupported composition driver codegen"));
+    assert!(rendered.contains("meerkat_mob_seam"));
 }

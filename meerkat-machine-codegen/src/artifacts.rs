@@ -859,10 +859,10 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
         // without a concrete renderer.
         return None;
     }
-    panic!(
-        "unsupported composition driver codegen for {} @ {} ({})",
+    Some(format!(
+        "compile_error!(\"unsupported composition driver codegen for {} @ {} ({})\");\n",
         schema.name, driver.module_path, driver.driver_type
-    );
+    ))
 }
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {

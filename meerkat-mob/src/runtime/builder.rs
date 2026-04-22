@@ -121,6 +121,65 @@ fn seed_mob_authority_sync_from_roster(
             .state
             .identity_to_runtime
             .insert(dsl_identity, dsl_runtime_id);
+        authority.state.member_state_markers.insert(
+            dsl_runtime_id.clone(),
+            match entry.state {
+                crate::roster::MemberState::Active => mob_dsl::MobMemberState::Active,
+                crate::roster::MemberState::Retiring => mob_dsl::MobMemberState::Retiring,
+            },
+        );
+        authority
+            .state
+            .member_startup_ready
+            .insert(dsl_runtime_id.clone());
+
+        let member_id = entry.agent_identity.to_string();
+        if let Some(kickoff) = entry.kickoff.clone() {
+            match kickoff.phase {
+                crate::roster::MobMemberKickoffPhase::Pending => {
+                    authority
+                        .state
+                        .member_kickoff_pending
+                        .insert(member_id.clone());
+                }
+                crate::roster::MobMemberKickoffPhase::Starting => {
+                    authority
+                        .state
+                        .member_kickoff_starting
+                        .insert(member_id.clone());
+                }
+                crate::roster::MobMemberKickoffPhase::CallbackPending => {
+                    authority
+                        .state
+                        .member_kickoff_failed
+                        .insert(member_id.clone());
+                }
+                crate::roster::MobMemberKickoffPhase::Started => {
+                    authority
+                        .state
+                        .member_kickoff_started
+                        .insert(member_id.clone());
+                }
+                crate::roster::MobMemberKickoffPhase::Failed => {
+                    authority
+                        .state
+                        .member_kickoff_failed
+                        .insert(member_id.clone());
+                }
+                crate::roster::MobMemberKickoffPhase::Cancelled => {
+                    authority
+                        .state
+                        .member_kickoff_cancelled
+                        .insert(member_id.clone());
+                }
+            }
+            if let Some(error) = kickoff.error {
+                authority
+                    .state
+                    .member_kickoff_error
+                    .insert(member_id, error);
+            }
+        }
     }
 }
 

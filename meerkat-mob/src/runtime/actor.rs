@@ -1054,9 +1054,7 @@ impl MobActor {
             crate::roster::MobMemberKickoffPhase::Pending => mob_dsl::KickoffPhase::Pending,
             crate::roster::MobMemberKickoffPhase::Starting => mob_dsl::KickoffPhase::Starting,
             crate::roster::MobMemberKickoffPhase::Started => mob_dsl::KickoffPhase::Started,
-            crate::roster::MobMemberKickoffPhase::CallbackPending => {
-                mob_dsl::KickoffPhase::CallbackPending
-            }
+            crate::roster::MobMemberKickoffPhase::CallbackPending => mob_dsl::KickoffPhase::Failed,
             crate::roster::MobMemberKickoffPhase::Failed => mob_dsl::KickoffPhase::Failed,
             crate::roster::MobMemberKickoffPhase::Cancelled => mob_dsl::KickoffPhase::Cancelled,
         }
@@ -1973,11 +1971,13 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
-                        mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
-                            member_id: agent_identity.to_string(),
-                        }
-                    }
+                    meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                        tool_name,
+                        ..
+                    } => mob_dsl::MobMachineInput::KickoffResolveFailed {
+                        member_id: agent_identity.to_string(),
+                        error: format!("autonomous kickoff blocked on callback tool '{tool_name}'"),
+                    },
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {

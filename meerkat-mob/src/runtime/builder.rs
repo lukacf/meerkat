@@ -120,7 +120,7 @@ fn seed_mob_authority_sync_from_roster(
         authority
             .state
             .identity_to_runtime
-            .insert(dsl_identity, dsl_runtime_id);
+            .insert(dsl_identity, dsl_runtime_id.clone());
         authority.state.member_state_markers.insert(
             dsl_runtime_id.clone(),
             match entry.state {

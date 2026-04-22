@@ -3452,12 +3452,7 @@ impl MemberHandle {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::event::MemberRef;
     use crate::ids::Generation;
-    use crate::roster::{
-        MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, RosterEntry,
-    };
-    use std::time::SystemTime;
 
     #[test]
     fn member_projection_types_omit_bridge_session_fields_in_serialized_output() {

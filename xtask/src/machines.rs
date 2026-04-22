@@ -259,10 +259,12 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     );
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
-    mismatches.extend(collect_machine_inventory_mismatches(&root)?);
-    mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
-    mismatches.extend(collect_authority_language_mismatches(&root)?);
-    mismatches.extend(collect_stale_cfg_mismatches(&root)?);
+    if selection.include_local_flow_machines {
+        mismatches.extend(collect_machine_inventory_mismatches(&root)?);
+        mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
+        mismatches.extend(collect_authority_language_mismatches(&root)?);
+        mismatches.extend(collect_stale_cfg_mismatches(&root)?);
+    }
 
     if !mismatches.is_empty() {
         bail!(
@@ -499,7 +501,11 @@ fn machine_verify_at_root(
     }
 
     if selection.include_local_flow_machines {
-        run_generated_kernel_tests(root)?;
+        run_generated_kernel_tests(root, None)?;
+    } else {
+        for machine in &selection.machines {
+            run_generated_kernel_tests(root, Some(machine.slug.as_str()))?;
+        }
     }
     for machine in &selection.machines {
         run_machine_owner_tests(root, machine)?;
@@ -1854,20 +1860,72 @@ pub fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)
     ))
 }
 
-fn run_generated_kernel_tests(root: &Path) -> Result<()> {
-    let mut cmd = repo_cargo_command(root);
-    cmd.arg("test")
-        .arg("-p")
-        .arg("meerkat-machine-kernels")
-        .arg("--lib")
-        .arg("--")
-        .arg("--test-threads=1")
-        .current_dir(root);
-
-    let status = cmd.status().context("run generated machine kernel tests")?;
-    if !status.success() {
-        bail!("generated machine kernel tests failed");
+fn generated_kernel_test_filters_for_machine(slug: &str) -> &'static [&'static str] {
+    match slug {
+        "meerkat_machine" => &[
+            "runtime::tests::meerkat_rejects_unknown_input_variant",
+            "runtime::tests::meerkat_prepare_bindings_rejects_bad_payload_types",
+        ],
+        "mob_machine" => &["runtime::tests::mob_spawn_and_submit_work_transitions_execute"],
+        _ => &[],
     }
+}
+
+fn run_generated_kernel_tests(root: &Path, machine_slug: Option<&str>) -> Result<()> {
+    let filters = machine_slug
+        .map(generated_kernel_test_filters_for_machine)
+        .unwrap_or(&[]);
+
+    if machine_slug.is_some() && filters.is_empty() {
+        return Ok(());
+    }
+
+    if filters.is_empty() {
+        let mut cmd = repo_cargo_command(root);
+        cmd.arg("test")
+            .arg("-p")
+            .arg("meerkat-machine-kernels")
+            .arg("--lib")
+            .arg("--")
+            .arg("--test-threads=1")
+            .current_dir(root);
+
+        let status = cmd.status().context("run generated machine kernel tests")?;
+        if !status.success() {
+            bail!("generated machine kernel tests failed");
+        }
+        return Ok(());
+    }
+
+    for filter in filters {
+        let mut cmd = repo_cargo_command(root);
+        cmd.arg("test")
+            .arg("-p")
+            .arg("meerkat-machine-kernels")
+            .arg("--lib")
+            .arg(filter)
+            .arg("--")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .current_dir(root);
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("run generated machine kernel test {filter}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+        if !output.status.success() {
+            bail!(
+                "generated machine kernel test failed for {filter}\n{}",
+                combined.trim()
+            );
+        }
+        if combined.contains("running 0 tests") {
+            bail!("generated machine kernel test filter matched zero tests: {filter}");
+        }
+    }
+
     Ok(())
 }
 

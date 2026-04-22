@@ -92,13 +92,7 @@ impl MobRun {
 
     /// Typed view of the kernel-owned ordered step sequence.
     pub fn ordered_steps(&self) -> Result<Vec<StepId>, MobError> {
-        Ok(self
-            .flow_state
-            .ordered_steps
-            .iter()
-            .cloned()
-            .map(StepId::from)
-            .collect())
+        Ok(self.flow_state.ordered_steps.clone())
     }
 
     /// Typed view of the kernel-owned dependency map keyed by step id.
@@ -107,12 +101,7 @@ impl MobRun {
             .flow_state
             .step_dependencies
             .iter()
-            .map(|(step_id, deps)| {
-                (
-                    StepId::from(step_id.clone()),
-                    deps.iter().cloned().map(StepId::from).collect(),
-                )
-            })
+            .map(|(step_id, deps)| (step_id.clone(), deps.clone()))
             .collect())
     }
 
@@ -132,7 +121,7 @@ impl MobRun {
                         )));
                     }
                 };
-                Ok((StepId::from(step_id.clone()), mode))
+                Ok((step_id.clone(), mode))
             })
             .collect()
     }
@@ -143,7 +132,7 @@ impl MobRun {
             .flow_state
             .step_has_conditions
             .iter()
-            .map(|(step_id, flag)| (StepId::from(step_id.clone()), *flag))
+            .map(|(step_id, flag)| (step_id.clone(), *flag))
             .collect())
     }
 
@@ -153,12 +142,7 @@ impl MobRun {
             .flow_state
             .step_branches
             .iter()
-            .map(|(step_id, branch)| {
-                (
-                    StepId::from(step_id.clone()),
-                    branch.clone().map(BranchId::from),
-                )
-            })
+            .map(|(step_id, branch)| (step_id.clone(), branch.clone()))
             .collect())
     }
 
@@ -181,7 +165,7 @@ impl MobRun {
                         )));
                     }
                 };
-                Ok((StepId::from(step_id.clone()), policy))
+                Ok((step_id.clone(), policy))
             })
             .collect()
     }
@@ -192,7 +176,7 @@ impl MobRun {
             .flow_state
             .step_quorum_thresholds
             .iter()
-            .map(|(step_id, threshold)| (StepId::from(step_id.clone()), *threshold))
+            .map(|(step_id, threshold)| (step_id.clone(), *threshold))
             .collect())
     }
 
@@ -204,7 +188,7 @@ impl MobRun {
                 continue;
             };
             statuses.insert(
-                StepId::from(step_key.clone()),
+                step_key.clone(),
                 StepRunStatus::from_flow_run_status(value.as_str(), &self.run_id)?,
             );
         }

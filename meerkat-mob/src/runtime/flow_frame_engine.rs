@@ -2658,7 +2658,7 @@ fn recover_pending_body_frame_request(
     let next_run_state = flow_run::transition(
         run_state,
         flow_run::Input::RegisterPendingBodyFrame(flow_run::inputs::RegisterPendingBodyFrame {
-            loop_instance_id: loop_instance_id.clone(),
+            loop_instance_id,
             depth,
         }),
         &flow_run::EmptyContext,

@@ -2263,7 +2263,7 @@ fn effect_step_id(effect: &flow_run::Effect) -> Result<Option<StepId>, MobError>
         flow_run::Effect::EscalateSupervisor(payload) => Some(payload.step_id.clone()),
         _ => None,
     };
-    Ok(step_id.map(StepId::from))
+    Ok(step_id)
 }
 
 fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobError> {
@@ -2273,7 +2273,7 @@ fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobE
         flow_run::Effect::ProjectTargetCanceled(payload) => Some(payload.target_id.clone()),
         _ => None,
     };
-    Ok(target_id.map(MeerkatId::from))
+    Ok(target_id)
 }
 
 fn effect_step_status(effect: &flow_run::Effect) -> Result<StepRunStatus, MobError> {

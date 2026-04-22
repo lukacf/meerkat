@@ -119,7 +119,7 @@ impl FrameStepExecutor for AnyOrderScriptedStepExecutor {
         let mut remaining = self.remaining.lock().unwrap();
         let Some(index) = remaining
             .iter()
-            .position(|script| script.node_id == node_id.to_string())
+            .position(|script| *node_id == script.node_id)
         else {
             panic!(
                 "no any-order script for node_id={node_id}; remaining={:?}",

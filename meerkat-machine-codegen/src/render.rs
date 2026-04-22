@@ -342,15 +342,24 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    meerkat_machine_schema::{catalog_fn}()");
     pushln!(&mut out, "}}");
     pushln!(&mut out);
-    pushln!(
-        &mut out,
-        "use {}::{{evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema, transition_signal_from_schema, RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue}};",
-        if schema.rust.crate_name == "meerkat-mob" {
-            "crate::generated::compat_runtime"
-        } else {
-            "crate::runtime"
-        }
-    );
+    if schema.rust.crate_name == "meerkat-mob" {
+        pushln!(&mut out, "mod modeled_runtime {{");
+        pushln!(&mut out, "    #![allow(warnings)]");
+        pushln!(
+            &mut out,
+            "    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../meerkat-machine-kernels/src/runtime.rs\"));"
+        );
+        pushln!(&mut out, "}}");
+        pushln!(
+            &mut out,
+            "use modeled_runtime::{{evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema, transition_signal_from_schema, RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue}};"
+        );
+    } else {
+        pushln!(
+            &mut out,
+            "use crate::runtime::{{evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema, transition_signal_from_schema, RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue}};"
+        );
+    }
     pushln!(&mut out);
     let generated_enum_names: std::collections::BTreeSet<String> = enum_type_defs
         .iter()
@@ -402,37 +411,6 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
                 "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
             );
             pushln!(&mut out, "        f.write_str(self.as_str())");
-            pushln!(&mut out, "    }}");
-            pushln!(&mut out, "}}");
-            pushln!(&mut out, "impl From<&str> for {} {{", enum_name);
-            pushln!(&mut out, "    fn from(value: &str) -> Self {{");
-            pushln!(&mut out, "        match value {{");
-            for variant in &variants {
-                pushln!(
-                    &mut out,
-                    "            \"{}\" => Self::{},",
-                    variant,
-                    rust_ident(variant)
-                );
-            }
-            pushln!(&mut out, "            other => {{");
-            pushln!(
-                &mut out,
-                "                panic!(\"unknown {} variant: {{other}}\");",
-                enum_name
-            );
-            pushln!(&mut out, "            }},");
-            pushln!(&mut out, "        }}");
-            pushln!(&mut out, "    }}");
-            pushln!(&mut out, "}}");
-            pushln!(&mut out, "impl From<String> for {} {{", enum_name);
-            pushln!(&mut out, "    fn from(value: String) -> Self {{");
-            pushln!(&mut out, "        Self::from(value.as_str())");
-            pushln!(&mut out, "    }}");
-            pushln!(&mut out, "}}");
-            pushln!(&mut out, "impl PartialEq<&str> for {} {{", enum_name);
-            pushln!(&mut out, "    fn eq(&self, other: &&str) -> bool {{");
-            pushln!(&mut out, "        self.as_str() == *other");
             pushln!(&mut out, "    }}");
             pushln!(&mut out, "}}");
         }
@@ -1101,13 +1079,6 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(&mut out, "}}");
     pushln!(&mut out);
-    pushln!(
-        &mut out,
-        "pub fn initial_state_raw() -> Result<RawState, RawRefusal> {{"
-    );
-    pushln!(&mut out, "    initial_state_from_schema(schema())");
-    pushln!(&mut out, "}}");
-    pushln!(&mut out);
     pushln!(&mut out, "pub fn transition<C: Context>(");
     pushln!(&mut out, "    state: &State,");
     pushln!(&mut out, "    input: Input,");
@@ -1122,15 +1093,6 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(&mut out, "}}");
     pushln!(&mut out);
-    pushln!(&mut out, "pub fn transition_raw(");
-    pushln!(&mut out, "    state: &RawState,");
-    pushln!(&mut out, "    input: &RawInput,");
-    pushln!(&mut out, ") -> Result<RawOutcome, RawRefusal> {{");
-    pushln!(
-        &mut out,
-        "    transition_from_schema(schema(), state, input)"
-    );
-    pushln!(&mut out, "}}");
     if has_signals {
         pushln!(&mut out);
         pushln!(&mut out, "pub fn transition_signal<C: Context>(");
@@ -1146,31 +1108,7 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
             "    transition_signal_from_schema(schema(), &raw_state, &raw_signal).map_err(refusal_from_raw).and_then(outcome_from_raw)"
         );
         pushln!(&mut out, "}}");
-        pushln!(&mut out);
-        pushln!(&mut out, "pub fn transition_signal_raw(");
-        pushln!(&mut out, "    state: &RawState,");
-        pushln!(&mut out, "    signal: &RawSignal,");
-        pushln!(&mut out, ") -> Result<RawOutcome, RawRefusal> {{");
-        pushln!(
-            &mut out,
-            "    transition_signal_from_schema(schema(), state, signal)"
-        );
-        pushln!(&mut out, "}}");
     }
-    pushln!(&mut out);
-    pushln!(&mut out, "pub fn evaluate_helper_raw(");
-    pushln!(&mut out, "    state: &RawState,");
-    pushln!(&mut out, "    helper_name: &str,");
-    pushln!(
-        &mut out,
-        "    args: &std::collections::BTreeMap<String, RawValue>,"
-    );
-    pushln!(&mut out, ") -> Result<RawValue, RawRefusal> {{");
-    pushln!(
-        &mut out,
-        "    evaluate_helper_from_schema(schema(), state, helper_name, args)"
-    );
-    pushln!(&mut out, "}}");
 
     out
 }

@@ -1104,7 +1104,8 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
                     parent_node_id: loop_node_id.to_string(),
                     loop_id: loop_id.to_string(),
                     depth: 1,
-                    stage: "AwaitingUntil".into(),
+                    stage:
+                        meerkat_mob::generated::loop_iteration::LoopIterationStage::AwaitingUntil,
                     current_iteration: 1,
                     last_completed_iteration: 0,
                     max_iterations: 1,
@@ -1214,7 +1215,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
         .cloned()
         .expect("body frame snapshot");
     let mut body_frame = rootish_body_frame.clone();
-    body_frame.kernel_state.frame_scope = "Body".into();
+    body_frame.kernel_state.frame_scope = meerkat_mob::generated::flow_frame::FrameScope::Body;
     body_frame.kernel_state.loop_instance_id = loop_instance_id.to_string();
     body_frame.kernel_state.iteration = 0;
     assert!(
@@ -1241,7 +1242,8 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
                     parent_node_id: loop_node_id.to_string(),
                     loop_id: loop_id.to_string(),
                     depth: 1,
-                    stage: "BodyFrameActive".into(),
+                    stage:
+                        meerkat_mob::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 1,
@@ -1427,7 +1429,7 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
         kernel_state: meerkat_mob::generated::flow_frame::State {
             phase: meerkat_mob::generated::flow_frame::Phase::Running,
             frame_id: frame_id.to_string(),
-            frame_scope: "Root".into(),
+            frame_scope: meerkat_mob::generated::flow_frame::FrameScope::Root,
             loop_instance_id: String::new(),
             iteration: 0,
             last_admitted_node: "node-a".into(),
@@ -1436,16 +1438,28 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
                 .collect(),
             ordered_nodes: vec!["node-a".into(), "node-b".into()],
             node_kind: std::collections::BTreeMap::from([
-                ("node-a".into(), "Step".into()),
-                ("node-b".into(), "Step".into()),
+                (
+                    "node-a".into(),
+                    meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
+                ),
+                (
+                    "node-b".into(),
+                    meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
+                ),
             ]),
             node_dependencies: std::collections::BTreeMap::from([
                 ("node-a".into(), vec![]),
                 ("node-b".into(), vec!["node-a".into()]),
             ]),
             node_dependency_modes: std::collections::BTreeMap::from([
-                ("node-a".into(), "All".into()),
-                ("node-b".into(), "All".into()),
+                (
+                    "node-a".into(),
+                    meerkat_mob::generated::flow_frame::DependencyMode::All,
+                ),
+                (
+                    "node-b".into(),
+                    meerkat_mob::generated::flow_frame::DependencyMode::All,
+                ),
             ]),
             node_branches: std::collections::BTreeMap::from([
                 ("node-a".into(), None),

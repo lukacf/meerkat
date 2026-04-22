@@ -5,7 +5,6 @@
 // owner feedback returns an obligation token that must be consumed by the
 // corresponding feedback submitter.
 
-mod compat_runtime;
 pub mod flow_frame;
 pub mod flow_run;
 pub mod loop_iteration;

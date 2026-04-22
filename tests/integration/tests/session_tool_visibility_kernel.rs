@@ -1,72 +1,38 @@
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::test_oracle::{KernelInput, KernelSignal, KernelState, KernelValue};
 
-fn string(value: &str) -> KernelValue {
-    KernelValue::String(value.to_string())
+fn tool_filter_all() -> String {
+    serde_json::to_string(&meerkat_core::ToolFilter::All).expect("tool filter should serialize")
 }
 
-fn verified_witness() -> KernelValue {
-    string("verified")
-}
-
-fn tool_filter_all() -> KernelValue {
-    KernelValue::String(
-        serde_json::to_string(&meerkat_core::ToolFilter::All)
-            .expect("tool filter should serialize"),
-    )
-}
-
-fn empty_string_set() -> KernelValue {
-    KernelValue::Set(Default::default())
-}
-
-fn input(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
-    KernelInput {
-        variant: variant.to_string(),
-        fields: fields
-            .into_iter()
-            .map(|(field, value)| (field.to_string(), value))
-            .collect(),
-    }
-}
-
-fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
-    KernelSignal {
-        variant: variant.to_string(),
-        fields: fields
-            .into_iter()
-            .map(|(field, value)| (field.to_string(), value))
-            .collect(),
-    }
-}
-
-fn prepared_meerkat_state() -> KernelState {
-    let initialized = meerkat::transition_signal_raw(
-        &meerkat::initial_state_raw().expect("initial state"),
-        &signal("Initialize", vec![]),
+fn prepared_meerkat_state() -> meerkat::State {
+    let initialized = meerkat::transition_signal(
+        &meerkat::initial_state(),
+        meerkat::Signal::Initialize(meerkat::signals::Initialize {}),
+        &meerkat::EmptyContext,
     )
     .expect("initialize")
     .next_state;
-    let registered = meerkat::transition_raw(
+    let registered = meerkat::transition(
         &initialized,
-        &input("RegisterSession", vec![("session_id", string("session-1"))]),
+        meerkat::Input::RegisterSession(meerkat::inputs::RegisterSession {
+            session_id: "session-1".into(),
+        }),
+        &meerkat::EmptyContext,
     )
     .expect("register session")
     .next_state;
-    meerkat::transition_raw(
+    meerkat::transition(
         &registered,
-        &input(
-            "PrepareBindings",
-            vec![
-                ("agent_runtime_id", string("runtime-7")),
-                ("fence_token", KernelValue::U64(3)),
-                ("generation", KernelValue::U64(1)),
-            ],
-        ),
+        meerkat::Input::PrepareBindings(meerkat::inputs::PrepareBindings {
+            agent_runtime_id: "runtime-7".into(),
+            fence_token: 3,
+            generation: 1,
+        }),
+        &meerkat::EmptyContext,
     )
     .expect("prepare bindings")
     .next_state
@@ -76,79 +42,62 @@ fn prepared_meerkat_state() -> KernelState {
 fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     let attached = prepared_meerkat_state();
 
-    // PublishCommittedVisibleSet from Attached carries the active/staged owner
-    // revisions in the input, but the top-level machine no longer stores a
-    // separate active visibility mirror.
-    let published = meerkat::transition_raw(
+    let published = meerkat::transition(
         &attached,
-        &input(
-            "PublishCommittedVisibleSet",
-            vec![
-                ("active_filter", tool_filter_all()),
-                ("staged_filter", tool_filter_all()),
-                ("active_requested_deferred_names", empty_string_set()),
-                ("staged_requested_deferred_names", empty_string_set()),
-                ("active_visibility_revision", KernelValue::U64(0)),
-                ("staged_visibility_revision", KernelValue::U64(0)),
-            ],
-        ),
+        meerkat::Input::PublishCommittedVisibleSet(meerkat::inputs::PublishCommittedVisibleSet {
+            active_filter: tool_filter_all(),
+            staged_filter: tool_filter_all(),
+            active_requested_deferred_names: BTreeSet::new(),
+            staged_requested_deferred_names: BTreeSet::new(),
+            active_visibility_revision: 0,
+            staged_visibility_revision: 0,
+        }),
+        &meerkat::EmptyContext,
     )
     .expect("publish committed visible set");
 
-    // PrepareBindings promotes an idle registered session to Attached.
-    assert_eq!(published.next_state.phase, "Attached");
+    assert_eq!(published.next_state.phase, meerkat::Phase::Attached);
     assert_eq!(published.effects.len(), 1);
-    assert_eq!(published.effects[0].variant, "CommittedVisibleSetPublished");
+    assert!(matches!(
+        published.effects[0],
+        meerkat::Effect::CommittedVisibleSetPublished(_)
+    ));
 }
 
 #[test]
 fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state() {
     let attached = prepared_meerkat_state();
-    let requested = meerkat::transition_raw(
+    let requested = meerkat::transition(
         &attached,
-        &input(
-            "RequestDeferredTools",
-            vec![
-                (
-                    "names",
-                    KernelValue::Set(
-                        vec![string("search"), string("view_image")]
-                            .into_iter()
-                            .collect(),
-                    ),
-                ),
-                (
-                    "witnesses",
-                    KernelValue::Map(BTreeMap::from([
-                        (string("search"), verified_witness()),
-                        (string("view_image"), verified_witness()),
-                    ])),
-                ),
-            ],
-        ),
+        meerkat::Input::RequestDeferredTools(meerkat::inputs::RequestDeferredTools {
+            names: BTreeSet::from(["search".to_string(), "view_image".to_string()]),
+            witnesses: BTreeMap::from([
+                ("search".to_string(), "verified".to_string()),
+                ("view_image".to_string(), "verified".to_string()),
+            ]),
+        }),
+        &meerkat::EmptyContext,
     )
     .expect("request deferred tools")
     .next_state;
 
+    let value = serde_json::to_value(&requested).expect("serialize typed state");
+    let object = value.as_object().expect("typed state serializes as object");
+
     assert!(
-        !requested.fields.contains_key("staged_visibility_revision"),
+        !object.contains_key("staged_visibility_revision"),
         "top-level machine should no longer mirror staged visibility revision",
     );
     assert!(
-        !requested.fields.contains_key("active_visibility_revision"),
+        !object.contains_key("active_visibility_revision"),
         "top-level machine should no longer mirror active visibility revision",
     );
     assert!(
-        !requested
-            .fields
-            .contains_key("active_requested_deferred_names"),
+        !object.contains_key("active_requested_deferred_names"),
         "top-level machine should no longer mirror active requested names",
     );
-
     assert!(
-        !requested
-            .fields
-            .contains_key("staged_requested_deferred_names"),
+        !object.contains_key("staged_requested_deferred_names"),
         "top-level machine should no longer mirror staged requested names",
     );
 }

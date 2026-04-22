@@ -152,7 +152,7 @@ fn reconcile_active_counts(run: &mut MobRun) {
 /// Return true if a loop snapshot represents a loop that is pending a body frame start.
 ///
 /// A loop is pending iff it is in Running phase with no active body frame
-/// (`active_body_frame_id == KernelValue::None`). The `None` (field absent) arm
+/// (`active_body_frame_id == None`). The `None` (field absent) arm
 /// guards against corrupt snapshots — legitimate Running loops always initialize
 /// this field; if it is missing entirely, we treat the loop as pending and emit a
 /// warning so the anomaly is visible in logs.
@@ -247,7 +247,7 @@ mod tests {
                 .map(|s| {
                     (
                         s.to_string(),
-                        crate::generated::flow_frame::NodeRunStatus::from("Ready"),
+                        crate::generated::flow_frame::NodeRunStatus::Ready,
                     )
                 })
                 .collect();
@@ -290,11 +290,11 @@ mod tests {
         root.phase = crate::generated::flow_frame::Phase::Running;
         root.node_status = BTreeMap::from([(
             "loop-node".into(),
-            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+            crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         root.node_kind = BTreeMap::from([(
             "loop-node".into(),
-            crate::generated::flow_frame::FlowNodeKind::from("Loop"),
+            crate::generated::flow_frame::FlowNodeKind::Loop,
         )]);
         run.frames
             .insert(FrameId::from("root"), FrameSnapshot { kernel_state: root });
@@ -303,11 +303,11 @@ mod tests {
         body.phase = crate::generated::flow_frame::Phase::Running;
         body.node_status = BTreeMap::from([(
             "body-step".into(),
-            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+            crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         body.node_kind = BTreeMap::from([(
             "body-step".into(),
-            crate::generated::flow_frame::FlowNodeKind::from("Step"),
+            crate::generated::flow_frame::FlowNodeKind::Step,
         )]);
         run.frames.insert(
             FrameId::from("body-frame"),
@@ -336,7 +336,7 @@ mod tests {
         state.phase = crate::generated::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
             "node-a".into(),
-            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+            crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         let snap = FrameSnapshot {
             kernel_state: state,
@@ -351,7 +351,7 @@ mod tests {
         state.phase = crate::generated::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
             "node-a".into(),
-            crate::generated::flow_frame::NodeRunStatus::from("Ready"),
+            crate::generated::flow_frame::NodeRunStatus::Ready,
         )]);
         let snap = FrameSnapshot {
             kernel_state: state,

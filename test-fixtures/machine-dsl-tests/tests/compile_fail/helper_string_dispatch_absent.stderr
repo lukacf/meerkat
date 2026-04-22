@@ -1,19 +1,5 @@
 error[E0425]: cannot find function `evaluate_helper` in module `meerkat`
  --> tests/compile_fail/helper_string_dispatch_absent.rs:5:22
   |
-5 |       let _ = meerkat::evaluate_helper(
-  |                        ^^^^^^^^^^^^^^^
-  |
- ::: $WORKSPACE/meerkat-machine-kernels/src/generated/meerkat.rs
-  |
-  | / pub fn evaluate_helper_raw(
-  | |     state: &RawState,
-  | |     helper_name: &str,
-  | |     args: &std::collections::BTreeMap<String, RawValue>,
-  | | ) -> Result<RawValue, RawRefusal> {
-  | |_________________________________- similarly named function `evaluate_helper_raw` defined here
-  |
-help: a function with a similar name exists
-  |
-5 |     let _ = meerkat::evaluate_helper_raw(
-  |                                     ++++
+5 |     let _ = meerkat::evaluate_helper(
+  |                      ^^^^^^^^^^^^^^^ not found in `meerkat`

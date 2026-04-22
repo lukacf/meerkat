@@ -19143,7 +19143,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
                     parent_node_id: "loop-node".into(),
                     loop_id: "retry".into(),
                     depth: 1,
-                    stage: "AwaitingBodyFrame".into(),
+                    stage: crate::generated::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 3,
@@ -19281,7 +19281,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
                     parent_node_id: "loop-node".into(),
                     loop_id: "retry".into(),
                     depth: 1,
-                    stage: "BodyFrameActive".into(),
+                    stage: crate::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 3,
@@ -19301,7 +19301,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         .await
         .expect("seed body frame");
     let mut body_frame = root_body_frame.clone();
-    body_frame.kernel_state.frame_scope = "Body".into();
+    body_frame.kernel_state.frame_scope = crate::generated::flow_frame::FrameScope::Body;
     body_frame.kernel_state.loop_instance_id = loop_instance_id.to_string();
     body_frame.kernel_state.iteration = 0;
     assert!(
@@ -19513,10 +19513,9 @@ async fn test_root_frame_max_active_nodes_limits_nested_body_step_admission() {
             .expect("run exists");
         let active_node_count = run.flow_state.active_node_count;
         let ready_frames_len = run.flow_state.ready_frames.len() as u64;
-        let has_body_frame = run
-            .frames
-            .values()
-            .any(|frame| frame.kernel_state.frame_scope == "Body");
+        let has_body_frame = run.frames.values().any(|frame| {
+            frame.kernel_state.frame_scope == crate::generated::flow_frame::FrameScope::Body
+        });
 
         if has_body_frame && active_node_count > 0 && ready_frames_len > 0 {
             assert_eq!(

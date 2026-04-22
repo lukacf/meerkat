@@ -2342,10 +2342,6 @@ pub fn initial_state() -> State {
     state_from_raw(&raw).expect("typed modeled-kernel initial state should convert from raw state")
 }
 
-pub fn initial_state_raw() -> Result<RawState, RawRefusal> {
-    initial_state_from_schema(schema())
-}
-
 pub fn transition<C: Context>(
     state: &State,
     input: Input,
@@ -2359,10 +2355,6 @@ pub fn transition<C: Context>(
         .and_then(outcome_from_raw)
 }
 
-pub fn transition_raw(state: &RawState, input: &RawInput) -> Result<RawOutcome, RawRefusal> {
-    transition_from_schema(schema(), state, input)
-}
-
 pub fn transition_signal<C: Context>(
     state: &State,
     signal: Signal,
@@ -2374,19 +2366,4 @@ pub fn transition_signal<C: Context>(
     transition_signal_from_schema(schema(), &raw_state, &raw_signal)
         .map_err(refusal_from_raw)
         .and_then(outcome_from_raw)
-}
-
-pub fn transition_signal_raw(
-    state: &RawState,
-    signal: &RawSignal,
-) -> Result<RawOutcome, RawRefusal> {
-    transition_signal_from_schema(schema(), state, signal)
-}
-
-pub fn evaluate_helper_raw(
-    state: &RawState,
-    helper_name: &str,
-    args: &std::collections::BTreeMap<String, RawValue>,
-) -> Result<RawValue, RawRefusal> {
-    evaluate_helper_from_schema(schema(), state, helper_name, args)
 }

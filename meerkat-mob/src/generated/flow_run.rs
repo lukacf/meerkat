@@ -20,7 +20,14 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_run_machine()
 }
 
-use crate::generated::compat_runtime::{
+mod modeled_runtime {
+    #![allow(warnings)]
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../meerkat-machine-kernels/src/runtime.rs"
+    ));
+}
+use modeled_runtime::{
     RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
     evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
     transition_signal_from_schema,
@@ -53,28 +60,6 @@ impl std::fmt::Display for CollectionPolicyKind {
         f.write_str(self.as_str())
     }
 }
-impl From<&str> for CollectionPolicyKind {
-    fn from(value: &str) -> Self {
-        match value {
-            "All" => Self::All,
-            "Any" => Self::Any,
-            "Quorum" => Self::Quorum,
-            other => {
-                panic!("unknown CollectionPolicyKind variant: {other}");
-            }
-        }
-    }
-}
-impl From<String> for CollectionPolicyKind {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-impl PartialEq<&str> for CollectionPolicyKind {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DependencyMode {
@@ -92,27 +77,6 @@ impl DependencyMode {
 impl std::fmt::Display for DependencyMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-impl From<&str> for DependencyMode {
-    fn from(value: &str) -> Self {
-        match value {
-            "All" => Self::All,
-            "Any" => Self::Any,
-            other => {
-                panic!("unknown DependencyMode variant: {other}");
-            }
-        }
-    }
-}
-impl From<String> for DependencyMode {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-impl PartialEq<&str> for DependencyMode {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
     }
 }
 #[allow(non_camel_case_types)]
@@ -142,31 +106,6 @@ impl std::fmt::Display for FlowRunStatus {
         f.write_str(self.as_str())
     }
 }
-impl From<&str> for FlowRunStatus {
-    fn from(value: &str) -> Self {
-        match value {
-            "Absent" => Self::Absent,
-            "Pending" => Self::Pending,
-            "Running" => Self::Running,
-            "Completed" => Self::Completed,
-            "Failed" => Self::Failed,
-            "Canceled" => Self::Canceled,
-            other => {
-                panic!("unknown FlowRunStatus variant: {other}");
-            }
-        }
-    }
-}
-impl From<String> for FlowRunStatus {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-impl PartialEq<&str> for FlowRunStatus {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StepRunStatus {
@@ -190,30 +129,6 @@ impl StepRunStatus {
 impl std::fmt::Display for StepRunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-impl From<&str> for StepRunStatus {
-    fn from(value: &str) -> Self {
-        match value {
-            "Dispatched" => Self::Dispatched,
-            "Completed" => Self::Completed,
-            "Failed" => Self::Failed,
-            "Skipped" => Self::Skipped,
-            "Canceled" => Self::Canceled,
-            other => {
-                panic!("unknown StepRunStatus variant: {other}");
-            }
-        }
-    }
-}
-impl From<String> for StepRunStatus {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-impl PartialEq<&str> for StepRunStatus {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
     }
 }
 
@@ -2627,10 +2542,6 @@ pub fn initial_state() -> State {
     state_from_raw(&raw).expect("typed modeled-kernel initial state should convert from raw state")
 }
 
-pub fn initial_state_raw() -> Result<RawState, RawRefusal> {
-    initial_state_from_schema(schema())
-}
-
 pub fn transition<C: Context>(
     state: &State,
     input: Input,
@@ -2642,16 +2553,4 @@ pub fn transition<C: Context>(
     transition_from_schema(schema(), &raw_state, &raw_input)
         .map_err(refusal_from_raw)
         .and_then(outcome_from_raw)
-}
-
-pub fn transition_raw(state: &RawState, input: &RawInput) -> Result<RawOutcome, RawRefusal> {
-    transition_from_schema(schema(), state, input)
-}
-
-pub fn evaluate_helper_raw(
-    state: &RawState,
-    helper_name: &str,
-    args: &std::collections::BTreeMap<String, RawValue>,
-) -> Result<RawValue, RawRefusal> {
-    evaluate_helper_from_schema(schema(), state, helper_name, args)
 }

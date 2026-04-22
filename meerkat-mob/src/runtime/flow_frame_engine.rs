@@ -1832,7 +1832,7 @@ fn root_outputs_from_run(run: &MobRun) -> IndexMap<StepId, serde_json::Value> {
 }
 
 fn frame_is_body(kernel_state: &flow_frame::State) -> bool {
-    kernel_state.frame_scope == "Body"
+    kernel_state.frame_scope == flow_frame::FrameScope::Body
 }
 
 fn frame_loop_instance_id(kernel_state: &flow_frame::State) -> Option<LoopInstanceId> {
@@ -2773,7 +2773,7 @@ fn build_frame_start_payload(
         let k = node_id.to_string();
         match node_spec {
             FlowNodeSpec::Step(s) => {
-                node_kind.insert(k.clone(), "Step".to_string().into());
+                node_kind.insert(k.clone(), flow_frame::FlowNodeKind::Step);
                 node_deps.insert(
                     k.clone(),
                     s.depends_on.iter().map(ToString::to_string).collect(),
@@ -2782,7 +2782,7 @@ fn build_frame_start_payload(
                 node_branches.insert(k.clone(), s.branch.as_ref().map(ToString::to_string));
             }
             FlowNodeSpec::RepeatUntil(l) => {
-                node_kind.insert(k.clone(), "Loop".to_string().into());
+                node_kind.insert(k.clone(), flow_frame::FlowNodeKind::Loop);
                 node_deps.insert(
                     k.clone(),
                     l.depends_on.iter().map(ToString::to_string).collect(),
@@ -2857,11 +2857,9 @@ fn build_start_body_frame_input(
 
 fn dep_mode_kv(mode: &crate::definition::DependencyMode) -> flow_frame::DependencyMode {
     match mode {
-        crate::definition::DependencyMode::All => "All",
-        crate::definition::DependencyMode::Any => "Any",
+        crate::definition::DependencyMode::All => flow_frame::DependencyMode::All,
+        crate::definition::DependencyMode::Any => flow_frame::DependencyMode::Any,
     }
-    .to_string()
-    .into()
 }
 
 fn topological_order(spec: &FrameSpec) -> Result<Vec<FlowNodeId>, MobError> {
@@ -2966,5 +2964,5 @@ fn loop_terminal_effect(phase: &loop_iteration::Phase) -> Option<&'static str> {
 }
 
 fn state_is_awaiting_body_frame(state: &loop_iteration::State) -> bool {
-    state.stage == "AwaitingBodyFrame"
+    state.stage == loop_iteration::LoopIterationStage::AwaitingBodyFrame
 }

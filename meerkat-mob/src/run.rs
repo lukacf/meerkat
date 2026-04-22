@@ -682,11 +682,9 @@ impl MobRun {
 
 fn dependency_mode_value(mode: crate::definition::DependencyMode) -> flow_run::DependencyMode {
     match mode {
-        crate::definition::DependencyMode::All => "All",
-        crate::definition::DependencyMode::Any => "Any",
+        crate::definition::DependencyMode::All => flow_run::DependencyMode::All,
+        crate::definition::DependencyMode::Any => flow_run::DependencyMode::Any,
     }
-    .to_string()
-    .into()
 }
 
 fn dependency_mode_seed_value(mode: crate::definition::DependencyMode) -> mob_dsl::DependencyMode {
@@ -700,12 +698,12 @@ fn collection_policy_kind_value(
     policy: &crate::definition::CollectionPolicy,
 ) -> flow_run::CollectionPolicyKind {
     match policy {
-        crate::definition::CollectionPolicy::All => "All",
-        crate::definition::CollectionPolicy::Any => "Any",
-        crate::definition::CollectionPolicy::Quorum { .. } => "Quorum",
+        crate::definition::CollectionPolicy::All => flow_run::CollectionPolicyKind::All,
+        crate::definition::CollectionPolicy::Any => flow_run::CollectionPolicyKind::Any,
+        crate::definition::CollectionPolicy::Quorum { .. } => {
+            flow_run::CollectionPolicyKind::Quorum
+        }
     }
-    .to_string()
-    .into()
 }
 
 fn collection_policy_seed_value(
@@ -1086,7 +1084,7 @@ mod tests {
         run.flow_state.step_status = BTreeMap::from([
             (
                 "step-a".to_string(),
-                Some(flow_run::StepRunStatus::from("Completed")),
+                Some(flow_run::StepRunStatus::Completed),
             ),
             ("step-b".to_string(), None),
         ]);
@@ -1158,7 +1156,7 @@ mod tests {
         );
         run.flow_state.step_status = BTreeMap::from([(
             "step-a".to_string(),
-            Some(flow_run::StepRunStatus::from("Completed")),
+            Some(flow_run::StepRunStatus::Completed),
         )]);
         assert_eq!(
             run.step_status_snapshot().unwrap(),
@@ -1176,7 +1174,7 @@ mod tests {
         );
         run.flow_state.step_status = BTreeMap::from([(
             "step-a".to_string(),
-            Some(flow_run::StepRunStatus::from("Completed")),
+            Some(flow_run::StepRunStatus::Completed),
         )]);
 
         assert_eq!(
@@ -1209,7 +1207,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_dependency_modes =
-            BTreeMap::from([("step-a".to_string(), flow_run::DependencyMode::from("All"))]);
+            BTreeMap::from([("step-a".to_string(), flow_run::DependencyMode::All)]);
 
         assert_eq!(
             run.step_dependency_modes().unwrap(),
@@ -1225,10 +1223,8 @@ mod tests {
             MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
             serde_json::json!({}),
         );
-        run.flow_state.step_collection_policies = BTreeMap::from([(
-            "step-a".to_string(),
-            flow_run::CollectionPolicyKind::from("All"),
-        )]);
+        run.flow_state.step_collection_policies =
+            BTreeMap::from([("step-a".to_string(), flow_run::CollectionPolicyKind::All)]);
 
         assert_eq!(
             run.step_collection_policy_kinds().unwrap(),

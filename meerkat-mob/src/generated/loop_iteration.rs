@@ -20,7 +20,14 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::loop_iteration_machine()
 }
 
-use crate::generated::compat_runtime::{
+mod modeled_runtime {
+    #![allow(warnings)]
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../meerkat-machine-kernels/src/runtime.rs"
+    ));
+}
+use modeled_runtime::{
     RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
     evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
     transition_signal_from_schema,
@@ -50,28 +57,6 @@ impl LoopIterationStage {
 impl std::fmt::Display for LoopIterationStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-impl From<&str> for LoopIterationStage {
-    fn from(value: &str) -> Self {
-        match value {
-            "AwaitingBodyFrame" => Self::AwaitingBodyFrame,
-            "BodyFrameActive" => Self::BodyFrameActive,
-            "AwaitingUntil" => Self::AwaitingUntil,
-            other => {
-                panic!("unknown LoopIterationStage variant: {other}");
-            }
-        }
-    }
-}
-impl From<String> for LoopIterationStage {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-impl PartialEq<&str> for LoopIterationStage {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
     }
 }
 
@@ -1084,10 +1069,6 @@ pub fn initial_state() -> State {
     state_from_raw(&raw).expect("typed modeled-kernel initial state should convert from raw state")
 }
 
-pub fn initial_state_raw() -> Result<RawState, RawRefusal> {
-    initial_state_from_schema(schema())
-}
-
 pub fn transition<C: Context>(
     state: &State,
     input: Input,
@@ -1099,16 +1080,4 @@ pub fn transition<C: Context>(
     transition_from_schema(schema(), &raw_state, &raw_input)
         .map_err(refusal_from_raw)
         .and_then(outcome_from_raw)
-}
-
-pub fn transition_raw(state: &RawState, input: &RawInput) -> Result<RawOutcome, RawRefusal> {
-    transition_from_schema(schema(), state, input)
-}
-
-pub fn evaluate_helper_raw(
-    state: &RawState,
-    helper_name: &str,
-    args: &std::collections::BTreeMap<String, RawValue>,
-) -> Result<RawValue, RawRefusal> {
-    evaluate_helper_from_schema(schema(), state, helper_name, args)
 }

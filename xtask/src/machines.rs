@@ -1774,7 +1774,7 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_reconcile_signal_removed",
+            filter: "peer_directory_reachability_kernel_initializes_with_typed_signal",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
@@ -1784,17 +1784,17 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_gracefully_drains_running_shutdown",
+            filter: "session_turn_admission_kernel_attached_state_reached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_interrupt_only_wakes_running_turns",
+            filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_promotes_staged_filter_at_boundary",
+            filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",

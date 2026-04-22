@@ -34,7 +34,7 @@ urlencoding = { version = "2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-gix = { version = "0.79", default-features = false, features = ["blocking-network-client", "worktree-mutation", "revision"], optional = true }
+gix = { version = "0.81", default-features = false, features = ["blocking-network-client", "worktree-mutation", "revision"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

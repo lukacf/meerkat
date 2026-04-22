@@ -76,11 +76,11 @@ fn seed_mob_authority(
 ///
 /// This helper replays every live roster entry into the DSL exactly as a
 /// fresh spawn would have done, populating `live_runtime_ids`,
-/// `runtime_fence_tokens`, `externally_addressable_runtime_ids`, and
-/// `identity_to_runtime`. `external_addressable` is resolved from the
-/// definition's inline profile (realm-profile overrides are resolved
-/// asynchronously elsewhere; callers that need realm overrides can re-feed
-/// spawn events through the live pipeline).
+/// `runtime_fence_tokens`, `externally_addressable_runtime_ids`,
+/// `identity_to_runtime`, and the canonical realtime-binding keyspace.
+/// `external_addressable` is taken from the roster's effective profile
+/// override when present so resume reconstructs the same truth the live
+/// spawn path wrote into the machine.
 fn seed_mob_authority_sync_from_roster(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &Roster,
@@ -88,17 +88,17 @@ fn seed_mob_authority_sync_from_roster(
 ) {
     use crate::machines::mob_machine as mob_dsl;
     for entry in roster.list_all() {
-        // Use the inline profile where available. Realm-profile overrides
-        // are not observed here (the realm store is async-only); resumes
-        // that depend on a realm override for addressability would need to
-        // also emit a spawn event through the normal async pipeline, which
-        // `handle_submit_work` would then see once the entry re-enters the
-        // DSL via that path.
-        let external_addressable = definition
-            .profiles
-            .get(&entry.role)
-            .and_then(|binding| binding.as_inline())
+        let external_addressable = entry
+            .effective_profile_override
+            .as_ref()
             .map(|profile| profile.external_addressable)
+            .or_else(|| {
+                definition
+                    .profiles
+                    .get(&entry.role)
+                    .and_then(|binding| binding.as_inline())
+                    .map(|profile| profile.external_addressable)
+            })
             .unwrap_or(false);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
@@ -121,12 +121,15 @@ fn seed_mob_authority_sync_from_roster(
             .state
             .identity_to_runtime
             .insert(dsl_identity, dsl_runtime_id.clone());
-        if let Some(session_id) = entry.member_ref.bridge_session_id().cloned() {
-            authority.state.member_realtime_bindings.insert(
-                mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-                mob_dsl::SessionId::from_domain(&session_id),
-            );
-        }
+        let bridge_session_id = entry
+            .member_ref
+            .bridge_session_id()
+            .cloned()
+            .unwrap_or_default();
+        authority.state.member_realtime_bindings.insert(
+            mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+            mob_dsl::SessionId::from_domain(&bridge_session_id),
+        );
         authority.state.member_state_markers.insert(
             dsl_runtime_id.clone(),
             match entry.state {
@@ -1556,5 +1559,119 @@ impl MobBuilder {
         tokio::spawn(actor.run(command_rx));
 
         handle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::definition::{BackendConfig, SessionCleanupPolicy, WiringRules};
+    use crate::event::MemberRef;
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
+    use crate::roster::{Roster, RosterAddEntry};
+    use std::collections::BTreeMap;
+
+    fn profile(external_addressable: bool) -> Profile {
+        Profile {
+            model: "test-model".to_string(),
+            skills: Vec::new(),
+            tools: ToolConfig::default(),
+            peer_description: String::new(),
+            external_addressable,
+            backend: None,
+            runtime_mode: crate::MobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        }
+    }
+
+    fn definition_with_worker_profile(external_addressable: bool) -> MobDefinition {
+        MobDefinition {
+            id: crate::MobId::from("seed-test"),
+            orchestrator: None,
+            profiles: BTreeMap::from([(
+                ProfileName::from("worker"),
+                ProfileBinding::Inline(profile(external_addressable)),
+            )]),
+            mcp_servers: BTreeMap::new(),
+            wiring: WiringRules::default(),
+            skills: BTreeMap::new(),
+            backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
+            spawn_policy: None,
+            event_router: None,
+            owner_bridge_session_id: None,
+            session_cleanup_policy: SessionCleanupPolicy::Manual,
+            is_implicit: false,
+        }
+    }
+
+    #[test]
+    fn seed_mob_authority_sync_from_roster_uses_effective_profile_override_for_addressability() {
+        let definition = definition_with_worker_profile(false);
+        let identity = AgentIdentity::from("worker-override");
+        let runtime_id = crate::ids::AgentRuntimeId::initial(identity.clone());
+        let mut roster = Roster::new();
+        assert!(roster.add(RosterAddEntry {
+            agent_identity: identity.clone(),
+            generation: crate::ids::Generation::INITIAL,
+            fence_token: crate::ids::FenceToken::new(7),
+            agent_runtime_id: runtime_id.clone(),
+            role: ProfileName::from("worker"),
+            runtime_mode: crate::MobRuntimeMode::TurnDriven,
+            member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
+            peer_id: None,
+            labels: BTreeMap::new(),
+            effective_profile_override: Some(profile(true)),
+        }));
+
+        let mut authority = seed_mob_authority(MobState::Running);
+        seed_mob_authority_sync_from_roster(&mut authority, &roster, &definition);
+
+        assert!(
+            authority.state.externally_addressable_runtime_ids.contains(
+                &crate::machines::mob_machine::AgentRuntimeId::from_domain(&runtime_id)
+            ),
+            "resume seeding should respect the effective profile override's external addressability"
+        );
+    }
+
+    #[test]
+    fn seed_mob_authority_sync_from_roster_recreates_inert_binding_keys_for_backend_peers() {
+        let definition = definition_with_worker_profile(false);
+        let identity = AgentIdentity::from("peer-only");
+        let runtime_id = crate::ids::AgentRuntimeId::initial(identity.clone());
+        let mut roster = Roster::new();
+        assert!(roster.add(RosterAddEntry {
+            agent_identity: identity.clone(),
+            generation: crate::ids::Generation::INITIAL,
+            fence_token: crate::ids::FenceToken::new(11),
+            agent_runtime_id: runtime_id,
+            role: ProfileName::from("worker"),
+            runtime_mode: crate::MobRuntimeMode::TurnDriven,
+            member_ref: MemberRef::BackendPeer {
+                peer_id: "peer-only-id".to_string(),
+                address: "local://peer-only".to_string(),
+                bootstrap_token: None,
+                session_id: None,
+            },
+            peer_id: Some("peer-only-id".to_string()),
+            labels: BTreeMap::new(),
+            effective_profile_override: None,
+        }));
+
+        let mut authority = seed_mob_authority(MobState::Running);
+        seed_mob_authority_sync_from_roster(&mut authority, &roster, &definition);
+
+        assert!(
+            authority.state.member_realtime_bindings.contains_key(
+                &crate::machines::mob_machine::AgentIdentity::from_domain(&identity)
+            ),
+            "resume seeding should recreate the canonical binding key even when no bridge session is persisted"
+        );
     }
 }

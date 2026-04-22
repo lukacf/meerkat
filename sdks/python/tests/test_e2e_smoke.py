@@ -84,6 +84,97 @@ async def read_realtime_until(connection, predicate, *, timeout_secs: float = 60
             return frames
 
 
+def realtime_frame_event_type(frame: dict[str, object]) -> str | None:
+    if frame.get("type") != "channel.event":
+        return None
+    event = frame.get("event")
+    if not isinstance(event, dict):
+        return None
+    event_type = event.get("type")
+    return event_type if isinstance(event_type, str) else None
+
+
+def realtime_frames_show_turn_activity(frames: list[dict[str, object]]) -> bool:
+    return any(
+        realtime_frame_event_type(frame)
+        in {
+            "turn_started",
+            "turn_committed",
+            "turn_completed",
+            "interrupted",
+            "input_transcript_partial",
+            "input_transcript_final",
+            "output_text_delta",
+            "output_audio_chunk",
+            "tool_call_requested",
+            "tool_call_completed",
+            "tool_call_failed",
+        }
+        for frame in frames
+    )
+
+
+def realtime_frames_show_turn_completed(frames: list[dict[str, object]]) -> bool:
+    return any(realtime_frame_event_type(frame) == "turn_completed" for frame in frames)
+
+
+async def read_realtime_until_ready_or_idle(
+    connection, *, timeout_secs: float = 5.0, idle_timeout_secs: float = 0.5
+):
+    frames: list[dict[str, object]] = []
+    saw_any_frame = False
+    deadline = asyncio.get_running_loop().time() + timeout_secs
+
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = min(idle_timeout_secs, deadline - asyncio.get_running_loop().time())
+        try:
+            frame = await asyncio.wait_for(connection.recv(), timeout=remaining)
+        except asyncio.TimeoutError:
+            if saw_any_frame:
+                return frames
+            continue
+
+        assert frame is not None, "realtime websocket closed before expected frame arrived"
+        if frame.get("type") == "channel.error":
+            raise AssertionError(f"realtime channel error: {frame}")
+        frames.append(frame)
+        saw_any_frame = True
+
+        if frame.get("type") == "channel.status":
+            status = frame.get("status")
+            if isinstance(status, dict) and status.get("state") == "ready":
+                return frames
+        event = frame.get("event")
+        if (
+            frame.get("type") == "channel.event"
+            and isinstance(event, dict)
+            and event.get("type") == "status_changed"
+        ):
+            status = event.get("status")
+            if isinstance(status, dict) and status.get("state") == "ready":
+                return frames
+
+    return frames
+
+
+async def ensure_realtime_channel_quiescent_after_out_of_band_turn(
+    connection, *, timeout_secs: float = 5.0
+):
+    frames = await read_realtime_until_ready_or_idle(
+        connection, timeout_secs=timeout_secs
+    )
+    if realtime_frames_show_turn_completed(frames) or not realtime_frames_show_turn_activity(
+        frames
+    ):
+        return frames
+
+    await connection.interrupt()
+    drained = await read_realtime_until_ready_or_idle(
+        connection, timeout_secs=timeout_secs
+    )
+    return [*frames, *drained]
+
+
 @contextmanager
 def without_openai_realtime_env():
     keys = ("RKAT_OPENAI_API_KEY", "OPENAI_API_KEY")
@@ -714,6 +805,14 @@ if include_scenario(64):
                 timeout_secs=120.0,
             )
             assert "birch" in (switched_state.get("output_preview") or "").lower()
+            # `mob_turn_start(..., model=...)` is still a real semantic turn.
+            # When the member already has an attached realtime channel, the
+            # switch-turn reply can continue flowing on that channel after the
+            # RPC result is back. Quiesce it explicitly before the next
+            # provider-managed input so this smoke proves continuity through
+            # the switch rather than accidental barge-in against leftover
+            # switch-turn output.
+            await ensure_realtime_channel_quiescent_after_out_of_band_turn(connection)
 
             # Member-target channels preserve continuity through the mob/runtime
             # substrate even when the projected attachment state has not yet

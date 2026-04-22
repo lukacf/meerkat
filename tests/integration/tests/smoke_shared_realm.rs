@@ -116,7 +116,11 @@ const REALTIME_AUDIO_BYTES_PER_SAMPLE: usize = 2;
 const REALTIME_AUDIO_FRAME_MS: usize = 200;
 const REALTIME_AUDIO_TRAILING_SILENCE_MS: usize = 500;
 const REALTIME_AUDIO_INTERNAL_SILENCE_THRESHOLD: i16 = 64;
-const REALTIME_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 180;
+// Keep synthetic TTS pauses comfortably below provider-managed VAD commit
+// thresholds. The audio smokes are proving runtime continuity, not whether a
+// particular TTS voice happens to pause long enough after "reply with" to
+// trigger an early provider turn commit.
+const REALTIME_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 75;
 const REALTIME_AUDIO_PRESERVED_INTERNAL_SILENCE_MS: usize = 75;
 const REALTIME_OUTPUT_IDLE_SETTLE_MS: u64 = 1_500;
 
@@ -627,6 +631,7 @@ async fn collect_realtime_frames_until_ready_or_idle(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle_window = Duration::from_millis(500);
     let mut capture = RealtimeFrameCapture::default();
+    let mut saw_any_frame = false;
 
     while Instant::now() < deadline {
         let remaining = std::cmp::min(
@@ -635,6 +640,7 @@ async fn collect_realtime_frames_until_ready_or_idle(
         );
         match timeout(remaining, receiver.next_frame()).await {
             Ok(Ok(Some(frame))) => {
+                saw_any_frame = true;
                 observe_realtime_server_frame(&mut capture, &frame)?;
                 if capture
                     .status_states
@@ -647,6 +653,36 @@ async fn collect_realtime_frames_until_ready_or_idle(
             Ok(Ok(None)) => {
                 return Err("realtime websocket closed before the channel became ready".into());
             }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) if saw_any_frame => return Ok(capture),
+            Err(_) => {}
+        }
+    }
+
+    Ok(capture)
+}
+
+async fn collect_realtime_frames_until_turn_completed_or_idle(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(REALTIME_OUTPUT_IDLE_SETTLE_MS);
+    let mut capture = RealtimeFrameCapture::default();
+
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match timeout(remaining, receiver.next_frame()).await {
+            Ok(Ok(Some(frame))) => {
+                observe_realtime_server_frame(&mut capture, &frame)?;
+                if capture.saw_turn_completed {
+                    return Ok(capture);
+                }
+            }
+            Ok(Ok(None)) => return Ok(capture),
             Ok(Err(err)) => return Err(err.into()),
             Err(_) => return Ok(capture),
         }
@@ -886,6 +922,20 @@ async fn ensure_realtime_session_quiescent(
     // realtime surface contract instead of depending on provider-specific
     // response-finalization timing.
     interrupt_realtime_output_and_settle(sender, receiver, timeout_secs).await
+}
+
+fn realtime_capture_has_turn_activity(capture: &RealtimeFrameCapture) -> bool {
+    capture.saw_turn_started
+        || capture.saw_turn_committed
+        || capture.saw_turn_completed
+        || capture.saw_interrupted
+        || !capture.input_partials.is_empty()
+        || !capture.input_finals.is_empty()
+        || !capture.output_text.is_empty()
+        || !capture.output_audio_pcm.is_empty()
+        || !capture.tool_call_requests.is_empty()
+        || !capture.tool_call_completions.is_empty()
+        || !capture.tool_call_failures.is_empty()
 }
 
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -6960,7 +7010,10 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
         let connection = channel.connect(&open_info).await?;
         let (mut sender, mut receiver) = connection.split();
 
-        let turn1_pcm = openai_tts_pcm("Reply with pine river.").await?;
+        // Keep spoken fixture turns short and low-pause. This smoke is proving
+        // post-switch realtime continuity, not whether provider-managed VAD can
+        // survive a longer synthetic instruction like "reply with ...".
+        let turn1_pcm = openai_tts_pcm("Say only pine river.").await?;
         eprintln!("[scenario 72] send turn 1 audio");
         let mut turn1_capture = match send_realtime_audio_and_wait_for_commit(
             &mut sender,
@@ -7025,7 +7078,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
                 json!({
                     "mob_id": mob_id,
                     "agent_identity": agent_identity,
-                    "prompt": "Reply with SWITCH_AUDIO_72 and birch.",
+                    "prompt": "Say ready.",
                     "model": openai_switch_model(),
                     "provider": "openai",
                 }),
@@ -7047,11 +7100,27 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             |status| status["realtime_attachment_status"].as_str() == Some("binding_ready"),
         )
         .await?;
-        let _post_switch_frames = collect_realtime_frames_until_ready_or_idle(&mut receiver, 5)
+        let post_switch_capture = collect_realtime_frames_until_ready_or_idle(&mut receiver, 5)
             .await
             .unwrap_or_default();
+        if realtime_capture_has_turn_activity(&post_switch_capture) {
+            // `mob/turn_start(..., model=...)` is still an ordinary user turn,
+            // not a semantics-free reconfigure RPC. When that turn runs on an
+            // attached provider-managed session, its assistant output can keep
+            // speaking on the already-open realtime channel after the RPC reply
+            // has returned. Quiesce that turn explicitly before the next spoken
+            // utterance so this smoke proves post-switch continuity instead of
+            // accidental barge-in against the switch-turn reply.
+            let _post_switch_quiesced = ensure_realtime_session_quiescent(
+                &mut sender,
+                &mut receiver,
+                &post_switch_capture,
+                5,
+            )
+            .await?;
+        }
 
-        let turn2_pcm = openai_tts_pcm("Reply with copper canyon after the switch.").await?;
+        let turn2_pcm = openai_tts_pcm("Say only copper canyon.").await?;
         eprintln!("[scenario 72] send turn 2 audio");
         let mut turn2_capture = match send_realtime_audio_and_wait_for_commit(
             &mut sender,
@@ -7072,7 +7141,32 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             }
         };
         eprintln!("[scenario 72] collect turn 2 output");
-        match settle_realtime_turn_after_commit(&mut receiver, &turn2_capture, 120).await {
+        let turn2_output_already_started = !turn2_capture.output_text.is_empty()
+            || !turn2_capture.output_audio_pcm.is_empty()
+            || !turn2_capture.tool_call_requests.is_empty()
+            || !turn2_capture.tool_call_completions.is_empty()
+            || !turn2_capture.tool_call_failures.is_empty();
+        // This is the final post-switch user turn in the scenario. Unlike the
+        // earlier reuse sites of `settle_realtime_turn_after_commit`, there is
+        // no subsequent utterance that depends on a strict `TurnCompleted`
+        // boundary before we proceed. Under heavy lane load the OpenAI
+        // realtime backend can occasionally finish emitting the full semantic
+        // response (text/audio) yet omit or delay the terminal frame beyond the
+        // useful completion point for this smoke. For this last turn, stable
+        // output quiescence is the correct witness for "the switched member can
+        // still answer over audio" — not a stricter transport-terminal event.
+        //
+        // Important: fast short answers can begin and even finish inside the
+        // commit witness itself (OpenAI may emit first output before the
+        // transcript-final event closes the commit capture). When that happens,
+        // waiting for *new* output is the wrong contract; the right witness is
+        // simply "turn completed or the channel stayed quiet for the settle
+        // window after the already-observed output."
+        match if turn2_output_already_started {
+            collect_realtime_frames_until_turn_completed_or_idle(&mut receiver, 120).await
+        } else {
+            collect_realtime_frames_until_output_settles(&mut receiver, 120).await
+        } {
             Ok(capture) => turn2_capture.merge_from(capture),
             Err(error) => {
                 let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;

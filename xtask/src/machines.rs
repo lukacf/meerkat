@@ -1871,17 +1871,17 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_gracefully_drains_running_shutdown",
+            filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_interrupt_only_wakes_running_turns",
+            filter: "session_turn_admission_kernel_cancel_boundary_allowed_while_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_promotes_staged_filter_at_boundary",
+            filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
@@ -1920,15 +1920,29 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
             .arg("--test-threads=1")
             .current_dir(root);
 
-        let status = cmd.status().with_context(|| {
+        let output = cmd.output().with_context(|| {
             format!(
                 "run owner test {}::{}/{}",
                 spec.package, spec.target, spec.filter
             )
         })?;
-        if !status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+
+        if !output.status.success() {
             bail!(
-                "owner test failed for {}: {}::{}/{}",
+                "owner test failed for {}: {}::{}/{}\n{}",
+                machine.schema.machine,
+                spec.package,
+                spec.target,
+                spec.filter,
+                combined.trim()
+            );
+        }
+        if combined.contains("running 0 tests") {
+            bail!(
+                "owner test filter matched zero tests for {}: {}::{}/{}",
                 machine.schema.machine,
                 spec.package,
                 spec.target,

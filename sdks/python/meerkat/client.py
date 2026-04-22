@@ -391,12 +391,12 @@ class MeerkatClient:
         through unchanged so the wire schema governs the contract."""
         return await self._request("auth/profile/create", params)
 
-    async def delete_auth_profile(self, realm_id: str, profile_id: str) -> None:
-        """Clear a profile's persisted credentials via
+    async def delete_auth_profile(self, realm_id: str, binding_id: str) -> None:
+        """Clear a binding's persisted credentials via
         `auth/profile/delete`."""
         await self._request(
             "auth/profile/delete",
-            {"realm_id": realm_id, "profile_id": profile_id},
+            {"realm_id": realm_id, "binding_id": binding_id},
         )
 
     async def test_auth_profile(
@@ -428,12 +428,12 @@ class MeerkatClient:
         pkce_verifier: str,
         *,
         realm_id: str = "dev",
-        profile_id: str | None = None,
+        binding_id: str | None = None,
         redirect_uri: str = "http://127.0.0.1:0/callback",
     ) -> dict[str, Any]:
         """Exchange an authorization code for tokens via
         `auth/login/complete`. Tokens land in the server's
-        TokenStore under `<realm_id>:<profile_id>`."""
+        TokenStore under `<realm_id>:<binding_id>`."""
         params: dict[str, Any] = {
             "provider": provider,
             "code": code,
@@ -441,8 +441,8 @@ class MeerkatClient:
             "realm_id": realm_id,
             "redirect_uri": redirect_uri,
         }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
+        if binding_id is not None:
+            params["binding_id"] = binding_id
         return await self._request("auth/login/complete", params)
 
     async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
@@ -459,7 +459,7 @@ class MeerkatClient:
         device_code: str,
         *,
         realm_id: str = "dev",
-        profile_id: str | None = None,
+        binding_id: str | None = None,
     ) -> dict[str, Any]:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
@@ -469,8 +469,8 @@ class MeerkatClient:
             "device_code": device_code,
             "realm_id": realm_id,
         }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
+        if binding_id is not None:
+            params["binding_id"] = binding_id
         return await self._request("auth/login/device_complete", params)
 
     async def auth_provision_api_key(
@@ -478,7 +478,7 @@ class MeerkatClient:
         access_token: str,
         *,
         realm_id: str = "dev",
-        profile_id: str | None = None,
+        binding_id: str | None = None,
     ) -> dict[str, Any]:
         """Anthropic Console-OAuth → API key provisioning via
         `auth/login/provision_api_key` (plan §4b.5). The caller runs
@@ -489,26 +489,26 @@ class MeerkatClient:
             "access_token": access_token,
             "realm_id": realm_id,
         }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
+        if binding_id is not None:
+            params["binding_id"] = binding_id
         return await self._request("auth/login/provision_api_key", params)
 
     async def auth_status(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str
     ) -> dict[str, Any]:
-        """Report persisted-credential status for a profile via
+        """Report persisted-credential status for a binding via
         `auth/status/get`."""
         return await self._request(
-            "auth/status/get", {"realm_id": realm_id, "profile_id": profile_id}
+            "auth/status/get", {"realm_id": realm_id, "binding_id": binding_id}
         )
 
     async def auth_logout(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str
     ) -> dict[str, Any]:
-        """Revoke + delete a profile's persisted credentials via
+        """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
         return await self._request(
-            "auth/logout", {"realm_id": realm_id, "profile_id": profile_id}
+            "auth/logout", {"realm_id": realm_id, "binding_id": binding_id}
         )
 
     # -- Session lifecycle -------------------------------------------------
@@ -541,6 +541,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        connection_ref: dict[str, str] | None = None,
     ) -> Session:
         """Create a new session, run the first turn, and return a :class:`Session`.
 
@@ -569,6 +570,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            connection_ref=connection_ref,
         )
         raw = await self._request("session/create", params)
         result = self._parse_run_result(raw)
@@ -602,6 +604,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        connection_ref: dict[str, str] | None = None,
     ) -> EventStream:
         """Create a new session and stream typed events from the first turn.
 
@@ -634,6 +637,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            connection_ref=connection_ref,
         )
         self._request_id += 1
         request_id = self._request_id
@@ -678,6 +682,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        connection_ref: dict[str, str] | None = None,
     ) -> DeferredSession:
         """Create a new session without running the first turn.
 
@@ -710,6 +715,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            connection_ref=connection_ref,
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
@@ -2062,11 +2068,11 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
-    async def runtime_state(self, session_id: str) -> RuntimeStateResult:
-        raw = await self._request("session/runtime_state", {"session_id": session_id})
+    async def session_state(self, session_id: str) -> RuntimeStateResult:
+        raw = await self._request("session/state", {"session_id": session_id})
         return RuntimeStateResult(**raw)
 
-    async def runtime_realtime_attachment_status(
+    async def session_realtime_attachment_status(
         self, session_id: str
     ) -> RuntimeRealtimeAttachmentStatusResult:
         raw = await self._request(
@@ -2075,7 +2081,7 @@ class MeerkatClient:
         )
         return RuntimeRealtimeAttachmentStatusResult(**raw)
 
-    async def runtime_realtime_attachment_statuses(
+    async def session_realtime_attachment_statuses(
         self, session_ids: list[str]
     ) -> dict[str, Any]:
         """Batch realtime attachment statuses for multiple session IDs.
@@ -2140,33 +2146,33 @@ class MeerkatClient:
         raw = await self._request("realtime/capabilities", _wire_params(params))
         return RealtimeCapabilitiesResult(**raw)
 
-    async def runtime_accept(
+    async def session_accept(
         self,
         session_id: str,
         input: dict[str, Any],
     ) -> RuntimeAcceptResult:
-        raw = await self._request("session/accept_input", {"session_id": session_id, "input": input})
+        raw = await self._request("session/accept", {"session_id": session_id, "input": input})
         state = raw.get("state")
         if isinstance(state, dict):
             raw = dict(raw)
-            raw["state"] = self._parse_wire_input_state(state)
+            raw["state"] = self._parse_wire_session_input(state)
         return RuntimeAcceptResult(**raw)
 
-    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
-        raw = await self._request("session/retire_runtime", {"session_id": session_id})
+    async def session_retire(self, session_id: str) -> RuntimeRetireResult:
+        raw = await self._request("session/retire", {"session_id": session_id})
         return RuntimeRetireResult(**raw)
 
-    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
-        raw = await self._request("session/reset_runtime", {"session_id": session_id})
+    async def session_reset(self, session_id: str) -> RuntimeResetResult:
+        raw = await self._request("session/reset", {"session_id": session_id})
         return RuntimeResetResult(**raw)
 
-    async def input_state(self, session_id: str, input_id: str) -> WireInputState | None:
-        raw = await self._request("session/input_state", {"session_id": session_id, "input_id": input_id})
+    async def session_input(self, session_id: str, input_id: str) -> WireInputState | None:
+        raw = await self._request("session/input", {"session_id": session_id, "input_id": input_id})
         if raw is None:
             return None
-        return self._parse_wire_input_state(raw)
+        return self._parse_wire_session_input(raw)
 
-    async def input_list(self, session_id: str) -> list[str]:
+    async def session_inputs(self, session_id: str) -> list[str]:
         result = await self._request("session/inputs", {"session_id": session_id})
         input_ids = result.get("input_ids", [])
         return [str(input_id) for input_id in input_ids]
@@ -2185,7 +2191,7 @@ class MeerkatClient:
         return await response_future
 
     @staticmethod
-    def _parse_wire_input_state(raw: dict[str, Any]) -> WireInputState:
+    def _parse_wire_session_input(raw: dict[str, Any]) -> WireInputState:
         history_raw = raw.get("history", [])
         history: list[WireInputStateHistoryEntry] = []
         if isinstance(history_raw, list):
@@ -2398,6 +2404,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        connection_ref: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
         if model:
@@ -2449,6 +2456,8 @@ class MeerkatClient:
             params["shell_env"] = shell_env
         if external_tools is not None:
             params["external_tools"] = external_tools
+        if connection_ref is not None:
+            params["connection_ref"] = connection_ref
         return params
 
     @staticmethod

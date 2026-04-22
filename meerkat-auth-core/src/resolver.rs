@@ -11,10 +11,104 @@
 //! provider runtime at build time (cloud-specific clients depend on
 //! SDKs that can't serde-roundtrip).
 
-use meerkat_core::{AuthError, CredentialSourceSpec, ResolvedAuthEnvelope};
+use chrono::{DateTime, Utc};
+use meerkat_core::{
+    AuthError, AuthMetadata, AuthRouteHints, CredentialSourceSpec, ResolvedAuthEnvelope,
+};
 
 use meerkat_llm_core::provider_runtime::errors::ProviderAuthError;
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
+
+pub fn interactive_login_error(
+    binding: &meerkat_llm_core::provider_runtime::binding::ValidatedBinding,
+) -> ProviderAuthError {
+    let method_implies_interactive = match binding.auth {
+        meerkat_llm_core::provider_runtime::binding::NormalizedAuthMethod::OpenAi(method) => {
+            matches!(
+                method,
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::ManagedChatGptOauth
+                    | meerkat_core::provider_matrix::openai::OpenAiAuthMethod::ExternalChatGptTokens
+            )
+        }
+        meerkat_llm_core::provider_runtime::binding::NormalizedAuthMethod::Anthropic(method) => {
+            matches!(
+                method,
+                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::ClaudeAiOauth
+                    | meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::OauthToApiKey
+            )
+        }
+        meerkat_llm_core::provider_runtime::binding::NormalizedAuthMethod::Google(method) => {
+            matches!(
+                method,
+                meerkat_core::provider_matrix::google::GoogleAuthMethod::GoogleOauth
+            )
+        }
+    };
+    let source_implies_interactive = matches!(
+        binding.auth_profile.source,
+        CredentialSourceSpec::ManagedStore { .. } | CredentialSourceSpec::PlatformDefault
+    );
+
+    if binding.auth_profile.constraints.allow_interactive_login
+        || method_implies_interactive
+        || source_implies_interactive
+    {
+        ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
+    } else {
+        ProviderAuthError::Auth(AuthError::MissingSecret)
+    }
+}
+
+pub fn refresh_allowed(
+    binding: &meerkat_llm_core::provider_runtime::binding::ValidatedBinding,
+) -> bool {
+    binding.auth_profile.constraints.allow_refresh
+}
+
+pub fn apply_auth_resolution_policy(
+    binding: &meerkat_llm_core::provider_runtime::binding::ValidatedBinding,
+    mut metadata: AuthMetadata,
+) -> Result<AuthMetadata, ProviderAuthError> {
+    if metadata.organization_id.is_none() {
+        metadata.organization_id = binding
+            .auth_profile
+            .metadata_defaults
+            .organization_id
+            .clone();
+    }
+    if metadata.workspace_id.is_none() {
+        metadata.workspace_id = binding.auth_profile.metadata_defaults.workspace_id.clone();
+    }
+    if matches!(metadata.route_hints, AuthRouteHints::None) {
+        metadata.route_hints = binding.auth_profile.metadata_defaults.route_hints.clone();
+    }
+    if metadata.provider_metadata.is_none() {
+        metadata.provider_metadata = binding
+            .auth_profile
+            .metadata_defaults
+            .provider_metadata
+            .clone();
+    }
+
+    if (binding.auth_profile.constraints.require_account_id
+        || binding.policy.require_metadata_account)
+        && metadata.account_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(ProviderAuthError::Auth(AuthError::MissingRequiredMetadata(
+            "account_id".into(),
+        )));
+    }
+    if (binding.auth_profile.constraints.require_workspace_id
+        || binding.policy.require_metadata_workspace)
+        && metadata.workspace_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(ProviderAuthError::Auth(AuthError::MissingRequiredMetadata(
+            "workspace_id".into(),
+        )));
+    }
+
+    Ok(metadata)
+}
 
 /// Resolve a [`CredentialSourceSpec`] into a single secret string. Used
 /// by api_key / static_bearer auth methods. Returns the resolved secret
@@ -100,7 +194,7 @@ pub async fn resolve_simple_secret(
             ))
         }
         CredentialSourceSpec::ManagedStore { .. } | CredentialSourceSpec::PlatformDefault => {
-            Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
+            Err(interactive_login_error(binding))
         }
     }
 }
@@ -115,7 +209,7 @@ pub async fn resolve_external_authorizer(
     source: &CredentialSourceSpec,
     env: &ResolverEnvironment,
     binding: &meerkat_llm_core::provider_runtime::binding::ValidatedBinding,
-) -> Result<(), ProviderAuthError> {
+) -> Result<ResolvedAuthEnvelope, ProviderAuthError> {
     let CredentialSourceSpec::ExternalResolver { handle } = source else {
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "external_authorizer auth requires CredentialSourceSpec::ExternalResolver, \
@@ -126,8 +220,10 @@ pub async fn resolve_external_authorizer(
         .external_resolvers
         .get(handle)
         .ok_or_else(|| ProviderAuthError::ExternalResolverMissing(handle.clone()))?;
-    let _envelope = resolver.resolve(binding).await?;
-    Ok(())
+    resolver
+        .resolve(binding)
+        .await
+        .map_err(ProviderAuthError::from)
 }
 
 /// Extract a simple secret from a resolved envelope. Dogma §5:
@@ -138,11 +234,30 @@ pub async fn resolve_external_authorizer(
 fn extract_secret_from_envelope(
     envelope: ResolvedAuthEnvelope,
 ) -> Result<String, ProviderAuthError> {
+    let (secret, _, _) = extract_inline_secret_envelope(envelope)?;
+    Ok(secret)
+}
+
+pub fn extract_inline_secret_envelope(
+    envelope: ResolvedAuthEnvelope,
+) -> Result<(String, AuthMetadata, Option<DateTime<Utc>>), ProviderAuthError> {
     match envelope {
-        ResolvedAuthEnvelope::InlineSecret { secret, .. } => Ok(secret),
-        ResolvedAuthEnvelope::StaticHeaders { headers, .. } => {
+        ResolvedAuthEnvelope::InlineSecret {
+            secret,
+            metadata,
+            expires_at,
+        } => Ok((secret, metadata, expires_at)),
+        ResolvedAuthEnvelope::StaticHeaders {
+            headers,
+            metadata,
+            expires_at,
+        } => {
             if let [(_, value)] = headers.as_slice() {
-                Ok(value.clone())
+                Ok((
+                    value.strip_prefix("Bearer ").unwrap_or(value).to_string(),
+                    metadata,
+                    expires_at,
+                ))
             } else {
                 Err(ProviderAuthError::SourceResolutionFailed(
                     "external resolver returned StaticHeaders with \
@@ -169,6 +284,52 @@ fn extract_secret_from_envelope(
 mod tests {
     use super::*;
 
+    fn binding_with_policy(
+        constraints: meerkat_core::AuthConstraints,
+        policy: meerkat_core::BindingPolicy,
+        metadata_defaults: AuthMetadata,
+    ) -> meerkat_llm_core::provider_runtime::binding::ValidatedBinding {
+        let auth_profile = meerkat_core::AuthProfile {
+            id: "auth".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            auth_method: "api_key".into(),
+            source: CredentialSourceSpec::InlineSecret {
+                secret: "sk-test".into(),
+            },
+            storage: Default::default(),
+            constraints,
+            metadata_defaults: meerkat_core::AuthMetadataDefaults {
+                organization_id: metadata_defaults.organization_id.clone(),
+                workspace_id: metadata_defaults.workspace_id.clone(),
+                route_hints: metadata_defaults.route_hints.clone(),
+                provider_metadata: metadata_defaults.provider_metadata,
+            },
+        };
+        let backend_profile = meerkat_core::BackendProfile {
+            id: "backend".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            backend_kind: "openai_api".into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        };
+        meerkat_llm_core::provider_runtime::binding::ValidatedBinding {
+            connection_ref: meerkat_core::ConnectionRef {
+                realm_id: "realm-x".into(),
+                binding_id: "binding-y".into(),
+            },
+            provider: meerkat_core::Provider::OpenAI,
+            backend: meerkat_llm_core::provider_runtime::binding::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+            ),
+            auth: meerkat_llm_core::provider_runtime::binding::NormalizedAuthMethod::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::ApiKey,
+            ),
+            backend_profile: std::sync::Arc::new(backend_profile),
+            auth_profile: std::sync::Arc::new(auth_profile),
+            policy,
+        }
+    }
+
     #[test]
     fn extract_secret_inline_variant() {
         let env = ResolvedAuthEnvelope::InlineSecret {
@@ -191,7 +352,7 @@ mod tests {
             metadata: Default::default(),
             expires_at: None,
         };
-        assert_eq!(extract_secret_from_envelope(env).unwrap(), "Bearer sk-y");
+        assert_eq!(extract_secret_from_envelope(env).unwrap(), "sk-y");
     }
 
     #[test]
@@ -228,5 +389,69 @@ mod tests {
             err,
             ProviderAuthError::Auth(AuthError::MissingSecret)
         ));
+    }
+
+    #[test]
+    fn interactive_login_error_respects_binding_constraints() {
+        let allow = binding_with_policy(
+            meerkat_core::AuthConstraints {
+                allow_interactive_login: true,
+                ..Default::default()
+            },
+            Default::default(),
+            AuthMetadata::default(),
+        );
+        assert!(matches!(
+            interactive_login_error(&allow),
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
+        ));
+
+        let deny = binding_with_policy(
+            Default::default(),
+            Default::default(),
+            AuthMetadata::default(),
+        );
+        assert!(matches!(
+            interactive_login_error(&deny),
+            ProviderAuthError::Auth(AuthError::MissingSecret)
+        ));
+    }
+
+    #[test]
+    fn apply_auth_resolution_policy_merges_defaults_and_requires_binding_metadata() {
+        let binding = binding_with_policy(
+            meerkat_core::AuthConstraints {
+                require_workspace_id: true,
+                ..Default::default()
+            },
+            meerkat_core::BindingPolicy {
+                allow_auth_override: false,
+                require_metadata_account: true,
+                require_metadata_workspace: false,
+            },
+            AuthMetadata {
+                organization_id: Some("org-x".into()),
+                workspace_id: Some("ws-x".into()),
+                ..AuthMetadata::default()
+            },
+        );
+
+        let err = apply_auth_resolution_policy(&binding, AuthMetadata::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::MissingRequiredMetadata(field))
+            if field == "account_id"
+        ));
+
+        let merged = apply_auth_resolution_policy(
+            &binding,
+            AuthMetadata {
+                account_id: Some("acct-x".into()),
+                ..AuthMetadata::default()
+            },
+        )
+        .expect("metadata defaults should satisfy workspace requirement");
+        assert_eq!(merged.organization_id.as_deref(), Some("org-x"));
+        assert_eq!(merged.workspace_id.as_deref(), Some("ws-x"));
     }
 }

@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
+#[cfg(feature = "skills")]
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -78,6 +80,36 @@ use tokio_with_wasm::alias::sync::mpsc;
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
+
+#[cfg(feature = "skills")]
+fn effective_skill_capabilities(
+    config: &Config,
+    effective_builtins: bool,
+    effective_shell: bool,
+    effective_memory: bool,
+) -> Vec<String> {
+    let mut available: HashSet<String> = crate::surface::build_capabilities_response(config)
+        .capabilities
+        .into_iter()
+        .filter(|entry| matches!(entry.status, meerkat_contracts::CapabilityStatus::Available))
+        .map(|entry| entry.id.to_string())
+        .collect();
+
+    if !effective_builtins {
+        available.remove("builtins");
+        available.remove("shell");
+    }
+    if !effective_shell {
+        available.remove("shell");
+    }
+    if !effective_memory {
+        available.remove("memory_store");
+    }
+
+    let mut capabilities: Vec<String> = available.into_iter().collect();
+    capabilities.sort();
+    capabilities
+}
 
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
@@ -1132,10 +1164,12 @@ impl AgentFactory {
             };
 
         skill_source.map(|source| {
-            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                .into_iter()
-                .map(|c| c.id.to_string())
-                .collect();
+            let available_caps = effective_skill_capabilities(
+                config,
+                self.enable_builtins,
+                self.enable_shell,
+                self.enable_memory,
+            );
             let engine = Arc::new(
                 meerkat_skills::DefaultSkillEngine::new(source, available_caps)
                     .with_inventory_threshold(config.skills.inventory_threshold)
@@ -1977,6 +2011,11 @@ impl AgentFactory {
             .as_deref()
             .or(self.project_root.as_deref());
         let _conventions_user_root = self.user_config_root.as_deref();
+        let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
+        #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
+        let effective_shell = build_config.override_shell.resolve(self.enable_shell);
+        #[allow(unused_variables)]
+        let effective_memory = build_config.override_memory.resolve(self.enable_memory);
 
         // 6a. Build skill engine (override > factory > config > filesystem).
         #[cfg(feature = "skills")]
@@ -2012,10 +2051,12 @@ impl AgentFactory {
                     };
 
                 skill_source.map(|source| {
-                    let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                        .into_iter()
-                        .map(|c| c.id.to_string())
-                        .collect();
+                    let available_caps = effective_skill_capabilities(
+                        config,
+                        effective_builtins,
+                        effective_shell,
+                        effective_memory,
+                    );
                     let engine = Arc::new(
                         meerkat_skills::DefaultSkillEngine::new(source, available_caps)
                             .with_inventory_threshold(config.skills.inventory_threshold)
@@ -2030,9 +2071,6 @@ impl AgentFactory {
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
         let persisted_system_prompt = build_config.system_prompt.clone();
         let per_request_prompt = build_config.system_prompt.take();
-        let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
-        #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
-        let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let mut session = build_config.resume_session.clone().unwrap_or_default();
         // Inject pre-resolved metadata entries (e.g. inherited tool filter from
         // spawn tooling) before the builder reads metadata for early-stage recovery.
@@ -2724,8 +2762,6 @@ impl AgentFactory {
         }
 
         // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
-        #[allow(unused_variables)]
-        let effective_memory = build_config.override_memory.resolve(self.enable_memory);
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
             let memory_dir = self.store_path.join("memory");
@@ -3425,5 +3461,40 @@ mod prompt_tests {
             visible_names.contains("secret_lookup"),
             "the session-plane tool should remain inline until adaptive deferred mode activates"
         );
+    }
+
+    #[cfg(feature = "skills")]
+    #[test]
+    fn effective_skill_capabilities_respect_tool_visibility_overrides() {
+        let mut config = Config::default();
+        config.tools.builtins_enabled = true;
+        config.tools.shell_enabled = true;
+
+        let available = super::effective_skill_capabilities(&config, true, true, true);
+        assert!(available.iter().any(|cap| cap == "builtins"));
+
+        let no_builtins = super::effective_skill_capabilities(&config, false, true, true);
+        assert!(
+            !no_builtins.iter().any(|cap| cap == "builtins"),
+            "per-build builtins disable must hide builtins-gated skills"
+        );
+        assert!(
+            !no_builtins.iter().any(|cap| cap == "shell"),
+            "shell cannot remain visible when builtins are disabled for the build"
+        );
+
+        let no_shell = super::effective_skill_capabilities(&config, true, false, true);
+        assert!(
+            !no_shell.iter().any(|cap| cap == "shell"),
+            "per-build shell disable must hide shell-gated skills"
+        );
+
+        let no_memory = super::effective_skill_capabilities(&config, true, true, false);
+        if available.iter().any(|cap| cap == "memory_store") {
+            assert!(
+                !no_memory.iter().any(|cap| cap == "memory_store"),
+                "per-build memory disable must hide memory-gated skills"
+            );
+        }
     }
 }

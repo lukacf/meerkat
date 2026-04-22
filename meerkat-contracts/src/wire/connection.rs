@@ -246,12 +246,12 @@ impl From<meerkat_core::AuthError> for WireAuthError {
     }
 }
 
-/// Wire projection of the auth-profile status. Returned from
+/// Wire projection of the binding-scoped auth status. Returned from
 /// `auth.status.get` / `GET /auth/status/:id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireAuthStatus {
-    pub profile_id: String,
+    pub binding_id: String,
     pub provider: String,
     pub auth_method: String,
     /// High-level health: "valid" / "expiring" / "expired" /
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn auth_status_serde_roundtrip() {
         let status = WireAuthStatus {
-            profile_id: "p".into(),
+            binding_id: "p".into(),
             provider: "openai".into(),
             auth_method: "managed_chatgpt_oauth".into(),
             state: "valid".into(),

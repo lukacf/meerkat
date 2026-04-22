@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 
 use meerkat_core::{
     AuthError, AuthLease, AuthMetadata, AuthProfile, AuthRefreshReason, BackendProfile,
-    BindingPolicy, HttpAuthorizer, Provider, ResolvedAuthKind,
+    BindingPolicy, ConnectionRef, HttpAuthorizer, Provider, ResolvedAuthKind,
 };
 
 use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
@@ -41,6 +41,7 @@ pub enum NormalizedAuthMethod {
 /// A binding that has been provider-validated but not yet resolved.
 #[derive(Clone)]
 pub struct ValidatedBinding {
+    pub connection_ref: ConnectionRef,
     pub provider: Provider,
     pub backend: NormalizedBackendKind,
     pub auth: NormalizedAuthMethod,
@@ -52,6 +53,7 @@ pub struct ValidatedBinding {
 impl std::fmt::Debug for ValidatedBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ValidatedBinding")
+            .field("connection_ref", &self.connection_ref)
             .field("provider", &self.provider)
             .field("backend", &self.backend)
             .field("auth", &self.auth)

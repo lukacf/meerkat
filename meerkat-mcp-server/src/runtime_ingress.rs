@@ -287,17 +287,27 @@ impl McpRuntimeIngressContext {
                     .and_then(|meta| meta.config_generation)
             });
         let external_tools = self.external_tools_for_session(session_id, &state).await?;
+        let bindings = self
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to prepare runtime bindings for session {session_id}: {error}"
+                )))
+            })?;
         let recovered = build_recovered_session(
             session.clone(),
             &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
+                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                allow_standalone_runtime_build_fallback: false,
                 realm_id: Some(self.realm_id.clone()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
-                ..Default::default()
             },
         )
         .map_err(surface_recovery_session_error)?;

@@ -535,7 +535,7 @@
         "type": "null"
       }
     ],
-    "description": "Response payload for `session/input_state`.",
+    "description": "Response payload for `session/input`.",
     "title": "InputStateResult"
   },
   "McpLiveOpResponse": {
@@ -5841,7 +5841,7 @@
   },
   "RuntimeAcceptOutcomeType": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Discriminator for `session/accept_input` responses.",
+    "description": "Discriminator for `session/accept` responses.",
     "enum": [
       "accepted",
       "deduplicated",
@@ -5853,7 +5853,7 @@
   "RuntimeAcceptResult": {
     "$defs": {
       "RuntimeAcceptOutcomeType": {
-        "description": "Discriminator for `session/accept_input` responses.",
+        "description": "Discriminator for `session/accept` responses.",
         "enum": [
           "accepted",
           "deduplicated",
@@ -5971,7 +5971,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/accept_input`.",
+    "description": "Response payload for `session/accept`.",
     "properties": {
       "existing_id": {
         "type": [
@@ -6042,7 +6042,7 @@
   },
   "RuntimeResetResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/reset_runtime`.",
+    "description": "Response payload for `session/reset`.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -6058,7 +6058,7 @@
   },
   "RuntimeRetireResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/retire_runtime`.",
+    "description": "Response payload for `session/retire`.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -6095,7 +6095,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/runtime_state`.",
+    "description": "Response payload for `session/state`.",
     "properties": {
       "state": {
         "$ref": "#/$defs/WireRuntimeState"
@@ -9218,7 +9218,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Wire projection of the auth-profile status. Returned from\n`auth.status.get` / `GET /auth/status/:id`.",
+    "description": "Wire projection of the binding-scoped auth status. Returned from\n`auth.status.get` / `GET /auth/status/:id`.",
     "properties": {
       "account_id": {
         "type": [
@@ -9227,6 +9227,9 @@
         ]
       },
       "auth_method": {
+        "type": "string"
+      },
+      "binding_id": {
         "type": "string"
       },
       "expires_at": {
@@ -9252,9 +9255,6 @@
           "null"
         ]
       },
-      "profile_id": {
-        "type": "string"
-      },
       "provider": {
         "type": "string"
       },
@@ -9264,7 +9264,7 @@
       }
     },
     "required": [
-      "profile_id",
+      "binding_id",
       "provider",
       "auth_method",
       "state"

@@ -1627,43 +1627,45 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // The shell loop is a mechanical cursor over DSL-owned state; the
-        // "is this op non-terminal?" decision is expressed as a typed read
-        // of the DSL's `op_statuses` map via `OperationStatus::is_terminal`,
-        // not a handwritten branch over stringly-typed state. The DSL's
-        // `TerminateOp` transition guards on the same non-terminal set, so
-        // guard rejection here indicates a genuine state desync rather than
-        // the common already-terminal no-op.
-        let to_terminate: Vec<(OperationId, OperationStatus)> = state
-            .operation_ids()
-            .into_iter()
-            .filter_map(|id| state.status(&id).map(|s| (id, s)))
-            .filter(|(_, s)| !s.is_terminal())
-            .collect();
-
-        for (op_id, status) in &to_terminate {
+        // Mechanical cursor only: walk every tracked operation id and let the
+        // DSL's `TerminateOp` guard decide whether the op is still terminable.
+        // Already-terminal ops become guard-rejected no-ops instead of being
+        // pre-filtered by shell-owned status logic.
+        let mut terminated_any = false;
+        for op_id in state.operation_ids() {
+            let Some(status) = state.status(&op_id) else {
+                continue;
+            };
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
             let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-            if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
-                operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+            match state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
+                operation_id: mm_dsl::OperationId::from_domain(&op_id).0,
                 outcome: outcome_kind,
                 payload: outcome_payload,
             }) {
-                return Err(classify_op_rejection(
-                    err,
-                    op_id,
-                    *status,
-                    "terminate_owner",
-                ));
+                Ok(()) => {
+                    state.finalize_terminal(&op_id);
+                    terminated_any = true;
+                }
+                Err(mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
+                    // Already-terminal / otherwise non-terminable ops stay a
+                    // machine-owned no-op. The shell does not pre-classify.
+                }
+                Err(err) => {
+                    return Err(classify_op_rejection(
+                        err,
+                        &op_id,
+                        status,
+                        "terminate_owner",
+                    ));
+                }
             }
-
-            state.finalize_terminal(op_id);
         }
 
-        if !to_terminate.is_empty() {
+        if terminated_any {
             state.maybe_persist();
         }
         Ok(())
@@ -1750,77 +1752,57 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                     }
                 }
 
-                // Short-circuit when every target op is already terminal.
-                let all_terminal = owned_ids.iter().all(|op_id| {
-                    state
-                        .status(op_id)
-                        .is_some_and(OperationStatus::is_terminal)
-                });
-                if all_terminal {
-                    let outcomes =
-                        state
-                            .collect_wait_outcomes(&owned_ids)
-                            .map(|outcomes| WaitAllResult {
-                                outcomes,
-                                satisfied: WaitAllSatisfied {
-                                    wait_request_id: wait_request_id.clone(),
-                                    operation_ids: owned_ids.clone(),
-                                },
-                            });
-                    WaitAllFutureState::Ready(Some(outcomes))
-                } else {
-                    // Populate DSL barrier membership via RequestWaitAll.
-                    // Membership is DSL-owned; shell holds only the oneshot
-                    // correlation id for delivering the result to the caller.
-                    let dsl_ids: std::collections::BTreeSet<String> = owned_ids
-                        .iter()
-                        .map(|id| mm_dsl::OperationId::from_domain(id).0)
-                        .collect();
-                    if let Err(err) = state.dsl_apply(
-                        mm_dsl::MeerkatMachineInput::RequestWaitAll {
-                            operation_ids: dsl_ids,
-                        },
-                        "RequestWaitAll",
-                    ) {
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids,
-                            state: WaitAllFutureState::Ready(Some(Err(err))),
-                        });
-                    }
-                    state.wait_request_id = Some(wait_request_id.clone());
-
-                    if state.pending_wait.is_some() {
-                        // Roll back the DSL barrier we just activated so the
-                        // registry is not stuck in a wait-active state with
-                        // no correlation oneshot to resolve. `CancelWaitAll`
-                        // is the no-obligation clearer (members need not be
-                        // terminal).
-                        state.wait_request_id = None;
-                        let _ = state.dsl_apply(
-                            mm_dsl::MeerkatMachineInput::CancelWaitAll,
-                            "CancelWaitAll(rollback)",
-                        );
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids,
-                            state: WaitAllFutureState::Ready(Some(Err(
-                                OpsLifecycleError::Internal(
-                                    "wait_all started while a pending wait sender already existed"
-                                        .into(),
-                                ),
-                            ))),
-                        });
-                    }
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    state.pending_wait = Some(PendingWaitState {
-                        wait_request_id: wait_request_id.clone(),
-                        sender,
+                // Populate DSL barrier membership via RequestWaitAll.
+                // Membership and immediate satisfaction are both DSL-owned.
+                let dsl_ids: std::collections::BTreeSet<String> = owned_ids
+                    .iter()
+                    .map(|id| mm_dsl::OperationId::from_domain(id).0)
+                    .collect();
+                if let Err(err) = state.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::RequestWaitAll {
+                        operation_ids: dsl_ids,
+                    },
+                    "RequestWaitAll",
+                ) {
+                    return Box::pin(WaitAllFuture {
+                        registry: self,
+                        wait_request_id,
+                        operation_ids: owned_ids,
+                        state: WaitAllFutureState::Ready(Some(Err(err))),
                     });
-                    WaitAllFutureState::Waiting(receiver)
                 }
+                state.wait_request_id = Some(wait_request_id.clone());
+
+                if state.pending_wait.is_some() {
+                    // Roll back the DSL barrier we just activated so the
+                    // registry is not stuck in a wait-active state with
+                    // no correlation oneshot to resolve. `CancelWaitAll`
+                    // is the no-obligation clearer (members need not be
+                    // terminal).
+                    state.wait_request_id = None;
+                    let _ = state.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                        "CancelWaitAll(rollback)",
+                    );
+                    return Box::pin(WaitAllFuture {
+                        registry: self,
+                        wait_request_id,
+                        operation_ids: owned_ids,
+                        state: WaitAllFutureState::Ready(Some(Err(OpsLifecycleError::Internal(
+                            "wait_all started while a pending wait sender already existed".into(),
+                        )))),
+                    });
+                }
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                state.pending_wait = Some(PendingWaitState {
+                    wait_request_id: wait_request_id.clone(),
+                    sender,
+                });
+                // If every member is already terminal, satisfy the barrier
+                // immediately through the DSL-owned fixed point instead of
+                // a shell-side terminality scan.
+                state.maybe_satisfy_wait();
+                WaitAllFutureState::Waiting(receiver)
             }
             Err(err) => WaitAllFutureState::Ready(Some(Err(err))),
         };

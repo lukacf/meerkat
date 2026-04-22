@@ -196,7 +196,7 @@ if include_scenario(38):
 if include_scenario(39):
     @pytest.mark.asyncio
     @requires_live_llm
-    async def test_smoke_scenario_39_persistent_reconnect_and_runtime_accept(tmp_path: Path):
+    async def test_smoke_scenario_39_persistent_reconnect_and_session_accept(tmp_path: Path):
         realm = persistent_realm_kwargs(tmp_path)
         marker = f"python-runtime-{uuid4().hex[:8]}"
 
@@ -213,15 +213,15 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await client_b.runtime_state(session_id)
-            assert runtime_state.state in {
+            session_state = await client_b.session_state(session_id)
+            assert session_state.state in {
                 "attached",
                 "idle",
                 "running",
                 "initializing",
             }
 
-            accepted = await client_b.runtime_accept(
+            accepted = await client_b.session_accept(
                 session_id,
                 make_prompt_input(
                     f"Reply with PY-RUNTIME-39 and the marker {marker}.",
@@ -236,14 +236,14 @@ if include_scenario(39):
             assert accepted.input_id is not None
             input_id = accepted.input_id
 
-            input_state = await wait_for(
+            session_input = await wait_for(
                 "runtime input to be consumed",
-                lambda: client_b.input_state(session_id, input_id),
+                lambda: client_b.session_input(session_id, input_id),
                 lambda state: state is not None and state.current_state == "consumed",
                 timeout_secs=120.0,
             )
-            assert input_state is not None
-            assert input_state.current_state == "consumed"
+            assert session_input is not None
+            assert session_input.current_state == "consumed"
 
             after_runtime = await wait_for(
                 "runtime-authored assistant reply",

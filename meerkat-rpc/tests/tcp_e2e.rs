@@ -566,8 +566,8 @@ async fn tcp_e2e_rkat_rpc_mini_initialize_and_roundtrip() {
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"config/get"));
-    assert!(!method_names.contains(&"session/runtime_state"));
-    assert!(!method_names.contains(&"session/input_state"));
+    assert!(!method_names.contains(&"session/state"));
+    assert!(!method_names.contains(&"session/input"));
     assert!(!method_names.contains(&"blob/get"));
     assert!(!method_names.contains(&"session/stream_open"));
     assert!(!method_names.contains(&"skills/list"));

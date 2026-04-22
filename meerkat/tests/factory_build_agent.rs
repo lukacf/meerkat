@@ -17,6 +17,8 @@ use meerkat_client::{LlmClient, TestClient};
 #[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
+#[cfg(feature = "skills")]
+use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillId, SkillScope};
 use meerkat_core::{
     AgentToolDispatcher, Config, Provider, SelfHostedApiStyle, SelfHostedModelConfig,
     SelfHostedServerConfig, SelfHostedTransport, Session, SessionId, SessionLlmIdentity,
@@ -24,6 +26,10 @@ use meerkat_core::{
     ToolDispatchOutcome, ToolError, UserMessage,
 };
 use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
+#[cfg(feature = "skills")]
+use meerkat_skills::source::SourceNode;
+#[cfg(feature = "skills")]
+use meerkat_skills::{CompositeSkillSource, InMemorySkillSource};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use serde_json::json;
 use std::sync::Mutex;
@@ -1365,6 +1371,190 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             "nonexistent-legacy-skill".into(),
         )]),
         "resume may drop unavailable skills from the live surface projection, but it must not rewrite durable session behavior truth"
+    );
+}
+
+#[cfg(feature = "skills")]
+fn capability_skill(id: &str, name: &str, caps: &[&str]) -> SkillDocument {
+    SkillDocument {
+        descriptor: SkillDescriptor {
+            id: SkillId(id.to_string()),
+            name: name.to_string(),
+            description: format!("Description for {name}"),
+            scope: SkillScope::Project,
+            requires_capabilities: caps.iter().map(|cap| (*cap).to_string()).collect(),
+            ..Default::default()
+        },
+        body: format!("# {name}\n\nCapability-gated content."),
+        extensions: indexmap::IndexMap::new(),
+    }
+}
+
+#[cfg(feature = "skills")]
+#[tokio::test]
+async fn capability_gated_skills_follow_agent_factory_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = Arc::new(CompositeSkillSource::new(vec![SourceNode::Memory(
+        InMemorySkillSource::new(vec![
+            capability_skill("builtins-skill", "Builtins Skill", &["builtins"]),
+            capability_skill("shell-skill", "Shell Skill", &["builtins", "shell"]),
+        ]),
+    )]));
+
+    let factory = temp_factory(&temp)
+        .builtins(true)
+        .shell(true)
+        .skill_source(source);
+    let mut config = Config::default();
+    config.tools.builtins_enabled = true;
+    config.tools.shell_enabled = true;
+
+    let fully_enabled = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                preload_skills: None,
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .expect("fully-enabled build should succeed");
+    let Some(meerkat::Message::System(full_prompt_message)) =
+        fully_enabled.session().messages().first()
+    else {
+        panic!("expected system prompt");
+    };
+    let full_prompt = &full_prompt_message.content;
+    assert!(full_prompt.contains("Builtins Skill"));
+    assert!(full_prompt.contains("Shell Skill"));
+
+    let shell_disabled = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                override_shell: ToolCategoryOverride::Disable,
+                preload_skills: None,
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .expect("shell-disabled build should succeed");
+    let Some(meerkat::Message::System(shell_disabled_prompt_message)) =
+        shell_disabled.session().messages().first()
+    else {
+        panic!("expected system prompt");
+    };
+    let shell_disabled_prompt = &shell_disabled_prompt_message.content;
+    assert!(shell_disabled_prompt.contains("Builtins Skill"));
+    assert!(!shell_disabled_prompt.contains("Shell Skill"));
+
+    let shell_preload = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                override_shell: ToolCategoryOverride::Disable,
+                preload_skills: Some(vec![SkillId("shell-skill".into())]),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await;
+    assert!(
+        shell_preload.is_err(),
+        "preloading a shell-gated skill must fail when shell is disabled for the build"
+    );
+
+    let builtins_preload = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                override_builtins: ToolCategoryOverride::Disable,
+                preload_skills: Some(vec![SkillId("builtins-skill".into())]),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await;
+    assert!(
+        builtins_preload.is_err(),
+        "preloading a builtins-gated skill must fail when builtins are disabled for the build"
+    );
+}
+
+#[cfg(all(feature = "skills", feature = "memory-store-session"))]
+#[tokio::test]
+async fn memory_gated_skills_follow_agent_factory_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = Arc::new(CompositeSkillSource::new(vec![SourceNode::Memory(
+        InMemorySkillSource::new(vec![capability_skill(
+            "memory-skill",
+            "Memory Skill",
+            &["memory_store"],
+        )]),
+    )]));
+
+    let factory = temp_factory(&temp)
+        .builtins(true)
+        .memory(true)
+        .skill_source(source);
+    let mut config = Config::default();
+    config.tools.builtins_enabled = true;
+
+    let enabled = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                preload_skills: None,
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .expect("memory-enabled build should succeed");
+    let Some(meerkat::Message::System(enabled_prompt_message)) =
+        enabled.session().messages().first()
+    else {
+        panic!("expected system prompt");
+    };
+    let enabled_prompt = &enabled_prompt_message.content;
+    assert!(enabled_prompt.contains("Memory Skill"));
+
+    let disabled = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                override_memory: ToolCategoryOverride::Disable,
+                preload_skills: None,
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .expect("memory-disabled build should succeed");
+    let Some(meerkat::Message::System(disabled_prompt_message)) =
+        disabled.session().messages().first()
+    else {
+        panic!("expected system prompt");
+    };
+    let disabled_prompt = &disabled_prompt_message.content;
+    assert!(!disabled_prompt.contains("Memory Skill"));
+
+    let preload = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                override_memory: ToolCategoryOverride::Disable,
+                preload_skills: Some(vec![SkillId("memory-skill".into())]),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await;
+    assert!(
+        preload.is_err(),
+        "preloading a memory-gated skill must fail when memory is disabled for the build"
     );
 }
 

@@ -96,7 +96,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 
@@ -153,7 +153,7 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 
@@ -181,14 +181,14 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
     let runtime = oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
         store.clone(),
         endpoints,
-        TokenKey::new("dev", "claude_oauth"),
+        TokenKey::new("dev", "default_claude"),
     );
     let access = runtime.get_or_refresh_access_token().await.unwrap();
     assert_eq!(access, "refreshed-access-NEW");
 
     // Verify the new bundle was persisted.
     let updated = store
-        .load(&TokenKey::new("dev", "claude_oauth"))
+        .load(&TokenKey::new("dev", "default_claude"))
         .await
         .unwrap()
         .unwrap();
@@ -221,7 +221,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 

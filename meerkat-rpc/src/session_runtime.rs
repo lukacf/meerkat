@@ -994,6 +994,7 @@ impl SessionRuntime {
                     .map(encode_llm_client_override_for_service),
                 external_tools: self.recovery_external_tools(),
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                allow_standalone_runtime_build_fallback: false,
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
                 backend: self.backend.clone(),

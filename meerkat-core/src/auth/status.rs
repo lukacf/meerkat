@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use super::error::AuthErrorKind;
 use crate::provider::Provider;
 
-/// Status snapshot of a resolved (or unresolved) auth profile.
+/// Status snapshot of a resolved (or unresolved) auth binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AuthStatus {
-    pub profile_id: String,
+    pub binding_id: String,
     pub provider: Provider,
     pub backend_kind: String,
     pub auth_method: String,
@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn auth_status_roundtrip() {
         let status = AuthStatus {
-            profile_id: "openai_api_key".into(),
+            binding_id: "openai_api_key".into(),
             provider: Provider::OpenAI,
             backend_kind: "openai_api".into(),
             auth_method: "api_key".into(),
@@ -90,7 +90,7 @@ mod tests {
         let props = json
             .get("properties")
             .expect("AuthStatus schema has properties");
-        assert!(props.get("profile_id").is_some());
+        assert!(props.get("binding_id").is_some());
         assert!(props.get("provider").is_some());
         assert!(props.get("needs_reauth").is_some());
     }

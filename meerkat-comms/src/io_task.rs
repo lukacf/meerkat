@@ -3,9 +3,8 @@
 //! Each incoming connection spawns an IO task that:
 //! 1. Reads envelope (with length-prefix framing)
 //! 2. Verifies signature (optional)
-//! 3. Checks sender in trusted list (when peer-auth is enabled)
-//! 4. If valid: sends Ack immediately (unless it's an Ack or Response)
-//! 5. Enqueues to inbox
+//! 3. Enqueues to inbox through the classified admission gate
+//! 4. If admitted: sends Ack (unless it's an Ack or Response)
 //! 6. Closes connection (or keeps alive)
 
 use std::sync::Arc;
@@ -31,15 +30,15 @@ use crate::types::{Envelope, InboxItem, MessageKind};
 /// * `stream` - The async read/write stream (e.g., TcpStream or UnixStream)
 /// * `keypair` - Our keypair for signing acks
 /// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
-/// * `trusted` - Router-owned trust set. The IO task reads through this
-///   shared handle (no snapshot clone) so admission and the transport-level
-///   trust gate cannot diverge on live mutation.
+/// * `trusted` - Router-owned trust set shared with the classified inbox
+///   admission gate. The IO task keeps this only so the ingress pipeline
+///   shares one trust owner, rather than re-checking trust locally.
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
     require_peer_auth: bool,
     keypair: &Keypair,
-    trusted: &Arc<RwLock<TrustedPeers>>,
+    _trusted: &Arc<RwLock<TrustedPeers>>,
     inbox_sender: &InboxSender,
 ) -> Result<(), IoTaskError>
 where
@@ -70,21 +69,6 @@ where
         return Ok(());
     }
 
-    // Trust gate — single read through the router-owned
-    // `Arc<RwLock<TrustedPeers>>`. The inbox admission gate consults the
-    // same handle, so a snapshot divergence between prefilter and admission
-    // is impossible. We keep this check here (rather than deferring all the
-    // way to admission) so untrusted senders do not receive an ack, which
-    // avoids leaking "I'm live" to unauthenticated scanners.
-    if require_peer_auth && !trusted.read().is_trusted(&envelope.from) {
-        tracing::warn!(
-            "Dropped message {} from {:?}: sender not trusted",
-            envelope.id,
-            envelope.from
-        );
-        return Ok(());
-    }
-
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
         tracing::warn!(
@@ -97,22 +81,25 @@ where
         return Ok(());
     }
 
-    // Send ack if appropriate (not for Ack or Response)
-    if should_ack(&envelope.kind) {
-        let ack = create_ack(&envelope, keypair);
-        let frame = EnvelopeFrame {
-            envelope: ack,
-            raw: Arc::new(Bytes::new()),
-        };
-        framed.send(frame).await?;
-    }
+    let should_send_ack = should_ack(&envelope.kind);
 
-    // Enqueue to inbox (with classification if context is available).
-    // Typed admission outcome: explicit drops are surfaced as `IoTaskError`
-    // so the IO task can react (close connection, log, etc.) rather than
-    // silently returning `Ok(())`.
-    match inbox_sender.send_classified(InboxItem::External { envelope }) {
-        AdmissionOutcome::Admitted => Ok(()),
+    // Enqueue through the classified inbox. Trust admission happens there so
+    // the transport stays mechanical (framing/crypto/backpressure) and the
+    // inbox remains the sole semantic drop owner for peer trust.
+    match inbox_sender.send_classified(InboxItem::External {
+        envelope: envelope.clone(),
+    }) {
+        AdmissionOutcome::Admitted => {
+            if should_send_ack {
+                let ack = create_ack(&envelope, keypair);
+                let frame = EnvelopeFrame {
+                    envelope: ack,
+                    raw: Arc::new(Bytes::new()),
+                };
+                framed.send(frame).await?;
+            }
+            Ok(())
+        }
         AdmissionOutcome::Dropped { reason } => Err(match reason {
             DropReason::SessionClosed => IoTaskError::InboxClosed,
             DropReason::InboxFull => IoTaskError::InboxFull,
@@ -173,9 +160,10 @@ pub enum IoTaskError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::classify::IngressClassificationContext;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeer;
+    use crate::trust::{TrustedPeer, TrustedPeers};
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::codec::FramedRead;
@@ -193,6 +181,17 @@ mod tests {
                 addr: "tcp://127.0.0.1:4200".to_string(),
                 meta: crate::PeerMeta::default(),
             }],
+        }))
+    }
+
+    fn make_classified_inbox(
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        require_peer_auth: bool,
+    ) -> (Inbox, InboxSender) {
+        Inbox::new_classified(Arc::new(IngressClassificationContext {
+            require_peer_auth,
+            trusted_peers,
+            silent_intents: Arc::new(std::collections::HashSet::new()),
         }))
     }
 
@@ -328,7 +327,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let untrusted_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key()); // Only trust sender_keypair
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = make_classified_inbox(trusted.clone(), true);
 
         // Create envelope from untrusted peer
         let envelope = make_signed_envelope(
@@ -351,7 +350,10 @@ mod tests {
 
         let result =
             handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
-        assert!(result.is_ok()); // Silent drop, not an error
+        assert!(matches!(
+            result,
+            Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
+        ));
 
         // No item in inbox
         let items = inbox.try_drain();
@@ -736,7 +738,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let other_keypair = make_keypair();
         let trusted = make_trusted_peers(&other_keypair.public_key()); // sender NOT trusted
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = make_classified_inbox(trusted.clone(), true);
 
         let envelope = make_signed_envelope(
             &sender_keypair, // Not trusted
@@ -756,9 +758,12 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
-            .await
-            .unwrap();
+        let result =
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        assert!(matches!(
+            result,
+            Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
+        ));
 
         // No ack sent - connection closes without data
         let result = read_one_envelope(&mut client_read).await;
@@ -783,7 +788,7 @@ mod tests {
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
         let trusted = Arc::new(RwLock::new(TrustedPeers { peers: vec![] }));
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = make_classified_inbox(trusted.clone(), true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -821,9 +826,13 @@ mod tests {
             .await
             .unwrap();
 
-        let items = inbox.try_drain();
-        assert_eq!(items.len(), 1, "envelope should be admitted via live trust");
-        match &items[0] {
+        let entries = inbox.try_drain_classified();
+        assert_eq!(
+            entries.len(),
+            1,
+            "envelope should be admitted via live trust"
+        );
+        match &entries[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, envelope_id),
             _ => panic!("expected External"),
         }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use meerkat_core::{AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope};
+use meerkat_core::{AuthError, ConnectionRef, Provider, RealmConnectionSet, ResolvedAuthEnvelope};
 
 use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -177,12 +177,16 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        let connection_ref = ConnectionRef {
+            realm_id: realm.realm_id.clone(),
+            binding_id: binding_id.to_string(),
+        };
         let runtime = self
             .runtimes
             .get(&backend.provider)
             .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
         let validated = runtime
-            .validate_binding(backend, auth, &binding.policy)
+            .validate_binding(&connection_ref, backend, auth, &binding.policy)
             .map_err(ProviderAuthError::Binding)?;
         runtime.resolve_binding(&validated, env).await
     }
@@ -226,6 +230,10 @@ fn _compile_proof_of_error_wiring() -> ProviderBindingError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::provider_runtime::binding::{
+        NormalizedAuthMethod, NormalizedBackendKind, StaticLease,
+    };
+    use parking_lot::Mutex;
 
     #[test]
     fn testing_env_has_none_lookup() {
@@ -279,5 +287,97 @@ mod tests {
             result,
             Err(ProviderAuthError::SourceResolutionFailed(_))
         ));
+    }
+
+    struct RecordingRuntime {
+        seen_connection_ref: Arc<Mutex<Option<ConnectionRef>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl ProviderRuntime for RecordingRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        fn validate_binding(
+            &self,
+            connection_ref: &ConnectionRef,
+            backend: &meerkat_core::BackendProfile,
+            auth: &meerkat_core::AuthProfile,
+            policy: &meerkat_core::BindingPolicy,
+        ) -> Result<ValidatedBinding, ProviderBindingError> {
+            *self.seen_connection_ref.lock() = Some(connection_ref.clone());
+            Ok(ValidatedBinding {
+                connection_ref: connection_ref.clone(),
+                provider: Provider::OpenAI,
+                backend: NormalizedBackendKind::OpenAi(
+                    meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+                ),
+                auth: NormalizedAuthMethod::OpenAi(
+                    meerkat_core::provider_matrix::openai::OpenAiAuthMethod::ApiKey,
+                ),
+                backend_profile: Arc::new(backend.clone()),
+                auth_profile: Arc::new(auth.clone()),
+                policy: policy.clone(),
+            })
+        }
+
+        async fn resolve_binding(
+            &self,
+            binding: &ValidatedBinding,
+            _env: &ResolverEnvironment,
+        ) -> Result<ResolvedConnection, ProviderAuthError> {
+            Ok(ResolvedConnection {
+                provider: binding.provider,
+                backend: binding.backend,
+                backend_profile: binding.backend_profile.clone(),
+                auth_lease: Arc::new(StaticLease::inline_secret(
+                    "sk-test".into(),
+                    meerkat_core::AuthMetadata::default(),
+                    None,
+                    "recording",
+                )),
+            })
+        }
+
+        fn build_client(
+            &self,
+            _connection: ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+            Err(ProviderClientError::MissingFeature("not-needed-for-test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_forwards_canonical_connection_ref_into_validated_binding() {
+        let seen_connection_ref = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(RecordingRuntime {
+            seen_connection_ref: Arc::clone(&seen_connection_ref),
+        }) as Arc<dyn ProviderRuntime>;
+        let registry = ProviderRuntimeRegistry::empty().with_runtime(runtime);
+        let realm = meerkat_core::RealmConnectionSet::synthesize_inline_default(
+            Provider::OpenAI,
+            "sk-test".into(),
+        );
+        let env = ResolverEnvironment::testing();
+        let binding_id = realm
+            .default_binding
+            .clone()
+            .expect("synthesized realm should have a default binding");
+
+        let resolved = registry
+            .resolve(&realm, &binding_id, &env)
+            .await
+            .expect("registry resolve should succeed");
+
+        assert_eq!(resolved.provider, Provider::OpenAI);
+        assert_eq!(
+            seen_connection_ref.lock().clone(),
+            Some(ConnectionRef {
+                realm_id: "env_default".into(),
+                binding_id,
+            })
+        );
     }
 }

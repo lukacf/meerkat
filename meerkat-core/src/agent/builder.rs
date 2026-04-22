@@ -334,7 +334,7 @@ impl AgentBuilder {
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
             turn_state_handle: self.turn_state_handle,
-            turn_state: super::turn_state::LocalTurnExecutionState::new(),
+            standalone_execution_state: Default::default(),
             runtime_execution_kind: None,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
@@ -602,11 +602,17 @@ mod tests {
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
+    use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
     use crate::lifecycle::RunId;
+    use crate::lifecycle::RuntimeExecutionKind;
     use crate::ops::{AsyncOpRef, OperationId};
-    use crate::turn_execution_authority::{ContentShape, TurnExecutionInput};
+    use crate::turn_execution_authority::{
+        ContentShape, TurnExecutionInput, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    };
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
 
@@ -671,6 +677,193 @@ mod tests {
         }
         async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
             Ok(None)
+        }
+    }
+
+    struct MockRuntimeTurnStateHandle {
+        snapshot: Mutex<TurnStateSnapshot>,
+    }
+
+    impl MockRuntimeTurnStateHandle {
+        fn new() -> Self {
+            Self {
+                snapshot: Mutex::new(TurnStateSnapshot {
+                    turn_phase: TurnPhase::Ready,
+                    active_run_id: None,
+                    primitive_kind: None,
+                    admitted_content_shape: None,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    tool_calls_pending: 0,
+                    pending_op_refs: BTreeSet::new(),
+                    barrier_operation_ids: BTreeSet::new(),
+                    has_barrier_ops: false,
+                    barrier_satisfied: true,
+                    boundary_count: 0,
+                    cancel_after_boundary: false,
+                    terminal_outcome: None,
+                    extraction_attempts: 0,
+                    max_extraction_retries: 0,
+                }),
+            }
+        }
+    }
+
+    impl TurnStateHandle for MockRuntimeTurnStateHandle {
+        fn start_conversation_run(
+            &self,
+            run_id: RunId,
+            primitive_kind: TurnPrimitiveKind,
+            admitted_content_shape: String,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            max_extraction_retries: u64,
+        ) -> Result<(), DslTransitionError> {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.turn_phase = TurnPhase::ApplyingPrimitive;
+            snapshot.active_run_id = Some(run_id);
+            snapshot.primitive_kind = Some(primitive_kind);
+            snapshot.admitted_content_shape = Some(admitted_content_shape);
+            snapshot.vision_enabled = vision_enabled;
+            snapshot.image_tool_results_enabled = image_tool_results_enabled;
+            snapshot.max_extraction_retries = max_extraction_retries;
+            Ok(())
+        }
+
+        fn start_immediate_append(
+            &self,
+            run_id: RunId,
+            admitted_content_shape: String,
+        ) -> Result<(), DslTransitionError> {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.turn_phase = TurnPhase::ApplyingPrimitive;
+            snapshot.active_run_id = Some(run_id);
+            snapshot.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
+            snapshot.admitted_content_shape = Some(admitted_content_shape);
+            Ok(())
+        }
+
+        fn start_immediate_context(
+            &self,
+            run_id: RunId,
+            admitted_content_shape: String,
+        ) -> Result<(), DslTransitionError> {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.turn_phase = TurnPhase::ApplyingPrimitive;
+            snapshot.active_run_id = Some(run_id);
+            snapshot.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
+            snapshot.admitted_content_shape = Some(admitted_content_shape);
+            Ok(())
+        }
+
+        fn primitive_applied(&self) -> Result<(), DslTransitionError> {
+            self.snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .turn_phase = TurnPhase::CallingLlm;
+            Ok(())
+        }
+
+        fn llm_returned_tool_calls(&self, _tool_count: u64) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn llm_returned_terminal(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn register_pending_ops(
+            &self,
+            _op_refs: BTreeSet<String>,
+            _barrier_operation_ids: BTreeSet<String>,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn tool_calls_resolved(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn ops_barrier_satisfied(
+            &self,
+            _operation_ids: BTreeSet<String>,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn boundary_continue(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn boundary_complete(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn enter_extraction(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn extraction_start(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn extraction_validation_passed(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn extraction_validation_failed(&self, _error: String) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn recoverable_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn fatal_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn retry_requested(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn cancel_now(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn cancellation_observed(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn acknowledge_terminal(
+            &self,
+            _outcome: TurnTerminalOutcome,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn turn_limit_reached(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn budget_exhausted(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn time_budget_exceeded(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn run_failed(&self, _run_id: RunId, _error: String) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+        fn run_cancelled(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn snapshot(&self) -> TurnStateSnapshot {
+            self.snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -858,48 +1051,53 @@ mod tests {
         let barrier_id = OperationId::new();
         let detached_id = OperationId::new();
 
-        let start_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::StartConversationRun {
-                run_id: run_id.clone(),
-            });
+        let start_result =
+            agent
+                .standalone_execution_state
+                .apply(TurnExecutionInput::StartConversationRun {
+                    run_id: run_id.clone(),
+                    admitted_content_shape: ContentShape("prompt_text".into()),
+                    vision_enabled: true,
+                    image_tool_results_enabled: true,
+                    max_extraction_retries: 0,
+                });
         assert!(
             start_result.is_ok(),
             "start run should succeed: {start_result:?}"
         );
-        let primitive_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::PrimitiveApplied {
-                run_id: run_id.clone(),
-                admitted_content_shape: ContentShape("prompt_text".into()),
-                vision_enabled: true,
-                image_tool_results_enabled: true,
-            });
+        let primitive_result =
+            agent
+                .standalone_execution_state
+                .apply(TurnExecutionInput::PrimitiveApplied {
+                    run_id: run_id.clone(),
+                });
         assert!(
             primitive_result.is_ok(),
             "primitive applied should succeed: {primitive_result:?}"
         );
-        let tool_call_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::LlmReturnedToolCalls {
-                run_id: run_id.clone(),
-                tool_count: 2,
-            });
+        let tool_call_result =
+            agent
+                .standalone_execution_state
+                .apply(TurnExecutionInput::LlmReturnedToolCalls {
+                    run_id: run_id.clone(),
+                    tool_count: 2,
+                });
         assert!(
             tool_call_result.is_ok(),
             "tool call transition should succeed: {tool_call_result:?}"
         );
-        let pending_ops_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::RegisterPendingOps {
-                run_id: run_id.clone(),
-                op_refs: vec![
-                    AsyncOpRef::barrier(barrier_id.clone()),
-                    AsyncOpRef::detached(detached_id.clone()),
-                ],
-                barrier_operation_ids: vec![barrier_id.clone()],
-                has_barrier_ops: true,
-            });
+        let pending_ops_result =
+            agent
+                .standalone_execution_state
+                .apply(TurnExecutionInput::RegisterPendingOps {
+                    run_id: run_id.clone(),
+                    op_refs: vec![
+                        AsyncOpRef::barrier(barrier_id.clone()),
+                        AsyncOpRef::detached(detached_id.clone()),
+                    ],
+                    barrier_operation_ids: vec![barrier_id.clone()],
+                    has_barrier_ops: true,
+                });
         assert!(
             pending_ops_result.is_ok(),
             "pending ops should register: {pending_ops_result:?}"
@@ -942,5 +1140,55 @@ mod tests {
         assert_eq!(snapshot.extraction_attempts, 0);
         assert_eq!(snapshot.max_extraction_retries, 0);
         assert_eq!(snapshot.applied_cursor, 42);
+    }
+
+    #[tokio::test]
+    async fn test_execution_snapshot_prefers_runtime_turn_state_handle() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let runtime_handle = Arc::new(MockRuntimeTurnStateHandle::new());
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(runtime_handle)
+            .build(client, tools, store)
+            .await;
+        agent.runtime_execution_kind = Some(RuntimeExecutionKind::ContentTurn);
+
+        let run_id = RunId::new();
+        let start_result = agent.apply_turn_input(TurnExecutionInput::StartConversationRun {
+            run_id: run_id.clone(),
+            admitted_content_shape: ContentShape("runtime-path".into()),
+            vision_enabled: true,
+            image_tool_results_enabled: false,
+            max_extraction_retries: 3,
+        });
+        assert!(
+            start_result.is_ok(),
+            "runtime-backed start should succeed: {start_result:?}"
+        );
+        let primitive_result = agent.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+            run_id: run_id.clone(),
+        });
+        assert!(
+            primitive_result.is_ok(),
+            "runtime-backed primitive_applied should succeed: {primitive_result:?}"
+        );
+
+        // Deliberately stale local mirror: the published snapshot must come
+        // from the runtime handle, not the standalone fallback state.
+        agent.standalone_execution_state = Default::default();
+        agent.state = crate::state::LoopState::WaitingForOps;
+
+        let snapshot = agent.execution_snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.active_run_id, Some(run_id));
+        assert_eq!(snapshot.primitive_kind, TurnPrimitiveKind::ConversationTurn);
+        assert_eq!(
+            snapshot.admitted_content_shape,
+            Some(ContentShape("runtime-path".into()))
+        );
+        assert!(snapshot.vision_enabled);
+        assert_eq!(snapshot.max_extraction_retries, 3);
     }
 }

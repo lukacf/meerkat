@@ -1176,7 +1176,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert status["fence_token"] == 7
     assert status["realtime_attachment_status"] == "binding_ready"
 
-    runtime_status = await client.runtime_realtime_attachment_status("session-1")
+    runtime_status = await client.session_realtime_attachment_status("session-1")
     assert runtime_status.status == "binding_ready"
 
     client._request = fake_request  # type: ignore[method-assign]

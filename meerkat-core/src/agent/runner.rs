@@ -34,7 +34,6 @@ fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
 
 fn runtime_execution_snapshot(
     handle: &dyn crate::TurnStateHandle,
-    active_run_id: Option<crate::lifecycle::RunId>,
     applied_cursor: crate::completion_feed::CompletionSeq,
 ) -> Option<crate::AgentExecutionSnapshot> {
     let snapshot = handle.snapshot();
@@ -68,7 +67,7 @@ fn runtime_execution_snapshot(
     Some(crate::AgentExecutionSnapshot {
         loop_state: turn_phase.to_loop_state(),
         turn_phase,
-        active_run_id,
+        active_run_id: snapshot.active_run_id,
         primitive_kind,
         admitted_content_shape: snapshot.admitted_content_shape.map(ContentShape),
         vision_enabled: snapshot.vision_enabled,
@@ -420,11 +419,7 @@ where
     /// Snapshot the agent's live execution state for diagnostics and mapping.
     pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
         if let Some(handle) = self.turn_state_handle.as_deref() {
-            if let Some(snapshot) = runtime_execution_snapshot(
-                handle,
-                self.turn_state.active_run().cloned(),
-                self.applied_cursor,
-            ) {
+            if let Some(snapshot) = runtime_execution_snapshot(handle, self.applied_cursor) {
                 return snapshot;
             }
             tracing::warn!(
@@ -434,30 +429,35 @@ where
 
         crate::AgentExecutionSnapshot {
             loop_state: self.state.clone(),
-            turn_phase: self.turn_state.phase(),
-            active_run_id: self.turn_state.active_run().cloned(),
-            primitive_kind: self.turn_state.primitive_kind(),
-            admitted_content_shape: self.turn_state.admitted_content_shape().cloned(),
-            vision_enabled: self.turn_state.vision_enabled(),
-            image_tool_results_enabled: self.turn_state.image_tool_results_enabled(),
-            tool_calls_pending: self.turn_state.tool_calls_pending(),
+            turn_phase: self.standalone_execution_state.phase(),
+            active_run_id: self.standalone_execution_state.active_run().cloned(),
+            primitive_kind: self.standalone_execution_state.primitive_kind(),
+            admitted_content_shape: self
+                .standalone_execution_state
+                .admitted_content_shape()
+                .cloned(),
+            vision_enabled: self.standalone_execution_state.vision_enabled(),
+            image_tool_results_enabled: self
+                .standalone_execution_state
+                .image_tool_results_enabled(),
+            tool_calls_pending: self.standalone_execution_state.tool_calls_pending(),
             pending_operation_ids: self
-                .turn_state
+                .standalone_execution_state
                 .pending_op_ids()
                 .map(|ids| ids.into_iter().cloned().collect()),
             barrier_operation_ids: self
-                .turn_state
+                .standalone_execution_state
                 .barrier_op_ids()
                 .into_iter()
                 .cloned()
                 .collect(),
-            has_barrier_ops: self.turn_state.has_barrier_ops(),
-            barrier_satisfied: self.turn_state.barrier_satisfied(),
-            boundary_count: self.turn_state.boundary_count(),
-            cancel_after_boundary: self.turn_state.cancel_after_boundary(),
-            terminal_outcome: self.turn_state.terminal_outcome(),
-            extraction_attempts: self.turn_state.extraction_attempts(),
-            max_extraction_retries: self.turn_state.max_extraction_retries(),
+            has_barrier_ops: self.standalone_execution_state.has_barrier_ops(),
+            barrier_satisfied: self.standalone_execution_state.barrier_satisfied(),
+            boundary_count: self.standalone_execution_state.boundary_count(),
+            cancel_after_boundary: self.standalone_execution_state.cancel_after_boundary(),
+            terminal_outcome: self.standalone_execution_state.terminal_outcome(),
+            extraction_attempts: self.standalone_execution_state.extraction_attempts(),
+            max_extraction_retries: self.standalone_execution_state.max_extraction_retries(),
             applied_cursor: self.applied_cursor,
         }
     }
@@ -867,11 +867,12 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
+        let runtime_execution_kind = self.runtime_execution_kind;
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
-        self.runtime_execution_kind = None;
+        self.standalone_execution_state = Default::default();
+        self.runtime_execution_kind = runtime_execution_kind;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -913,24 +914,28 @@ where
             return Err(err);
         }
 
-        match self.run_loop(event_tx.clone()).await {
+        let result = match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
                 if let Err(err) = self
                     .run_completed_hooks(&mut result, event_tx.as_ref())
                     .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
-                    return Err(err);
+                    Err(err)
+                } else {
+                    self.emit_run_completed_event(&result, event_tx.as_ref())
+                        .await;
+                    Ok(result)
                 }
-                self.emit_run_completed_event(&result, event_tx.as_ref())
-                    .await;
-                Ok(result)
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
-        }
+        };
+
+        self.runtime_execution_kind = None;
+        result
     }
 
     /// Core run-pending implementation shared by `run_pending()` and
@@ -945,6 +950,7 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
+        let runtime_execution_kind = self.runtime_execution_kind;
 
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
             Message::User(u) => Some(u.text_content()),
@@ -960,8 +966,8 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
-        self.runtime_execution_kind = None;
+        self.standalone_execution_state = Default::default();
+        self.runtime_execution_kind = runtime_execution_kind;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -974,24 +980,28 @@ where
             return Err(err);
         }
 
-        match self.run_loop(event_tx.clone()).await {
+        let result = match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
                 if let Err(err) = self
                     .run_completed_hooks(&mut result, event_tx.as_ref())
                     .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
-                    return Err(err);
+                    Err(err)
+                } else {
+                    self.emit_run_completed_event(&result, event_tx.as_ref())
+                        .await;
+                    Ok(result)
                 }
-                self.emit_run_completed_event(&result, event_tx.as_ref())
-                    .await;
-                Ok(result)
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
-        }
+        };
+
+        self.runtime_execution_kind = None;
+        result
     }
 
     /// Cancel the current run
@@ -1000,7 +1010,7 @@ where
 
         // Route through the shared turn-input path so runtime-backed turn
         // state stays aligned with the standalone local fallback.
-        let input = if let Some(run_id) = self.turn_state.active_run().cloned() {
+        let input = if let Some(run_id) = self.standalone_execution_state.active_run().cloned() {
             TurnExecutionInput::CancelNow { run_id }
         } else {
             TurnExecutionInput::ForceCancelNoRun

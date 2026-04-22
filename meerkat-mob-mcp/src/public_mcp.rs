@@ -18,11 +18,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
 
-fn spawn_result_payload(result: &meerkat_mob::SpawnResult) -> Value {
+fn member_ref_for(
+    mob_id: &meerkat_mob::MobId,
+    agent_identity: &meerkat_mob::AgentIdentity,
+) -> String {
+    meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), agent_identity.as_str())
+        .as_str()
+        .to_string()
+}
+
+fn spawn_result_payload(mob_id: &meerkat_mob::MobId, result: &meerkat_mob::SpawnResult) -> Value {
     json!({
         "agent_identity": result.agent_identity,
-        "agent_runtime_id": result.agent_runtime_id,
-        "fence_token": result.fence_token,
+        "member_ref": member_ref_for(mob_id, &result.agent_identity),
+    })
+}
+
+fn respawn_receipt_payload(
+    mob_id: &meerkat_mob::MobId,
+    receipt: &meerkat_mob::MemberRespawnReceipt,
+) -> Value {
+    json!({
+        "agent_identity": receipt.identity,
+        "member_ref": member_ref_for(mob_id, &receipt.identity),
     })
 }
 
@@ -250,12 +268,12 @@ fn realtime_status_from_runtime(
         meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment replacement is pending"),
-            1,
+            0,
         ),
         meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment requires reattach"),
-            1,
+            0,
         ),
     }
 }
@@ -842,7 +860,7 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = spawn_result_payload(&spawn_result);
+            let mut payload = spawn_result_payload(&mob_id, &spawn_result);
             payload["mob_id"] = json!(mob_id);
             Ok(payload)
         }
@@ -873,7 +891,7 @@ pub async fn handle_public_tools_call(
             Ok(json!({
                 "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| match result {
                     Ok(spawn_result) => {
-                        let mut payload = spawn_result_payload(&spawn_result);
+                        let mut payload = spawn_result_payload(&mob_id, &spawn_result);
                         payload["ok"] = json!(true);
                         payload
                     }
@@ -913,14 +931,14 @@ pub async fn handle_public_tools_call(
             {
                 Ok(receipt) => Ok(json!({
                     "status": "completed",
-                    "receipt": receipt,
+                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
                 })),
                 Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
                     receipt,
                     failed_peer_ids,
                 }) => Ok(json!({
                     "status": "topology_restore_failed",
-                    "receipt": receipt,
+                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
                     "failed_peer_ids": failed_peer_ids
                         .iter()
                         .map(std::string::ToString::to_string)
@@ -972,8 +990,7 @@ pub async fn handle_public_tools_call(
             Ok(json!({
                 "mob_id": mob_id,
                 "agent_identity": receipt.identity,
-                "agent_runtime_id": receipt.agent_runtime_id,
-                "fence_token": receipt.fence_token,
+                "member_ref": member_ref_for(&mob_id, &receipt.identity),
                 "handling_mode": input.handling_mode,
             }))
         }

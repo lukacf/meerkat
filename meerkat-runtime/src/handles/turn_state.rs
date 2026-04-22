@@ -284,6 +284,9 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         let state = self.dsl.snapshot_state();
         TurnStateSnapshot {
             turn_phase: map_turn_phase(state.turn_phase),
+            active_run_id: state
+                .current_run_id
+                .and_then(|run_id| uuid::Uuid::parse_str(&run_id.0).ok().map(RunId::from_uuid)),
             primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.clone(),
             vision_enabled: state.vision_enabled,

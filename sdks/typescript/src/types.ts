@@ -594,6 +594,10 @@ export interface SessionOptions {
   appContext?: unknown;
   shellEnv?: Readonly<Record<string, string>>;
   externalTools?: readonly Record<string, unknown>[];
+  connectionRef?: {
+    readonly realmId: string;
+    readonly bindingId: string;
+  };
 }
 
 

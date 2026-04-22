@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::OpsLifecycleRegistry;
 
 impl MeerkatMachine {
     pub(super) async fn interrupt_current_run_inner(
@@ -86,7 +87,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         command: RunControlCommand,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, completions, control_tx) = {
+        let (driver, completions, control_tx, ops_lifecycle) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -97,6 +98,7 @@ impl MeerkatMachine {
                 entry.driver.clone(),
                 entry.completions.clone(),
                 entry.control_sender(),
+                entry.ops_lifecycle.clone(),
             )
         };
 
@@ -133,6 +135,13 @@ impl MeerkatMachine {
         }
 
         if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
+            ops_lifecycle
+                .terminate_owner("runtime stopped".into())
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "failed to terminate owner operations during stop: {err}"
+                    ))
+                })?;
             let mut driver = driver.lock().await;
             machine_stop_runtime(&mut driver).await?;
             drop(driver);

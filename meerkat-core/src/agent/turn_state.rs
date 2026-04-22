@@ -34,6 +34,7 @@ struct LocalTurnExecutionFields {
     boundary_count: u32,
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
+    extraction_active: bool,
     extraction_attempts: u32,
     max_extraction_retries: u32,
 }
@@ -54,6 +55,7 @@ impl LocalTurnExecutionFields {
             boundary_count: 0,
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
+            extraction_active: false,
             extraction_attempts: 0,
             max_extraction_retries: 0,
         }
@@ -150,11 +152,7 @@ impl LocalTurnExecutionState {
     }
 
     pub(crate) fn in_extraction_flow(&self) -> bool {
-        self.fields.max_extraction_retries > 0
-    }
-
-    pub(crate) fn can_accept(&self, input: &TurnExecutionInput) -> bool {
-        self.evaluate(input).is_ok()
+        self.fields.extraction_active
     }
 
     pub(crate) fn apply(
@@ -224,75 +222,97 @@ impl LocalTurnExecutionState {
         let mut effects = Vec::new();
 
         let next_phase = match (phase, input) {
-            (Ready, StartConversationRun { run_id }) => {
+            (
+                Ready,
+                StartConversationRun {
+                    run_id,
+                    admitted_content_shape,
+                    vision_enabled,
+                    image_tool_results_enabled,
+                    max_extraction_retries,
+                },
+            ) => {
                 fields.active_run = Some(run_id.clone());
                 fields.primitive_kind = TurnPrimitiveKind::ConversationTurn;
                 fields.tool_calls_pending = 0;
-                fields.admitted_content_shape = None;
-                fields.vision_enabled = false;
-                fields.image_tool_results_enabled = false;
+                fields.admitted_content_shape = Some(admitted_content_shape.clone());
+                fields.vision_enabled = *vision_enabled;
+                fields.image_tool_results_enabled = *image_tool_results_enabled;
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.extraction_active = false;
                 fields.pending_op_refs = None;
                 fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
-                effects.push(TurnExecutionEffect::RunStarted {
-                    run_id: run_id.clone(),
-                });
-                ApplyingPrimitive
-            }
-            (Ready, StartImmediateAppend { run_id }) => {
-                fields.active_run = Some(run_id.clone());
-                fields.primitive_kind = TurnPrimitiveKind::ImmediateAppend;
-                fields.tool_calls_pending = 0;
-                fields.admitted_content_shape = None;
-                fields.vision_enabled = false;
-                fields.image_tool_results_enabled = false;
-                fields.boundary_count = 0;
-                fields.cancel_after_boundary = false;
-                fields.terminal_outcome = TurnTerminalOutcome::None;
-                fields.pending_op_refs = None;
-                fields.barrier_operation_ids = Vec::new();
-                fields.has_barrier_ops = false;
-                effects.push(TurnExecutionEffect::RunStarted {
-                    run_id: run_id.clone(),
-                });
-                ApplyingPrimitive
-            }
-            (Ready, StartImmediateContext { run_id }) => {
-                fields.active_run = Some(run_id.clone());
-                fields.primitive_kind = TurnPrimitiveKind::ImmediateContextAppend;
-                fields.tool_calls_pending = 0;
-                fields.admitted_content_shape = None;
-                fields.vision_enabled = false;
-                fields.image_tool_results_enabled = false;
-                fields.boundary_count = 0;
-                fields.cancel_after_boundary = false;
-                fields.terminal_outcome = TurnTerminalOutcome::None;
-                fields.pending_op_refs = None;
-                fields.barrier_operation_ids = Vec::new();
-                fields.has_barrier_ops = false;
+                fields.barrier_satisfied = false;
+                fields.extraction_attempts = 0;
+                fields.max_extraction_retries = *max_extraction_retries;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
                 ApplyingPrimitive
             }
             (
-                ApplyingPrimitive,
-                PrimitiveApplied {
+                Ready,
+                StartImmediateAppend {
                     run_id,
                     admitted_content_shape,
-                    vision_enabled,
-                    image_tool_results_enabled,
                 },
             ) => {
+                fields.active_run = Some(run_id.clone());
+                fields.primitive_kind = TurnPrimitiveKind::ImmediateAppend;
+                fields.tool_calls_pending = 0;
+                fields.admitted_content_shape = Some(admitted_content_shape.clone());
+                fields.vision_enabled = false;
+                fields.image_tool_results_enabled = false;
+                fields.boundary_count = 0;
+                fields.cancel_after_boundary = false;
+                fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.extraction_active = false;
+                fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
+                fields.has_barrier_ops = false;
+                fields.barrier_satisfied = false;
+                fields.extraction_attempts = 0;
+                fields.max_extraction_retries = 0;
+                effects.push(TurnExecutionEffect::RunStarted {
+                    run_id: run_id.clone(),
+                });
+                ApplyingPrimitive
+            }
+            (
+                Ready,
+                StartImmediateContext {
+                    run_id,
+                    admitted_content_shape,
+                },
+            ) => {
+                fields.active_run = Some(run_id.clone());
+                fields.primitive_kind = TurnPrimitiveKind::ImmediateContextAppend;
+                fields.tool_calls_pending = 0;
+                fields.admitted_content_shape = Some(admitted_content_shape.clone());
+                fields.vision_enabled = false;
+                fields.image_tool_results_enabled = false;
+                fields.boundary_count = 0;
+                fields.cancel_after_boundary = false;
+                fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.extraction_active = false;
+                fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
+                fields.has_barrier_ops = false;
+                fields.barrier_satisfied = false;
+                fields.extraction_attempts = 0;
+                fields.max_extraction_retries = 0;
+                effects.push(TurnExecutionEffect::RunStarted {
+                    run_id: run_id.clone(),
+                });
+                ApplyingPrimitive
+            }
+            (ApplyingPrimitive, PrimitiveApplied { run_id }) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.admitted_content_shape = Some(admitted_content_shape.clone());
-                fields.vision_enabled = *vision_enabled;
-                fields.image_tool_results_enabled = *image_tool_results_enabled;
 
                 match fields.primitive_kind {
                     TurnPrimitiveKind::ConversationTurn => {
@@ -447,6 +467,11 @@ impl LocalTurnExecutionState {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                if fields.extraction_active {
+                    fields.extraction_attempts += 1;
+                } else {
+                    fields.extraction_active = true;
+                }
                 fields.max_extraction_retries = *max_retries;
                 Extracting
             }
@@ -471,7 +496,6 @@ impl LocalTurnExecutionState {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.extraction_attempts += 1;
                 if fields.extraction_attempts < fields.max_extraction_retries {
                     effects.push(TurnExecutionEffect::CheckCompaction);
                     CallingLlm

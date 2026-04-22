@@ -13,7 +13,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod default_sources;
 mod identity;
+pub use default_sources::{
+    DefaultSkillSourceKind, default_source_fingerprint, default_source_identity_record,
+    default_source_uuid,
+};
 pub use identity::{SkillAlias, SourceIdentityRegistry};
 
 // ---------------------------------------------------------------------------

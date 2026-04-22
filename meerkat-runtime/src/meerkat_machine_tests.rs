@@ -8116,43 +8116,24 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     })
     .await
     .expect("attached stop should eventually publish the Stopped phase");
-    assert_eq!(
-        after_stop.ops.wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop currently preserves the authority-owned wait request"
-    );
-    assert!(
-        after_stop.ops.pending_wait_present,
-        "stop currently preserves the pending wait carrier while the operation remains active"
-    );
-    assert_eq!(
-        after_stop.ops.pending_wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop should preserve request-id agreement across the wait carrier seam"
-    );
-    assert_eq!(
-        after_stop.ops.wait_operation_ids,
-        vec![operation_id.clone()],
-        "stop should preserve the tracked wait targets until the operation settles"
-    );
-
-    registry
-        .complete_operation(
-            &operation_id,
-            OperationResult {
-                id: operation_id.clone(),
-                content: "done".into(),
-                is_error: false,
-                duration_ms: 1,
-                tokens_used: 0,
-            },
-        )
-        .expect("operation should complete after stop");
+    assert_eq!(after_stop.ops.wait_request_id, None);
+    assert!(!after_stop.ops.pending_wait_present);
+    assert_eq!(after_stop.ops.pending_wait_request_id, None);
+    assert!(after_stop.ops.wait_operation_ids.is_empty());
     let wait_result = wait_future.await.expect("wait_all should still resolve");
     assert_eq!(wait_result.satisfied.wait_request_id, wait_request_id);
     assert_eq!(
         wait_result.satisfied.operation_ids,
         vec![operation_id.clone()]
+    );
+    assert_eq!(
+        wait_result.outcomes,
+        vec![(
+            operation_id.clone(),
+            meerkat_core::OperationTerminalOutcome::Terminated {
+                reason: "runtime stopped".into(),
+            },
+        )]
     );
 
     let settled = adapter
@@ -8290,40 +8271,24 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
         after_stop.completion_waiters.waiting_inputs.is_empty(),
         "stop should clear input-owned steered completion waiters immediately"
     );
-    assert_eq!(
-        after_stop.ops.wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop should preserve the authority-owned wait request after steered completion waiters clear"
-    );
-    assert!(after_stop.ops.pending_wait_present);
-    assert_eq!(
-        after_stop.ops.pending_wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop should preserve request-id agreement across the wait carrier seam"
-    );
-    assert_eq!(
-        after_stop.ops.wait_operation_ids,
-        vec![operation_id.clone()],
-        "stop should preserve the tracked wait target until the operation settles"
-    );
-
-    registry
-        .complete_operation(
-            &operation_id,
-            OperationResult {
-                id: operation_id.clone(),
-                content: "done".into(),
-                is_error: false,
-                duration_ms: 1,
-                tokens_used: 0,
-            },
-        )
-        .expect("operation should complete after stop");
+    assert_eq!(after_stop.ops.wait_request_id, None);
+    assert!(!after_stop.ops.pending_wait_present);
+    assert_eq!(after_stop.ops.pending_wait_request_id, None);
+    assert!(after_stop.ops.wait_operation_ids.is_empty());
     let wait_result = wait_future.await.expect("wait_all should still resolve");
     assert_eq!(wait_result.satisfied.wait_request_id, wait_request_id);
     assert_eq!(
         wait_result.satisfied.operation_ids,
         vec![operation_id.clone()]
+    );
+    assert_eq!(
+        wait_result.outcomes,
+        vec![(
+            operation_id.clone(),
+            meerkat_core::OperationTerminalOutcome::Terminated {
+                reason: "runtime stopped".into(),
+            },
+        )]
     );
 
     let settled = adapter
@@ -8446,40 +8411,24 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
         after_stop.completion_waiters.waiting_inputs.is_empty(),
         "stop should clear input-owned completion waiters immediately"
     );
-    assert_eq!(
-        after_stop.ops.wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop should preserve the authority-owned wait request after completion waiters clear"
-    );
-    assert!(after_stop.ops.pending_wait_present);
-    assert_eq!(
-        after_stop.ops.pending_wait_request_id,
-        Some(wait_request_id.clone()),
-        "stop should preserve request-id agreement across the wait carrier seam"
-    );
-    assert_eq!(
-        after_stop.ops.wait_operation_ids,
-        vec![operation_id.clone()],
-        "stop should preserve the tracked wait target until the operation settles"
-    );
-
-    registry
-        .complete_operation(
-            &operation_id,
-            OperationResult {
-                id: operation_id.clone(),
-                content: "done".into(),
-                is_error: false,
-                duration_ms: 1,
-                tokens_used: 0,
-            },
-        )
-        .expect("operation should complete after stop");
+    assert_eq!(after_stop.ops.wait_request_id, None);
+    assert!(!after_stop.ops.pending_wait_present);
+    assert_eq!(after_stop.ops.pending_wait_request_id, None);
+    assert!(after_stop.ops.wait_operation_ids.is_empty());
     let wait_result = wait_future.await.expect("wait_all should still resolve");
     assert_eq!(wait_result.satisfied.wait_request_id, wait_request_id);
     assert_eq!(
         wait_result.satisfied.operation_ids,
         vec![operation_id.clone()]
+    );
+    assert_eq!(
+        wait_result.outcomes,
+        vec![(
+            operation_id.clone(),
+            meerkat_core::OperationTerminalOutcome::Terminated {
+                reason: "runtime stopped".into(),
+            },
+        )]
     );
 
     let settled = adapter
@@ -10075,6 +10024,80 @@ async fn stop_runtime_executor_rejects_destroyed_session() {
     assert!(
         matches!(err, RuntimeDriverError::Destroyed),
         "expected Destroyed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn stop_runtime_executor_terminates_owner_operations_when_no_loop_is_attached() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    let registry = adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .expect("ops lifecycle registry should exist for registered session");
+
+    let provisioning_id = OperationId::new();
+    registry
+        .register_operation(OperationSpec {
+            id: provisioning_id.clone(),
+            kind: OperationKind::BackgroundToolOp,
+            owner_session_id: session_id.clone(),
+            display_name: "phase2-stop-provisioning".into(),
+            source_label: "phase2".into(),
+            child_session_id: None,
+            expect_peer_channel: false,
+        })
+        .expect("register provisioning op");
+    let provisioning_watch = registry
+        .register_watcher(&provisioning_id)
+        .expect("watch provisioning op");
+
+    let running_id = OperationId::new();
+    registry
+        .register_operation(OperationSpec {
+            id: running_id.clone(),
+            kind: OperationKind::BackgroundToolOp,
+            owner_session_id: session_id.clone(),
+            display_name: "phase2-stop-running".into(),
+            source_label: "phase2".into(),
+            child_session_id: None,
+            expect_peer_channel: false,
+        })
+        .expect("register running op");
+    registry
+        .provisioning_succeeded(&running_id)
+        .expect("promote running op");
+    let running_watch = registry
+        .register_watcher(&running_id)
+        .expect("watch running op");
+
+    adapter
+        .stop_runtime_executor(
+            &session_id,
+            RunControlCommand::StopRuntimeExecutor {
+                reason: "phase2 direct stop".to_string(),
+            },
+        )
+        .await
+        .expect("stop_runtime_executor should take the direct stop path");
+
+    let expected = meerkat_core::OperationTerminalOutcome::Terminated {
+        reason: "runtime stopped".into(),
+    };
+    assert_eq!(provisioning_watch.wait().await, expected.clone());
+    assert_eq!(running_watch.wait().await, expected.clone());
+    assert_eq!(
+        registry
+            .snapshot(&provisioning_id)
+            .expect("snapshot")
+            .status,
+        meerkat_core::OperationStatus::Terminated
+    );
+    assert_eq!(
+        registry.snapshot(&running_id).expect("snapshot").status,
+        meerkat_core::OperationStatus::Terminated
     );
 }
 

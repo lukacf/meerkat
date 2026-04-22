@@ -6,11 +6,25 @@ pub mod oauth;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_auth_core::authorizers::StaticBearerAuthorizer;
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+use meerkat_auth_core::authorizers::{AwsCredentialProvider, AwsStsAuthorizer};
+#[cfg(all(not(target_arch = "wasm32"), feature = "foundry"))]
+use meerkat_auth_core::authorizers::{AzureAdAuthorizer, AzureClientCredentials};
+#[cfg(all(not(target_arch = "wasm32"), feature = "vertex"))]
+use meerkat_auth_core::authorizers::{GoogleAuthAuthorizer, GoogleAuthChain};
+use meerkat_auth_core::resolver::{
+    apply_auth_resolution_policy, extract_inline_secret_envelope, interactive_login_error,
+    resolve_external_authorizer, resolve_simple_secret,
+};
 use meerkat_llm_core::LlmClient;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -82,6 +96,63 @@ pub const ALLOWED_BINDINGS: &[(AnthropicBackendKind, AnthropicAuthMethod)] = &[
     ),
 ];
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+fn parse_bedrock_region(base_url: Option<&str>, env: &ResolverEnvironment) -> Option<String> {
+    base_url
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .and_then(|url| url.host_str().map(str::to_string))
+        .and_then(|host| {
+            let mut parts = host.split('.');
+            let first = parts.next()?;
+            let region = parts.next()?;
+            if first == "bedrock-runtime" {
+                Some(region.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| (env.env_lookup)("AWS_REGION"))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+fn bedrock_authorizer(
+    base_url: Option<&str>,
+    env: &ResolverEnvironment,
+) -> Result<Arc<dyn meerkat_core::HttpAuthorizer>, ProviderAuthError> {
+    let region = parse_bedrock_region(base_url, env).ok_or_else(|| {
+        ProviderAuthError::SourceResolutionFailed(
+            "bedrock_aws_sigv4 requires an AWS region via BackendProfile.base_url or AWS_REGION"
+                .into(),
+        )
+    })?;
+    let provider = if let Some(token) = (env.env_lookup)("AWS_BEARER_TOKEN_BEDROCK") {
+        AwsCredentialProvider::BearerToken(token)
+    } else {
+        AwsCredentialProvider::Env(env.env_lookup.clone())
+    };
+    Ok(Arc::new(AwsStsAuthorizer::new(region, provider)))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "vertex"))]
+fn vertex_authorizer(env: &ResolverEnvironment) -> Arc<dyn meerkat_core::HttpAuthorizer> {
+    Arc::new(GoogleAuthAuthorizer::with_env_lookup(
+        GoogleAuthChain::Default,
+        env.env_lookup.clone(),
+    ))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "foundry"))]
+fn foundry_authorizer(
+    env: &ResolverEnvironment,
+) -> Result<Arc<dyn meerkat_core::HttpAuthorizer>, ProviderAuthError> {
+    let creds = AzureClientCredentials::from_env(|key| (env.env_lookup)(key))
+        .map_err(|error| ProviderAuthError::Auth(error.into()))?;
+    Ok(Arc::new(AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds,
+    )))
+}
+
 pub struct AnthropicProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -93,6 +164,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
 
     fn validate_binding(
         &self,
+        connection_ref: &meerkat_core::ConnectionRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -112,6 +184,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             });
         }
         Ok(ValidatedBinding {
+            connection_ref: connection_ref.clone(),
             provider: Provider::Anthropic,
             backend: NormalizedBackendKind::Anthropic(backend_kind),
             auth: NormalizedAuthMethod::Anthropic(auth_method),
@@ -161,6 +234,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             allow(unused_mut)
         )]
         let mut anthropic_subscription_tier: Option<String> = None;
+        #[allow(unused_variables, unused_mut)]
+        let mut authorizer_material: Option<(
+            Arc<dyn meerkat_core::HttpAuthorizer>,
+            AuthMetadata,
+            Option<DateTime<Utc>>,
+        )> = None;
 
         // Plan §6.11: Option<String> for secret material; None for
         // authorizer-backed paths (build_client constructs the concrete
@@ -173,35 +252,88 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 Some(resolve_simple_secret(&binding.auth_profile.source, env, binding).await?)
             }
             AnthropicAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
-                None
+                let envelope =
+                    resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
+                let (secret, metadata, expires_at) = extract_inline_secret_envelope(envelope)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    authorizer_material = Some((
+                        Arc::new(StaticBearerAuthorizer::new(
+                            secret,
+                            "anthropic-external-bearer",
+                        )),
+                        metadata,
+                        expires_at,
+                    ));
+                    None
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (metadata, expires_at);
+                    Some(secret)
+                }
             }
-            AnthropicAuthMethod::BedrockAwsSigv4
-            | AnthropicAuthMethod::VertexGoogleAuth
-            | AnthropicAuthMethod::FoundryAzureAd => None,
+            AnthropicAuthMethod::BedrockAwsSigv4 => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+                {
+                    authorizer_material = Some((
+                        bedrock_authorizer(binding.backend_profile.base_url.as_deref(), env)?,
+                        AuthMetadata::default(),
+                        None,
+                    ));
+                    None
+                }
+                #[cfg(not(all(not(target_arch = "wasm32"), feature = "bedrock")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "bedrock_aws_sigv4 requires the anthropic bedrock feature".into(),
+                    ));
+                }
+            }
+            AnthropicAuthMethod::VertexGoogleAuth => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "vertex"))]
+                {
+                    authorizer_material =
+                        Some((vertex_authorizer(env), AuthMetadata::default(), None));
+                    None
+                }
+                #[cfg(not(all(not(target_arch = "wasm32"), feature = "vertex")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "vertex_google_auth requires the anthropic vertex feature".into(),
+                    ));
+                }
+            }
+            AnthropicAuthMethod::FoundryAzureAd => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "foundry"))]
+                {
+                    authorizer_material =
+                        Some((foundry_authorizer(env)?, AuthMetadata::default(), None));
+                    None
+                }
+                #[cfg(not(all(not(target_arch = "wasm32"), feature = "foundry")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "foundry_azure_ad requires the anthropic foundry feature".into(),
+                    ));
+                }
+            }
             AnthropicAuthMethod::ClaudeAiOauth | AnthropicAuthMethod::OauthToApiKey => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
                 {
                     let store = env
                         .token_store
                         .as_ref()
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-                    let realm_id = binding
-                        .backend_profile
-                        .options
-                        .get("realm_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("dev")
-                        .to_string();
+                        .ok_or_else(|| interactive_login_error(binding))?;
                     let key = meerkat_core::auth::TokenKey::new(
-                        realm_id,
-                        binding.auth_profile.id.clone(),
+                        binding.connection_ref.realm_id.clone(),
+                        binding.connection_ref.binding_id.clone(),
                     );
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                        .ok_or_else(|| interactive_login_error(binding))?;
                     // Plan §4b.12: lift id_token claims.
                     if let Some(id_token) = persisted.id_token.as_deref()
                         && let Ok(claims) =
@@ -227,6 +359,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             {
                                 access
                             } else {
+                                if !meerkat_auth_core::resolver::refresh_allowed(binding) {
+                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                                }
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
@@ -241,9 +376,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                 runtime.get_or_refresh_access_token().await.map_err(
                                     |e| match e {
                                         oauth::AnthropicOAuthError::InteractiveLoginRequired => {
-                                            ProviderAuthError::Auth(
-                                                AuthError::InteractiveLoginRequired,
-                                            )
+                                            interactive_login_error(binding)
                                         }
                                         other => ProviderAuthError::SourceResolutionFailed(
                                             other.to_string(),
@@ -258,7 +391,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
-                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                    return Err(interactive_login_error(binding));
                 }
             }
         };
@@ -286,7 +419,8 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 },
             ));
         }
-        let source_label = format!("anthropic:{}", binding.auth_profile.id);
+        let metadata = apply_auth_resolution_policy(binding, metadata)?;
+        let source_label = format!("anthropic:{}", binding.connection_ref);
         let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
             Some(secret) => Arc::new(StaticLease::inline_secret(
                 secret,
@@ -294,10 +428,24 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 None,
                 source_label,
             )),
-            None => Arc::new(StaticLease::empty_lease(
-                AuthMetadata::default(),
-                source_label,
-            )),
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some((authorizer, authorizer_metadata, expires_at)) = authorizer_material {
+                    let metadata = apply_auth_resolution_policy(binding, authorizer_metadata)?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        expires_at,
+                        source_label,
+                    ))
+                } else {
+                    return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
+                }
+            }
         };
 
         Ok(ResolvedConnection {
@@ -465,6 +613,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn allowed_bindings_cover_api_key_and_oauth_variants() {
@@ -481,5 +630,83 @@ mod tests {
     #[test]
     fn provider_id_is_anthropic() {
         assert_eq!(AnthropicProviderRuntime.provider_id(), Provider::Anthropic);
+    }
+
+    fn backend(kind: &str) -> BackendProfile {
+        BackendProfile {
+            id: "b".into(),
+            provider: Provider::Anthropic,
+            backend_kind: kind.into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        }
+    }
+
+    fn connection_ref() -> meerkat_core::ConnectionRef {
+        meerkat_core::ConnectionRef {
+            realm_id: "realm-x".into(),
+            binding_id: "binding-y".into(),
+        }
+    }
+
+    fn auth(method: &str) -> AuthProfile {
+        AuthProfile {
+            id: "a".into(),
+            provider: Provider::Anthropic,
+            auth_method: method.into(),
+            source: meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: "sk-x".into(),
+            },
+            storage: Default::default(),
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        }
+    }
+
+    struct MockExternalResolver;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_llm_core::provider_runtime::registry::ExternalAuthResolverHandle
+        for MockExternalResolver
+    {
+        async fn resolve(
+            &self,
+            _binding: &ValidatedBinding,
+        ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
+            Ok(meerkat_core::ResolvedAuthEnvelope::InlineSecret {
+                secret: "tok-anthropic".into(),
+                metadata: AuthMetadata::default(),
+                expires_at: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn external_authorizer_builds_dynamic_lease() {
+        let rt = AnthropicProviderRuntime;
+        let mut external_auth = auth("external_authorizer");
+        external_auth.source = meerkat_core::CredentialSourceSpec::ExternalResolver {
+            handle: "mock".into(),
+        };
+        let binding = rt
+            .validate_binding(
+                &connection_ref(),
+                &backend("anthropic_api"),
+                &external_auth,
+                &BindingPolicy::default(),
+            )
+            .expect("external authorizer binding should validate");
+        let env = ResolverEnvironment::testing()
+            .with_external_resolver("mock", Arc::new(MockExternalResolver));
+        let resolved = rt
+            .resolve_binding(&binding, &env)
+            .await
+            .expect("external authorizer binding should resolve");
+
+        assert!(
+            resolved.resolved_authorizer().is_some(),
+            "anthropic external authorizer bindings should materialize a dynamic lease"
+        );
     }
 }

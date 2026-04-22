@@ -76,13 +76,13 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realtime/open_info` | Realtime | Get bootstrap metadata for opening a realtime channel |
 | `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
 | `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
-| `session/runtime_state` | Runtime | Read runtime-backed ingress state |
+| `session/state` | Runtime | Read runtime-backed ingress state |
 | `session/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status for a session |
 | `session/realtime_attachment_statuses` | Runtime | Batch read realtime attachment statuses for many sessions |
-| `session/accept_input` | Runtime | Admit external work directly into runtime ingress |
-| `session/retire_runtime` | Runtime | Retire runtime-backed ingress |
-| `session/reset_runtime` | Runtime | Reset runtime-backed ingress |
-| `session/input_state` | Runtime | Read runtime input lifecycle state |
+| `session/accept` | Runtime | Admit external work directly into runtime ingress |
+| `session/retire` | Runtime | Retire runtime-backed ingress |
+| `session/reset` | Runtime | Reset runtime-backed ingress |
+| `session/input` | Runtime | Read runtime input lifecycle state |
 | `session/inputs` | Runtime | List runtime input lifecycle records |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
@@ -151,21 +151,21 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
 | `auth/profile/list` | Auth | List auth profiles in a realm |
 | `auth/profile/get` | Auth | Get one auth profile |
-| `auth/profile/create` | Auth | Create an auth profile (CLI-driven for now) |
-| `auth/profile/delete` | Auth | Delete an auth profile (CLI-driven for now) |
+| `auth/profile/create` | Auth | Persist credentials for a binding (CLI-driven for now) |
+| `auth/profile/delete` | Auth | Delete persisted credentials for a binding (CLI-driven for now) |
 | `auth/profile/test` | Auth | Dry-run a binding's resolve path |
 | `auth/login/start` | Auth | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
 | `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
 | `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
 | `auth/login/device_complete` | Auth | Single-poll completion for a device-code OAuth login |
 | `auth/login/provision_api_key` | Auth | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
-| `auth/status/get` | Auth | Get auth status for a profile |
-| `auth/logout` | Auth | Revoke + remove persisted credentials |
+| `auth/status/get` | Auth | Get auth status for a binding |
+| `auth/logout` | Auth | Revoke + remove persisted credentials for a binding |
 | `realm/list` | Realm | List realm summaries |
 | `realm/get` | Realm | Get full realm connection set |
 
 <Note>
-`session/runtime_state`, `session/accept_input`, `session/retire_runtime`, `session/reset_runtime`, `session/input_state`, `session/inputs` are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
+`session/state`, `session/accept`, `session/retire`, `session/reset`, `session/input`, `session/inputs` are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
 </Note>
 
 <Note>
@@ -246,8 +246,8 @@ Handshake. Returns server capabilities.
       "capabilities/get", "models/catalog",
       "skills/list", "skills/inspect",
       "realtime/open_info", "realtime/status", "realtime/capabilities",
-      "session/runtime_state", "session/realtime_attachment_status", "session/realtime_attachment_statuses", "session/accept_input", "session/retire_runtime", "session/reset_runtime",
-      "session/input_state", "session/inputs",
+      "session/state", "session/realtime_attachment_status", "session/realtime_attachment_statuses", "session/accept", "session/retire", "session/reset",
+      "session/input", "session/inputs",
       "session/stream_open", "session/stream_close",
       "mob/create", "mob/list", "mob/status",
       "mob/members", "mob/spawn", "mob/spawn_many",
@@ -288,6 +288,10 @@ Handshake. Returns server capabilities.
 
 Create a new session and run the first turn.
 
+`connection_ref` is optional. When present, the server resolves the
+session through the referenced `{realm_id, binding_id}` pair instead of
+the legacy flat provider path.
+
 <CodeGroup>
 ```json Request (minimal)
 {
@@ -309,6 +313,10 @@ Create a new session and run the first turn.
     "prompt": "What is Rust?",
     "model": "claude-sonnet-4-6",
     "provider": "anthropic",
+    "connection_ref": {
+      "realm_id": "workspace",
+      "binding_id": "default_openai"
+    },
     "max_tokens": 4096,
     "system_prompt": "You are a helpful assistant.",
     "output_schema": {

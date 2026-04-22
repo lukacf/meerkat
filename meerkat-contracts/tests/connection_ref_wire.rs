@@ -163,7 +163,7 @@ fn auth_error_tagged_discriminator_matches_domain() {
 #[test]
 fn auth_status_wire_with_error_roundtrips() {
     let status = WireAuthStatus {
-        profile_id: "p1".to_string(),
+        binding_id: "p1".to_string(),
         provider: "openai".to_string(),
         auth_method: "managed_chatgpt_oauth".to_string(),
         state: "reauth_required".to_string(),

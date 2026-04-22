@@ -551,6 +551,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext {
                 runtime_build_mode,
+                allow_standalone_runtime_build_fallback: self.runtime_bindings_provider.is_none()
+                    && self.ops_lifecycle_provider.is_none(),
                 ..Default::default()
             },
         )
@@ -1102,6 +1104,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 &SurfaceSessionRecoveryOverrides::default(),
                 SurfaceSessionRecoveryContext {
                     runtime_build_mode,
+                    allow_standalone_runtime_build_fallback: self
+                        .runtime_bindings_provider
+                        .is_none()
+                        && self.ops_lifecycle_provider.is_none(),
                     ..Default::default()
                 },
             )

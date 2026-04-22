@@ -94,7 +94,10 @@ impl RpcMethodDescriptor {
 pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDescriptor> {
     let mut methods = vec![
         RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
-        RpcMethodDescriptor::basic("session/create", "Create session + run first turn"),
+        RpcMethodDescriptor::basic(
+            "session/create",
+            "Create session + run first turn (accepts optional connection_ref)",
+        ),
         RpcMethodDescriptor::basic("session/list", "List active sessions"),
         RpcMethodDescriptor::basic("session/read", "Get session state"),
         RpcMethodDescriptor::basic("session/history", "Get full session history"),
@@ -113,8 +116,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         // Auth-profile management (Phase 4c — always available).
         RpcMethodDescriptor::basic("auth/profile/list", "List configured auth profiles"),
         RpcMethodDescriptor::basic("auth/profile/get", "Get one auth profile by id"),
-        RpcMethodDescriptor::basic("auth/profile/create", "Create an auth profile"),
-        RpcMethodDescriptor::basic("auth/profile/delete", "Delete an auth profile"),
+        RpcMethodDescriptor::basic("auth/profile/create", "Persist credentials for a binding"),
+        RpcMethodDescriptor::basic(
+            "auth/profile/delete",
+            "Delete persisted credentials for a binding",
+        ),
         RpcMethodDescriptor::basic(
             "auth/profile/test",
             "Dry-run the auth profile's resolve path and return its status",
@@ -139,8 +145,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "auth/login/provision_api_key",
             "Console-OAuth → API key provisioning (Anthropic oauth_to_api_key): POST access_token to create_api_key endpoint, persist returned api_key",
         ),
-        RpcMethodDescriptor::basic("auth/status/get", "Get auth status for a profile"),
-        RpcMethodDescriptor::basic("auth/logout", "Revoke + remove persisted credentials"),
+        RpcMethodDescriptor::basic("auth/status/get", "Get auth status for a binding"),
+        RpcMethodDescriptor::basic(
+            "auth/logout",
+            "Revoke + remove persisted credentials for a binding",
+        ),
         RpcMethodDescriptor::basic("realm/list", "List realms with binding summaries"),
         RpcMethodDescriptor::basic("realm/get", "Get one realm's full connection set"),
     ];
@@ -274,7 +283,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "RealtimeCapabilitiesResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/runtime_state",
+                "session/state",
                 "Get a session's current runtime state",
                 "RuntimeStateParams",
                 "RuntimeStateResult",
@@ -292,25 +301,25 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "RuntimeRealtimeAttachmentStatusesResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/accept_input",
+                "session/accept",
                 "Accept a runtime input for a session",
                 "RuntimeAcceptParams",
                 "RuntimeAcceptResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/retire_runtime",
+                "session/retire",
                 "Retire a session runtime",
                 "RuntimeRetireParams",
                 "RuntimeRetireResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/reset_runtime",
+                "session/reset",
                 "Reset a session runtime",
                 "RuntimeResetParams",
                 "RuntimeResetResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/input_state",
+                "session/input",
                 "Get the state of a specific input on a session",
                 "InputStateParams",
                 "InputStateResult",

@@ -171,6 +171,7 @@ impl DslTransitionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
     pub turn_phase: TurnPhase,
+    pub active_run_id: Option<RunId>,
     /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means no primitive is currently in flight.
     pub primitive_kind: Option<TurnPrimitiveKind>,

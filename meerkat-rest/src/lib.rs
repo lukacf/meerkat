@@ -32,8 +32,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, SurfaceSessionRecoveryContext,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, noop_request_action, request_action,
+    CompleteOutcome, RequestAlreadyExists, RequestContext, SurfaceRequestExecutor,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -433,6 +434,7 @@ async fn resolve_validation_identity(
     config_runtime: &meerkat_core::ConfigRuntime,
     model: &str,
     provider: Option<meerkat_core::Provider>,
+    connection_ref: Option<meerkat_core::ConnectionRef>,
 ) -> SessionLlmIdentity {
     let snapshot = config_runtime.get().await.ok().map(|state| state.config);
     let registry = snapshot
@@ -456,8 +458,40 @@ async fn resolve_validation_identity(
         provider,
         self_hosted_server_id,
         provider_params: None,
-        connection_ref: None,
+        connection_ref,
     }
+}
+
+async fn validate_connection_ref_for_state(
+    state: &AppState,
+    connection_ref: &meerkat_core::ConnectionRef,
+) -> Result<(), ApiError> {
+    if connection_ref.realm_id != state.realm_id {
+        return Err(ApiError::BadRequest(format!(
+            "connection_ref realm '{}' does not match active realm '{}'",
+            connection_ref.realm_id, state.realm_id
+        )));
+    }
+
+    let snapshot = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(|error| ApiError::Internal(format!("failed to load config: {error}")))?;
+    let section = snapshot
+        .config
+        .realm
+        .get(&connection_ref.realm_id)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("Unknown realm: {}", connection_ref.realm_id))
+        })?;
+    if !section.binding.contains_key(&connection_ref.binding_id) {
+        return Err(ApiError::BadRequest(format!(
+            "Unknown binding '{}' in realm '{}'",
+            connection_ref.binding_id, connection_ref.realm_id
+        )));
+    }
+    Ok(())
 }
 
 async fn validate_prompt_video_input(
@@ -642,6 +676,7 @@ async fn apply_runtime_turn(
                     runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
                         bindings,
                     )),
+                    allow_standalone_runtime_build_fallback: false,
                     realm_id: Some(context.realm_id.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
@@ -856,6 +891,9 @@ pub struct CreateSessionRequest {
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Optional realm-scoped connection binding used for provider resolution.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -1028,6 +1066,7 @@ async fn with_request_lifecycle<T>(
     executor: &SurfaceRequestExecutor,
     ctx: Option<RequestContext>,
     outcome: RequestOutcome<T>,
+    on_superseded_by_cancel: impl FnOnce() -> T,
 ) -> T {
     match ctx {
         Some(ctx) => match outcome {
@@ -1041,12 +1080,14 @@ async fn with_request_lifecycle<T>(
                 val
             }
             RequestOutcome::Unpublished(val) => {
-                // CompleteOutcome is observed by RPC/MCP surfaces for the
-                // late-cancel branch; REST decides Unpublished inline so the
-                // outcome is always Completed (cleanup runs) or the entry was
-                // already removed by a parallel shutdown path.
-                let _ = executor.finish_unpublished(ctx.key()).await;
-                val
+                // REST now projects the same canonical late-cancel outcome as
+                // RPC/MCP: an unpublished terminal yields to a prior cancel
+                // via CompleteOutcome::SupersededByCancel instead of
+                // silently returning the stale payload.
+                match executor.finish_unpublished(ctx.key()).await {
+                    CompleteOutcome::Completed => val,
+                    CompleteOutcome::SupersededByCancel => on_superseded_by_cancel(),
+                }
             }
         },
         None => match outcome {
@@ -1132,14 +1173,14 @@ pub fn router(state: AppState) -> Router {
         .route("/realtime/status", post(realtime_status))
         .route("/realtime/capabilities", post(realtime_capabilities))
         // Session-scoped runtime / input endpoints.
-        .route("/sessions/{id}/runtime-state", get(runtime_state))
+        .route("/sessions/{id}/state", get(runtime_state))
         .route(
             "/sessions/{id}/realtime-attachment-status",
             get(runtime_realtime_attachment_status),
         )
-        .route("/sessions/{id}/accept-input", post(runtime_accept))
-        .route("/sessions/{id}/retire-runtime", post(runtime_retire))
-        .route("/sessions/{id}/reset-runtime", post(runtime_reset))
+        .route("/sessions/{id}/accept", post(runtime_accept))
+        .route("/sessions/{id}/retire", post(runtime_retire))
+        .route("/sessions/{id}/reset", post(runtime_reset))
         .route("/sessions/{id}/inputs", get(input_list))
         .route("/sessions/{session_id}/inputs/{input_id}", get(input_state))
         // Phase 4d — auth + realm endpoints.
@@ -1286,7 +1327,7 @@ async fn ensure_runtime_session_registered(
     Ok(())
 }
 
-/// GET /sessions/{id}/runtime-state
+/// GET /sessions/{id}/state
 async fn runtime_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1460,12 +1501,12 @@ fn realtime_status_from_runtime(
         meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => realtime_channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment replacement is pending"),
-            1,
+            0,
         ),
         meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => realtime_channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment requires reattach"),
-            1,
+            0,
         ),
     }
 }
@@ -1587,7 +1628,7 @@ async fn realtime_open_info(
         .into_response())
 }
 
-/// POST /sessions/{id}/accept-input
+/// POST /sessions/{id}/accept
 async fn runtime_accept(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1630,7 +1671,7 @@ async fn runtime_accept(
 }
 
 /// Translate an in-process [`meerkat_runtime::AcceptOutcome`] into the REST
-/// JSON shape exposed at `POST /sessions/{id}/accept-input`.
+/// JSON shape exposed at `POST /sessions/{id}/accept`.
 ///
 /// `AcceptOutcome` is a domain envelope without `Serialize`; the wire-facing
 /// projection is materialized here to keep parity with prior responses.
@@ -1661,7 +1702,7 @@ fn accept_outcome_to_json(outcome: meerkat_runtime::AcceptOutcome) -> Value {
     }
 }
 
-/// POST /sessions/{id}/retire-runtime
+/// POST /sessions/{id}/retire
 async fn runtime_retire(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1681,7 +1722,7 @@ async fn runtime_retire(
     Ok(Json(json!({"inputs_abandoned": report.inputs_abandoned})))
 }
 
-/// POST /sessions/{id}/reset-runtime
+/// POST /sessions/{id}/reset
 async fn runtime_reset(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2853,7 +2894,10 @@ async fn create_session(
     let req_ctx = extract_request_context(&headers, &state.request_executor)?;
     let executor = state.request_executor.clone();
     let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
-    with_request_lifecycle(&executor, req_ctx, outcome).await
+    with_request_lifecycle(&executor, req_ctx, outcome, || {
+        Err(ApiError::RequestCancelled { details: None })
+    })
+    .await
 }
 
 /// Create and run a new session (inner body returning RequestOutcome).
@@ -2865,6 +2909,11 @@ async fn create_session_inner(
     // --- Validation (pre-stateful work) ---
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
         return RequestOutcome::Unpublished(Err(e));
+    }
+    if let Some(connection_ref) = req.connection_ref.as_ref()
+        && let Err(error) = validate_connection_ref_for_state(state, connection_ref).await
+    {
+        return RequestOutcome::Unpublished(Err(error));
     }
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
@@ -2981,9 +3030,25 @@ async fn create_session_inner(
         }
     }
 
-    let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let initial_identity =
-        resolve_validation_identity(&state.config_runtime, &model, req.provider).await;
+    let config_snapshot = state.config_runtime.get().await.ok();
+    let current_generation = config_snapshot.as_ref().map(|snapshot| snapshot.generation);
+    let default_config = meerkat_core::Config::default();
+    let validation_config = config_snapshot
+        .as_ref()
+        .map(|snapshot| &snapshot.config)
+        .unwrap_or(&default_config);
+    if let Err(err) =
+        meerkat::surface::validate_connection_ref(validation_config, req.connection_ref.as_ref())
+    {
+        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+    }
+    let initial_identity = resolve_validation_identity(
+        &state.config_runtime,
+        &model,
+        req.provider,
+        req.connection_ref.clone(),
+    )
+    .await;
     let mut build = SessionBuildOptions {
         provider: req.provider,
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
@@ -3018,7 +3083,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: None,
+        connection_ref: req.connection_ref.clone(),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -3046,6 +3111,7 @@ async fn create_session_inner(
         req.enable_mob,
     ));
     let create_provider = build.provider;
+    let validation_connection_ref = build.connection_ref.clone();
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
@@ -3062,8 +3128,13 @@ async fn create_session_inner(
         labels: req.labels,
     };
 
-    let validation_identity =
-        resolve_validation_identity(&state.config_runtime, &svc_req.model, create_provider).await;
+    let validation_identity = resolve_validation_identity(
+        &state.config_runtime,
+        &svc_req.model,
+        create_provider,
+        validation_connection_ref,
+    )
+    .await;
     if let Err(err) =
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
@@ -3594,7 +3665,10 @@ async fn continue_session(
     let req_ctx = extract_request_context(&headers, &state.request_executor)?;
     let executor = state.request_executor.clone();
     let outcome = Box::pin(continue_session_inner(&state, &id, req, req_ctx.clone())).await;
-    with_request_lifecycle(&executor, req_ctx, outcome).await
+    with_request_lifecycle(&executor, req_ctx, outcome, || {
+        Err(ApiError::RequestCancelled { details: None })
+    })
+    .await
 }
 
 /// Continue an existing session (inner body returning RequestOutcome).
@@ -3753,6 +3827,9 @@ async fn continue_session_inner(
             req.model.as_deref(),
             req.provider,
         );
+        let persisted_connection_ref = session
+            .session_metadata()
+            .and_then(|metadata| metadata.connection_ref);
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,
             self_hosted_server_id: llm_binding.self_hosted_server_id,
@@ -3784,7 +3861,7 @@ async fn continue_session_inner(
             instance_id: state.instance_id.clone(),
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
-            connection_ref: None,
+            connection_ref: persisted_connection_ref,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -3808,6 +3885,7 @@ async fn continue_session_inner(
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
+        let validation_connection_ref = build.connection_ref.clone();
         let create_req = SvcCreateSessionRequest {
             model: req
                 .model
@@ -3826,9 +3904,13 @@ async fn continue_session_inner(
             labels: None,
         };
         let create_provider = create_req.build.as_ref().and_then(|build| build.provider);
-        let validation_identity =
-            resolve_validation_identity(&state.config_runtime, &create_req.model, create_provider)
-                .await;
+        let validation_identity = resolve_validation_identity(
+            &state.config_runtime,
+            &create_req.model,
+            create_provider,
+            validation_connection_ref,
+        )
+        .await;
         if let Err(err) = validate_prompt_video_input(
             &state.config_runtime,
             &create_req.prompt,
@@ -3977,7 +4059,8 @@ async fn continue_session_inner(
         }
 
         let fallback_identity =
-            resolve_validation_identity(&state.config_runtime, &state.default_model, None).await;
+            resolve_validation_identity(&state.config_runtime, &state.default_model, None, None)
+                .await;
         let current_identity = stored_metadata
             .as_ref()
             .map(meerkat::SessionMetadata::llm_identity)
@@ -4837,7 +4920,8 @@ mod tests {
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
 
-        let identity = resolve_validation_identity(&config_runtime, "gemma-4-e2b", None).await;
+        let identity =
+            resolve_validation_identity(&config_runtime, "gemma-4-e2b", None, None).await;
         assert_eq!(identity.provider, Provider::SelfHosted);
 
         validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
@@ -5133,6 +5217,22 @@ mod tests {
         assert!(req.comms_name.is_none());
     }
 
+    #[test]
+    fn test_create_session_request_accepts_connection_ref() {
+        let req_json = serde_json::json!({
+            "prompt": "Hello",
+            "connection_ref": {
+                "realm_id": "workspace",
+                "binding_id": "default_openai"
+            }
+        });
+
+        let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
+        let connection_ref = req.connection_ref.expect("connection_ref");
+        assert_eq!(connection_ref.realm_id, "workspace");
+        assert_eq!(connection_ref.binding_id, "default_openai");
+    }
+
     #[tokio::test]
     async fn test_create_session_route_rejects_reserved_mob_peer_meta_labels() {
         use axum::body::Body;
@@ -5371,7 +5471,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("GET")
-            .uri(format!("/sessions/{session_id}/runtime-state"))
+            .uri(format!("/sessions/{session_id}/state"))
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -6634,9 +6734,13 @@ mod tests {
                 }
             }));
 
-            let result: u32 =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(42u32))
-                    .await;
+            let result: u32 = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestOutcome::Published(42u32),
+                || 0u32,
+            )
+            .await;
             assert_eq!(result, 42);
             assert_eq!(
                 cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -6662,9 +6766,13 @@ mod tests {
                 }
             }));
 
-            let result: u32 =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Unpublished(99u32))
-                    .await;
+            let result: u32 = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestOutcome::Unpublished(99u32),
+                || 0u32,
+            )
+            .await;
             assert_eq!(result, 99);
             assert_eq!(
                 cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -6684,9 +6792,13 @@ mod tests {
             let key = ctx.key().to_string();
 
             // Simulate: turn completed successfully (Published).
-            let val: Result<u32, ApiError> =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(Ok(200u32)))
-                    .await;
+            let val: Result<u32, ApiError> = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestOutcome::Published(Ok(200u32)),
+                || Err(ApiError::RequestCancelled { details: None }),
+            )
+            .await;
             assert!(val.is_ok());
             assert_eq!(val.unwrap(), 200);
 
@@ -6696,6 +6808,45 @@ mod tests {
                 executor.cancel_request(&key).await,
                 meerkat::surface::CancelOutcome::NotFound,
                 "cancel after Published removal must report NotFound"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_with_request_lifecycle_unpublished_superseded_by_cancel_returns_cancelled() {
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ctx = executor
+                .try_begin_request("late-cancel", noop_request_action())
+                .unwrap();
+            let key = ctx.key().to_string();
+            ctx.set_unpublished_cleanup(request_action({
+                let count = Arc::clone(&cleanup_count);
+                move || {
+                    let count = Arc::clone(&count);
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            assert_eq!(
+                executor.cancel_request(&key).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+
+            let result: Result<u32, ApiError> = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestOutcome::Unpublished(Ok(99u32)),
+                || Err(ApiError::RequestCancelled { details: None }),
+            )
+            .await;
+
+            assert!(matches!(result, Err(ApiError::RequestCancelled { .. })));
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "late-cancel cleanup must still run exactly once"
             );
         }
     }

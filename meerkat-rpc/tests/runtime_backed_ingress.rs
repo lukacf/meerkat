@@ -169,3 +169,80 @@ async fn runtime_backed_ingress_red_ok_rpc_session_create_and_turn_start_roundtr
         .expect("join rpc server")
         .expect("rpc server");
 }
+
+#[tokio::test]
+async fn runtime_backed_ingress_rpc_peer_response_terminal_projects_session_history() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/create",
+            "params": { "prompt": "hello" }
+        }),
+    )
+    .await;
+    let create = read_response(&mut reader).await;
+    assert!(create["error"].is_null(), "session/create failed: {create}");
+    let session_id = create["result"]["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/peer_response_terminal",
+            "params": {
+                "session_id": session_id,
+                "peer_name": "analyst",
+                "request_id": "req-123",
+                "status": "completed",
+                "result": { "token": "amber" }
+            }
+        }),
+    )
+    .await;
+    let peer_response = read_response(&mut reader).await;
+    assert!(
+        peer_response["error"].is_null(),
+        "session/peer_response_terminal failed: {peer_response}"
+    );
+    assert_eq!(peer_response["result"]["outcome_type"], "accepted");
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/history",
+            "params": { "session_id": session_id }
+        }),
+    )
+    .await;
+    let history = read_response(&mut reader).await;
+    assert!(
+        history["error"].is_null(),
+        "session/history failed: {history}"
+    );
+    let messages_json =
+        serde_json::to_string(&history["result"]["messages"]).expect("serialize history messages");
+    assert!(
+        messages_json.contains("peer_response_terminal:analyst:req-123"),
+        "history should include the canonical peer_response_terminal context key: {messages_json}"
+    );
+    assert!(
+        messages_json.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"),
+        "history should include the projected peer response terminal notice: {messages_json}"
+    );
+
+    drop(writer);
+    server_handle
+        .await
+        .expect("join rpc server")
+        .expect("rpc server");
+}

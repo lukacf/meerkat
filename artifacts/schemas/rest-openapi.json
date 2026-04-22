@@ -22,7 +22,7 @@
     },
     "/auth/logout/{id}": {
       "post": {
-        "summary": "Revoke + remove persisted credentials"
+        "summary": "Revoke + remove persisted credentials for a binding"
       }
     },
     "/auth/profiles": {
@@ -30,12 +30,12 @@
         "summary": "List auth profiles"
       },
       "post": {
-        "summary": "Create an auth profile"
+        "summary": "Persist credentials for a binding"
       }
     },
     "/auth/profiles/{id}": {
       "delete": {
-        "summary": "Delete an auth profile"
+        "summary": "Delete persisted credentials for a binding"
       },
       "get": {
         "summary": "Get one auth profile"
@@ -48,7 +48,7 @@
     },
     "/auth/status/{id}": {
       "get": {
-        "summary": "Get auth status"
+        "summary": "Get auth status for a binding"
       }
     },
     "/capabilities": {
@@ -201,6 +201,7 @@
         "summary": "List sessions"
       },
       "post": {
+        "description": "Accepts optional connection_ref for realm-scoped provider resolution.",
         "summary": "Create and run a new session"
       }
     },
@@ -212,7 +213,7 @@
         "summary": "Get session details"
       }
     },
-    "/sessions/{id}/accept-input": {
+    "/sessions/{id}/accept": {
       "post": {
         "summary": "Accept a runtime input for a session"
       }
@@ -275,17 +276,17 @@
         "summary": "Get a session's realtime attachment status"
       }
     },
-    "/sessions/{id}/reset-runtime": {
+    "/sessions/{id}/reset": {
       "post": {
         "summary": "Reset a session runtime"
       }
     },
-    "/sessions/{id}/retire-runtime": {
+    "/sessions/{id}/retire": {
       "post": {
         "summary": "Retire a session runtime"
       }
     },
-    "/sessions/{id}/runtime-state": {
+    "/sessions/{id}/state": {
       "get": {
         "summary": "Get a session's current runtime state"
       }

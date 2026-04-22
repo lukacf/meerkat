@@ -125,3 +125,83 @@ async fn runtime_backed_ingress_red_ok_mcp_run_and_resume_reuse_the_same_runtime
         "resume should not create a second surface-local session entry"
     );
 }
+
+#[tokio::test]
+async fn runtime_backed_ingress_mcp_run_rejects_malformed_connection_ref() {
+    let root = unique_root("mcp-run-invalid-connection-ref");
+    let state = MeerkatMcpState::new_with_bootstrap_and_test_client(
+        mcp_bootstrap(&root, "runtime-backed"),
+        true,
+    )
+    .await
+    .expect("mcp state should initialize");
+
+    let error = handle_tools_call(
+        &state,
+        "meerkat_run",
+        &json!({
+            "prompt": "hello",
+            "connection_ref": "missing-colon",
+        }),
+    )
+    .await
+    .expect_err("malformed connection_ref must be rejected");
+
+    assert!(
+        error.message.contains("connection_ref"),
+        "error should explain the malformed connection_ref: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_backed_ingress_mcp_run_rejects_cross_realm_connection_ref() {
+    let root = unique_root("mcp-run-cross-realm-connection-ref");
+    let bootstrap = mcp_bootstrap(&root, "runtime-backed");
+    let config_path = bootstrap
+        .context
+        .context_root
+        .as_ref()
+        .expect("context root")
+        .join(".rkat/config.toml");
+    let config_toml = r#"
+[realm.other-realm]
+default_binding = "default_openai"
+
+[realm.other-realm.backend.default_openai]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.other-realm.auth.default_openai]
+provider = "openai"
+auth_method = "api_key"
+
+[realm.other-realm.auth.default_openai.source]
+kind = "inline_secret"
+secret = "sk-cross-realm"
+
+[realm.other-realm.binding.default_openai]
+backend_profile = "default_openai"
+auth_profile = "default_openai"
+"#;
+    std::fs::write(&config_path, config_toml).expect("config file should write");
+
+    let state = MeerkatMcpState::new_with_bootstrap_and_test_client(bootstrap, true)
+        .await
+        .expect("mcp state should initialize");
+
+    let error = handle_tools_call(
+        &state,
+        "meerkat_run",
+        &json!({
+            "prompt": "hello",
+            "connection_ref": "other-realm:default_openai",
+        }),
+    )
+    .await
+    .expect_err("cross-realm connection_ref must be rejected");
+
+    assert!(
+        error.message.contains("does not match active realm"),
+        "error should explain the active-realm mismatch: {error:?}"
+    );
+}

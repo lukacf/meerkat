@@ -6,11 +6,19 @@ pub mod oauth;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_auth_core::authorizers::StaticBearerAuthorizer;
+use meerkat_auth_core::resolver::{
+    apply_auth_resolution_policy, extract_inline_secret_envelope, interactive_login_error,
+    resolve_external_authorizer, resolve_simple_secret,
+};
 use meerkat_llm_core::LlmClient;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -54,6 +62,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 
     fn validate_binding(
         &self,
+        connection_ref: &meerkat_core::ConnectionRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -73,6 +82,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             });
         }
         Ok(ValidatedBinding {
+            connection_ref: connection_ref.clone(),
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(backend_kind),
             auth: NormalizedAuthMethod::OpenAi(auth_method),
@@ -122,18 +132,27 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             allow(unused_mut)
         )]
         let mut chatgpt_plan_type: Option<String> = None;
+        #[cfg_attr(
+            not(any(
+                all(not(target_arch = "wasm32"), feature = "oauth"),
+                target_arch = "wasm32"
+            )),
+            allow(unused_mut)
+        )]
+        let mut authorizer_secret: Option<(String, AuthMetadata, Option<DateTime<Utc>>)> = None;
 
         // Plan §6.11: resolve credential material to Option<String>.
         // `Some(secret)` lands in the lease as a typed InlineSecret lease.
         // `None` means authorizer-backed (ExternalAuthorizer on non-wasm)
-        // — the lease stays empty and build_client emits a typed error
-        // when no DynamicLease path is available.
+        // — provider build_client receives a concrete DynamicLease.
         let secret_opt: Option<String> = match auth_method {
             OpenAiAuthMethod::ApiKey | OpenAiAuthMethod::StaticBearer => {
                 Some(resolve_simple_secret(&binding.auth_profile.source, env, binding).await?)
             }
             OpenAiAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
+                let envelope =
+                    resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
+                authorizer_secret = Some(extract_inline_secret_envelope(envelope)?);
                 None
             }
             OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens => {
@@ -142,23 +161,16 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     let store = env
                         .token_store
                         .as_ref()
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-                    let realm_id = binding
-                        .backend_profile
-                        .options
-                        .get("realm_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("dev")
-                        .to_string();
+                        .ok_or_else(|| interactive_login_error(binding))?;
                     let key = meerkat_core::auth::TokenKey::new(
-                        realm_id,
-                        binding.auth_profile.id.clone(),
+                        binding.connection_ref.realm_id.clone(),
+                        binding.connection_ref.binding_id.clone(),
                     );
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                        .ok_or_else(|| interactive_login_error(binding))?;
 
                     chatgpt_account_id = persisted.account_id.clone();
                     if let Some(id_token) = persisted.id_token.as_deref()
@@ -179,7 +191,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                             .clone()
                             .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?,
                         OpenAiAuthMethod::ManagedChatGptOauth => {
-                            use chrono::{Duration, Utc};
+                            use chrono::Duration;
                             let fresh = persisted
                                 .expires_at
                                 .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
@@ -187,6 +199,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                             {
                                 access
                             } else {
+                                if !meerkat_auth_core::resolver::refresh_allowed(binding) {
+                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                                }
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
@@ -201,9 +216,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 runtime.get_or_refresh_access_token().await.map_err(
                                     |e| match e {
                                         oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                            ProviderAuthError::Auth(
-                                                AuthError::InteractiveLoginRequired,
-                                            )
+                                            interactive_login_error(binding)
                                         }
                                         other => ProviderAuthError::SourceResolutionFailed(
                                             other.to_string(),
@@ -218,7 +231,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
-                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                    return Err(interactive_login_error(binding));
                 }
             }
         };
@@ -243,19 +256,41 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 },
             ));
         }
-        // Plan §6.11: populate the lease with the resolved secret as
-        // a typed InlineSecret variant, or an empty lease for
-        // authorizer paths (build_client constructs the concrete
-        // HttpAuthorizer).
-        let source_label = format!("openai:{}", binding.auth_profile.id);
-        let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
-            Some(secret) => Arc::new(StaticLease::inline_secret(
+        let metadata = apply_auth_resolution_policy(binding, metadata)?;
+        let source_label = format!("openai:{}", binding.connection_ref);
+        let lease: Arc<dyn meerkat_core::AuthLease> = if let Some(secret) = secret_opt {
+            Arc::new(StaticLease::inline_secret(
                 secret,
                 metadata,
                 None,
                 source_label,
-            )),
-            None => Arc::new(StaticLease::empty_lease(metadata, source_label)),
+            ))
+        } else if let Some((secret, authorizer_metadata, expires_at)) = authorizer_secret {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let metadata = apply_auth_resolution_policy(binding, authorizer_metadata)?;
+                Arc::new(DynamicLease::new(
+                    Arc::new(StaticBearerAuthorizer::new(
+                        secret,
+                        "openai-external-bearer",
+                    )),
+                    metadata,
+                    expires_at,
+                    source_label,
+                ))
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let metadata = apply_auth_resolution_policy(binding, authorizer_metadata)?;
+                Arc::new(StaticLease::inline_secret(
+                    secret,
+                    metadata,
+                    expires_at,
+                    source_label.clone(),
+                ))
+            }
+        } else {
+            return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
         };
 
         Ok(ResolvedConnection {
@@ -364,6 +399,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn allowed_bindings_contain_expected_combinations() {
@@ -391,6 +427,13 @@ mod tests {
         }
     }
 
+    fn connection_ref() -> meerkat_core::ConnectionRef {
+        meerkat_core::ConnectionRef {
+            realm_id: "realm-x".into(),
+            binding_id: "binding-y".into(),
+        }
+    }
+
     fn auth(method: &str) -> AuthProfile {
         AuthProfile {
             id: "a".into(),
@@ -405,11 +448,31 @@ mod tests {
         }
     }
 
+    struct MockExternalResolver;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_llm_core::provider_runtime::registry::ExternalAuthResolverHandle
+        for MockExternalResolver
+    {
+        async fn resolve(
+            &self,
+            _binding: &ValidatedBinding,
+        ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
+            Ok(meerkat_core::ResolvedAuthEnvelope::InlineSecret {
+                secret: "tok-openai".into(),
+                metadata: AuthMetadata::default(),
+                expires_at: None,
+            })
+        }
+    }
+
     #[test]
     fn validate_accepts_allowed_combination() {
         let rt = OpenAiProviderRuntime;
         let vb = rt
             .validate_binding(
+                &connection_ref(),
                 &backend("openai_api"),
                 &auth("api_key"),
                 &BindingPolicy::default(),
@@ -423,6 +486,7 @@ mod tests {
         let rt = OpenAiProviderRuntime;
         let err = rt
             .validate_binding(
+                &connection_ref(),
                 &backend("bogus_backend"),
                 &auth("api_key"),
                 &BindingPolicy::default(),
@@ -437,6 +501,7 @@ mod tests {
         let rt = OpenAiProviderRuntime;
         let err = rt
             .validate_binding(
+                &connection_ref(),
                 &backend("openai_api"),
                 &auth("managed_chatgpt_oauth"),
                 &BindingPolicy::default(),
@@ -454,7 +519,12 @@ mod tests {
         let mut wrong = backend("openai_api");
         wrong.provider = Provider::Anthropic;
         let err = rt
-            .validate_binding(&wrong, &auth("api_key"), &BindingPolicy::default())
+            .validate_binding(
+                &connection_ref(),
+                &wrong,
+                &auth("api_key"),
+                &BindingPolicy::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
@@ -470,8 +540,41 @@ mod tests {
             require_metadata_workspace: false,
         };
         let vb = rt
-            .validate_binding(&backend("openai_api"), &auth("api_key"), &policy)
+            .validate_binding(
+                &connection_ref(),
+                &backend("openai_api"),
+                &auth("api_key"),
+                &policy,
+            )
             .expect("allowed combination");
         assert_eq!(vb.policy, policy);
+    }
+
+    #[tokio::test]
+    async fn external_authorizer_builds_dynamic_lease() {
+        let rt = OpenAiProviderRuntime;
+        let mut external_auth = auth("external_authorizer");
+        external_auth.source = meerkat_core::CredentialSourceSpec::ExternalResolver {
+            handle: "mock".into(),
+        };
+        let binding = rt
+            .validate_binding(
+                &connection_ref(),
+                &backend("openai_api"),
+                &external_auth,
+                &BindingPolicy::default(),
+            )
+            .expect("external authorizer binding should validate");
+        let env = ResolverEnvironment::testing()
+            .with_external_resolver("mock", Arc::new(MockExternalResolver));
+        let resolved = rt
+            .resolve_binding(&binding, &env)
+            .await
+            .expect("external authorizer binding should resolve");
+
+        assert!(
+            resolved.resolved_authorizer().is_some(),
+            "external authorizer bindings should materialize a dynamic lease"
+        );
     }
 }

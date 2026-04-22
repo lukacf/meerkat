@@ -2427,6 +2427,21 @@ fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
+fn validate_connection_ref_for_state(
+    state: &MeerkatMcpState,
+    config: &Config,
+    connection_ref: &meerkat_core::ConnectionRef,
+) -> Result<(), ToolCallError> {
+    if connection_ref.realm_id != state.realm_id {
+        return Err(ToolCallError::invalid_params(format!(
+            "connection_ref realm '{}' does not match active realm '{}'",
+            connection_ref.realm_id, state.realm_id
+        )));
+    }
+    meerkat::surface::validate_connection_ref(config, Some(connection_ref))
+        .map_err(ToolCallError::invalid_params)
+}
+
 async fn handle_meerkat_run(
     state: &MeerkatMcpState,
     input: MeerkatRunInput,
@@ -2486,6 +2501,17 @@ async fn handle_meerkat_run(
             })?),
             None => None,
         };
+    let connection_ref = match input.connection_ref.as_deref() {
+        Some(raw) => Some(meerkat_core::ConnectionRef::parse(raw).ok_or_else(|| {
+            ToolCallError::invalid_params(
+                "connection_ref must be '<realm_id>:<binding_id>' when provided",
+            )
+        })?),
+        None => None,
+    };
+    if let Some(connection_ref) = connection_ref.as_ref() {
+        validate_connection_ref_for_state(state, &config, connection_ref)?;
+    }
 
     // Pre-create a session to claim a stable session_id.
     let prepared_session = prepare_surface_session(&state.runtime_adapter)
@@ -2576,14 +2602,7 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: input
-            .connection_ref
-            .as_deref()
-            .and_then(|raw| raw.split_once(':'))
-            .map(|(realm_id, binding_id)| meerkat_core::ConnectionRef {
-                realm_id: realm_id.to_string(),
-                binding_id: binding_id.to_string(),
-            }),
+        connection_ref,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),

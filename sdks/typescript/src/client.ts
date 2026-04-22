@@ -1839,18 +1839,18 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeState(sessionId: string): Promise<RuntimeStateResult> {
-    const result = await this.request("session/runtime_state", { session_id: sessionId });
+  async sessionState(sessionId: string): Promise<RuntimeStateResult> {
+    const result = await this.request("session/state", { session_id: sessionId });
     if (typeof result.state !== "string" || result.state.length === 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/runtime_state response: missing state",
+        "Invalid session/state response: missing state",
       );
     }
     return result as unknown as RuntimeStateResult;
   }
 
-  async runtimeRealtimeAttachmentStatus(
+  async sessionRealtimeAttachmentStatus(
     sessionId: string,
   ): Promise<RuntimeRealtimeAttachmentStatusResult> {
     const result = await this.request("session/realtime_attachment_status", {
@@ -1866,7 +1866,7 @@ export class MeerkatClient {
   }
 
   /** Batch realtime attachment statuses for multiple session IDs. */
-  async runtimeRealtimeAttachmentStatuses(
+  async sessionRealtimeAttachmentStatuses(
     sessionIds: string[],
   ): Promise<Record<string, unknown>> {
     return await this.request("session/realtime_attachment_statuses", {
@@ -1946,57 +1946,57 @@ export class MeerkatClient {
     return result as unknown as RealtimeCapabilitiesResult;
   }
 
-  async runtimeAccept(
+  async sessionAccept(
     sessionId: string,
     input: Record<string, unknown>,
   ): Promise<RuntimeAcceptResult> {
-    const result = await this.request("session/accept_input", { session_id: sessionId, input });
+    const result = await this.request("session/accept", { session_id: sessionId, input });
     if (typeof result.outcome_type !== "string" || result.outcome_type.length === 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/accept_input response: missing outcome_type",
+        "Invalid session/accept response: missing outcome_type",
       );
     }
     return result as unknown as RuntimeAcceptResult;
   }
 
-  async runtimeRetire(sessionId: string): Promise<RuntimeRetireResult> {
-    const result = await this.request("session/retire_runtime", { session_id: sessionId });
+  async sessionRetire(sessionId: string): Promise<RuntimeRetireResult> {
+    const result = await this.request("session/retire", { session_id: sessionId });
     if (typeof result.inputs_abandoned !== "number") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/retire_runtime response: missing inputs_abandoned",
+        "Invalid session/retire response: missing inputs_abandoned",
       );
     }
     return result as unknown as RuntimeRetireResult;
   }
 
-  async runtimeReset(sessionId: string): Promise<RuntimeResetResult> {
-    const result = await this.request("session/reset_runtime", { session_id: sessionId });
+  async sessionReset(sessionId: string): Promise<RuntimeResetResult> {
+    const result = await this.request("session/reset", { session_id: sessionId });
     if (typeof result.inputs_abandoned !== "number") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/reset_runtime response: missing inputs_abandoned",
+        "Invalid session/reset response: missing inputs_abandoned",
       );
     }
     return result as unknown as RuntimeResetResult;
   }
 
-  async inputState(sessionId: string, inputId: string): Promise<WireInputState | null> {
-    const result = await this.request("session/input_state", { session_id: sessionId, input_id: inputId });
+  async sessionInput(sessionId: string, inputId: string): Promise<WireInputState | null> {
+    const result = await this.request("session/input", { session_id: sessionId, input_id: inputId });
     if (result === null) {
       return null;
     }
     if (typeof result !== "object" || result === null) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/input_state response: expected object or null",
+        "Invalid session/input response: expected object or null",
       );
     }
     return result as unknown as WireInputState;
   }
 
-  async inputList(sessionId: string): Promise<string[]> {
+  async sessionInputs(sessionId: string): Promise<string[]> {
     const result = (await this.request("session/inputs", {
       session_id: sessionId,
     })) as unknown as InputListResult;
@@ -2036,10 +2036,10 @@ export class MeerkatClient {
     return this.request("auth/profile/create", params);
   }
 
-  async authProfileDelete(realmId: string, profileId: string): Promise<unknown> {
+  async authProfileDelete(realmId: string, bindingId: string): Promise<unknown> {
     return this.request("auth/profile/delete", {
       realm_id: realmId,
-      profile_id: profileId,
+      binding_id: bindingId,
     });
   }
 
@@ -2076,17 +2076,17 @@ export class MeerkatClient {
     return this.request("auth/login/provision_api_key", params);
   }
 
-  async authStatusGet(realmId: string, profileId: string): Promise<unknown> {
+  async authStatusGet(realmId: string, bindingId: string): Promise<unknown> {
     return this.request("auth/status/get", {
       realm_id: realmId,
-      profile_id: profileId,
+      binding_id: bindingId,
     });
   }
 
-  async authLogout(realmId: string, profileId: string): Promise<unknown> {
+  async authLogout(realmId: string, bindingId: string): Promise<unknown> {
     return this.request("auth/logout", {
       realm_id: realmId,
-      profile_id: profileId,
+      binding_id: bindingId,
     });
   }
 
@@ -2831,6 +2831,12 @@ export class MeerkatClient {
     if (options.appContext !== undefined) params.app_context = options.appContext;
     if (options.shellEnv != null) params.shell_env = options.shellEnv;
     if (options.externalTools != null) params.external_tools = options.externalTools;
+    if (options.connectionRef != null) {
+      params.connection_ref = {
+        realm_id: options.connectionRef.realmId,
+        binding_id: options.connectionRef.bindingId,
+      };
+    }
     return params;
   }
 

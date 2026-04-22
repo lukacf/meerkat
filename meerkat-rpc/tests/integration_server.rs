@@ -14,7 +14,10 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
-use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
+use meerkat_core::{
+    BlobStore, Config, ConfigRuntime, MemoryConfigStore, RealmConfigSection, StopReason,
+};
+use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use meerkat_store::MemoryBlobStore;
@@ -188,6 +191,76 @@ fn spawn_test_server_with_client(
     (client_writer, client_reader, server_handle)
 }
 
+struct FailingTokenStore;
+
+#[async_trait]
+impl TokenStore for FailingTokenStore {
+    async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+        Err(TokenStoreError::Unavailable("load failed".into()))
+    }
+
+    async fn save(
+        &self,
+        _key: &TokenKey,
+        _tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        Ok(())
+    }
+
+    async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+        Ok(Vec::new())
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "failing"
+    }
+}
+
+fn spawn_test_server_with_config_and_token_store(
+    config: Config,
+    token_store: Arc<dyn TokenStore>,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = AgentFactory::new(temp.path().join("sessions")).with_token_store(token_store);
+    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+    let mut runtime = SessionRuntime::new(
+        factory,
+        config.clone(),
+        10,
+        meerkat::PersistenceBundle::new(store, None, blob_store),
+        meerkat_rpc::router::NotificationSink::noop(),
+    );
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(config));
+    runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
+
+    let (server_reader, client_writer) = tokio::io::duplex(4096);
+    let (client_reader, server_writer) = tokio::io::duplex(4096);
+
+    let server_handle = tokio::spawn(async move {
+        let _temp = temp;
+        let reader = BufReader::new(server_reader);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        server.run().await
+    });
+
+    let client_reader = BufReader::new(client_reader);
+    (client_writer, client_reader, server_handle)
+}
+
 /// Send a JSONL request line.
 async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
     let line = format!("{}\n", serde_json::to_string(request).unwrap());
@@ -248,12 +321,12 @@ async fn initialize_roundtrip() {
     assert!(method_names.contains(&"session/peer_response_terminal"));
     assert!(method_names.contains(&"session/inject_context"));
     assert!(method_names.contains(&"turn/start"));
-    assert!(method_names.contains(&"session/runtime_state"));
+    assert!(method_names.contains(&"session/state"));
     assert!(method_names.contains(&"realtime/open_info"));
     assert!(method_names.contains(&"realtime/status"));
     assert!(method_names.contains(&"realtime/capabilities"));
-    assert!(method_names.contains(&"session/accept_input"));
-    assert!(method_names.contains(&"session/input_state"));
+    assert!(method_names.contains(&"session/accept"));
+    assert!(method_names.contains(&"session/input"));
     assert!(method_names.contains(&"config/get"));
     #[cfg(feature = "mcp")]
     {
@@ -278,6 +351,45 @@ async fn initialize_roundtrip() {
     // Close to trigger EOF
     drop(writer);
     server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn auth_status_get_surfaces_token_store_load_failures() {
+    let mut config = Config::default();
+    config.realm.insert(
+        "test-realm".to_string(),
+        RealmConfigSection::from_inline_api_keys(&[("openai", "sk-config-test")]),
+    );
+
+    let (mut writer, mut reader, server_handle) =
+        spawn_test_server_with_config_and_token_store(config, Arc::new(FailingTokenStore));
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "auth/status/get",
+        "params": {
+            "realm_id": "test-realm",
+            "binding_id": "default_openai"
+        }
+    });
+    send_request(&mut writer, &req).await;
+
+    let response = read_response(&mut reader).await;
+    assert_eq!(response["id"], 99);
+    assert_eq!(
+        response["error"]["code"],
+        meerkat_rpc::error::INTERNAL_ERROR
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TokenStore load failed")),
+        "auth/status/get should surface TokenStore load failures: {response}"
+    );
+
+    drop(writer);
+    let _ = server_handle.await.unwrap();
 }
 
 #[tokio::test]

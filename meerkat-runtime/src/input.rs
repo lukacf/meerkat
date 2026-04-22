@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::lifecycle::run_primitive::{ConversationContextAppend, CoreRenderable};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
@@ -392,6 +393,67 @@ pub enum ResponseTerminalStatus {
     Cancelled,
 }
 
+impl PeerInput {
+    /// Stable transcript prefix for peer messages that should keep their
+    /// transport provenance visible when blocks are present.
+    pub(crate) fn block_prefix_text(&self) -> Option<String> {
+        match (&self.convention, &self.header.source) {
+            (Some(PeerConvention::Message), InputOrigin::Peer { peer_id, .. }) => {
+                Some(format!("[COMMS MESSAGE from {peer_id}]"))
+            }
+            _ => None,
+        }
+    }
+
+    /// Typed ingress seam for peer prompt projection.
+    pub(crate) fn prompt_projection_text(&self) -> String {
+        match (&self.convention, &self.header.source) {
+            (
+                Some(PeerConvention::Request { request_id, intent }),
+                InputOrigin::Peer { peer_id, .. },
+            ) => format!(
+                "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
+                format_peer_payload(self.payload.as_ref())
+            ),
+            (
+                Some(PeerConvention::ResponseProgress { request_id, phase }),
+                InputOrigin::Peer { peer_id, .. },
+            ) => format!(
+                "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
+                response_progress_phase_label(phase),
+                format_peer_payload(self.payload.as_ref())
+            ),
+            (
+                Some(PeerConvention::ResponseTerminal { request_id, status }),
+                InputOrigin::Peer { peer_id, .. },
+            ) => format!(
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {peer_id}. Request ID: {request_id}. Status: {}. Result: {}.",
+                response_terminal_status_label(status),
+                format_peer_payload(self.payload.as_ref())
+            ),
+            _ => self.body.clone(),
+        }
+    }
+
+    /// Canonical context projection for terminal peer responses.
+    pub(crate) fn terminal_context_append(&self) -> Option<ConversationContextAppend> {
+        let (
+            Some(PeerConvention::ResponseTerminal { request_id, .. }),
+            InputOrigin::Peer { peer_id, .. },
+        ) = (&self.convention, &self.header.source)
+        else {
+            return None;
+        };
+
+        Some(ConversationContextAppend {
+            key: format!("peer_response_terminal:{peer_id}:{request_id}"),
+            content: CoreRenderable::Text {
+                text: self.prompt_projection_text(),
+            },
+        })
+    }
+}
+
 /// Flow step input from mob orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowStepInput {
@@ -496,6 +558,27 @@ pub(crate) fn classify_execution_kind(
     match input {
         Input::Continuation(_) => meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
         _ => meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+    }
+}
+
+fn format_peer_payload(payload: Option<&serde_json::Value>) -> String {
+    serde_json::to_string_pretty(payload.unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_else(|_| "null".to_string())
+}
+
+fn response_progress_phase_label(phase: &ResponseProgressPhase) -> &'static str {
+    match phase {
+        ResponseProgressPhase::Accepted => "accepted",
+        ResponseProgressPhase::InProgress => "in_progress",
+        ResponseProgressPhase::PartialResult => "partial_result",
+    }
+}
+
+fn response_terminal_status_label(status: &ResponseTerminalStatus) -> &'static str {
+    match status {
+        ResponseTerminalStatus::Completed => "completed",
+        ResponseTerminalStatus::Failed => "failed",
+        ResponseTerminalStatus::Cancelled => "cancelled",
     }
 }
 

@@ -95,18 +95,21 @@ pub struct ContentShape(pub String);
 pub enum TurnExecutionInput {
     StartConversationRun {
         run_id: RunId,
-    },
-    StartImmediateAppend {
-        run_id: RunId,
-    },
-    StartImmediateContext {
-        run_id: RunId,
-    },
-    PrimitiveApplied {
-        run_id: RunId,
         admitted_content_shape: ContentShape,
         vision_enabled: bool,
         image_tool_results_enabled: bool,
+        max_extraction_retries: u32,
+    },
+    StartImmediateAppend {
+        run_id: RunId,
+        admitted_content_shape: ContentShape,
+    },
+    StartImmediateContext {
+        run_id: RunId,
+        admitted_content_shape: ContentShape,
+    },
+    PrimitiveApplied {
+        run_id: RunId,
     },
     LlmReturnedToolCalls {
         run_id: RunId,

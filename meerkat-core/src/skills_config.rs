@@ -211,11 +211,18 @@ impl SkillsConfig {
 impl SkillsConfig {
     /// Build a source identity registry from repository config + governance overlays.
     pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
-        let records = self
-            .repositories
-            .iter()
-            .map(repository_to_identity_record)
-            .collect();
+        let mut records = vec![crate::skills::default_source_identity_record(
+            crate::skills::DefaultSkillSourceKind::Builtin,
+        )];
+        if self.repositories.is_empty() {
+            records.push(crate::skills::default_source_identity_record(
+                crate::skills::DefaultSkillSourceKind::Project,
+            ));
+            records.push(crate::skills::default_source_identity_record(
+                crate::skills::DefaultSkillSourceKind::User,
+            ));
+        }
+        records.extend(self.repositories.iter().map(repository_to_identity_record));
         SourceIdentityRegistry::build(
             records,
             self.identity.lineage.clone(),

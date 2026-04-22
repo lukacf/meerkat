@@ -589,9 +589,36 @@ fn scheduled_completion_future(
                 phase: OccurrencePhase::DeliveryFailed,
                 receipt: None,
                 detail: Some(reason),
-                failure_class: Some(OccurrenceFailureClass::TransportError),
+                failure_class: Some(OccurrenceFailureClass::RuntimeRejected),
                 materialized_session_id,
             },
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::expect_used)]
+mod tests {
+    use super::scheduled_completion_future;
+    use meerkat_runtime::completion::{CompletionHandle, CompletionOutcome};
+    use meerkat_schedule::OccurrenceFailureClass;
+
+    #[tokio::test]
+    async fn runtime_terminated_completions_preserve_runtime_failure_class() {
+        let future = scheduled_completion_future(
+            CompletionHandle::already_resolved(CompletionOutcome::RuntimeTerminated(
+                "runtime stopped".to_string(),
+            )),
+            None,
+        );
+
+        let Ok(terminal) = future.await else {
+            panic!("scheduled completion");
+        };
+        assert_eq!(
+            terminal.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        assert_eq!(terminal.detail.as_deref(), Some("runtime stopped"));
+    }
 }

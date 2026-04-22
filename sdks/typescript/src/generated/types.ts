@@ -547,10 +547,10 @@ export interface WireRealmConnectionSet {
 export interface WireAuthStatus {
   account_id?: string;
   auth_method: string;
+  binding_id: string;
   expires_at?: string;
   last_error?: Record<string, unknown>;
   last_refresh_at?: string;
-  profile_id: string;
   provider: string;
   state: string;
 }

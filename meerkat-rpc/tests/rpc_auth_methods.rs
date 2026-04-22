@@ -3,8 +3,8 @@
 //! reachable through the router and return well-formed JSON-RPC
 //! responses.
 //!
-//! Plan choke point K7 reads: "JSON-RPC `auth.login.start` →
-//! `auth.login.complete` → `session.create { binding_id }`". The live
+//! Plan choke point K7 reads: "JSON-RPC `auth/login.start` →
+//! `auth/login.complete` → `session/create { binding_id }`". The live
 //! OAuth round-trip belongs in the `e2e-auth` lane; this file verifies
 //! the router-level contract: every declared method exists, dispatches,
 //! and returns either a `result` or `error` envelope with a matching
@@ -45,17 +45,17 @@ fn dispatch(method: &str, params: Value) -> Value {
 #[test]
 fn every_auth_rpc_method_round_trips_through_envelope() {
     let methods = [
-        "auth.profile.create",
-        "auth.profile.list",
-        "auth.profile.get",
-        "auth.profile.delete",
-        "auth.profile.test",
-        "auth.login.start",
-        "auth.login.complete",
-        "auth.login.device_start",
-        "auth.login.device_complete",
-        "auth.login.provision_api_key",
-        "auth.status.get",
+        "auth/profile.create",
+        "auth/profile.list",
+        "auth/profile.get",
+        "auth/profile.delete",
+        "auth/profile.test",
+        "auth/login.start",
+        "auth/login.complete",
+        "auth/login.device_start",
+        "auth/login.device_complete",
+        "auth/login.provision_api_key",
+        "auth/status.get",
         "auth.logout",
     ];
 
@@ -69,13 +69,13 @@ fn every_auth_rpc_method_round_trips_through_envelope() {
     }
 }
 
-/// session.create envelope accepts a `connection_ref` field nested
+/// session/create envelope accepts a `connection_ref` field nested
 /// inside the params. Parses cleanly without flattening or discarding
 /// the field.
 #[test]
 fn session_create_envelope_preserves_connection_ref() {
     let envelope = dispatch(
-        "session.create",
+        "session/create",
         json!({
             "model": "claude-sonnet-4-5",
             "prompt": "hi",

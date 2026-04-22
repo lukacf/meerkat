@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider};
 
 use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -36,6 +36,7 @@ pub trait ProviderRuntime: Send + Sync {
     /// and bleeds defaults across bindings that declared otherwise.
     fn validate_binding(
         &self,
+        connection_ref: &ConnectionRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -78,6 +79,7 @@ mod tests {
         }
         fn validate_binding(
             &self,
+            _connection_ref: &ConnectionRef,
             _backend: &BackendProfile,
             _auth: &AuthProfile,
             _policy: &BindingPolicy,

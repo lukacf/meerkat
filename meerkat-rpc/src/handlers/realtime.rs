@@ -68,12 +68,12 @@ pub(crate) fn realtime_status_from_runtime(
         meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment replacement is pending"),
-            1,
+            0,
         ),
         meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => channel_status(
             RealtimeChannelState::Reconnecting,
             Some("realtime attachment requires reattach"),
-            1,
+            0,
         ),
     }
 }

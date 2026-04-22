@@ -18,6 +18,7 @@ pub struct SkillAlias {
 pub struct SourceIdentityRegistry {
     aliases: HashMap<String, SkillKey>,
     remaps: HashMap<SkillKey, SkillKey>,
+    records_by_fingerprint: HashMap<String, SourceUuid>,
 }
 
 impl SourceIdentityRegistry {
@@ -112,6 +113,10 @@ impl SourceIdentityRegistry {
         Ok(Self {
             aliases: alias_index,
             remaps: remap_index,
+            records_by_fingerprint: fingerprints_by_uuid
+                .into_iter()
+                .map(|(source_uuid, fingerprint)| (fingerprint, source_uuid))
+                .collect(),
         })
     }
 
@@ -134,6 +139,12 @@ impl SourceIdentityRegistry {
 
     pub fn canonical_skill_id(key: &SkillKey) -> super::SkillId {
         super::SkillId(format!("{}/{}", key.source_uuid, key.skill_name))
+    }
+
+    pub fn default_source_uuid(&self, kind: super::DefaultSkillSourceKind) -> Option<SourceUuid> {
+        self.records_by_fingerprint
+            .get(super::default_source_fingerprint(kind))
+            .cloned()
     }
 
     fn apply_remaps(&self, mut key: SkillKey) -> Result<SkillKey, SkillError> {

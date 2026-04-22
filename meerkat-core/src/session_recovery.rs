@@ -38,15 +38,31 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub recoverable_tool_defs: Option<Vec<ToolDef>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
+    pub allow_standalone_runtime_build_fallback: bool,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+}
+
+impl Default for SurfaceSessionRecoveryContext {
+    fn default() -> Self {
+        Self {
+            llm_client_override: None,
+            external_tools: None,
+            runtime_build_mode: None,
+            allow_standalone_runtime_build_fallback: true,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -90,6 +106,10 @@ pub enum SurfaceSessionRecoveryError {
     MissingSessionMetadata(String),
     #[error("{0}")]
     InvalidOverride(String),
+    #[error(
+        "recovered session {0} requires runtime-backed bindings but no runtime_build_mode was supplied"
+    )]
+    MissingRuntimeBuildMode(String),
 }
 
 pub fn has_build_only_turn_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
@@ -209,6 +229,7 @@ pub fn build_recovered_session(
     };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
     let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
+    let session_id_for_error = session.id().to_string();
     let recoverable_tool_defs = overrides
         .recoverable_tool_defs
         .clone()
@@ -295,9 +316,17 @@ pub fn build_recovered_session(
         call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
-        runtime_build_mode: context
-            .runtime_build_mode
-            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
+        runtime_build_mode: match context.runtime_build_mode {
+            Some(runtime_build_mode) => runtime_build_mode,
+            None if context.allow_standalone_runtime_build_fallback => {
+                RuntimeBuildMode::StandaloneEphemeral
+            }
+            None => {
+                return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
+                    session_id_for_error,
+                ));
+            }
+        },
     };
     build.apply_persisted_mob_operator_access(
         overrides
@@ -629,6 +658,25 @@ mod tests {
         );
         assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
         assert_eq!(recovered.build.config_generation, Some(99));
+    }
+
+    #[test]
+    fn build_recovered_session_rejects_missing_runtime_build_mode_when_fallback_disabled() {
+        let session = sample_session();
+        let error = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                allow_standalone_runtime_build_fallback: false,
+                ..Default::default()
+            },
+        )
+        .expect_err("runtime-backed recovery must not silently fall back");
+
+        assert!(matches!(
+            error,
+            SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
+        ));
     }
 
     #[test]

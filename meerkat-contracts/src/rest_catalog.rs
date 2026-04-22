@@ -48,7 +48,11 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/sessions",
             vec![
                 RestOperationDescriptor::new("get", "List sessions"),
-                RestOperationDescriptor::new("post", "Create and run a new session"),
+                RestOperationDescriptor::with_description(
+                    "post",
+                    "Create and run a new session",
+                    "Accepts optional connection_ref for realm-scoped provider resolution.",
+                ),
             ],
         ),
         RestPathDescriptor::new(
@@ -232,7 +236,7 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/runtime-state",
+            "/sessions/{id}/state",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get a session's current runtime state",
@@ -246,21 +250,21 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/accept-input",
+            "/sessions/{id}/accept",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Accept a runtime input for a session",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/retire-runtime",
+            "/sessions/{id}/retire",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Retire a session runtime",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/reset-runtime",
+            "/sessions/{id}/reset",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Reset a session runtime",
@@ -342,14 +346,17 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/auth/profiles",
             vec![
                 RestOperationDescriptor::new("get", "List auth profiles"),
-                RestOperationDescriptor::new("post", "Create an auth profile"),
+                RestOperationDescriptor::new("post", "Persist credentials for a binding"),
             ],
         ),
         RestPathDescriptor::new(
             "/auth/profiles/{id}",
             vec![
                 RestOperationDescriptor::new("get", "Get one auth profile"),
-                RestOperationDescriptor::new("delete", "Delete an auth profile"),
+                RestOperationDescriptor::new(
+                    "delete",
+                    "Delete persisted credentials for a binding",
+                ),
             ],
         ),
         RestPathDescriptor::new(
@@ -382,13 +389,16 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
         ),
         RestPathDescriptor::new(
             "/auth/status/{id}",
-            vec![RestOperationDescriptor::new("get", "Get auth status")],
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get auth status for a binding",
+            )],
         ),
         RestPathDescriptor::new(
             "/auth/logout/{id}",
             vec![RestOperationDescriptor::new(
                 "post",
-                "Revoke + remove persisted credentials",
+                "Revoke + remove persisted credentials for a binding",
             )],
         ),
         RestPathDescriptor::new(

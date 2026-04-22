@@ -1,0 +1,108 @@
+# RCT: Remaining Dogma Rows (Round 5)
+
+Status: In progress
+Scope: All remaining dogma violations except kernel/stringly typing (cluster F / row 22)
+Method: `rct-lite`
+Branch target: `codex/dogma-rest-rct-lite`
+Authority note: This round-5 document is the authoritative Phase 0-4 plan for the remaining dogma rows. Repo-root `.rct/plan.yaml` is legacy 0.5 package context only and does not define this round's REQ-301..319 target set.
+Surface note: Meerkat is library-first. When a phase targets runtime/control-plane internals that are not yet surfaced on REST/RPC/MCP, the shipped validation surfaces include the library/runtime APIs (`SessionAgent`, `SessionServiceRuntimeExt`, `MeerkatMachine`) in addition to public network surfaces.
+
+## Requirement Traceability Matrix
+
+| REQ-ID | Phase | Requirement | Primary files | Runtime caller / surface | Planned proof | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| REQ-301 | 2 | Peer response semantic projection is owned by a protocol or machine seam, not handwritten runtime-loop prompt/context synthesis. | `meerkat-runtime/src/runtime_loop.rs`, `meerkat-runtime/src/input.rs` | runtime-backed session turn execution | `phase1_round5_dogma::req_301_peer_response_semantics_are_still_projected_by_runtime_loop_shell_text` | VALIDATED |
+| REQ-302 | 2 | `wait_all` and terminate-owner semantics are DSL-authoritative; shell keeps only waiter mechanics. | `meerkat-runtime/src/ops_lifecycle.rs`, machine DSL/state | runtime ops barrier / agent loop | `phase1_round5_dogma::req_302_wait_all_and_terminate_owner_still_make_semantic_decisions_in_shell_code` | VALIDATED |
+| REQ-303 | 2 | Runtime-backed agent turns no longer depend on `LocalTurnExecutionState` for start dispatch or published execution snapshot truth. | `meerkat-core/src/agent/state.rs`, `meerkat-core/src/agent/runner.rs` | core agent loop | `phase1_round5_dogma::req_303_agent_turn_dispatch_still_depends_on_local_turn_execution_state` | VALIDATED |
+| REQ-304 | 3 | Request lifecycle late-cancel/publish semantics are canonical across request executor, RPC, REST, and MCP surfaces. | `meerkat/src/surface/request_execution.rs`, `meerkat-rest/src/lib.rs`, `meerkat-rpc/src/server.rs`, `meerkat-mcp-server/src/main.rs` | REST/RPC/MCP request lifecycle | `phase1_round5_dogma::req_304_rest_lifecycle_still_discards_complete_outcome_instead_of_projecting_it` | VALIDATED |
+| REQ-305 | 3 | Public runtime control APIs use final session-domain names; REST/RPC catalogs, docs, SDKs, and handlers converge with no compatibility aliases. | `meerkat-contracts/src/{rest_catalog,rpc_catalog}.rs`, REST/RPC routers, SDK clients/types | RPC initialize, REST catalog/docs, SDK wrappers | `phase1_round5_dogma::req_305_public_runtime_control_surfaces_still_drift_from_final_session_domain_names` | VALIDATED |
+| REQ-306 | 3 | Public mob-MCP receipts expose `member_ref` instead of raw binding-era runtime handles. | `meerkat-mob-mcp/src/public_mcp.rs`, SDKs | public MCP surface | `phase1_round5_dogma::req_306_public_mob_mcp_receipts_still_leak_binding_era_runtime_handles` | VALIDATED |
+| REQ-307 | 3 | RPC `realtime/status` and websocket channel frames project the same attachment status semantics, including `attempt_count`. | `meerkat-rpc/src/handlers/realtime.rs`, `meerkat-rpc/src/realtime_ws.rs` | RPC realtime + realtime WS | `phase1_round5_dogma::req_307_rpc_realtime_status_still_drifts_from_websocket_attempt_count_semantics` | VALIDATED |
+| REQ-308 | 3 | `connection_ref` is accepted and forwarded consistently through REST, RPC, MCP, and SDK session-create surfaces. | REST/RPC create-session handlers, SDKs, MCP ingress | session creation surfaces | `phase1_round5_dogma::req_308_connection_ref_is_still_not_validated_and_forwarded_across_create_surfaces` | VALIDATED |
+| REQ-309 | 2 | Trust admission for peer ingress has one canonical owner/drop path shared by transport and inbox admission. | `meerkat-comms/src/{io_task,inbox}.rs` | comms ingress | `phase1_round5_dogma::req_309_peer_trust_admission_still_has_multiple_canonical_owners` | VALIDATED |
+| REQ-310 | 2 | Supervisor bind/authorize trust edges publish only after DSL commit, with rollback on DSL rejection or rotation failure. | `meerkat-runtime/src/comms_drain.rs`, `meerkat-comms/src/{io_task,inbox}.rs` | supervisor bridge / comms drain | `phase1_round5_dogma::req_310_supervisor_trust_edges_still_publish_before_dsl_commit` | VALIDATED |
+| REQ-311 | 4 | Auth identity is canonicalized on `(realm_id, binding_id)` across token store, auth machine, RPC/REST handlers, and provider runtimes. | `meerkat-core/src/auth/token_store.rs`, `meerkat-runtime/src/auth_machine/`, auth handlers, provider runtimes | auth CRUD + provider resolution | `phase1_round5_dogma::req_311_auth_identity_still_uses_profile_or_backend_surrogates` | VALIDATED |
+| REQ-312 | 4 | Authorizer-backed bindings materialize dynamic authorizer-backed auth leases instead of inert empty static leases. | provider runtimes, auth resolver | provider runtime auth resolution | `phase1_round5_dogma::req_312_authorizer_backed_bindings_still_materialize_empty_static_leases` | VALIDATED |
+| REQ-313 | 4 | WASM external-auth callbacks receive canonical `<realm_id>:<binding_id>` binding keys. | `meerkat-web-runtime/src/external_auth.rs` | wasm external auth | `phase1_round5_dogma::req_313_wasm_external_auth_binding_key_is_still_not_realm_binding_canonical` | VALIDATED |
+| REQ-314 | 4 | Auth profile constraints, metadata defaults, and binding policy fields affect resolved runtime behavior after ingest. | `meerkat-auth-core/src/resolver.rs`, provider runtimes, core connection types | provider build/auth resolution | `phase1_round5_dogma::req_314_auth_policy_fields_still_have_no_runtime_consumer` | VALIDATED |
+| REQ-315 | 4 | Skill capability gating uses effective per-build builtins/shell/memory policy, not raw registered capabilities. | `meerkat/src/factory.rs`, `meerkat-skills/src/resolve.rs`, capability registry | factory build / skill resolution | `phase1_round5_dogma::req_315_skill_capability_gating_still_seeds_from_registered_capabilities` | VALIDATED |
+| REQ-316 | 3 | Persistent recovery never silently drops canonical runtime bindings when a runtime-backed seam exists. | `meerkat-session/src/persistent.rs`, `meerkat-core/src/session_recovery.rs`, runtime-backed surfaces | persistent session recovery | `phase1_round5_dogma::req_316_recovery_still_falls_back_to_standalone_ephemeral_bindings` | VALIDATED |
+| REQ-317 | 4 | Default skill sources resolve through the canonical source-identity registry instead of helper-local fixed UUIDs. | `meerkat-skills/src/resolve.rs`, `meerkat-skills/src/source/filesystem.rs`, factory/session runtime surfaces | skill resolution | `phase1_round5_dogma::req_317_default_skill_sources_still_bypass_the_canonical_identity_registry` | VALIDATED |
+| REQ-318 | 3 | Realtime websocket member rotation rebuilds the bound product session before further traffic is routed. | `meerkat-rpc/src/realtime_ws.rs` | realtime websocket | `phase1_round5_dogma::req_318_realtime_ws_rotation_still_switches_session_id_without_rebinding_product_session` | VALIDATED |
+| REQ-319 | 3 | Schedule surfaces preserve runtime terminal classes instead of reinterpreting them into schedule-local failures. | `meerkat/src/surface/schedule_host.rs` | schedule host | `phase1_round5_dogma::req_319_schedule_host_still_reinterprets_runtime_terminal_classes` | VALIDATED |
+
+## Carry-Forward: Typed But Unwired / Semantically Drifted
+
+None.
+
+## Phase Plan
+
+### Phase 0
+
+- Validate the external boundaries and representation contracts this PR depends on.
+- Record green evidence for wire/schema representation contracts plus real entrypoint success + rejection recovery on the shipped RPC/REST/MCP surfaces before top-down red tests.
+- Phase 0 does **not** claim that runtime plumbing for `connection_ref` or other dogma fixes is already implemented; those remain explicit later-phase red targets.
+
+### Phase 1
+
+- Rewrite the round-5 red target so every REQ-301..319 has its own executable test and no later REQ is masked by an earlier panic.
+- Use real shipped surfaces where the behavior is observable today: JSON-RPC `initialize`, JSON-RPC `session/create`, JSON-RPC `realtime/status`, and public mob-MCP `handle_public_tools_call`.
+- Keep structural sentinels only for the deep runtime/auth/schedule internals that do not yet expose a clean black-box seam.
+- Record the red target that the later implementation phases must turn green.
+
+### Phase 1 Test Map
+
+| Test | Requirement | Proof Type | Notes |
+| --- | --- | --- | --- |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_301_peer_response_semantics_are_still_projected_by_runtime_loop_shell_text` | `REQ-301` | Structural sentinel | Pins the runtime-loop peer-response system-notice synthesis still living in shell code. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_302_wait_all_and_terminate_owner_still_make_semantic_decisions_in_shell_code` | `REQ-302` | Structural sentinel | Pins the remaining shell-owned `wait_all` / terminate-owner terminal scans. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_303_agent_turn_dispatch_still_depends_on_local_turn_execution_state` | `REQ-303` | Structural sentinel | Pins `LocalTurnExecutionState` as a remaining shadow authority in agent/runner dispatch. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_304_rest_lifecycle_still_discards_complete_outcome_instead_of_projecting_it` | `REQ-304` | Owner behavior + structural seam | First proves `SurfaceRequestExecutor::finish_unpublished()` returns `SupersededByCancel`, then pins REST still discarding that outcome. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_305_public_runtime_control_surfaces_still_drift_from_final_session_domain_names` | `REQ-305` | Real JSON-RPC entrypoint + docs/schema/SDK parity | Uses real `initialize` response plus REST catalogs/docs/schemas and SDK scans to pin the rename surface. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_306_public_mob_mcp_receipts_still_leak_binding_era_runtime_handles` | `REQ-306` | Public MCP handler + structural seam | Drives `handle_public_tools_call("meerkat_mob_spawn", ...)` and pairs it with the remaining public member-send receipt leak. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_307_rpc_realtime_status_still_drifts_from_websocket_attempt_count_semantics` | `REQ-307` | Real JSON-RPC entrypoint | Creates a real session, drives runtime attachment replacement/reattach, then asserts `realtime/status` still disagrees with WS `attempt_count`. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_308_connection_ref_is_still_not_validated_and_forwarded_across_create_surfaces` | `REQ-308` | Real JSON-RPC entrypoint + structural parity checks | Sends invalid `connection_ref` through real `session/create`, then pins the missing REST/MCP/schema/SDK plumbing. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_309_peer_trust_admission_still_has_multiple_canonical_owners` | `REQ-309` | Structural sentinel | Pins duplicate trust admission checks in both `io_task` and `inbox`. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_310_supervisor_trust_edges_still_publish_before_dsl_commit` | `REQ-310` | Structural order check | Pins `add_trusted_peer` / `remove_trusted_peer` still happening before DSL commit on bind/authorize flows. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_311_auth_identity_still_uses_profile_or_backend_surrogates` | `REQ-311` | Contract foothold + structural seam | Starts from canonical `TokenKey(realm,binding)` and pins handler/provider drift back to `profile_id` / backend options. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_312_authorizer_backed_bindings_still_materialize_empty_static_leases` | `REQ-312` | Structural sentinel | Pins provider runtimes still resolving authorizer-backed bindings to empty static leases instead of `DynamicLease`. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_313_wasm_external_auth_binding_key_is_still_not_realm_binding_canonical` | `REQ-313` | Structural sentinel | Pins browser external-auth binding keys still being fabricated from auth/backend profile ids. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_314_auth_policy_fields_still_have_no_runtime_consumer` | `REQ-314` | Structural sentinel | Pins the lack of runtime reads for constraints, metadata defaults, and binding policy requirement fields. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_315_skill_capability_gating_still_seeds_from_registered_capabilities` | `REQ-315` | Structural sentinel | Pins factory/skills gating still seeding from raw registered capabilities. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_316_recovery_still_falls_back_to_standalone_ephemeral_bindings` | `REQ-316` | Structural sentinel | Pins the recovery fallback to `RuntimeBuildMode::StandaloneEphemeral`. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_317_default_skill_sources_still_bypass_the_canonical_identity_registry` | `REQ-317` | Structural sentinel | Pins the helper-local fixed UUIDs in skills resolve/filesystem source code. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_318_realtime_ws_rotation_still_switches_session_id_without_rebinding_product_session` | `REQ-318` | Structural sentinel | Pins the rotation branch that rewrites `current_session_id` before rebuilding the bound product session. |
+| `tests/integration/tests/phase1_round5_dogma.rs::req_319_schedule_host_still_reinterprets_runtime_terminal_classes` | `REQ-319` | Structural sentinel | Pins `CompletionOutcome::RuntimeTerminated` still mapping to `OccurrenceFailureClass::TransportError`. |
+
+### Phase 2
+
+- REQ-301, REQ-302, REQ-303, REQ-309, REQ-310.
+- Validation surfaces for this phase are mixed by design:
+  `session/peer_response_terminal` on RPC for the peer-projection seam,
+  `SessionServiceRuntimeExt::stop_runtime_executor` for owner teardown,
+  and `SessionAgent::execution_snapshot` / runtime turn-state handle regression tests for published snapshot truth.
+
+### Phase 3
+
+- REQ-304, REQ-305, REQ-306, REQ-307, REQ-308, REQ-316, REQ-318, REQ-319.
+
+### Phase 4
+
+- REQ-311, REQ-312, REQ-313, REQ-314, REQ-315, REQ-317.
+
+### Final Phase
+
+- Full test + review gate.
+- Empty carry-forward list.
+- All REQ rows `VALIDATED`.
+
+## Evidence Log
+
+| Phase | Commit | Timestamp | Commands | Artifact / excerpt | Result |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `2e8ef62d1858567a06eaa9e0e4cdc89a06e1b7dc + dirty phase1 tests` | `2026-04-21T21:20:06Z` | `cargo test -p meerkat-contracts --features schema --test connection_ref_wire -- --nocapture` ; `cargo test -p meerkat-rpc --test integration_server initialize_roundtrip -- --nocapture` ; `cargo test -p meerkat-rpc --test integration_server malformed_json_returns_error_and_continues -- --nocapture` ; `cargo test -p meerkat-rest test_create_session_route_rejects_reserved_mob_peer_meta_labels -- --nocapture` ; `cargo test -p meerkat-rest --test runtime_backed_ingress runtime_backed_external_events_stay_queued_without_waking_idle_sessions -- --nocapture` ; `cargo test -p meerkat-mcp-server --test runtime_backed_ingress runtime_backed_ingress_red_ok_mcp_run_and_resume_reuse_the_same_runtime_session -- --nocapture` ; `cargo test -p meerkat-mcp-server test_handle_tools_call_unknown_tool_still_errors -- --nocapture` | Green boundary proofs: `connection_ref_wire` passed 11/11 round-trip + schema assertions for connection/auth/binding wire shapes with the `schema` feature enabled; JSON-RPC `initialize_roundtrip` and REST runtime-backed external-event queueing passed through real shipped entrypoints; RPC malformed JSON recovery, REST reserved-label rejection, MCP runtime-backed `meerkat_run`/`meerkat_resume` session reuse, and MCP unknown-tool rejection all passed as independent real-entrypoint success + adversarial checks. | `GREEN` |
+| 1 | `2e8ef62d1858567a06eaa9e0e4cdc89a06e1b7dc + dirty phase1 tests/docs` | `2026-04-21T21:52:39Z` | `cargo test -p meerkat-integration-tests --test phase1_round5_dogma -- --list` ; `cargo test -p meerkat-integration-tests --test phase1_round5_dogma --no-run` ; `cargo test -p meerkat-integration-tests --test phase1_round5_dogma -- --nocapture` | `--list` discovered 19 tests for 19 REQs with no bundled panics; `--no-run` compiled the rewritten suite cleanly; the full run failed 19/19 at explicit assertion sites only. Real-entrypoint reds now include JSON-RPC `initialize` (REQ-305), JSON-RPC `realtime/status` after live-attachment replacement/reattach (REQ-307), JSON-RPC `session/create` with invalid `connection_ref` (REQ-308), and public mob-MCP `handle_public_tools_call("meerkat_mob_spawn", ...)` (REQ-306). Representative red assertions: RPC `realtime/status` still reports `attempt_count = 1` for replacement/reattach, RPC `session/create` still accepts an invalid `connection_ref`, public mob-MCP spawn still returns `agent_runtime_id`/`fence_token` instead of `member_ref`, and the schedule host still maps `RuntimeTerminated` to `TransportError`. | `RED (expected)` |
+| 2 | `2e8ef62d1858567a06eaa9e0e4cdc89a06e1b7dc + dirty round5 phase2` | `2026-04-22T00:23:58Z` | `cargo test -p meerkat-integration-tests --test phase1_round5_dogma -- --nocapture` ; `cargo test -p meerkat-comms --lib` ; `cargo test -p meerkat-core -p meerkat-runtime --lib -- --nocapture` ; `cargo clippy -p meerkat-core -p meerkat-runtime -p meerkat-comms --all-targets -- -D warnings` | The full round-5 red-target suite now reports REQ-301/302/303/309/310 green while only the Phase 4 auth/policy rows remain red; `meerkat-comms --lib` passed 291 tests (3 ignored); `meerkat-core --lib` passed 600 tests and `meerkat-runtime --lib` passed 433 tests (3 ignored); the phase-scoped clippy lane is green. | `GREEN` |
+| 3 | `2e8ef62d1858567a06eaa9e0e4cdc89a06e1b7dc + dirty round5 phase3` | `2026-04-22T00:24:44Z` | `cargo test -p meerkat-integration-tests --test phase1_round5_dogma -- --nocapture` ; `cargo test -p meerkat-rest -p meerkat-rpc -p meerkat-mob-mcp -p meerkat-session --lib --tests -- --nocapture` ; `cargo test -p meerkat-mcp-server --lib --tests -- --nocapture` ; `cargo clippy -p meerkat-mcp-server -p meerkat-rest -p meerkat-rpc -p meerkat-mob-mcp -p meerkat-session --all-targets -- -D warnings` | The full round-5 red-target suite reports REQ-304/305/306/307/308/316/318/319 green while the remaining red rows are Phase 4 only; REST/RPC/mob/session crate sweeps are green; MCP now has a real runtime-backed adversarial proof that `meerkat_run` rejects a well-formed cross-realm `connection_ref`; the expanded phase-scoped clippy lane is green. | `GREEN` |
+| 4 | `2e8ef62d1858567a06eaa9e0e4cdc89a06e1b7dc + dirty round5 phase4` | `2026-04-22T01:22:07Z` | `cargo test -p meerkat-integration-tests --test phase1_round5_dogma -- --nocapture` ; `cargo test -p meerkat-rest --features integration-real-tests --test rest_auth_endpoints -- --nocapture` ; `cargo test -p meerkat-auth-core -p meerkat-llm-core -p meerkat-openai -p meerkat-anthropic -p meerkat-gemini -p meerkat-skills -p meerkat --lib --tests -- --nocapture` ; `cargo test -p meerkat-rpc --test integration_server auth_status_get_surfaces_token_store_load_failures -- --nocapture` ; `cargo test -p meerkat --features skills --test factory_build_agent capability_gated_skills_follow_agent_factory_overrides -- --nocapture` ; `cargo test -p meerkat --features "skills memory-store-session" --test factory_build_agent memory_gated_skills_follow_agent_factory_overrides -- --nocapture` ; `wasm-pack test --node . --test wasm_external_resolver` ; `cargo clippy -p meerkat-auth-core -p meerkat-llm-core -p meerkat-openai -p meerkat-anthropic -p meerkat-gemini -p meerkat-skills -p meerkat-core -p meerkat-rest -p meerkat-rpc -p meerkat-web-runtime -p meerkat --all-targets -- -D warnings` | The full round-5 red-target suite reports 19/19 green; REST auth routes now prove binding-keyed status/create semantics through the shipped router; provider-runtime OAuth and dynamic-lease tests are green for OpenAI, Anthropic, and Gemini; RPC `auth/status/get` now surfaces TokenStore read failures as an error envelope; AgentFactory capability-gating tests pass for builtins, shell, and memory-store overrides; `wasm-pack test --node . --test wasm_external_resolver` executes the new resolver callback witness and reports 5/5 passing; the touched Phase 4 clippy lane is green. | `GREEN` |
+| Final | pending | pending | pending | pending | pending |

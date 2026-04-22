@@ -50,7 +50,7 @@ pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
 use meerkat_contracts::{
     CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
 };
-use meerkat_core::{AgentEvent, Config, PeerMeta};
+use meerkat_core::{AgentEvent, Config, ConnectionRef, PeerMeta, RealmConnectionSet};
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
@@ -213,6 +213,33 @@ pub fn validate_raw_labels(
         }
     }
 
+    Ok(())
+}
+
+/// Validate that a public `connection_ref` points at a configured realm
+/// binding before a create surface starts session materialization.
+pub fn validate_connection_ref(
+    config: &Config,
+    connection_ref: Option<&ConnectionRef>,
+) -> Result<(), String> {
+    let Some(connection_ref) = connection_ref else {
+        return Ok(());
+    };
+
+    let section = config.realm.get(&connection_ref.realm_id).ok_or_else(|| {
+        format!(
+            "realm '{}' not found in config.realm",
+            connection_ref.realm_id
+        )
+    })?;
+    let realm = RealmConnectionSet::from_config(&connection_ref.realm_id, section)
+        .map_err(|error| error.to_string())?;
+    if !realm.bindings.contains_key(&connection_ref.binding_id) {
+        return Err(format!(
+            "binding '{}' not found in config.realm.{}.binding",
+            connection_ref.binding_id, connection_ref.realm_id
+        ));
+    }
     Ok(())
 }
 
@@ -404,6 +431,7 @@ pub async fn emit_mcp_lifecycle_events(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_core::Config;
@@ -431,6 +459,35 @@ mod tests {
             result.is_ok(),
             "ordinary peer metadata should stay available"
         );
+    }
+
+    #[test]
+    fn validate_connection_ref_rejects_missing_binding() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.workspace.backend.default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.workspace.auth.default]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "inline_secret", secret = "sk-test" }
+
+[realm.workspace.binding.default]
+backend_profile = "default"
+auth_profile = "default"
+"#,
+        )
+        .unwrap_or_else(|error| panic!("config parse failed: {error}"));
+        let result = validate_connection_ref(
+            &config,
+            Some(&ConnectionRef {
+                realm_id: "workspace".to_string(),
+                binding_id: "missing".to_string(),
+            }),
+        );
+        assert!(result.is_err(), "missing binding must be rejected");
     }
 
     #[test]

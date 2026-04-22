@@ -2188,6 +2188,36 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     .detach_live(current_session_id)
                                                     .await;
                                                 *current_session_id = new_session_id;
+                                                if let Some(product_session) =
+                                                    product_session.as_mut()
+                                                    && let Err(error) =
+                                                        refresh_product_session_projection(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                            turning_mode,
+                                                            state.host.session_factory.clone(),
+                                                            product_session,
+                                                        )
+                                                        .await
+                                                {
+                                                    let close_reason =
+                                                        error.code.as_str().to_string();
+                                                    let _ = send_server_frame(
+                                                        &mut socket,
+                                                        &RealtimeServerFrame::ChannelError(error),
+                                                    )
+                                                    .await;
+                                                    let _ = send_server_frame(
+                                                        &mut socket,
+                                                        &RealtimeServerFrame::ChannelClosed(
+                                                            RealtimeChannelClosedFrame {
+                                                                reason: Some(close_reason),
+                                                            },
+                                                        ),
+                                                    )
+                                                    .await;
+                                                    break;
+                                                }
                                                 // Reset projection baseline so the
                                                 // poll-loop's next status tick is
                                                 // evaluated against the freshly

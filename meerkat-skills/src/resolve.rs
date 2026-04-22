@@ -3,7 +3,9 @@
 //! Turns `SkillsConfig` into a composed concrete `CompositeSkillSource`.
 //! This is the single canonical path for all surfaces.
 
-use meerkat_core::skills::{SkillError, SkillScope, SourceUuid};
+#[cfg(test)]
+use meerkat_core::skills::SourceUuid;
+use meerkat_core::skills::{DefaultSkillSourceKind, SkillError, SkillScope};
 use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
 use std::path::Path;
 
@@ -40,28 +42,43 @@ pub async fn resolve_repositories_with_roots(
         return Ok(None);
     }
 
+    let identity_registry = config.build_source_identity_registry()?;
     let mut sources: Vec<NamedSource> = Vec::new();
 
     if config.repositories.is_empty() {
         // Explicit default chain: context FS -> user FS.
         if let Some(root) = context_root {
+            let source_uuid = identity_registry
+                .default_source_uuid(DefaultSkillSourceKind::Project)
+                .ok_or_else(|| {
+                    SkillError::Load(
+                        "default project skill source identity missing from registry".into(),
+                    )
+                })?;
             sources.push(NamedSource {
                 name: "project".into(),
                 source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                     root.join(".rkat/skills"),
                     SkillScope::Project,
-                    source_uuid("00000000-0000-4000-8000-000000000101"),
+                    source_uuid,
                     config.health_thresholds,
                 )),
             });
         }
         if let Some(user) = user_root {
+            let source_uuid = identity_registry
+                .default_source_uuid(DefaultSkillSourceKind::User)
+                .ok_or_else(|| {
+                    SkillError::Load(
+                        "default user skill source identity missing from registry".into(),
+                    )
+                })?;
             sources.push(NamedSource {
                 name: "user".into(),
                 source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                     user.join(".rkat/skills"),
                     SkillScope::User,
-                    source_uuid("00000000-0000-4000-8000-000000000102"),
+                    source_uuid,
                     config.health_thresholds,
                 )),
             });
@@ -255,6 +272,7 @@ fn sanitize_repo_name(url: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn source_uuid(raw: &str) -> SourceUuid {
     match SourceUuid::parse(raw) {
         Ok(source_uuid) => source_uuid,
@@ -617,6 +635,81 @@ fi
         let shared = skills.iter().find(|s| s.id.0 == "shared-skill").unwrap();
         assert_eq!(shared.description, "context description");
         assert_eq!(shared.source_name, "project");
+    }
+
+    #[tokio::test]
+    async fn test_default_source_runtime_uuids_come_from_identity_registry() {
+        let tmp = TempDir::new().unwrap();
+        let context_root = tmp.path().join("context");
+        let user_root = tmp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat/skills/project-skill"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat/skills/user-skill"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            context_root.join(".rkat/skills/project-skill/SKILL.md"),
+            "---\nname: project-skill\ndescription: project description\n---\n\nProject.",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/skills/user-skill/SKILL.md"),
+            "---\nname: user-skill\ndescription: user description\n---\n\nUser.",
+        )
+        .await
+        .unwrap();
+
+        let config = SkillsConfig::default();
+        let registry = config.build_source_identity_registry().unwrap();
+        let expected_project_uuid_opt =
+            registry.default_source_uuid(DefaultSkillSourceKind::Project);
+        let expected_user_uuid_opt = registry.default_source_uuid(DefaultSkillSourceKind::User);
+        assert!(expected_project_uuid_opt.is_some(), "project source uuid");
+        assert!(expected_user_uuid_opt.is_some(), "user source uuid");
+        let Some(expected_project_uuid) = expected_project_uuid_opt else {
+            unreachable!();
+        };
+        let Some(expected_user_uuid) = expected_user_uuid_opt else {
+            unreachable!();
+        };
+
+        let source = resolve_repositories_with_roots(
+            &config,
+            Some(&context_root),
+            Some(&user_root),
+            Some(tmp.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let named = source.named_sources_for_tests();
+        let project = named.iter().find(|named| named.name == "project").unwrap();
+        let user = named.iter().find(|named| named.name == "user").unwrap();
+        assert!(
+            matches!(&project.source, crate::source::SourceNode::Filesystem(_)),
+            "project source should be filesystem"
+        );
+        assert!(
+            matches!(&user.source, crate::source::SourceNode::Filesystem(_)),
+            "user source should be filesystem"
+        );
+        let project_source = match &project.source {
+            crate::source::SourceNode::Filesystem(source) => source,
+            _ => unreachable!(),
+        };
+        let user_source = match &user.source {
+            crate::source::SourceNode::Filesystem(source) => source,
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            project_source.source_uuid_for_tests(),
+            &expected_project_uuid
+        );
+        assert_eq!(user_source.source_uuid_for_tests(), &expected_user_uuid);
     }
 
     #[tokio::test]

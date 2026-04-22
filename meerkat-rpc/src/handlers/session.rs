@@ -130,6 +130,9 @@ pub struct CreateSessionParams {
     /// These are merged with globally registered tools at build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_tools: Option<Vec<meerkat_core::ToolDef>>,
+    /// Optional realm-scoped connection binding used for provider resolution.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -147,6 +150,39 @@ fn canonical_skill_ids(
         skill_references,
     };
     params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+}
+
+async fn validate_connection_ref_for_runtime(
+    runtime: &SessionRuntime,
+    connection_ref: &meerkat_core::ConnectionRef,
+) -> Result<(), String> {
+    if let Some(active_realm) = runtime.realm_id()
+        && active_realm != connection_ref.realm_id
+    {
+        return Err(format!(
+            "connection_ref realm '{}' does not match active realm '{}'",
+            connection_ref.realm_id, active_realm
+        ));
+    }
+
+    let snapshot = runtime
+        .config_runtime()
+        .ok_or_else(|| "connection_ref requires config runtime".to_string())?
+        .get()
+        .await
+        .map_err(|error| format!("failed to load config for connection_ref validation: {error}"))?;
+    let section = snapshot
+        .config
+        .realm
+        .get(&connection_ref.realm_id)
+        .ok_or_else(|| format!("unknown realm '{}'", connection_ref.realm_id))?;
+    if !section.binding.contains_key(&connection_ref.binding_id) {
+        return Err(format!(
+            "unknown binding '{}' in realm '{}'",
+            connection_ref.binding_id, connection_ref.realm_id
+        ));
+    }
+    Ok(())
 }
 
 /// Parameters for `session/list` (all optional).
@@ -241,16 +277,30 @@ pub async fn handle_create(
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
+    if let Some(connection_ref) = params.connection_ref.as_ref()
+        && let Err(err) = validate_connection_ref_for_runtime(&runtime, connection_ref).await
+    {
+        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+    }
 
-    let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
-        config_runtime
-            .get()
-            .await
-            .ok()
-            .map(|snapshot| snapshot.config.agent.model)
+    let config_snapshot = if let Some(config_runtime) = runtime.config_runtime() {
+        config_runtime.get().await.ok()
     } else {
         None
     };
+    let runtime_default_model = config_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.config.agent.model.clone());
+    let default_config = meerkat_core::Config::default();
+    let validation_config = config_snapshot
+        .as_ref()
+        .map(|snapshot| &snapshot.config)
+        .unwrap_or(&default_config);
+    if let Err(err) =
+        meerkat::surface::validate_connection_ref(validation_config, params.connection_ref.as_ref())
+    {
+        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+    }
     let model_name = params
         .model
         .clone()
@@ -301,6 +351,7 @@ pub async fn handle_create(
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
+    build_config.connection_ref = params.connection_ref.clone();
     build_config.preload_skills = params
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
@@ -615,7 +666,7 @@ pub async fn handle_read(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
-    use super::CreateSessionResult;
+    use super::{CreateSessionParams, CreateSessionResult};
 
     #[test]
     fn create_session_result_preserves_skill_diagnostics() {
@@ -671,6 +722,32 @@ mod tests {
         let json = serde_json::json!({"prompt": "hello"});
         let params: CreateSessionParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.initial_turn, None);
+    }
+
+    #[test]
+    fn create_session_params_accept_connection_ref() {
+        let json = serde_json::json!({
+            "prompt": "hello",
+            "connection_ref": {
+                "realm_id": "workspace",
+                "binding_id": "default_openai"
+            }
+        });
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            params
+                .connection_ref
+                .as_ref()
+                .map(|value| value.realm_id.as_str()),
+            Some("workspace")
+        );
+        assert_eq!(
+            params
+                .connection_ref
+                .as_ref()
+                .map(|value| value.binding_id.as_str()),
+            Some("default_openai")
+        );
     }
 
     #[test]

@@ -122,7 +122,10 @@ impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver 
         &self,
         binding: &meerkat_providers::ValidatedBinding,
     ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
-        let binding_key = format!("{}:{}", binding.auth_profile.id, binding.backend_profile.id,);
+        let binding_key = format!(
+            "{}:{}",
+            binding.connection_ref.realm_id, binding.connection_ref.binding_id,
+        );
         let promise = invoke_external_auth_resolver(&binding_key).map_err(|e| {
             meerkat_core::AuthError::Other(format!("wasm_host resolver: {}", js_value_display(&e),))
         })?;

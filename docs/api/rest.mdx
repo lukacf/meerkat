@@ -81,24 +81,24 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/realtime/open_info` | Issue a realtime websocket bootstrap token |
 | `POST` | `/realtime/status` | Read product-layer realtime status |
 | `POST` | `/realtime/capabilities` | Read product-layer realtime capabilities |
-| `GET` | `/sessions/{id}/runtime-state` | Read runtime state |
+| `GET` | `/sessions/{id}/state` | Read runtime state |
 | `GET` | `/sessions/{id}/realtime-attachment-status` | Read the runtime-owned realtime attachment status for a session |
-| `POST` | `/sessions/{id}/accept-input` | Admit runtime input explicitly |
-| `POST` | `/sessions/{id}/retire-runtime` | Retire a runtime |
-| `POST` | `/sessions/{id}/reset-runtime` | Reset a runtime |
+| `POST` | `/sessions/{id}/accept` | Admit runtime input explicitly |
+| `POST` | `/sessions/{id}/retire` | Retire a runtime |
+| `POST` | `/sessions/{id}/reset` | Reset a runtime |
 | `GET` | `/sessions/{id}/inputs` | List runtime input state entries |
 | `GET` | `/sessions/{session_id}/inputs/{input_id}` | Read one runtime input state |
 | `GET` | `/auth/profiles` | List auth profiles |
-| `POST` | `/auth/profiles` | Create an auth profile |
+| `POST` | `/auth/profiles` | Persist credentials for a binding |
 | `GET` | `/auth/profiles/{id}` | Read an auth profile |
-| `DELETE` | `/auth/profiles/{id}` | Delete an auth profile |
+| `DELETE` | `/auth/profiles/{id}` | Delete persisted credentials for a binding |
 | `POST` | `/auth/profiles/{id}/test` | Test an auth profile binding |
 | `POST` | `/auth/login/start` | Start interactive auth login |
 | `POST` | `/auth/login/complete` | Complete interactive auth login |
 | `POST` | `/auth/login/device/start` | Start device-code login |
 | `POST` | `/auth/login/device/complete` | Complete device-code login |
-| `GET` | `/auth/status/{id}` | Read auth status |
-| `POST` | `/auth/logout/{id}` | Log out an auth profile |
+| `GET` | `/auth/status/{id}` | Read auth status for a binding |
+| `POST` | `/auth/logout/{id}` | Log out a binding |
 | `GET` | `/realms` | List configured realms |
 | `GET` | `/realms/{id}` | Read one realm |
 | `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
@@ -182,6 +182,10 @@ Cancellation only affects uncommitted work:
 
 Create and run a new session.
 
+`connection_ref` is optional. When present, the server resolves the
+session through the referenced `{realm_id, binding_id}` pair instead of
+the legacy flat provider path.
+
 <CodeGroup>
 ```json Request (minimal)
 {
@@ -195,6 +199,10 @@ Create and run a new session.
   "system_prompt": "Optional system prompt",
   "model": "claude-opus-4-6",
   "provider": "anthropic",
+  "connection_ref": {
+    "realm_id": "workspace",
+    "binding_id": "default_openai"
+  },
   "max_tokens": 4096,
   "output_schema": {
     "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},

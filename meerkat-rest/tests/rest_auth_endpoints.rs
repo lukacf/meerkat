@@ -26,7 +26,7 @@ use meerkat::{
     PersistentSessionService, SessionStore,
 };
 use meerkat_client::TestClient;
-use meerkat_core::MemoryConfigStore;
+use meerkat_core::{MemoryConfigStore, RealmConfigSection};
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::wire_mob_tools;
 use meerkat_rest::{AppState, router};
@@ -42,7 +42,11 @@ fn build_app() -> axum::Router {
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).expect("mkdir");
 
-    let config = Config::default();
+    let mut config = Config::default();
+    config.realm.insert(
+        "test-realm".to_string(),
+        RealmConfigSection::from_inline_api_keys(&[("openai", "sk-config-test")]),
+    );
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
@@ -182,12 +186,11 @@ async fn create_auth_profile_accepts_valid_body() {
     let app = build_app();
 
     let body = serde_json::json!({
-        "realm": "test-realm",
-        "id": "default_openai",
+        "realm_id": "test-realm",
+        "binding_id": "default_openai",
         "provider": "openai",
-        "backend_kind": "openai_api",
         "auth_method": "api_key",
-        "source": {"kind": "inline_secret", "secret": "sk-test"}
+        "secret": "sk-test"
     });
 
     let req = Request::builder()
@@ -222,6 +225,46 @@ async fn create_auth_profile_accepts_valid_body() {
     }
 }
 
+/// POST /auth/profiles stores credentials by canonical binding id, and
+/// GET /auth/status/{id} reports the same binding identity back through
+/// the shipped REST surface.
+#[tokio::test]
+async fn auth_status_route_reports_binding_identity() {
+    let app = build_app();
+
+    let create = Request::builder()
+        .method("POST")
+        .uri("/auth/profiles")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "realm_id": "test-realm",
+                "binding_id": "default_openai",
+                "provider": "openai",
+                "auth_method": "api_key",
+                "secret": "sk-rest-binding"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create).await.unwrap();
+    assert_ne!(create_resp.status(), StatusCode::NOT_FOUND);
+
+    let read = Request::builder()
+        .method("GET")
+        .uri("/auth/status/default_openai?realm_id=test-realm")
+        .body(Body::empty())
+        .unwrap();
+    let read_resp = app.oneshot(read).await.unwrap();
+    assert_eq!(read_resp.status(), StatusCode::OK);
+    let body = read_resp.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("status payload");
+    assert_eq!(payload["binding_id"], "default_openai");
+    assert_eq!(payload["realm_id"], "test-realm");
+    assert_eq!(payload["provider"], "openai");
+    assert_eq!(payload["state"], "valid");
+}
+
 /// `POST /sessions` accepts a `connection_ref: {realm_id, binding_id}`
 /// field on the body. When the referenced realm doesn't exist, the
 /// server returns a structured error — not 404 or a panic.
@@ -251,5 +294,38 @@ async fn post_sessions_accepts_connection_ref_field() {
     assert!(
         status.is_success() || status.is_client_error() || status.is_server_error(),
         "status must be valid HTTP code for connection_ref body, got {status}"
+    );
+}
+
+/// `POST /sessions` must surface an error when `connection_ref` points at
+/// a missing realm binding instead of silently dropping the field.
+#[tokio::test]
+async fn post_sessions_rejects_unknown_connection_ref() {
+    let app = build_app();
+
+    let body = serde_json::json!({
+        "prompt": "hi",
+        "connection_ref": {"realm_id": "test-realm", "binding_id": "missing-binding"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/sessions")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_client_error() || resp.status().is_server_error(),
+        "unknown connection_ref must be rejected, got {}",
+        resp.status()
+    );
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&bytes).expect("structured JSON error");
+    assert!(
+        payload.get("error").is_some(),
+        "connection_ref rejection must surface a structured error payload: {payload}"
     );
 }

@@ -42,6 +42,11 @@ impl CompositeSkillSource {
             .collect();
         Self { sources: named }
     }
+
+    #[cfg(test)]
+    pub(crate) fn named_sources_for_tests(&self) -> &[NamedSource] {
+        &self.sources
+    }
 }
 
 impl SkillSource for CompositeSkillSource {

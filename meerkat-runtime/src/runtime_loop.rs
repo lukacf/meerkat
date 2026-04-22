@@ -20,7 +20,7 @@ use crate::tokio;
 pub(crate) fn input_to_prompt(input: &Input) -> String {
     match input {
         Input::Prompt(p) => p.text.clone(),
-        Input::Peer(p) => peer_prompt_text(p),
+        Input::Peer(peer) => peer.prompt_projection_text(),
         Input::FlowStep(f) => f.instructions.clone(),
         Input::ExternalEvent(e) => external_event_projection_text(e),
         Input::Continuation(c) => format!("[Continuation] {}", c.reason),
@@ -190,7 +190,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         },
         Input::Peer(p) if p.blocks.is_some() => {
             let raw_blocks = p.blocks.clone().unwrap_or_default();
-            if let Some(prefix) = peer_block_prefix_text(p) {
+            if let Some(prefix) = p.block_prefix_text() {
                 let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
                 blocks.extend(raw_blocks);
                 CoreRenderable::Blocks { blocks }
@@ -231,93 +231,9 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 }
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let Input::Peer(peer) = input else {
-        return None;
-    };
-    let (
-        Some(crate::input::PeerConvention::ResponseTerminal { request_id, .. }),
-        crate::input::InputOrigin::Peer { peer_id, .. },
-    ) = (&peer.convention, &peer.header.source)
-    else {
-        return None;
-    };
-
-    Some(ConversationContextAppend {
-        // Transitional but runtime-owned: until the machine/DSL branch lands,
-        // correlated terminal peer results need one durable semantic owner.
-        // Using a stable context key here keeps replacement/dedup on the core
-        // session context path instead of helper-local comms state.
-        key: format!("peer_response_terminal:{peer_id}:{request_id}"),
-        content: CoreRenderable::Text {
-            text: input_to_prompt(input),
-        },
-    })
-}
-
-fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
-    match (&peer.convention, &peer.header.source) {
-        (
-            Some(crate::input::PeerConvention::Message),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => Some(format!("[COMMS MESSAGE from {peer_id}]")),
+    match input {
+        Input::Peer(peer) => peer.terminal_context_append(),
         _ => None,
-    }
-}
-
-fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
-    match (&peer.convention, &peer.header.source) {
-        (
-            Some(crate::input::PeerConvention::Request { request_id, intent }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            // Transitional but intentional: until the machine/DSL branch owns a
-            // first-class peer-request/peer-response semantic seam, the runtime
-            // must derive the correlated request/response prompt text from the
-            // typed peer convention and payload here. We keep the ownership on
-            // runtime admission rather than trusting helper-rendered comms text,
-            // because the typed ingress record is already the most authoritative
-            // fact available on this branch.
-            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        (
-            Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
-            response_progress_phase_label(phase),
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        (
-            Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {peer_id}. Request ID: {request_id}. Status: {}. Result: {}.",
-            response_terminal_status_label(status),
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        _ => peer.body.clone(),
-    }
-}
-
-fn format_peer_payload(payload: Option<&serde_json::Value>) -> String {
-    serde_json::to_string_pretty(payload.unwrap_or(&serde_json::Value::Null))
-        .unwrap_or_else(|_| "null".to_string())
-}
-
-fn response_progress_phase_label(phase: &crate::input::ResponseProgressPhase) -> &'static str {
-    match phase {
-        crate::input::ResponseProgressPhase::Accepted => "accepted",
-        crate::input::ResponseProgressPhase::InProgress => "in_progress",
-        crate::input::ResponseProgressPhase::PartialResult => "partial_result",
-    }
-}
-
-fn response_terminal_status_label(status: &crate::input::ResponseTerminalStatus) -> &'static str {
-    match status {
-        crate::input::ResponseTerminalStatus::Completed => "completed",
-        crate::input::ResponseTerminalStatus::Failed => "failed",
-        crate::input::ResponseTerminalStatus::Cancelled => "cancelled",
     }
 }
 

@@ -281,7 +281,7 @@ async with MeerkatClient() as client:
 
     # 2. Wait for the binding to reach BindingReady.
     while True:
-        status = await client.runtime_realtime_attachment_status(session.id)
+        status = await client.session_realtime_attachment_status(session.id)
         if status.status == "binding_ready":
             break
         await asyncio.sleep(0.1)

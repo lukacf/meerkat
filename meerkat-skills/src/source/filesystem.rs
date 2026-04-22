@@ -4,9 +4,10 @@
 //! Derives namespaced skill IDs from relative paths.
 
 use meerkat_core::skills::{
-    SkillCollection, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId,
-    SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot, SourceHealthState,
-    SourceHealthThresholds, SourceUuid, apply_filter, classify_source_health,
+    DefaultSkillSourceKind, SkillCollection, SkillDescriptor, SkillDocument, SkillError,
+    SkillFilter, SkillId, SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
+    SourceHealthState, SourceHealthThresholds, SourceUuid, apply_filter, classify_source_health,
+    default_source_uuid as canonical_default_source_uuid,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -34,7 +35,11 @@ pub struct FilesystemSkillSource {
 
 impl FilesystemSkillSource {
     pub fn new(root: PathBuf, scope: SkillScope) -> Self {
-        let source_uuid = default_source_uuid(scope);
+        let source_uuid = match scope {
+            SkillScope::Project => canonical_default_source_uuid(DefaultSkillSourceKind::Project),
+            SkillScope::User => canonical_default_source_uuid(DefaultSkillSourceKind::User),
+            SkillScope::Builtin => canonical_default_source_uuid(DefaultSkillSourceKind::Builtin),
+        };
         Self::new_with_identity(root, scope, source_uuid, SourceHealthThresholds::default())
     }
 
@@ -51,6 +56,11 @@ impl FilesystemSkillSource {
             thresholds,
             state: Arc::new(RwLock::new(FilesystemSourceState::default())),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_uuid_for_tests(&self) -> &SourceUuid {
+        &self.source_uuid
     }
 }
 
@@ -153,18 +163,6 @@ fn record_failure(
                 last_seen_unix_secs: now,
             },
         );
-    }
-}
-
-fn default_source_uuid(scope: SkillScope) -> SourceUuid {
-    let raw = match scope {
-        SkillScope::Project => "00000000-0000-4000-8000-000000000101",
-        SkillScope::User => "00000000-0000-4000-8000-000000000102",
-        SkillScope::Builtin => "00000000-0000-4000-8000-000000000103",
-    };
-    match SourceUuid::parse(raw) {
-        Ok(source_uuid) => source_uuid,
-        Err(_) => unreachable!("hardcoded filesystem source UUID must remain valid"),
     }
 }
 

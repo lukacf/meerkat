@@ -286,7 +286,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     secret,
                     metadata,
                     expires_at,
-                    source_label.clone(),
+                    source_label,
                 ))
             }
         } else {

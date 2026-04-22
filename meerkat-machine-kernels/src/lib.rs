@@ -1,3 +1,4 @@
+pub mod compat_generated;
 pub mod generated;
 #[cfg(feature = "test-oracle")]
 pub mod legacy_generated;

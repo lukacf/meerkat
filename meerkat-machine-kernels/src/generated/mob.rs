@@ -162,19 +162,19 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        live_runtime_ids: inner.live_runtime_ids.clone(),
-        externally_addressable_runtime_ids: inner.externally_addressable_runtime_ids.clone(),
-        runtime_fence_tokens: inner.runtime_fence_tokens.clone(),
+        live_runtime_ids: inner.live_runtime_ids,
+        externally_addressable_runtime_ids: inner.externally_addressable_runtime_ids,
+        runtime_fence_tokens: inner.runtime_fence_tokens,
         active_run_count: inner.active_run_count,
         pending_spawn_count: inner.pending_spawn_count,
         coordinator_bound: inner.coordinator_bound,
-        member_state_markers: inner.member_state_markers.clone(),
-        wiring_edges: inner.wiring_edges.clone(),
-        identity_to_runtime: inner.identity_to_runtime.clone(),
-        tasks: inner.tasks.clone(),
-        in_progress_task_ids: inner.in_progress_task_ids.clone(),
-        completed_task_ids: inner.completed_task_ids.clone(),
-        member_realtime_bindings: inner.member_realtime_bindings.clone(),
+        member_state_markers: inner.member_state_markers,
+        wiring_edges: inner.wiring_edges,
+        identity_to_runtime: inner.identity_to_runtime,
+        tasks: inner.tasks,
+        in_progress_task_ids: inner.in_progress_task_ids,
+        completed_task_ids: inner.completed_task_ids,
+        member_realtime_bindings: inner.member_realtime_bindings,
     }
 }
 

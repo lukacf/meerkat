@@ -6,10 +6,9 @@
 //! `RegisterReadyFrame` or `RegisterPendingBodyFrame` calls.
 
 use crate::error::MobError;
+use crate::flow_machine_types::{local_frame_id, local_loop_instance_id};
 use crate::ids::{FrameId, LoopInstanceId};
-use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
-use meerkat_machine_kernels::legacy_generated::flow_run;
-use std::collections::BTreeMap;
+use meerkat_machine_kernels::compat_generated::flow_run;
 
 /// A scheduler grant produced by pumping.
 #[derive(Debug, Clone)]
@@ -27,9 +26,9 @@ pub enum SchedulerGrant {
 /// each count as one attempt). Use a generous value such as 100 to prevent
 /// infinite loops in case of a machine bug.
 pub fn pump_schedulers_to_exhaustion(
-    run_state: &KernelState,
+    run_state: &flow_run::State,
     max_pumps: usize,
-) -> Result<(KernelState, Vec<SchedulerGrant>), MobError> {
+) -> Result<(flow_run::State, Vec<SchedulerGrant>), MobError> {
     let mut state = run_state.clone();
     let mut grants = Vec::new();
     let mut round = 0;
@@ -41,22 +40,16 @@ pub fn pump_schedulers_to_exhaustion(
         let mut any_grant = false;
 
         // Try PumpNodeScheduler
-        let node_pump = KernelInput {
-            variant: "PumpNodeScheduler".into(),
-            fields: BTreeMap::new(),
-        };
-        if let Ok(outcome) = flow_run::transition(&state, &node_pump) {
+        let node_pump = flow_run::Input::PumpNodeScheduler(flow_run::inputs::PumpNodeScheduler);
+        if let Ok(outcome) = flow_run::transition(&state, node_pump, &flow_run::EmptyContext) {
             let node_grants: Vec<SchedulerGrant> = outcome
                 .effects
                 .iter()
-                .filter(|e| e.variant == "GrantNodeSlot")
-                .filter_map(|e| e.fields.get("frame_id"))
-                .filter_map(|v| {
-                    if let KernelValue::String(fid) = v {
-                        Some(SchedulerGrant::NodeSlot(FrameId::from(fid.as_str())))
-                    } else {
-                        None
+                .filter_map(|effect| match effect {
+                    flow_run::Effect::GrantNodeSlot(payload) => {
+                        Some(SchedulerGrant::NodeSlot(local_frame_id(&payload.frame_id)))
                     }
+                    _ => None,
                 })
                 .collect();
             if !node_grants.is_empty() {
@@ -67,24 +60,18 @@ pub fn pump_schedulers_to_exhaustion(
         }
 
         // Try PumpFrameScheduler
-        let frame_pump = KernelInput {
-            variant: "PumpFrameScheduler".into(),
-            fields: BTreeMap::new(),
-        };
-        if let Ok(outcome) = flow_run::transition(&state, &frame_pump) {
+        let frame_pump = flow_run::Input::PumpFrameScheduler(flow_run::inputs::PumpFrameScheduler);
+        if let Ok(outcome) = flow_run::transition(&state, frame_pump, &flow_run::EmptyContext) {
             let frame_grants: Vec<SchedulerGrant> = outcome
                 .effects
                 .iter()
-                .filter(|e| e.variant == "GrantBodyFrameStart")
-                .filter_map(|e| e.fields.get("loop_instance_id"))
-                .filter_map(|v| {
-                    if let KernelValue::String(lid) = v {
-                        Some(SchedulerGrant::BodyFrameStart(LoopInstanceId::from(
-                            lid.as_str(),
+                .filter_map(|effect| match effect {
+                    flow_run::Effect::GrantBodyFrameStart(payload) => {
+                        Some(SchedulerGrant::BodyFrameStart(local_loop_instance_id(
+                            &payload.loop_instance_id,
                         )))
-                    } else {
-                        None
                     }
+                    _ => None,
                 })
                 .collect();
             if !frame_grants.is_empty() {

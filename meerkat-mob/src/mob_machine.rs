@@ -165,6 +165,7 @@ pub(crate) struct SubmitWorkCommand {
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MobMachineCommandResult {
     Unit,
     RunId(RunId),

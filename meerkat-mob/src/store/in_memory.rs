@@ -20,7 +20,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::legacy::KernelState;
+use meerkat_machine_kernels::compat_generated::flow_run;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -300,8 +300,8 @@ impl MobRunStore for InMemoryMobRunStore {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &KernelState,
-        next: &KernelState,
+        expected: &flow_run::State,
+        next: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
@@ -318,9 +318,9 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &KernelState,
+        expected_flow_state: &flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &KernelState,
+        next_flow_state: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
@@ -465,8 +465,8 @@ impl MobRunStore for InMemoryMobRunStore {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -540,8 +540,8 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         loop_instance_id: &LoopInstanceId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -573,8 +573,8 @@ impl MobRunStore for InMemoryMobRunStore {
         loop_instance_id: &LoopInstanceId,
         expected_loop: &LoopSnapshot,
         next_loop: LoopSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
@@ -601,8 +601,8 @@ impl MobRunStore for InMemoryMobRunStore {
         frame_id: &FrameId,
         initial_frame: FrameSnapshot,
         ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
@@ -641,8 +641,8 @@ impl MobRunStore for InMemoryMobRunStore {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
@@ -673,8 +673,8 @@ impl MobRunStore for InMemoryMobRunStore {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs

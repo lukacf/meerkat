@@ -21,7 +21,7 @@ use crate::run::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_machine_kernels::legacy::KernelState;
+use meerkat_machine_kernels::compat_generated::flow_run;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
@@ -812,8 +812,8 @@ impl MobRunStore for SqliteMobRunStore {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &KernelState,
-        next: &KernelState,
+        expected: &flow_run::State,
+        next: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -854,9 +854,9 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &KernelState,
+        expected_flow_state: &flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &KernelState,
+        next_flow_state: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1136,8 +1136,8 @@ impl MobRunStore for SqliteMobRunStore {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -1231,8 +1231,8 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         run_id: &RunId,
         loop_instance_id: &LoopInstanceId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -1278,8 +1278,8 @@ impl MobRunStore for SqliteMobRunStore {
         loop_instance_id: &LoopInstanceId,
         expected_loop: &LoopSnapshot,
         next_loop: LoopSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1320,8 +1320,8 @@ impl MobRunStore for SqliteMobRunStore {
         frame_id: &FrameId,
         initial_frame: FrameSnapshot,
         ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1368,8 +1368,8 @@ impl MobRunStore for SqliteMobRunStore {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1416,8 +1416,8 @@ impl MobRunStore for SqliteMobRunStore {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();

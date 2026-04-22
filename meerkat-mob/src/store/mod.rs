@@ -28,7 +28,7 @@ use crate::run::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
-use meerkat_machine_kernels::legacy::KernelState;
+use meerkat_machine_kernels::compat_generated::flow_run;
 use serde::{Deserialize, Serialize};
 
 /// Errors from mob storage operations.
@@ -245,16 +245,16 @@ pub trait MobRunStore: Send + Sync {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &KernelState,
-        next: &KernelState,
+        expected: &flow_run::State,
+        next: &flow_run::State,
     ) -> Result<bool, MobStoreError>;
     async fn cas_run_snapshot(
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &KernelState,
+        expected_flow_state: &flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &KernelState,
+        next_flow_state: &flow_run::State,
     ) -> Result<bool, MobStoreError>;
     async fn append_step_entry(
         &self,
@@ -320,8 +320,8 @@ pub trait MobRunStore: Send + Sync {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -358,8 +358,8 @@ pub trait MobRunStore: Send + Sync {
         &self,
         run_id: &RunId,
         loop_instance_id: &LoopInstanceId,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
@@ -377,8 +377,8 @@ pub trait MobRunStore: Send + Sync {
         loop_instance_id: &LoopInstanceId,
         expected_loop: &LoopSnapshot,
         next_loop: LoopSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 6: body frame start — loop transition + register new frame + run state update.
@@ -396,8 +396,8 @@ pub trait MobRunStore: Send + Sync {
         frame_id: &FrameId,
         initial_frame: FrameSnapshot,
         ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 7: body frame completion — terminalize frame + loop state update + run state.
@@ -415,8 +415,8 @@ pub trait MobRunStore: Send + Sync {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 8: loop completion — loop state + run state + parent frame update.
@@ -434,8 +434,8 @@ pub trait MobRunStore: Send + Sync {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
-        expected_run_state: &KernelState,
-        next_run_state: KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
 }
 

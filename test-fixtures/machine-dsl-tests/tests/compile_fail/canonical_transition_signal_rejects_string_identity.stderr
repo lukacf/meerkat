@@ -7,7 +7,7 @@ error[E0061]: this function takes 3 arguments but 2 arguments were supplied
 note: function defined here
   --> $WORKSPACE/meerkat-machine-kernels/src/generated/meerkat.rs
    |
-   | pub fn transition_signal<C: Context>(
+   | pub fn transition_signal(
    |        ^^^^^^^^^^^^^^^^^
 help: provide the argument
    |

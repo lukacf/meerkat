@@ -3,6 +3,11 @@
 
 use indexmap::IndexMap;
 use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
+use meerkat_machine_kernels::legacy_generated::flow_run as raw_flow_run;
+use meerkat_mob::compat_test_support::{
+    flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
+    loop_iteration_state_from_raw,
+};
 use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
     FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
@@ -13,8 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn minimal_run_with_schema_v2() -> MobRun {
-    use meerkat_machine_kernels::legacy_generated::flow_run;
-    let flow_state = flow_run::initial_state().expect("init");
+    let flow_state = flow_run_state_from_raw(raw_flow_run::initial_state().expect("init"));
     MobRun {
         run_id: RunId::new(),
         mob_id: meerkat_mob::MobId::from("test-mob"),
@@ -61,29 +65,37 @@ fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> Fra
         .collect();
 
     FrameSnapshot {
-        kernel_state: KernelState {
+        kernel_state: flow_frame_state_from_raw(KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([
                 ("ready_queue".into(), ready_queue_seq),
                 ("tracked_nodes".into(), KernelValue::Set(tracked)),
                 ("node_status".into(), KernelValue::Map(node_status)),
             ]),
-        },
+        }),
     }
 }
 
 /// Insert a frame_id into the ready_frames Seq and ready_frame_membership Set of flow_state.
-fn insert_frame_to_ready_queue(flow_state: &mut KernelState, frame_id: &str) {
-    if let Some(KernelValue::Seq(seq)) = flow_state.fields.get_mut("ready_frames") {
+fn insert_frame_to_ready_queue(
+    flow_state: &mut meerkat_machine_kernels::compat_generated::flow_run::State,
+    frame_id: &str,
+) {
+    let mut raw = flow_run_state_to_raw(flow_state);
+    if let Some(KernelValue::Seq(seq)) = raw.fields.get_mut("ready_frames") {
         seq.push(KernelValue::String(frame_id.to_string()));
     }
-    if let Some(KernelValue::Set(set)) = flow_state.fields.get_mut("ready_frame_membership") {
+    if let Some(KernelValue::Set(set)) = raw.fields.get_mut("ready_frame_membership") {
         set.insert(KernelValue::String(frame_id.to_string()));
     }
+    *flow_state = flow_run_state_from_raw(raw);
 }
 
-fn get_ready_frames_from_run_state(flow_state: &KernelState) -> Vec<String> {
-    match flow_state.fields.get("ready_frames") {
+fn get_ready_frames_from_run_state(
+    flow_state: &meerkat_machine_kernels::compat_generated::flow_run::State,
+) -> Vec<String> {
+    let raw = flow_run_state_to_raw(flow_state);
+    match raw.fields.get("ready_frames") {
         Some(KernelValue::Seq(seq)) => seq
             .iter()
             .filter_map(|v| {
@@ -232,7 +244,7 @@ fn test_recovery_invalid_frame_invariant() {
 
     // Frame with node-a status=Ready but NOT in ready_queue → invariant violation.
     let bad_frame = FrameSnapshot {
-        kernel_state: KernelState {
+        kernel_state: flow_frame_state_from_raw(KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([
                 (
@@ -255,7 +267,7 @@ fn test_recovery_invalid_frame_invariant() {
                     )])),
                 ),
             ]),
-        },
+        }),
     };
     run.frames.insert(FrameId::from("frame-bad"), bad_frame);
 
@@ -298,8 +310,11 @@ fn test_pre_row22_pending_run_is_accepted() {
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────
 
-fn get_pending_body_frame_loops_from_run_state(flow_state: &KernelState) -> Vec<String> {
-    match flow_state.fields.get("pending_body_frame_loops") {
+fn get_pending_body_frame_loops_from_run_state(
+    flow_state: &meerkat_machine_kernels::compat_generated::flow_run::State,
+) -> Vec<String> {
+    let raw = flow_run_state_to_raw(flow_state);
+    match raw.fields.get("pending_body_frame_loops") {
         Some(KernelValue::Seq(seq)) => seq
             .iter()
             .filter_map(|v| {
@@ -323,10 +338,10 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
     // A LoopSnapshot in Running phase with active_body_frame_id = None
     // → should be added to pending_body_frame_loops.
     let loop_snap = LoopSnapshot {
-        kernel_state: KernelState {
+        kernel_state: loop_iteration_state_from_raw(KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([("active_body_frame_id".into(), KernelValue::None)]),
-        },
+        }),
     };
     run.loops
         .insert(LoopInstanceId::from("loop-inst-1"), loop_snap);
@@ -351,23 +366,24 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
     // A LoopSnapshot in Running phase with active_body_frame_id = Some(frame_id)
     // → should NOT be in pending_body_frame_loops.
     let loop_snap = LoopSnapshot {
-        kernel_state: KernelState {
+        kernel_state: loop_iteration_state_from_raw(KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([(
                 "active_body_frame_id".into(),
                 KernelValue::String("body-frame-1".into()),
             )]),
-        },
+        }),
     };
     run.loops
         .insert(LoopInstanceId::from("loop-inst-2"), loop_snap);
 
     // Manually add loop-inst-2 to pending_body_frame_loops as a stale entry.
-    run.flow_state.fields.insert(
+    let mut raw = flow_run_state_to_raw(&run.flow_state);
+    raw.fields.insert(
         "pending_body_frame_loops".to_string(),
         KernelValue::Seq(vec![KernelValue::String("loop-inst-2".into())]),
     );
-    run.flow_state.fields.insert(
+    raw.fields.insert(
         "pending_body_frame_loop_membership".to_string(),
         KernelValue::Set(
             [KernelValue::String("loop-inst-2".into())]
@@ -375,6 +391,7 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
                 .collect(),
         ),
     );
+    run.flow_state = flow_run_state_from_raw(raw);
 
     reconcile_run_state(&mut run).expect("reconcile");
 

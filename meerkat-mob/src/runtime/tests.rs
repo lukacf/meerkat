@@ -47,6 +47,7 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
+use meerkat_machine_kernels::compat_generated::flow_run;
 use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
 use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
@@ -1585,8 +1586,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &meerkat_machine_kernels::legacy::KernelState,
-        next: &meerkat_machine_kernels::legacy::KernelState,
+        expected: &flow_run::State,
+        next: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner.cas_flow_state(run_id, expected, next).await
     }
@@ -1595,9 +1596,9 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &meerkat_machine_kernels::legacy::KernelState,
+        expected_flow_state: &flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &meerkat_machine_kernels::legacy::KernelState,
+        next_flow_state: &flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.snapshot_cas_history.write().await.push((
             run_id.clone(),
@@ -1675,8 +1676,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1720,8 +1721,8 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1747,8 +1748,8 @@ impl MobRunStore for RecordingRunStore {
         loop_instance_id: &crate::ids::LoopInstanceId,
         expected_loop: &crate::run::LoopSnapshot,
         next_loop: crate::run::LoopSnapshot,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_loop_request_body_frame(
@@ -1771,8 +1772,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         initial_frame: crate::run::FrameSnapshot,
         ledger_entry: crate::run::LoopIterationLedgerEntry,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_grant_body_frame_start(
@@ -1798,8 +1799,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_body_frame(
@@ -1825,8 +1826,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-        next_run_state: meerkat_machine_kernels::legacy::KernelState,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_loop(
@@ -18604,7 +18605,9 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_machine_kernels::legacy::KernelState::default(),
+        crate::compat_test_support::flow_run_state_from_raw(
+            meerkat_machine_kernels::legacy_generated::flow_run::initial_state().expect("init"),
+        ),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -18686,7 +18689,8 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
         .expect("run exists");
     let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
     assert_eq!(
-        frame_snap.kernel_state.phase, "Completed",
+        frame_snap.kernel_state.phase,
+        meerkat_machine_kernels::compat_generated::flow_frame::Phase::Completed,
         "frame should be in Completed phase"
     );
 }
@@ -19038,7 +19042,9 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        KernelState::default(),
+        crate::compat_test_support::flow_run_state_from_raw(
+            meerkat_machine_kernels::legacy_generated::flow_run::initial_state().expect("init"),
+        ),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19093,60 +19099,64 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: KernelState {
-                    phase: "Running".into(),
-                    fields: std::collections::BTreeMap::from([
-                        (
-                            "loop_instance_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                loop_instance_id.to_string(),
+                kernel_state: crate::compat_test_support::loop_iteration_state_from_raw(
+                    KernelState {
+                        phase: "Running".into(),
+                        fields: std::collections::BTreeMap::from([
+                            (
+                                "loop_instance_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    loop_instance_id.to_string(),
+                                ),
                             ),
-                        ),
-                        (
-                            "current_iteration".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(0),
-                        ),
-                        (
-                            "max_iterations".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(3),
-                        ),
-                        (
-                            "parent_frame_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                frame_id.to_string(),
+                            (
+                                "current_iteration".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(0),
                             ),
-                        ),
-                        (
-                            "parent_node_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                "loop-node".into(),
+                            (
+                                "max_iterations".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(3),
                             ),
-                        ),
-                        (
-                            "loop_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String("retry".into()),
-                        ),
-                        (
-                            "depth".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(1),
-                        ),
-                        (
-                            "stage".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::NamedVariant {
-                                enum_name: "LoopIterationStage".into(),
-                                variant: "AwaitingBodyFrame".into(),
-                            },
-                        ),
-                        (
-                            "last_completed_iteration".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(0),
-                        ),
-                        (
-                            "active_body_frame_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::None,
-                        ),
-                    ]),
-                },
+                            (
+                                "parent_frame_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    frame_id.to_string(),
+                                ),
+                            ),
+                            (
+                                "parent_node_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    "loop-node".into(),
+                                ),
+                            ),
+                            (
+                                "loop_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    "retry".into(),
+                                ),
+                            ),
+                            (
+                                "depth".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                            ),
+                            (
+                                "stage".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::NamedVariant {
+                                    enum_name: "LoopIterationStage".into(),
+                                    variant: "AwaitingBodyFrame".into(),
+                                },
+                            ),
+                            (
+                                "last_completed_iteration".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(0),
+                            ),
+                            (
+                                "active_body_frame_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::None,
+                            ),
+                        ]),
+                    },
+                ),
             },
             None,
         )
@@ -19176,7 +19186,8 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
         .expect("get_run")
         .expect("run exists");
     let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
-    let node_status = match frame_snap.kernel_state.fields.get("node_status") {
+    let raw_frame = crate::compat_test_support::flow_frame_state_to_raw(&frame_snap.kernel_state);
+    let node_status = match raw_frame.fields.get("node_status") {
         Some(meerkat_machine_kernels::legacy::KernelValue::Map(map)) => map,
         other => panic!("expected node_status map, got {other:?}"),
     };
@@ -19221,7 +19232,9 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        KernelState::default(),
+        crate::compat_test_support::flow_run_state_from_raw(
+            meerkat_machine_kernels::legacy_generated::flow_run::initial_state().expect("init"),
+        ),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19277,62 +19290,66 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: KernelState {
-                    phase: "Running".into(),
-                    fields: std::collections::BTreeMap::from([
-                        (
-                            "loop_instance_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                loop_instance_id.to_string(),
+                kernel_state: crate::compat_test_support::loop_iteration_state_from_raw(
+                    KernelState {
+                        phase: "Running".into(),
+                        fields: std::collections::BTreeMap::from([
+                            (
+                                "loop_instance_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    loop_instance_id.to_string(),
+                                ),
                             ),
-                        ),
-                        (
-                            "current_iteration".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(0),
-                        ),
-                        (
-                            "max_iterations".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(3),
-                        ),
-                        (
-                            "parent_frame_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                frame_id.to_string(),
+                            (
+                                "current_iteration".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(0),
                             ),
-                        ),
-                        (
-                            "parent_node_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                "loop-node".into(),
+                            (
+                                "max_iterations".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(3),
                             ),
-                        ),
-                        (
-                            "loop_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String("retry".into()),
-                        ),
-                        (
-                            "depth".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(1),
-                        ),
-                        (
-                            "stage".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::NamedVariant {
-                                enum_name: "LoopIterationStage".into(),
-                                variant: "BodyFrameActive".into(),
-                            },
-                        ),
-                        (
-                            "last_completed_iteration".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::U64(0),
-                        ),
-                        (
-                            "active_body_frame_id".into(),
-                            meerkat_machine_kernels::legacy::KernelValue::String(
-                                body_frame_id.to_string(),
+                            (
+                                "parent_frame_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    frame_id.to_string(),
+                                ),
                             ),
-                        ),
-                    ]),
-                },
+                            (
+                                "parent_node_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    "loop-node".into(),
+                                ),
+                            ),
+                            (
+                                "loop_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    "retry".into(),
+                                ),
+                            ),
+                            (
+                                "depth".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                            ),
+                            (
+                                "stage".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::NamedVariant {
+                                    enum_name: "LoopIterationStage".into(),
+                                    variant: "BodyFrameActive".into(),
+                                },
+                            ),
+                            (
+                                "last_completed_iteration".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::U64(0),
+                            ),
+                            (
+                                "active_body_frame_id".into(),
+                                meerkat_machine_kernels::legacy::KernelValue::String(
+                                    body_frame_id.to_string(),
+                                ),
+                            ),
+                        ]),
+                    },
+                ),
             },
             Some(crate::run::LoopIterationLedgerEntry {
                 loop_instance_id: loop_instance_id.clone(),
@@ -19347,21 +19364,24 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         .await
         .expect("seed body frame");
     let mut body_frame = root_body_frame.clone();
-    body_frame.kernel_state.fields.insert(
+    let mut raw_body =
+        crate::compat_test_support::flow_frame_state_to_raw(&body_frame.kernel_state);
+    raw_body.fields.insert(
         "frame_scope".into(),
         meerkat_machine_kernels::legacy::KernelValue::NamedVariant {
             enum_name: "FrameScope".into(),
             variant: "Body".into(),
         },
     );
-    body_frame.kernel_state.fields.insert(
+    raw_body.fields.insert(
         "loop_instance_id".into(),
         meerkat_machine_kernels::legacy::KernelValue::String(loop_instance_id.to_string()),
     );
-    body_frame.kernel_state.fields.insert(
+    raw_body.fields.insert(
         "iteration".into(),
         meerkat_machine_kernels::legacy::KernelValue::U64(0),
     );
+    body_frame.kernel_state = crate::compat_test_support::flow_frame_state_from_raw(raw_body);
     assert!(
         store
             .cas_frame_state(&run_id, &body_frame_id, Some(&root_body_frame), body_frame)
@@ -19468,7 +19488,8 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         .expect("run exists");
     let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
     let frame = run.frames.get(&frame_id).expect("root frame snapshot");
-    let node_status = match frame.kernel_state.fields.get("node_status") {
+    let raw_frame = crate::compat_test_support::flow_frame_state_to_raw(&frame.kernel_state);
+    let node_status = match raw_frame.fields.get("node_status") {
         Some(KernelValue::Map(map)) => map,
         other => panic!("expected node_status map, got {other:?}"),
     };
@@ -19573,19 +19594,18 @@ async fn test_root_frame_max_active_nodes_limits_nested_body_step_admission() {
             .await
             .expect("flow status")
             .expect("run exists");
-        let active_node_count = match run.flow_state.fields.get("active_node_count") {
+        let raw_run = crate::compat_test_support::flow_run_state_to_raw(&run.flow_state);
+        let active_node_count = match raw_run.fields.get("active_node_count") {
             Some(KernelValue::U64(value)) => *value,
             other => panic!("expected active_node_count u64, got {other:?}"),
         };
-        let ready_frames_len = match run.flow_state.fields.get("ready_frames") {
+        let ready_frames_len = match raw_run.fields.get("ready_frames") {
             Some(KernelValue::Seq(queue)) => queue.len(),
             other => panic!("expected ready_frames seq, got {other:?}"),
         };
         let has_body_frame = run.frames.values().any(|frame| {
-            matches!(
-                frame.kernel_state.fields.get("frame_scope"),
-                Some(KernelValue::NamedVariant { variant, .. }) if variant == "Body"
-            )
+            frame.kernel_state.frame_scope
+                == meerkat_machine_schema::compat::types::FrameScope::Body
         });
 
         if has_body_frame && active_node_count > 0 && ready_frames_len > 0 {
@@ -19661,7 +19681,8 @@ async fn test_root_frame_cancel_cleans_up_inflight_node() {
         .expect("run exists");
     let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
     let frame = run.frames.get(&frame_id).expect("root frame snapshot");
-    let node_status = match frame.kernel_state.fields.get("node_status") {
+    let raw_frame = crate::compat_test_support::flow_frame_state_to_raw(&frame.kernel_state);
+    let node_status = match raw_frame.fields.get("node_status") {
         Some(KernelValue::Map(map)) => map,
         other => panic!("expected node_status map, got {other:?}"),
     };

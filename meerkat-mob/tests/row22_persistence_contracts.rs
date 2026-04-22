@@ -12,8 +12,7 @@ fn minimal_run(schema_version: u32, status: MobRunStatus) -> MobRun {
         mob_id: meerkat_mob::MobId::from("row22-mob"),
         flow_id: meerkat_mob::FlowId::from("row22-flow"),
         status,
-        flow_state: meerkat_machine_kernels::legacy_generated::flow_run::initial_state()
-            .expect("init"),
+        flow_state: meerkat_machine_kernels::compat_generated::flow_run::initial_state(),
         activation_params: serde_json::json!({}),
         created_at: chrono::Utc::now(),
         completed_at: None,

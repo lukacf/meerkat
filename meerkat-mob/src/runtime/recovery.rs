@@ -4,9 +4,11 @@
 //! scheduler's `ready_frames` and `pending_body_frame_loops` fields are
 //! consistent with the per-frame and per-loop kernel snapshots.
 
+use crate::flow_machine_types::{frame_id, local_frame_id, loop_instance_id};
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
-use meerkat_machine_kernels::legacy::KernelValue;
+use meerkat_machine_kernels::compat_generated::loop_iteration;
+use meerkat_machine_schema::compat::types as kernel_types;
 
 /// Errors that prevent a run from being resumed.
 #[derive(Debug, thiserror::Error)]
@@ -64,28 +66,27 @@ fn check_frame_invariant(
     frame_id: &FrameId,
     snap: &FrameSnapshot,
 ) -> Result<(), RestoreIncompatible> {
-    let fields = &snap.kernel_state.fields;
-
     // Collect the set of node IDs with status == Ready.
-    let ready_by_status: std::collections::BTreeSet<String> = match fields.get("node_status") {
-        Some(KernelValue::Map(map)) => map
-            .iter()
-            .filter_map(|(k, v)| {
-                if is_ready_variant(v) {
-                    kernel_value_string(k)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        _ => std::collections::BTreeSet::new(),
-    };
+    let ready_by_status: std::collections::BTreeSet<String> = snap
+        .kernel_state
+        .node_status
+        .iter()
+        .filter_map(|(node_id, status)| {
+            if is_ready_variant(status) {
+                Some(node_id.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Collect the set of node IDs in ready_queue.
-    let in_ready_queue: std::collections::BTreeSet<String> = match fields.get("ready_queue") {
-        Some(KernelValue::Seq(seq)) => seq.iter().filter_map(kernel_value_string).collect(),
-        _ => std::collections::BTreeSet::new(),
-    };
+    let in_ready_queue: std::collections::BTreeSet<String> = snap
+        .kernel_state
+        .ready_queue
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
     // Invariant: ready_by_status == in_ready_queue.
     if ready_by_status != in_ready_queue {
@@ -115,25 +116,14 @@ fn reconcile_ready_frames(run: &mut MobRun) {
     // Preserve stable ordering (BTreeMap gives us sorted keys).
     active_frame_ids.sort();
 
-    let new_seq = KernelValue::Seq(
-        active_frame_ids
-            .iter()
-            .map(|s| KernelValue::String(s.clone()))
-            .collect(),
-    );
-    let new_set = KernelValue::Set(
-        active_frame_ids
-            .iter()
-            .map(|s| KernelValue::String(s.clone()))
-            .collect(),
-    );
-
-    run.flow_state
-        .fields
-        .insert("ready_frames".to_string(), new_seq);
-    run.flow_state
-        .fields
-        .insert("ready_frame_membership".to_string(), new_set);
+    run.flow_state.ready_frames = active_frame_ids
+        .iter()
+        .map(|value| frame_id(&FrameId::from(value.as_str())))
+        .collect();
+    run.flow_state.ready_frame_membership = active_frame_ids
+        .iter()
+        .map(|value| frame_id(&FrameId::from(value.as_str())))
+        .collect();
 }
 
 /// Rebuild `pending_body_frame_loops` and `pending_body_frame_loop_membership`
@@ -152,25 +142,14 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
         .collect();
     pending_loop_ids.sort();
 
-    let new_seq = KernelValue::Seq(
-        pending_loop_ids
-            .iter()
-            .map(|s| KernelValue::String(s.clone()))
-            .collect(),
-    );
-    let new_set = KernelValue::Set(
-        pending_loop_ids
-            .iter()
-            .map(|s| KernelValue::String(s.clone()))
-            .collect(),
-    );
-
-    run.flow_state
-        .fields
-        .insert("pending_body_frame_loops".to_string(), new_seq);
-    run.flow_state
-        .fields
-        .insert("pending_body_frame_loop_membership".to_string(), new_set);
+    run.flow_state.pending_body_frame_loops = pending_loop_ids
+        .iter()
+        .map(|value| loop_instance_id(&LoopInstanceId::from(value.as_str())))
+        .collect();
+    run.flow_state.pending_body_frame_loop_membership = pending_loop_ids
+        .iter()
+        .map(|value| loop_instance_id(&LoopInstanceId::from(value.as_str())))
+        .collect();
 }
 
 /// Rebuild the run-level active counters from persisted snapshots.
@@ -197,14 +176,8 @@ fn reconcile_active_counts(run: &mut MobRun) {
         .filter(|frame_id| run.frames.contains_key(frame_id))
         .count() as u64;
 
-    run.flow_state.fields.insert(
-        "active_node_count".to_string(),
-        KernelValue::U64(active_node_count),
-    );
-    run.flow_state.fields.insert(
-        "active_frame_count".to_string(),
-        KernelValue::U64(active_frame_count),
-    );
+    run.flow_state.active_node_count = u32::try_from(active_node_count).unwrap_or(u32::MAX);
+    run.flow_state.active_frame_count = u32::try_from(active_frame_count).unwrap_or(u32::MAX);
 }
 
 /// Return true if a loop snapshot represents a loop that is pending a body frame start.
@@ -215,53 +188,39 @@ fn reconcile_active_counts(run: &mut MobRun) {
 /// this field; if it is missing entirely, we treat the loop as pending and emit a
 /// warning so the anomaly is visible in logs.
 fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
-    if snap.kernel_state.phase != "Running" {
+    if snap.kernel_state.phase != loop_iteration::Phase::Running {
         return false;
     }
-    match snap.kernel_state.fields.get("active_body_frame_id") {
-        Some(KernelValue::None) => true,
-        None => {
+    if snap.kernel_state.active_body_frame_id.is_none() {
+        if snap.kernel_state.parent_frame_id.as_str().is_empty() {
             tracing::warn!(
                 loop_instance_id = %loop_id,
                 "loop snapshot is missing active_body_frame_id field; \
                  treating as pending body frame — snapshot may be corrupt"
             );
-            true
         }
-        _ => false,
+        true
+    } else {
+        false
     }
 }
 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
-    match snap.kernel_state.fields.get("active_body_frame_id") {
-        Some(KernelValue::String(frame_id)) => Some(FrameId::from(frame_id.as_str())),
-        Some(KernelValue::Map(entries)) => entries
-            .get(&KernelValue::String("value".into()))
-            .and_then(|value| match value {
-                KernelValue::String(frame_id) if !frame_id.is_empty() => {
-                    Some(FrameId::from(frame_id.as_str()))
-                }
-                _ => None,
-            }),
-        _ => None,
-    }
+    snap.kernel_state
+        .active_body_frame_id
+        .as_ref()
+        .map(local_frame_id)
 }
 
 fn count_running_step_nodes(snap: &FrameSnapshot) -> u64 {
-    let Some(KernelValue::Map(node_status)) = snap.kernel_state.fields.get("node_status") else {
-        return 0;
-    };
-    let Some(KernelValue::Map(node_kind)) = snap.kernel_state.fields.get("node_kind") else {
-        return 0;
-    };
-
-    node_status
+    snap.kernel_state
+        .node_status
         .iter()
         .filter(|(node_id, status)| {
-            matches!(status, KernelValue::NamedVariant { variant, .. } if variant == "Running")
+            **status == kernel_types::NodeRunStatus::Running
                 && matches!(
-                    node_kind.get(*node_id),
-                    Some(KernelValue::NamedVariant { variant, .. }) if variant == "Step"
+                    snap.kernel_state.node_kind.get(*node_id),
+                    Some(kind) if *kind == kernel_types::FlowNodeKind::Step
                 )
         })
         .count() as u64
@@ -269,36 +228,28 @@ fn count_running_step_nodes(snap: &FrameSnapshot) -> u64 {
 
 /// Return true if the frame's `ready_queue` is present and non-empty.
 fn frame_has_nonempty_ready_queue(snap: &FrameSnapshot) -> bool {
-    match snap.kernel_state.fields.get("ready_queue") {
-        Some(KernelValue::Seq(seq)) => !seq.is_empty(),
-        _ => false,
-    }
+    !snap.kernel_state.ready_queue.is_empty()
 }
 
-/// Return true if a KernelValue is a `NamedVariant { variant: "Ready" }`.
-fn is_ready_variant(v: &KernelValue) -> bool {
-    matches!(v, KernelValue::NamedVariant { variant, .. } if variant == "Ready")
-}
-
-/// Extract the inner string from a `KernelValue::String`.
-fn kernel_value_string(v: &KernelValue) -> Option<String> {
-    match v {
-        KernelValue::String(s) => Some(s.clone()),
-        _ => None,
-    }
+fn is_ready_variant(v: &kernel_types::NodeRunStatus) -> bool {
+    *v == kernel_types::NodeRunStatus::Ready
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compat_test_support::{
+        flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
+        loop_iteration_state_from_raw,
+    };
     use crate::ids::RunId;
     use crate::run::{MobRun, MobRunStatus};
     use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
+    use meerkat_machine_kernels::legacy_generated::flow_run as raw_flow_run;
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use meerkat_machine_kernels::legacy_generated::flow_run;
-        let flow_state = flow_run::initial_state().expect("init");
+        let flow_state = flow_run_state_from_raw(raw_flow_run::initial_state().expect("init"));
         MobRun {
             run_id: RunId::new(),
             mob_id: crate::MobId::from("test-mob"),
@@ -354,14 +305,14 @@ mod tests {
         };
 
         FrameSnapshot {
-            kernel_state: KernelState {
+            kernel_state: flow_frame_state_from_raw(KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([
                     ("ready_queue".into(), ready_queue),
                     ("tracked_nodes".into(), KernelValue::Set(tracked)),
                     ("node_status".into(), node_status),
                 ]),
-            },
+            }),
         }
     }
 
@@ -398,7 +349,7 @@ mod tests {
         run.frames.insert(
             FrameId::from("root"),
             FrameSnapshot {
-                kernel_state: KernelState {
+                kernel_state: flow_frame_state_from_raw(KernelState {
                     phase: "Running".into(),
                     fields: BTreeMap::from([
                         (
@@ -423,13 +374,13 @@ mod tests {
                         ),
                         ("ready_queue".into(), KernelValue::Seq(vec![])),
                     ]),
-                },
+                }),
             },
         );
         run.frames.insert(
             FrameId::from("body-frame"),
             FrameSnapshot {
-                kernel_state: KernelState {
+                kernel_state: flow_frame_state_from_raw(KernelState {
                     phase: "Running".into(),
                     fields: BTreeMap::from([
                         (
@@ -454,32 +405,26 @@ mod tests {
                         ),
                         ("ready_queue".into(), KernelValue::Seq(vec![])),
                     ]),
-                },
+                }),
             },
         );
         run.loops.insert(
             LoopInstanceId::from("loop-1"),
             LoopSnapshot {
-                kernel_state: KernelState {
+                kernel_state: loop_iteration_state_from_raw(KernelState {
                     phase: "Running".into(),
                     fields: BTreeMap::from([(
                         "active_body_frame_id".into(),
                         KernelValue::String("body-frame".into()),
                     )]),
-                },
+                }),
             },
         );
 
         reconcile_run_state(&mut run).expect("reconcile");
 
-        assert_eq!(
-            run.flow_state.fields.get("active_node_count"),
-            Some(&KernelValue::U64(1))
-        );
-        assert_eq!(
-            run.flow_state.fields.get("active_frame_count"),
-            Some(&KernelValue::U64(1))
-        );
+        assert_eq!(run.flow_state.active_node_count, 1);
+        assert_eq!(run.flow_state.active_frame_count, 1);
     }
 
     #[test]
@@ -487,7 +432,7 @@ mod tests {
         // Frame with empty ready_queue and no Ready nodes is valid.
         let frame_id = crate::FrameId::from("f1");
         let snap = FrameSnapshot {
-            kernel_state: KernelState {
+            kernel_state: flow_frame_state_from_raw(KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([
                     ("ready_queue".into(), KernelValue::Seq(vec![])),
@@ -502,7 +447,7 @@ mod tests {
                         )])),
                     ),
                 ]),
-            },
+            }),
         };
         assert!(check_frame_invariant(&frame_id, &snap).is_ok());
     }
@@ -511,7 +456,7 @@ mod tests {
     fn test_frame_invariant_violation_ready_not_in_queue() {
         let frame_id = crate::FrameId::from("f-bad");
         let snap = FrameSnapshot {
-            kernel_state: KernelState {
+            kernel_state: flow_frame_state_from_raw(KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([
                     ("ready_queue".into(), KernelValue::Seq(vec![])),
@@ -526,7 +471,7 @@ mod tests {
                         )])),
                     ),
                 ]),
-            },
+            }),
         };
         let result = check_frame_invariant(&frame_id, &snap);
         assert!(
@@ -546,17 +491,19 @@ mod tests {
         run.frames.insert(crate::FrameId::from("frame-1"), stale);
 
         // Manually insert frame-1 into ready_frames as a stale entry.
-        if let Some(KernelValue::Seq(seq)) = run.flow_state.fields.get_mut("ready_frames") {
+        let mut raw = flow_run_state_to_raw(&run.flow_state);
+        if let Some(KernelValue::Seq(seq)) = raw.fields.get_mut("ready_frames") {
             seq.push(KernelValue::String("frame-1".into()));
         }
-        if let Some(KernelValue::Set(set)) = run.flow_state.fields.get_mut("ready_frame_membership")
-        {
+        if let Some(KernelValue::Set(set)) = raw.fields.get_mut("ready_frame_membership") {
             set.insert(KernelValue::String("frame-1".into()));
         }
+        run.flow_state = flow_run_state_from_raw(raw);
 
         reconcile_run_state(&mut run).expect("reconcile");
 
-        match run.flow_state.fields.get("ready_frames") {
+        let raw = flow_run_state_to_raw(&run.flow_state);
+        match raw.fields.get("ready_frames") {
             Some(KernelValue::Seq(seq)) => {
                 assert!(
                     !seq.contains(&KernelValue::String("frame-1".into())),
@@ -578,7 +525,8 @@ mod tests {
 
         reconcile_run_state(&mut run).expect("reconcile");
 
-        match run.flow_state.fields.get("ready_frames") {
+        let raw = flow_run_state_to_raw(&run.flow_state);
+        match raw.fields.get("ready_frames") {
             Some(KernelValue::Seq(seq)) => {
                 assert!(
                     seq.contains(&KernelValue::String("frame-2".into())),

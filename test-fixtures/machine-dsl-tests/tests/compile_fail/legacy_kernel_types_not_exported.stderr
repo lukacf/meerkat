@@ -10,12 +10,12 @@ error[E0432]: unresolved imports `meerkat_machine_kernels::KernelEffect`, `meerk
   |                               no `KernelEffect` in the root
   |
   = help: consider importing this struct instead:
-          meerkat_machine_kernels::legacy::KernelEffect
+          meerkat_machine_kernels::test_oracle::KernelEffect
   = help: consider importing this struct instead:
-          meerkat_machine_kernels::legacy::KernelInput
+          meerkat_machine_kernels::test_oracle::KernelInput
   = help: consider importing this struct instead:
-          meerkat_machine_kernels::legacy::KernelSignal
+          meerkat_machine_kernels::test_oracle::KernelSignal
   = help: consider importing this struct instead:
-          meerkat_machine_kernels::legacy::KernelState
+          meerkat_machine_kernels::test_oracle::KernelState
   = help: consider importing this enum instead:
-          meerkat_machine_kernels::legacy::KernelValue
+          meerkat_machine_kernels::test_oracle::KernelValue

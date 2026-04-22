@@ -1,0 +1,38 @@
+use crate::runtime::{
+    GeneratedMachineKernel, KernelInput, KernelSignal, KernelState, KernelValue, TransitionOutcome,
+    TransitionRefusal,
+};
+
+pub fn schema() -> meerkat_machine_schema::MachineSchema {
+    meerkat_machine_schema::loop_iteration_machine()
+}
+
+pub fn kernel() -> GeneratedMachineKernel {
+    GeneratedMachineKernel::new(schema())
+}
+
+pub fn initial_state() -> Result<KernelState, TransitionRefusal> {
+    kernel().initial_state()
+}
+
+pub fn transition(
+    state: &KernelState,
+    input: &KernelInput,
+) -> Result<TransitionOutcome, TransitionRefusal> {
+    kernel().transition(state, input)
+}
+
+pub fn transition_signal(
+    state: &KernelState,
+    signal: &KernelSignal,
+) -> Result<TransitionOutcome, TransitionRefusal> {
+    kernel().transition_signal(state, signal)
+}
+
+pub fn evaluate_helper(
+    state: &KernelState,
+    helper_name: &str,
+    args: &std::collections::BTreeMap<String, KernelValue>,
+) -> Result<KernelValue, TransitionRefusal> {
+    kernel().evaluate_helper(state, helper_name, args)
+}

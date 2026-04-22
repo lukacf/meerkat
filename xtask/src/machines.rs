@@ -22,6 +22,7 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
+    flow_frame_machine, flow_run_machine, loop_iteration_machine,
 };
 use serde::Serialize;
 
@@ -310,6 +311,18 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         );
     }
 
+    for schema in compat_machine_schemas() {
+        let generated_slug = generated_kernel_module_slug(&schema.machine);
+        write_generated(
+            &generated_kernel_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&schema),
+        )?;
+        println!(
+            "generated {}",
+            generated_kernel_module_path(root, &generated_slug).display()
+        );
+    }
+
     for composition in &selection.compositions {
         remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
         write_generated(
@@ -497,6 +510,15 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         compare_generated(
             &generated_kernel_module_path(root, &generated_slug),
             &render_machine_kernel_module(&machine.schema),
+            &mut mismatches,
+        )?;
+    }
+
+    for schema in compat_machine_schemas() {
+        let generated_slug = generated_kernel_module_slug(&schema.machine);
+        compare_generated(
+            &generated_kernel_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&schema),
             &mut mismatches,
         )?;
     }
@@ -2117,6 +2139,14 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
     schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
     schemas.dedup_by(|a, b| a.machine == b.machine);
     schemas
+}
+
+fn compat_machine_schemas() -> Vec<MachineSchema> {
+    vec![
+        flow_frame_machine(),
+        flow_run_machine(),
+        loop_iteration_machine(),
+    ]
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {

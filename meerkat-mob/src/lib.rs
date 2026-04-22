@@ -36,9 +36,12 @@ pub mod tokio {
 
 pub mod backend;
 mod build;
+#[doc(hidden)]
+pub mod compat_test_support;
 pub mod definition;
 pub mod error;
 pub mod event;
+mod flow_machine_types;
 mod generated;
 pub mod ids;
 pub mod launch;

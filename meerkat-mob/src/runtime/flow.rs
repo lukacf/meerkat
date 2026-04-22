@@ -14,6 +14,7 @@ use crate::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
+use crate::flow_machine_types::{local_step_id, local_step_run_status, local_target_id};
 use crate::generated::flow_frame_loop_driver::FlowFrameTerminalPhase;
 use crate::ids::{AgentIdentity, FlowId, MeerkatId, RunId, StepId};
 use crate::run::{
@@ -28,7 +29,7 @@ use indexmap::IndexMap;
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::legacy::KernelEffect;
+use meerkat_machine_kernels::compat_generated::flow_run;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -420,7 +421,7 @@ impl FlowEngine {
             };
             if !has_effect(
                 &dispatch_effects,
-                FlowRunEffectKind::AdmitStepWork,
+                flow_run::FlowRunEffectKind::AdmitStepWork,
                 Some(&step_id),
                 None,
             ) {
@@ -492,7 +493,7 @@ impl FlowEngine {
                     if let Some(output_effects) = output_effects
                         && has_effect(
                             &output_effects,
-                            FlowRunEffectKind::PersistStepOutput,
+                            flow_run::FlowRunEffectKind::PersistStepOutput,
                             Some(&step_id),
                             None,
                         )
@@ -1356,7 +1357,7 @@ impl FlowEngine {
 
     async fn apply_skip_projection(
         &self,
-        effects: Option<Vec<KernelEffect>>,
+        effects: Option<Vec<flow_run::Effect>>,
         run_id: &RunId,
         step_id: &StepId,
         reason: String,
@@ -1386,7 +1387,7 @@ impl FlowEngine {
 
     async fn apply_failure_projection(
         &self,
-        effects: Option<Vec<KernelEffect>>,
+        effects: Option<Vec<flow_run::Effect>>,
         run_id: &RunId,
         step_id: &StepId,
         reason: String,
@@ -1415,7 +1416,7 @@ impl FlowEngine {
         if append_failure_ledger
             && has_effect(
                 &effects,
-                FlowRunEffectKind::AppendFailureLedger,
+                flow_run::FlowRunEffectKind::AppendFailureLedger,
                 Some(step_id),
                 None,
             )
@@ -1433,7 +1434,7 @@ impl FlowEngine {
         }
         Ok(has_effect(
             &effects,
-            FlowRunEffectKind::EscalateSupervisor,
+            flow_run::FlowRunEffectKind::EscalateSupervisor,
             Some(step_id),
             None,
         ))
@@ -1547,28 +1548,6 @@ struct StepNoticeEffect {
     status: StepRunStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlowRunEffectKind {
-    AdmitStepWork,
-    EmitStepNotice,
-    PersistStepOutput,
-    AppendFailureLedger,
-    EscalateSupervisor,
-}
-
-impl FlowRunEffectKind {
-    fn parse(effect: &KernelEffect) -> Option<Self> {
-        match effect.variant.as_str() {
-            "AdmitStepWork" => Some(Self::AdmitStepWork),
-            "EmitStepNotice" => Some(Self::EmitStepNotice),
-            "PersistStepOutput" => Some(Self::PersistStepOutput),
-            "AppendFailureLedger" => Some(Self::AppendFailureLedger),
-            "EscalateSupervisor" => Some(Self::EscalateSupervisor),
-            _ => None,
-        }
-    }
-}
-
 fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
     if step.allowed_tools.is_none() && step.blocked_tools.is_none() {
         return None;
@@ -1580,94 +1559,85 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
 }
 
 fn find_step_notice_effect(
-    effects: &[KernelEffect],
+    effects: &[flow_run::Effect],
     expected_step_id: &StepId,
 ) -> Result<Option<StepNoticeEffect>, MobError> {
     for effect in effects {
-        if FlowRunEffectKind::parse(effect) != Some(FlowRunEffectKind::EmitStepNotice) {
-            continue;
-        }
-        let Some(step_id) = effect_step_id(effect)? else {
+        let flow_run::Effect::EmitStepNotice(payload) = effect else {
             continue;
         };
-        if &step_id != expected_step_id {
-            continue;
+        let step_id = local_step_id(&payload.step_id);
+        if &step_id == expected_step_id {
+            return Ok(Some(StepNoticeEffect {
+                step_id,
+                status: local_step_run_status(payload.step_status),
+            }));
         }
-        let status = effect_step_status(effect)?;
-        return Ok(Some(StepNoticeEffect { step_id, status }));
     }
     Ok(None)
 }
 
 fn has_effect(
-    effects: &[KernelEffect],
-    expected: FlowRunEffectKind,
+    effects: &[flow_run::Effect],
+    expected: flow_run::FlowRunEffectKind,
     expected_step_id: Option<&StepId>,
     expected_target_id: Option<&MeerkatId>,
 ) -> bool {
     effects.iter().any(|effect| {
-        if FlowRunEffectKind::parse(effect) != Some(expected) {
+        if effect.kind() != expected {
             return false;
         }
         if let Some(step_id) = expected_step_id {
-            match effect_step_id(effect) {
-                Ok(Some(candidate)) if &candidate == step_id => {}
+            let candidate = match effect {
+                flow_run::Effect::EmitStepNotice(payload) => Some(local_step_id(&payload.step_id)),
+                flow_run::Effect::AppendFailureLedger(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::PersistStepOutput(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::AdmitStepWork(payload) => Some(local_step_id(&payload.step_id)),
+                flow_run::Effect::EscalateSupervisor(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::ProjectTargetSuccess(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::ProjectTargetFailure(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::ProjectTargetCanceled(payload) => {
+                    Some(local_step_id(&payload.step_id))
+                }
+                flow_run::Effect::EmitFlowRunNotice(_)
+                | flow_run::Effect::FlowTerminalized(_)
+                | flow_run::Effect::GrantNodeSlot(_)
+                | flow_run::Effect::GrantBodyFrameStart(_) => None,
+            };
+            match candidate {
+                Some(candidate) if &candidate == step_id => {}
                 _ => return false,
             }
         }
         if let Some(target_id) = expected_target_id {
-            match effect_target_id(effect) {
-                Ok(Some(candidate)) if &candidate == target_id => {}
+            let candidate = match effect {
+                flow_run::Effect::ProjectTargetSuccess(payload) => {
+                    Some(local_target_id(&payload.target_id))
+                }
+                flow_run::Effect::ProjectTargetFailure(payload) => {
+                    Some(local_target_id(&payload.target_id))
+                }
+                flow_run::Effect::ProjectTargetCanceled(payload) => {
+                    Some(local_target_id(&payload.target_id))
+                }
+                _ => None,
+            };
+            match candidate {
+                Some(candidate) if &candidate == target_id => {}
                 _ => return false,
             }
         }
         true
-    })
-}
-
-fn effect_step_id(effect: &KernelEffect) -> Result<Option<StepId>, MobError> {
-    let Some(value) = effect.fields.get("step_id") else {
-        return Ok(None);
-    };
-    let step_id = value.as_string().map_err(|reason| {
-        MobError::Internal(format!(
-            "flow_run effect `{}` step_id invalid: {reason}",
-            effect.variant
-        ))
-    })?;
-    Ok(Some(StepId::from(step_id)))
-}
-
-fn effect_target_id(effect: &KernelEffect) -> Result<Option<MeerkatId>, MobError> {
-    let Some(value) = effect.fields.get("target_id") else {
-        return Ok(None);
-    };
-    let target_id = value.as_string().map_err(|reason| {
-        MobError::Internal(format!(
-            "flow_run effect `{}` target_id invalid: {reason}",
-            effect.variant
-        ))
-    })?;
-    Ok(Some(MeerkatId::from(target_id)))
-}
-
-fn effect_step_status(effect: &KernelEffect) -> Result<StepRunStatus, MobError> {
-    let value = effect.fields.get("step_status").ok_or_else(|| {
-        MobError::Internal(format!(
-            "flow_run effect `{}` missing step_status payload",
-            effect.variant
-        ))
-    })?;
-    StepRunStatus::parse_kernel_value(value).map_err(|reason| {
-        let message = if reason.starts_with("unknown StepRunStatus variant") {
-            format!("flow_run effect `{}` {reason}", effect.variant)
-        } else {
-            format!(
-                "flow_run effect `{}` step_status invalid: {reason}",
-                effect.variant
-            )
-        };
-        MobError::Internal(message)
     })
 }
 

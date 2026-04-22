@@ -150,6 +150,7 @@ mod tests {
     use crate::store::{InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError};
     use async_trait::async_trait;
     use chrono::Utc;
+    use meerkat_machine_kernels::compat_generated::flow_run;
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -196,8 +197,8 @@ mod tests {
         async fn cas_flow_state(
             &self,
             run_id: &RunId,
-            expected: &meerkat_machine_kernels::legacy::KernelState,
-            next: &meerkat_machine_kernels::legacy::KernelState,
+            expected: &flow_run::State,
+            next: &flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner.cas_flow_state(run_id, expected, next).await
         }
@@ -206,9 +207,9 @@ mod tests {
             &self,
             run_id: &RunId,
             expected_status: MobRunStatus,
-            expected_flow_state: &meerkat_machine_kernels::legacy::KernelState,
+            expected_flow_state: &flow_run::State,
             next_status: MobRunStatus,
-            next_flow_state: &meerkat_machine_kernels::legacy::KernelState,
+            next_flow_state: &flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_run_snapshot(
@@ -281,8 +282,8 @@ mod tests {
         async fn cas_grant_node_slot(
             &self,
             run_id: &RunId,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
@@ -326,8 +327,8 @@ mod tests {
             &self,
             run_id: &RunId,
             loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
@@ -353,8 +354,8 @@ mod tests {
             loop_instance_id: &crate::ids::LoopInstanceId,
             expected_loop: &crate::run::LoopSnapshot,
             next_loop: crate::run::LoopSnapshot,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_loop_request_body_frame(
@@ -377,8 +378,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             initial_frame: crate::run::FrameSnapshot,
             ledger_entry: crate::run::LoopIterationLedgerEntry,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_grant_body_frame_start(
@@ -404,8 +405,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_complete_body_frame(
@@ -431,8 +432,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &meerkat_machine_kernels::legacy::KernelState,
-            next_run_state: meerkat_machine_kernels::legacy::KernelState,
+            expected_run_state: &flow_run::State,
+            next_run_state: flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_complete_loop(

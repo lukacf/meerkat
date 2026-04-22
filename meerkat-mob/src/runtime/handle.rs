@@ -3166,7 +3166,7 @@ impl MobHandle {
     /// In 0.6 autonomous members no longer run a synthetic second kickoff turn,
     /// but their initial prompt still resolves asynchronously through the
     /// runtime-backed input path. This barrier is satisfied once each targeted
-    /// autonomous member leaves `pending` / `starting` / `callback_pending`
+    /// autonomous member leaves `pending` / `starting`
     /// and reaches a terminal kickoff phase.
     pub async fn wait_for_kickoff_complete(
         &self,

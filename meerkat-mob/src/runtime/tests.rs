@@ -20234,7 +20234,6 @@ struct MobRuntimeParitySnapshotSummary {
     member_startup_ready: BTreeSet<String>,
     member_kickoff_pending: BTreeSet<String>,
     member_kickoff_starting: BTreeSet<String>,
-    member_kickoff_callback_pending: BTreeSet<String>,
     member_kickoff_started: BTreeSet<String>,
     member_kickoff_failed: BTreeSet<String>,
     member_kickoff_cancelled: BTreeSet<String>,
@@ -20940,11 +20939,6 @@ async fn mob_runtime_parity_snapshot_summary(
             .expect("serialize member_kickoff_starting"),
     );
     formal_available_fields.insert(
-        "member_kickoff_callback_pending".into(),
-        serde_json::to_string(&startup_kickoff.member_kickoff_callback_pending_ids)
-            .expect("serialize member_kickoff_callback_pending"),
-    );
-    formal_available_fields.insert(
         "member_kickoff_started".into(),
         serde_json::to_string(&startup_kickoff.member_kickoff_started_ids)
             .expect("serialize member_kickoff_started"),
@@ -21030,7 +21024,6 @@ async fn mob_runtime_parity_snapshot_summary(
         member_startup_ready: startup_kickoff.member_startup_ready,
         member_kickoff_pending: startup_kickoff.member_kickoff_pending_ids,
         member_kickoff_starting: startup_kickoff.member_kickoff_starting_ids,
-        member_kickoff_callback_pending: startup_kickoff.member_kickoff_callback_pending_ids,
         member_kickoff_started: startup_kickoff.member_kickoff_started_ids,
         member_kickoff_failed: startup_kickoff.member_kickoff_failed_ids,
         member_kickoff_cancelled: startup_kickoff.member_kickoff_cancelled_ids,
@@ -21134,9 +21127,6 @@ fn mob_runtime_parity_field_value(
         )),
         "member_kickoff_starting" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_kickoff_starting.clone(),
-        )),
-        "member_kickoff_callback_pending" => Some(MobRuntimeParityExprValue::Set(
-            snapshot.member_kickoff_callback_pending.clone(),
         )),
         "member_kickoff_started" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_kickoff_started.clone(),

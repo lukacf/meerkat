@@ -131,7 +131,6 @@ pub(crate) struct MobStartupKickoffSnapshot {
     pub member_kickoff_pending_ids: std::collections::BTreeSet<String>,
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_starting_ids: std::collections::BTreeSet<String>,
-    pub member_kickoff_callback_pending_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_started_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_failed_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_cancelled_ids: std::collections::BTreeSet<String>,

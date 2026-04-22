@@ -44,8 +44,8 @@ pub enum MemberState {
 pub enum MobMemberKickoffPhase {
     Pending,
     Starting,
-    CallbackPending,
     Started,
+    #[serde(alias = "callback_pending")]
     Failed,
     Cancelled,
 }

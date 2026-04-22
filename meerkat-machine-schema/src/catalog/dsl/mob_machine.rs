@@ -19,7 +19,6 @@ machine! {
             member_startup_ready: Set<AgentRuntimeId>,
             member_kickoff_pending: Set<String>,
             member_kickoff_starting: Set<String>,
-            member_kickoff_callback_pending: Set<String>,
             member_kickoff_started: Set<String>,
             member_kickoff_failed: Set<String>,
             member_kickoff_cancelled: Set<String>,
@@ -64,7 +63,6 @@ machine! {
             member_startup_ready = EmptySet,
             member_kickoff_pending = EmptySet,
             member_kickoff_starting = EmptySet,
-            member_kickoff_callback_pending = EmptySet,
             member_kickoff_started = EmptySet,
             member_kickoff_failed = EmptySet,
             member_kickoff_cancelled = EmptySet,
@@ -129,7 +127,6 @@ machine! {
             KickoffMarkStarting { member_id: String },
             StartupMarkReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             KickoffResolveStarted { member_id: String },
-            KickoffResolveCallbackPending { member_id: String },
             KickoffResolveFailed { member_id: String, error: String },
             KickoffResolveCancelled { member_id: String },
             KickoffCancelRequested { member_id: String },
@@ -348,7 +345,6 @@ machine! {
             guard "kickoff_not_started" {
                 !self.member_kickoff_pending.contains(member_id)
                 && !self.member_kickoff_starting.contains(member_id)
-                && !self.member_kickoff_callback_pending.contains(member_id)
                 && !self.member_kickoff_started.contains(member_id)
                 && !self.member_kickoff_failed.contains(member_id)
                 && !self.member_kickoff_cancelled.contains(member_id)
@@ -356,7 +352,6 @@ machine! {
             update {
                 self.member_kickoff_pending.insert(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -374,7 +369,6 @@ machine! {
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.insert(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -392,7 +386,6 @@ machine! {
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.insert(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -403,36 +396,16 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Started }
         }
 
-        transition KickoffResolveCallbackPending {
-            per_phase [Running, Stopped, Completed]
-            on input KickoffResolveCallbackPending { member_id }
-            guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
-            update {
-                self.member_kickoff_pending.remove(member_id);
-                self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.insert(member_id);
-                self.member_kickoff_started.remove(member_id);
-                self.member_kickoff_failed.remove(member_id);
-                self.member_kickoff_cancelled.remove(member_id);
-                self.member_kickoff_error.remove(member_id);
-            }
-            to Running
-            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::CallbackPending }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::CallbackPending }
-        }
-
         transition KickoffResolveFailedFromStarting {
             per_phase [Running, Stopped, Completed]
             on input KickoffResolveFailed { member_id, error }
             guard "kickoff_active_failed" {
                 (self.member_kickoff_pending.contains(member_id)
-                    || self.member_kickoff_starting.contains(member_id)
-                    || self.member_kickoff_callback_pending.contains(member_id))
+                    || self.member_kickoff_starting.contains(member_id))
             }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.insert(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -450,7 +423,6 @@ machine! {
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.insert(member_id);
@@ -466,13 +438,11 @@ machine! {
             on input KickoffCancelRequested { member_id }
             guard "kickoff_cancellable" {
                 (self.member_kickoff_pending.contains(member_id)
-                    || self.member_kickoff_starting.contains(member_id)
-                    || self.member_kickoff_callback_pending.contains(member_id))
+                    || self.member_kickoff_starting.contains(member_id))
             }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.insert(member_id);
@@ -489,7 +459,6 @@ machine! {
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -573,7 +542,6 @@ machine! {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -603,7 +571,6 @@ machine! {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
@@ -638,7 +605,6 @@ machine! {
                 self.member_startup_ready = EmptySet;
                 self.member_kickoff_pending = EmptySet;
                 self.member_kickoff_starting = EmptySet;
-                self.member_kickoff_callback_pending = EmptySet;
                 self.member_kickoff_started = EmptySet;
                 self.member_kickoff_failed = EmptySet;
                 self.member_kickoff_cancelled = EmptySet;
@@ -666,7 +632,6 @@ machine! {
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_kickoff_pending = EmptySet;
                 self.member_kickoff_starting = EmptySet;
-                self.member_kickoff_callback_pending = EmptySet;
                 self.member_kickoff_started = EmptySet;
                 self.member_kickoff_failed = EmptySet;
                 self.member_kickoff_cancelled = EmptySet;
@@ -1650,7 +1615,6 @@ pub enum KickoffPhase {
     #[default]
     Pending,
     Starting,
-    CallbackPending,
     Started,
     Failed,
     Cancelled,
@@ -1662,7 +1626,6 @@ pub enum KickoffIntent {
     Pending,
     Starting,
     Started,
-    CallbackPending,
     Failed,
     Cancelled,
 }

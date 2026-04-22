@@ -134,10 +134,6 @@ fn seed_mob_authority_sync_from_roster(
                 crate::roster::MemberState::Retiring => mob_dsl::MobMemberState::Retiring,
             },
         );
-        authority
-            .state
-            .member_startup_ready
-            .insert(dsl_runtime_id.clone());
 
         let member_id = entry.agent_identity.to_string();
         if let Some(kickoff) = entry.kickoff.clone() {
@@ -152,12 +148,6 @@ fn seed_mob_authority_sync_from_roster(
                     authority
                         .state
                         .member_kickoff_starting
-                        .insert(member_id.clone());
-                }
-                crate::roster::MobMemberKickoffPhase::CallbackPending => {
-                    authority
-                        .state
-                        .member_kickoff_callback_pending
                         .insert(member_id.clone());
                 }
                 crate::roster::MobMemberKickoffPhase::Started => {

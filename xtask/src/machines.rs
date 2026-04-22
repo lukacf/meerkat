@@ -226,29 +226,6 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
         )?);
     }
 
-    if selection.include_local_flow_machines {
-        for machine in local_flow_machine_artifacts(&root) {
-            let dir = machine_dir(&root, machine.slug);
-            let artifact_subdir = artifact_dir.as_deref().map(|base| base.join(machine.slug));
-            items.push(run_hopcroft_for_target(
-                &root,
-                HopcroftTarget {
-                    kind: "machine",
-                    display_name: &machine.schema.machine,
-                    slug: machine.slug,
-                    dir: &dir,
-                    machine_schema: Some(&machine.schema),
-                },
-                args.profile,
-                workers,
-                args.observation,
-                args.audit_map,
-                args.reuse_existing_dump,
-                artifact_subdir.as_deref(),
-            )?);
-        }
-    }
-
     for composition in &selection.compositions {
         let dir = composition_dir(&root, &composition.slug);
         let artifact_subdir = artifact_dir

@@ -45,8 +45,8 @@ fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     let published = meerkat::transition(
         &attached,
         meerkat::Input::PublishCommittedVisibleSet(meerkat::inputs::PublishCommittedVisibleSet {
-            active_filter: tool_filter_all(),
-            staged_filter: tool_filter_all(),
+            active_filter: meerkat::ToolFilter::from(tool_filter_all()),
+            staged_filter: meerkat::ToolFilter::from(tool_filter_all()),
             active_requested_deferred_names: BTreeSet::new(),
             staged_requested_deferred_names: BTreeSet::new(),
             active_visibility_revision: 0,
@@ -72,8 +72,14 @@ fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_acti
         meerkat::Input::RequestDeferredTools(meerkat::inputs::RequestDeferredTools {
             names: BTreeSet::from(["search".to_string(), "view_image".to_string()]),
             witnesses: BTreeMap::from([
-                ("search".to_string(), "verified".to_string()),
-                ("view_image".to_string(), "verified".to_string()),
+                (
+                    "search".to_string(),
+                    meerkat::ToolVisibilityWitness::from("verified"),
+                ),
+                (
+                    "view_image".to_string(),
+                    meerkat::ToolVisibilityWitness::from("verified"),
+                ),
             ]),
         }),
         &meerkat::EmptyContext,

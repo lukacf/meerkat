@@ -22,11 +22,11 @@ impl LoopUntilEvaluationRequested {
     pub(crate) fn from_effect(effect: &loop_iteration::Effect) -> Result<Self, MobError> {
         match effect {
             loop_iteration::Effect::EvaluateUntilCondition(payload) => Ok(Self {
-                loop_instance_id: LoopInstanceId::from(payload.loop_instance_id.clone()),
+                loop_instance_id: payload.loop_instance_id.clone(),
                 iteration: payload.iteration,
-                parent_frame_id: FrameId::from(payload.parent_frame_id.clone()),
-                parent_node_id: FlowNodeId::from(payload.parent_node_id.clone()),
-                loop_id: LoopId::from(payload.loop_id.clone()),
+                parent_frame_id: payload.parent_frame_id.clone(),
+                parent_node_id: payload.parent_node_id.clone(),
+                loop_id: payload.loop_id.clone(),
             }),
             other => Err(MobError::Internal(format!(
                 "expected EvaluateUntilCondition effect, got '{other:?}'"

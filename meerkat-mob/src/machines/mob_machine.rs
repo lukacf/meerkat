@@ -993,6 +993,9 @@ machine! {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_startup_binding_requested = EmptySet;
+                self.member_startup_runtime_ready = EmptySet;
+                self.member_startup_ready = EmptySet;
                 self.member_kickoff_pending = EmptySet;
                 self.member_kickoff_starting = EmptySet;
                 self.member_kickoff_started = EmptySet;

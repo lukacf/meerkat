@@ -1760,6 +1760,8 @@ impl MobActor {
                 .get_by_identity(&AgentIdentity::from(agent_identity.as_str()))
                 .map(|entry| {
                     (
+                        entry.agent_runtime_id.clone(),
+                        entry.fence_token,
                         mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                         mob_dsl::FenceToken::from_domain(entry.fence_token),
                     )
@@ -1774,12 +1776,12 @@ impl MobActor {
         if !self
             .dsl_state()
             .member_startup_ready
-            .contains(&startup_marker.0)
+            .contains(&startup_marker.2)
         {
             self.apply_dsl_input(
                 mob_dsl::MobMachineInput::StartupMarkReady {
-                    agent_runtime_id: startup_marker.0,
-                    fence_token: startup_marker.1,
+                    agent_runtime_id: startup_marker.2.clone(),
+                    fence_token: startup_marker.3,
                 },
                 "start_autonomous_member/startup_mark_ready",
             )?;
@@ -1840,6 +1842,8 @@ impl MobActor {
                     if completion_command_tx
                         .send(MobCommand::KickoffOutcomeResolved {
                             agent_identity: log_id.clone(),
+                            agent_runtime_id: startup_marker.0.clone(),
+                            fence_token: startup_marker.1,
                             outcome,
                             ack_tx,
                         })
@@ -1950,8 +1954,32 @@ impl MobActor {
     async fn resolve_kickoff_outcome(
         &mut self,
         agent_identity: &MeerkatId,
+        agent_runtime_id: &AgentRuntimeId,
+        fence_token: FenceToken,
         outcome: meerkat_runtime::completion::CompletionOutcome,
     ) -> Result<(), MobError> {
+        let Some(current_entry) = self.roster.read().await.get(agent_identity).cloned() else {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                agent_runtime_id = %agent_runtime_id,
+                fence_token = %fence_token,
+                "dropping kickoff outcome for missing member"
+            );
+            return Ok(());
+        };
+        if current_entry.agent_runtime_id != *agent_runtime_id
+            || current_entry.fence_token != fence_token
+        {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                expected_runtime_id = %agent_runtime_id,
+                current_runtime_id = %current_entry.agent_runtime_id,
+                expected_fence_token = %fence_token,
+                current_fence_token = %current_entry.fence_token,
+                "dropping stale kickoff outcome for superseded member generation"
+            );
+            return Ok(());
+        }
         if let meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } =
             &outcome
         {
@@ -2364,10 +2392,19 @@ impl MobActor {
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
                     agent_identity,
+                    agent_runtime_id,
+                    fence_token,
                     outcome,
                     ack_tx,
                 } => {
-                    if let Err(error) = self.resolve_kickoff_outcome(&agent_identity, outcome).await
+                    if let Err(error) = self
+                        .resolve_kickoff_outcome(
+                            &agent_identity,
+                            &agent_runtime_id,
+                            fence_token,
+                            outcome,
+                        )
+                        .await
                     {
                         tracing::warn!(
                             agent_identity = %agent_identity,

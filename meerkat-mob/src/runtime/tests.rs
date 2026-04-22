@@ -5884,6 +5884,84 @@ async fn test_wait_for_kickoff_complete_returns_failed_snapshot_for_callback_bou
 }
 
 #[tokio::test]
+async fn test_respawn_ignores_stale_kickoff_outcome_from_retired_generation() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = MeerkatId::from("lead-stale-generation");
+
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn original lead");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.keep_alive_start_turn_call_count() < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("original kickoff should start");
+
+    let receipt = handle
+        .respawn(
+            AgentIdentity::from(member.as_str()),
+            Some("resume kickoff".into()),
+        )
+        .await
+        .expect("respawn succeeds");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.keep_alive_start_turn_call_count() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement kickoff should start");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let error = handle
+        .wait_for_members_kickoff_complete(
+            &[AgentIdentity::from(member.as_str())],
+            Some(Duration::from_millis(100)),
+        )
+        .await
+        .expect_err("replacement kickoff should remain pending while the new session is hung");
+
+    match error {
+        MobError::KickoffWaitTimedOut { pending_member_ids } => {
+            assert_eq!(
+                pending_member_ids,
+                vec![member.clone()],
+                "the replacement generation should remain the only pending kickoff target"
+            );
+        }
+        other => panic!("expected kickoff timeout after respawn, got {other:?}"),
+    }
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from(member.as_str()))
+        .await
+        .expect("replacement member snapshot");
+    assert_eq!(
+        snapshot.agent_runtime_id, receipt.agent_runtime_id,
+        "respawn should keep the replacement generation authoritative in the roster"
+    );
+
+    let kickoff = snapshot
+        .kickoff
+        .as_ref()
+        .expect("replacement autonomous member should expose kickoff state");
+    assert!(
+        matches!(
+            kickoff.phase,
+            crate::roster::MobMemberKickoffPhase::Pending
+                | crate::roster::MobMemberKickoffPhase::Starting
+        ),
+        "stale kickoff completion from the retired generation must not terminalize the replacement: {kickoff:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_wait_for_kickoff_complete_times_out_while_runtime_backed_kickoff_pending() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_start_turn_delay_ms(250);

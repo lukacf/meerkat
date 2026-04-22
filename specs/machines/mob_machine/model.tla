@@ -561,6 +561,9 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
+    /\ member_startup_binding_requested' = {}
+    /\ member_startup_runtime_ready' = {}
+    /\ member_startup_ready' = {}
     /\ member_kickoff_pending' = {}
     /\ member_kickoff_starting' = {}
     /\ member_kickoff_started' = {}
@@ -568,7 +571,7 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ member_kickoff_cancelled' = {}
     /\ member_kickoff_error' = [x \in {} |-> None]
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RecordOperatorActionProvenanceRunning ==

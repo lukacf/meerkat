@@ -256,6 +256,8 @@ pub(super) enum MobCommand {
     #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
         agent_identity: MeerkatId,
+        agent_runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
         outcome: meerkat_runtime::completion::CompletionOutcome,
         ack_tx: oneshot::Sender<()>,
     },

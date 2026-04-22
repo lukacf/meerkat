@@ -9821,6 +9821,9 @@ mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
        /\ mob_coordinator_bound' = FALSE
+       /\ mob_member_startup_binding_requested' = {}
+       /\ mob_member_startup_runtime_ready' = {}
+       /\ mob_member_startup_ready' = {}
        /\ mob_member_kickoff_pending' = {}
        /\ mob_member_kickoff_starting' = {}
        /\ mob_member_kickoff_started' = {}
@@ -9828,7 +9831,7 @@ mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_member_kickoff_cancelled' = {}
        /\ mob_member_kickoff_error' = [x \in {} |-> None]
        /\ mob_member_state_markers' = [x \in {} |-> None]
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, meerkat_mcp_server_states, meerkat_pending_peer_requests, meerkat_inbound_peer_requests, meerkat_last_session_context_updated_at_ms, meerkat_reserved_interaction_streams, meerkat_attached_interaction_streams, meerkat_realtime_product_turn_phase, meerkat_realtime_projection_freshness, meerkat_realtime_projection_frontier_ms, meerkat_realtime_reconnect_policy, meerkat_peer_ingress_owner_kind, meerkat_peer_ingress_comms_runtime_id, meerkat_peer_ingress_mob_id, meerkat_supervisor_binding_kind, meerkat_supervisor_bound_name, meerkat_supervisor_bound_peer_id, meerkat_supervisor_bound_address, meerkat_supervisor_bound_epoch, mob_externally_addressable_runtime_ids, mob_member_startup_binding_requested, mob_member_startup_runtime_ready, mob_member_startup_ready, mob_wiring_edges, mob_identity_to_runtime, mob_tasks, mob_in_progress_task_ids, mob_completed_task_ids, mob_member_realtime_bindings, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, meerkat_mcp_server_states, meerkat_pending_peer_requests, meerkat_inbound_peer_requests, meerkat_last_session_context_updated_at_ms, meerkat_reserved_interaction_streams, meerkat_attached_interaction_streams, meerkat_realtime_product_turn_phase, meerkat_realtime_projection_freshness, meerkat_realtime_projection_frontier_ms, meerkat_realtime_reconnect_policy, meerkat_peer_ingress_owner_kind, meerkat_peer_ingress_comms_runtime_id, meerkat_peer_ingress_mob_id, meerkat_supervisor_binding_kind, meerkat_supervisor_bound_name, meerkat_supervisor_bound_peer_id, meerkat_supervisor_bound_address, meerkat_supervisor_bound_epoch, mob_externally_addressable_runtime_ids, mob_wiring_edges, mob_identity_to_runtime, mob_tasks, mob_in_progress_task_ids, mob_completed_task_ids, mob_member_realtime_bindings, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes

@@ -1556,6 +1556,155 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
+    fn mob_observe_runtime_destroyed_clears_startup_and_kickoff_sets() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let runtime_id = "runtime.lead.1";
+        let member_id = "lead-destroy";
+
+        let spawned = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "Spawn".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_identity".into(),
+                            KernelValue::String("agent.lead".into()),
+                        ),
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String(runtime_id.into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
+                        ("generation".into(), KernelValue::U64(2)),
+                        ("external_addressable".into(), KernelValue::Bool(false)),
+                        (
+                            "bridge_session_id".into(),
+                            KernelValue::String("bridge.lead.1".into()),
+                        ),
+                        ("replacing".into(), KernelValue::None),
+                    ]),
+                },
+            )
+            .expect("spawn lead");
+        let runtime_ready = kernel
+            .transition_signal(
+                &spawned.next_state,
+                &KernelSignal {
+                    variant: "ObserveRuntimeReady".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String(runtime_id.into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
+                    ]),
+                },
+            )
+            .expect("observe runtime ready");
+        let startup_ready = kernel
+            .transition(
+                &runtime_ready.next_state,
+                &KernelInput {
+                    variant: "StartupMarkReady".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String(runtime_id.into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
+                    ]),
+                },
+            )
+            .expect("mark startup ready");
+        let kickoff_pending = kernel
+            .transition(
+                &startup_ready.next_state,
+                &KernelInput {
+                    variant: "KickoffMarkPending".into(),
+                    fields: BTreeMap::from([(
+                        "member_id".into(),
+                        KernelValue::String(member_id.into()),
+                    )]),
+                },
+            )
+            .expect("mark kickoff pending");
+        let kickoff_starting = kernel
+            .transition(
+                &kickoff_pending.next_state,
+                &KernelInput {
+                    variant: "KickoffMarkStarting".into(),
+                    fields: BTreeMap::from([(
+                        "member_id".into(),
+                        KernelValue::String(member_id.into()),
+                    )]),
+                },
+            )
+            .expect("mark kickoff starting");
+
+        assert_eq!(
+            kickoff_starting
+                .next_state
+                .fields
+                .get("member_startup_ready"),
+            Some(&KernelValue::Set(BTreeSet::from([KernelValue::String(
+                runtime_id.into(),
+            )]))),
+            "setup must prove the startup-ready set is populated before destroy"
+        );
+        assert_eq!(
+            kickoff_starting
+                .next_state
+                .fields
+                .get("member_kickoff_starting"),
+            Some(&KernelValue::Set(BTreeSet::from([KernelValue::String(
+                member_id.into(),
+            )]))),
+            "setup must prove the kickoff state is populated before destroy"
+        );
+
+        let destroyed = kernel
+            .transition_signal(
+                &kickoff_starting.next_state,
+                &KernelSignal {
+                    variant: "ObserveRuntimeDestroyed".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String(runtime_id.into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
+                    ]),
+                },
+            )
+            .expect("observe runtime destroyed");
+
+        for field in [
+            "member_startup_binding_requested",
+            "member_startup_runtime_ready",
+            "member_startup_ready",
+            "member_kickoff_pending",
+            "member_kickoff_starting",
+            "member_kickoff_started",
+            "member_kickoff_failed",
+            "member_kickoff_cancelled",
+        ] {
+            assert_eq!(
+                destroyed.next_state.fields.get(field),
+                Some(&KernelValue::Set(BTreeSet::new())),
+                "{field} should be cleared when the runtime is destroyed"
+            );
+        }
+        assert_eq!(
+            destroyed.next_state.fields.get("member_kickoff_error"),
+            Some(&KernelValue::Map(BTreeMap::new())),
+            "destroy should clear kickoff errors alongside the startup/kickoff sets"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
     fn kernel_value_map_roundtrips_through_json() {
         let value = KernelValue::Map(BTreeMap::from([
             (

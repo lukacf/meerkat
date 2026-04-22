@@ -23,6 +23,8 @@ pub mod compat_generated;
 pub mod generated;
 #[cfg(feature = "test-oracle")]
 mod legacy_generated;
+#[doc(hidden)]
+pub mod mob_runtime_generated;
 mod runtime;
 #[cfg(feature = "test-oracle")]
 mod test_oracle_compat_generated;

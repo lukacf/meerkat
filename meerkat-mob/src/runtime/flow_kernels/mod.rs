@@ -1,6 +1,1 @@
-#[allow(clippy::all)]
-pub mod flow_frame;
-#[allow(clippy::all)]
-pub mod flow_run;
-#[allow(clippy::all)]
-pub mod loop_iteration;
+pub use meerkat_machine_kernels::mob_runtime_generated::{flow_frame, flow_run, loop_iteration};

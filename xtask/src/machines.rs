@@ -345,14 +345,6 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         );
     }
 
-    for schema in runtime_local_machine_schemas() {
-        let generated_slug = generated_kernel_module_slug(&schema.machine);
-        write_generated(
-            &runtime_local_kernel_module_path(root, &generated_slug),
-            &render_machine_kernel_module(&schema),
-        )?;
-    }
-
     for composition in &selection.compositions {
         remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
         write_generated(
@@ -2146,23 +2138,12 @@ fn compat_test_oracle_root(root: &Path) -> PathBuf {
         .join("test_oracle_compat_generated")
 }
 
-fn runtime_local_kernel_root(root: &Path) -> PathBuf {
-    root.join("meerkat-mob")
-        .join("src")
-        .join("runtime")
-        .join("flow_kernels")
-}
-
 pub fn generated_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
     generated_kernel_root(root).join(format!("{slug}.rs"))
 }
 
 fn compat_test_oracle_module_path(root: &Path, slug: &str) -> PathBuf {
     compat_test_oracle_root(root).join(format!("{slug}.rs"))
-}
-
-fn runtime_local_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
-    runtime_local_kernel_root(root).join(format!("{slug}.rs"))
 }
 
 pub fn generated_kernel_mod_path(root: &Path) -> PathBuf {
@@ -2198,17 +2179,6 @@ fn compat_machine_schemas() -> Vec<MachineSchema> {
         flow_run_machine(),
         loop_iteration_machine(),
     ]
-}
-
-fn runtime_local_machine_schemas() -> Vec<MachineSchema> {
-    compat_machine_schemas()
-        .into_iter()
-        .map(|mut schema| {
-            let slug = generated_kernel_module_slug(&schema.machine);
-            schema.rust.module = format!("runtime::flow_kernels::{slug}");
-            schema
-        })
-        .collect()
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {

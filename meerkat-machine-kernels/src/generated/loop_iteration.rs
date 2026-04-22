@@ -784,7 +784,7 @@ pub struct EmptyContext;
 impl Context for EmptyContext {}
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
-    meerkat_machine_schema::loop_iteration_machine()
+    meerkat_machine_schema::compat::loop_iteration_machine()
 }
 
 pub fn initial_state() -> State {

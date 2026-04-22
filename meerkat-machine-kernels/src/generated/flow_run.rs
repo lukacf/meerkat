@@ -2804,7 +2804,7 @@ pub struct EmptyContext;
 impl Context for EmptyContext {}
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
-    meerkat_machine_schema::flow_run_machine()
+    meerkat_machine_schema::compat::flow_run_machine()
 }
 
 pub fn initial_state() -> State {

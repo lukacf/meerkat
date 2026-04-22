@@ -259,7 +259,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     );
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
-    if selection.include_local_flow_machines {
+    if selection.run_global_repo_checks {
         mismatches.extend(collect_machine_inventory_mismatches(&root)?);
         mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
         mismatches.extend(collect_authority_language_mismatches(&root)?);
@@ -517,7 +517,7 @@ fn machine_verify_at_root(
 fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     let mut mismatches = collect_drift_mismatches(root, selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(root, selection));
-    if selection.include_local_flow_machines {
+    if selection.run_global_repo_checks {
         mismatches.extend(collect_machine_inventory_mismatches(root)?);
         mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
         mismatches.extend(collect_authority_language_mismatches(root)?);
@@ -1347,10 +1347,14 @@ impl CanonicalRegistry {
             select_compositions(&composition_entries, &args.compositions)?
         };
 
+        let include_local_flow_machines =
+            args.all || machines.iter().any(|machine| machine.slug == "mob_machine");
+
         Ok(Selection {
             machines,
             compositions,
-            include_local_flow_machines: args.all,
+            include_local_flow_machines,
+            run_global_repo_checks: args.all,
         })
     }
 }
@@ -1543,6 +1547,7 @@ pub struct Selection {
     pub machines: Vec<MachineEntry>,
     pub compositions: Vec<CompositionEntry>,
     pub include_local_flow_machines: bool,
+    pub run_global_repo_checks: bool,
 }
 
 #[derive(Clone)]
@@ -1872,15 +1877,15 @@ fn generated_kernel_test_filters_for_machine(slug: &str) -> &'static [&'static s
 }
 
 fn run_generated_kernel_tests(root: &Path, machine_slug: Option<&str>) -> Result<()> {
-    let filters = machine_slug
-        .map(generated_kernel_test_filters_for_machine)
-        .unwrap_or(&[]);
-
-    if machine_slug.is_some() && filters.is_empty() {
-        return Ok(());
+    const SHARED_FILTERS: &[&str] =
+        &["runtime::tests::every_catalog_machine_builds_an_initial_state"];
+    let mut targeted_filters = Vec::new();
+    if let Some(slug) = machine_slug {
+        targeted_filters.extend_from_slice(SHARED_FILTERS);
+        targeted_filters.extend_from_slice(generated_kernel_test_filters_for_machine(slug));
     }
 
-    if filters.is_empty() {
+    if machine_slug.is_none() {
         let mut cmd = repo_cargo_command(root);
         cmd.arg("test")
             .arg("-p")
@@ -1897,7 +1902,7 @@ fn run_generated_kernel_tests(root: &Path, machine_slug: Option<&str>) -> Result
         return Ok(());
     }
 
-    for filter in filters {
+    for filter in targeted_filters {
         let mut cmd = repo_cargo_command(root);
         cmd.arg("test")
             .arg("-p")

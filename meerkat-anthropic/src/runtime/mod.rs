@@ -8,13 +8,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 #[allow(unused_imports)]
+use meerkat_core::AuthError;
+#[allow(unused_imports)]
 use meerkat_core::HttpAuthorizer;
-use meerkat_core::{
-    AuthError, AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider,
-};
+use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
+#[allow(unused_imports)]
+use meerkat_auth_core::resolver::refresh_allowed;
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, interactive_login_error, refresh_allowed, resolve_external_authorizer,
+    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
 use meerkat_llm_core::LlmClient;
@@ -153,25 +155,6 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 ));
             }
         };
-
-        // Plan §4b.12: metadata carried on the lease. Populated below
-        // when the ClaudeAiOauth / OauthToApiKey path finds an id_token
-        // with user:profile claims.
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_email: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_user_id: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_subscription_tier: Option<String> = None;
 
         let source_label = format!("anthropic:{}", binding.auth_profile.id);
         let lease: Arc<dyn AuthLease> = match auth_method {
@@ -330,6 +313,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
+                    let mut anthropic_email: Option<String> = None;
+                    let mut anthropic_user_id: Option<String> = None;
+                    let mut anthropic_subscription_tier: Option<String> = None;
                     // Plan §4b.12: lift id_token claims.
                     if let Some(id_token) = persisted.id_token.as_deref()
                         && let Ok(claims) =

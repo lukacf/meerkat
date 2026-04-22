@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{
-    AuthError, AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider,
-};
+#[allow(unused_imports)]
+use meerkat_core::AuthError;
+use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
+#[allow(unused_imports)]
+use meerkat_auth_core::resolver::refresh_allowed;
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, interactive_login_error, refresh_allowed, resolve_external_authorizer,
+    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
 use meerkat_llm_core::LlmClient;
@@ -111,26 +113,6 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             }
         };
 
-        // ChatGPT account metadata lifted from the persisted OAuth bundle
-        // (account_id → ChatGPT-Account-ID wire header; is_fedramp →
-        // X-OpenAI-Fedramp wire header).
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        #[allow(unused_assignments)]
-        let mut chatgpt_account_id: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut chatgpt_is_fedramp: Option<bool> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut chatgpt_plan_type: Option<String> = None;
-
         let source_label = format!("openai:{}", binding.auth_profile.id);
         let lease: Arc<dyn AuthLease> = match auth_method {
             OpenAiAuthMethod::ApiKey | OpenAiAuthMethod::StaticBearer => {
@@ -164,7 +146,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
 
-                    chatgpt_account_id = persisted.account_id.clone();
+                    let mut chatgpt_account_id = persisted.account_id.clone();
+                    let mut chatgpt_is_fedramp: Option<bool> = None;
+                    let mut chatgpt_plan_type: Option<String> = None;
                     if let Some(id_token) = persisted.id_token.as_deref()
                         && let Ok(claims) =
                             meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)

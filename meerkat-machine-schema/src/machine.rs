@@ -26,6 +26,52 @@ pub struct MachineSchema {
     pub ci_step_limit: Option<u32>,
 }
 
+pub fn authoritative_named_enum_variants(machine_name: &str) -> BTreeMap<String, BTreeSet<String>> {
+    match machine_name {
+        "FlowFrameMachine" => BTreeMap::from([
+            ("DependencyMode".into(), named_enum_variants(["All", "Any"])),
+            ("FlowNodeKind".into(), named_enum_variants(["Loop", "Step"])),
+            ("FrameScope".into(), named_enum_variants(["Body", "Root"])),
+            (
+                "NodeRunStatus".into(),
+                named_enum_variants([
+                    "Pending",
+                    "Ready",
+                    "Running",
+                    "Completed",
+                    "Failed",
+                    "Skipped",
+                    "Canceled",
+                ]),
+            ),
+        ]),
+        "FlowRunMachine" => BTreeMap::from([
+            (
+                "CollectionPolicyKind".into(),
+                named_enum_variants(["All", "Any", "Quorum"]),
+            ),
+            ("DependencyMode".into(), named_enum_variants(["All", "Any"])),
+            (
+                "FlowRunStatus".into(),
+                named_enum_variants(["Pending", "Running", "Completed", "Failed", "Canceled"]),
+            ),
+            (
+                "StepRunStatus".into(),
+                named_enum_variants(["Dispatched", "Completed", "Failed", "Skipped", "Canceled"]),
+            ),
+        ]),
+        "LoopIterationMachine" => BTreeMap::from([(
+            "LoopIterationStage".into(),
+            named_enum_variants(["AwaitingBodyFrame", "BodyFrameActive", "AwaitingUntil"]),
+        )]),
+        _ => BTreeMap::new(),
+    }
+}
+
+fn named_enum_variants(values: impl IntoIterator<Item = &'static str>) -> BTreeSet<String> {
+    values.into_iter().map(str::to_owned).collect()
+}
+
 impl MachineSchema {
     pub fn validate(&self) -> Result<(), MachineSchemaError> {
         let phase_names = self.state.phase.variants_by_name()?;
@@ -122,15 +168,33 @@ impl MachineSchema {
                 .map(|transition| transition.name.as_str()),
         )?;
         let named_variants = collect_named_variant_accessors(self);
-        validate_generated_accessor_names_allowing_keywords(
-            "named variant enum",
-            named_variants.keys().map(String::as_str),
-        )?;
-        for variants in named_variants.values() {
+        let authoritative_named_variants = authoritative_named_enum_variants(&self.machine);
+        if !authoritative_named_variants.is_empty() {
+            for (enum_name, variants) in &named_variants {
+                let Some(allowed) = authoritative_named_variants.get(enum_name) else {
+                    return Err(MachineSchemaError::UnknownNamedVariantEnum {
+                        enum_name: enum_name.clone(),
+                    });
+                };
+                for variant in variants {
+                    if !allowed.contains(variant) {
+                        return Err(MachineSchemaError::UnknownNamedVariantValue {
+                            enum_name: enum_name.clone(),
+                            variant: variant.clone(),
+                        });
+                    }
+                }
+            }
             validate_generated_accessor_names_allowing_keywords(
-                "named variant value",
-                variants.iter().map(String::as_str),
+                "named variant enum",
+                authoritative_named_variants.keys().map(String::as_str),
             )?;
+            for variants in authoritative_named_variants.values() {
+                validate_generated_accessor_names_allowing_keywords(
+                    "named variant value",
+                    variants.iter().map(String::as_str),
+                )?;
+            }
         }
 
         if !phase_names.contains(&self.state.init.phase) {
@@ -230,6 +294,32 @@ impl MachineSchema {
                 transition.on.bindings.iter().map(String::as_str),
                 "transition binding",
             )?;
+            let trigger_variant = match transition.on.kind {
+                TriggerKind::Input => match self.inputs.variant_named(&transition.on.variant) {
+                    Ok(variant) => variant,
+                    Err(_) => {
+                        return Err(MachineSchemaError::UnknownInputVariant {
+                            variant: transition.on.variant.clone(),
+                        });
+                    }
+                },
+                TriggerKind::Signal => match self.signals.variant_named(&transition.on.variant) {
+                    Ok(variant) => variant,
+                    Err(_) => {
+                        return Err(MachineSchemaError::UnknownSignalVariant {
+                            variant: transition.on.variant.clone(),
+                        });
+                    }
+                },
+            };
+            for binding in &bindings {
+                if trigger_variant.field_named(binding).is_err() {
+                    return Err(MachineSchemaError::UnknownVariantField {
+                        variant: transition.on.variant.clone(),
+                        field: (*binding).to_owned(),
+                    });
+                }
+            }
 
             for guard in &transition.guards {
                 guard.expr.validate(
@@ -1511,6 +1601,13 @@ pub enum MachineSchemaError {
         variant: String,
         field: String,
     },
+    UnknownNamedVariantEnum {
+        enum_name: String,
+    },
+    UnknownNamedVariantValue {
+        enum_name: String,
+        variant: String,
+    },
     UnknownEffectDispositionVariant {
         variant: String,
     },
@@ -1571,6 +1668,15 @@ impl fmt::Display for MachineSchemaError {
             Self::UnknownVariant { variant } => write!(f, "unknown variant `{variant}`"),
             Self::UnknownVariantField { variant, field } => {
                 write!(f, "unknown field `{field}` on variant `{variant}`")
+            }
+            Self::UnknownNamedVariantEnum { enum_name } => {
+                write!(f, "unknown named-variant enum `{enum_name}`")
+            }
+            Self::UnknownNamedVariantValue { enum_name, variant } => {
+                write!(
+                    f,
+                    "unknown named-variant value `{variant}` for enum `{enum_name}`"
+                )
             }
             Self::UnknownEffectDispositionVariant { variant } => {
                 write!(

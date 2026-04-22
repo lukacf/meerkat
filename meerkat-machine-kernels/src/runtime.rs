@@ -6,7 +6,7 @@ use std::{
 
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TriggerKind,
-    TypeRef, Update,
+    TypeRef, Update, authoritative_named_enum_variants,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -636,7 +636,17 @@ impl GeneratedMachineKernel {
             bindings.insert(param.name.clone(), value.clone());
         }
 
-        self.eval_helper(state, &bindings, helper, "<helper>")
+        let value = self.eval_helper(state, &bindings, helper, "<helper>")?;
+        if !value_matches_type(&self.schema, &value, &helper.returns) {
+            return Err(TransitionRefusal::EvaluationError {
+                machine: self.schema.machine.clone(),
+                transition: "<helper>".to_string(),
+                reason: format!(
+                    "helper `{helper_name}` returned a value that does not match its declared type"
+                ),
+            });
+        }
+        Ok(value)
     }
 
     fn render_effect(
@@ -646,12 +656,51 @@ impl GeneratedMachineKernel {
         effect: &EffectEmit,
         transition_name: &str,
     ) -> Result<KernelEffect, TransitionRefusal> {
+        let effect_variant = self
+            .schema
+            .effects
+            .variant_named(&effect.variant)
+            .map_err(|_| TransitionRefusal::EvaluationError {
+                machine: self.schema.machine.clone(),
+                transition: transition_name.to_string(),
+                reason: format!("unknown effect variant `{}`", effect.variant),
+            })?;
         let mut fields = BTreeMap::new();
         for (name, expr) in &effect.fields {
-            fields.insert(
-                name.clone().into(),
-                self.eval_expr(state, bindings, expr, transition_name)?,
-            );
+            let field_schema = effect_variant.field_named(name).map_err(|_| {
+                TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: transition_name.to_string(),
+                    reason: format!(
+                        "effect `{}` references unknown field `{name}`",
+                        effect.variant
+                    ),
+                }
+            })?;
+            let value = self.eval_expr(state, bindings, expr, transition_name)?;
+            if !value_matches_type(&self.schema, &value, &field_schema.ty) {
+                return Err(TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: transition_name.to_string(),
+                    reason: format!(
+                        "effect `{}` field `{name}` does not match its declared type",
+                        effect.variant
+                    ),
+                });
+            }
+            fields.insert(name.clone().into(), value);
+        }
+        for field in &effect_variant.fields {
+            if !fields.contains_key(field.name.as_str()) {
+                return Err(TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: transition_name.to_string(),
+                    reason: format!(
+                        "effect `{}` is missing declared field `{}`",
+                        effect.variant, field.name
+                    ),
+                });
+            }
         }
         Ok(KernelEffect {
             variant: effect.variant.clone().into(),
@@ -669,7 +718,7 @@ impl GeneratedMachineKernel {
         match update {
             Update::Assign { field, expr } => {
                 let value = self.eval_expr(state, bindings, expr, transition_name)?;
-                state.fields.insert(field.clone().into(), value);
+                self.assign_state_field(state, field, value, transition_name)?;
             }
             Update::Increment { field, amount } => {
                 let current = state
@@ -680,10 +729,12 @@ impl GeneratedMachineKernel {
                 let value = current
                     .as_u64()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
-                state.fields.insert(
-                    field.clone().into(),
+                self.assign_state_field(
+                    state,
+                    field,
                     KernelValue::U64(value.saturating_add(*amount)),
-                );
+                    transition_name,
+                )?;
             }
             Update::Decrement { field, amount } => {
                 let current = state
@@ -697,9 +748,7 @@ impl GeneratedMachineKernel {
                 let next = value.checked_sub(*amount).ok_or_else(|| {
                     self.eval_error(transition_name, format!("underflow decrementing `{field}`"))
                 })?;
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::U64(next));
+                self.assign_state_field(state, field, KernelValue::U64(next), transition_name)?;
             }
             Update::MapInsert { field, key, value } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
@@ -712,9 +761,7 @@ impl GeneratedMachineKernel {
                     .into_map()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.insert(key, value);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Map(map));
+                self.assign_state_field(state, field, KernelValue::Map(map), transition_name)?;
             }
             Update::MapRemove { field, key } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
@@ -726,9 +773,7 @@ impl GeneratedMachineKernel {
                     .into_map()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.remove(&key);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Map(map));
+                self.assign_state_field(state, field, KernelValue::Map(map), transition_name)?;
             }
             Update::MapIncrement { field, key, amount } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
@@ -746,9 +791,7 @@ impl GeneratedMachineKernel {
                     .as_u64()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 map.insert(key, KernelValue::U64(current.saturating_add(*amount)));
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Map(map));
+                self.assign_state_field(state, field, KernelValue::Map(map), transition_name)?;
             }
             Update::MapDecrement { field, key, amount } => {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
@@ -772,9 +815,7 @@ impl GeneratedMachineKernel {
                     )
                 })?;
                 map.insert(key, KernelValue::U64(next));
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Map(map));
+                self.assign_state_field(state, field, KernelValue::Map(map), transition_name)?;
             }
             Update::SetInsert { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
@@ -786,9 +827,7 @@ impl GeneratedMachineKernel {
                     .into_set()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 set.insert(value);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Set(set));
+                self.assign_state_field(state, field, KernelValue::Set(set), transition_name)?;
             }
             Update::SetRemove { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
@@ -800,9 +839,7 @@ impl GeneratedMachineKernel {
                     .into_set()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 set.remove(&value);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Set(set));
+                self.assign_state_field(state, field, KernelValue::Set(set), transition_name)?;
             }
             Update::SeqAppend { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
@@ -814,9 +851,7 @@ impl GeneratedMachineKernel {
                     .into_seq()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 seq.push(value);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Seq(seq));
+                self.assign_state_field(state, field, KernelValue::Seq(seq), transition_name)?;
             }
             Update::SeqPrepend { field, values } => {
                 let values = self.eval_expr(state, bindings, values, transition_name)?;
@@ -831,9 +866,7 @@ impl GeneratedMachineKernel {
                     .into_seq()
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 prefix.append(&mut seq);
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Seq(prefix));
+                self.assign_state_field(state, field, KernelValue::Seq(prefix), transition_name)?;
             }
             Update::SeqPopFront { field } => {
                 let mut seq = state
@@ -846,9 +879,7 @@ impl GeneratedMachineKernel {
                 if !seq.is_empty() {
                     seq.remove(0);
                 }
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Seq(seq));
+                self.assign_state_field(state, field, KernelValue::Seq(seq), transition_name)?;
             }
             Update::SeqRemoveValue { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
@@ -862,9 +893,7 @@ impl GeneratedMachineKernel {
                 if let Some(index) = seq.iter().position(|item| item == &value) {
                     seq.remove(index);
                 }
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Seq(seq));
+                self.assign_state_field(state, field, KernelValue::Seq(seq), transition_name)?;
             }
             Update::SeqRemoveAll { field, values } => {
                 let values = self.eval_expr(state, bindings, values, transition_name)?;
@@ -883,9 +912,7 @@ impl GeneratedMachineKernel {
                         seq.remove(index);
                     }
                 }
-                state
-                    .fields
-                    .insert(field.clone().into(), KernelValue::Seq(seq));
+                self.assign_state_field(state, field, KernelValue::Seq(seq), transition_name)?;
             }
             Update::Conditional {
                 condition,
@@ -923,6 +950,35 @@ impl GeneratedMachineKernel {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn assign_state_field(
+        &self,
+        state: &mut KernelState,
+        field: &str,
+        value: KernelValue,
+        transition_name: &str,
+    ) -> Result<(), TransitionRefusal> {
+        let field_schema = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == field)
+            .ok_or_else(|| TransitionRefusal::EvaluationError {
+                machine: self.schema.machine.clone(),
+                transition: transition_name.to_string(),
+                reason: format!("unknown state field `{field}`"),
+            })?;
+        if !value_matches_type(&self.schema, &value, &field_schema.ty) {
+            return Err(TransitionRefusal::EvaluationError {
+                machine: self.schema.machine.clone(),
+                transition: transition_name.to_string(),
+                reason: format!("state field `{field}` does not match its declared type"),
+            });
+        }
+        state.fields.insert(field.to_owned().into(), value);
         Ok(())
     }
 
@@ -1361,7 +1417,9 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
         (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Enum(name))
             if enum_name.as_str() == name =>
         {
-            let known_variants = schema_enum_variants(schema, name);
+            let known_variants = authoritative_named_enum_variants(&schema.machine)
+                .remove(name)
+                .unwrap_or_default();
             known_variants.is_empty() || known_variants.contains(variant.as_str())
         }
         (KernelValue::None, TypeRef::Option(_)) => true,
@@ -1382,161 +1440,6 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
             })
         }
         _ => false,
-    }
-}
-
-fn schema_enum_variants(schema: &MachineSchema, enum_name: &str) -> BTreeSet<String> {
-    let mut variants = BTreeSet::new();
-
-    for init in &schema.state.init.fields {
-        collect_named_variants_from_expr(&init.expr, enum_name, &mut variants);
-    }
-
-    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
-        collect_named_variants_from_expr(&helper.body, enum_name, &mut variants);
-    }
-
-    for invariant in &schema.invariants {
-        collect_named_variants_from_expr(&invariant.expr, enum_name, &mut variants);
-    }
-
-    for transition in &schema.transitions {
-        for guard in &transition.guards {
-            collect_named_variants_from_expr(&guard.expr, enum_name, &mut variants);
-        }
-        for update in &transition.updates {
-            collect_named_variants_from_update(update, enum_name, &mut variants);
-        }
-        for effect in &transition.emit {
-            for expr in effect.fields.values() {
-                collect_named_variants_from_expr(expr, enum_name, &mut variants);
-            }
-        }
-    }
-
-    variants
-}
-
-fn collect_named_variants_from_update(
-    update: &Update,
-    enum_name: &str,
-    variants: &mut BTreeSet<String>,
-) {
-    match update {
-        Update::Assign { expr, .. } => collect_named_variants_from_expr(expr, enum_name, variants),
-        Update::MapInsert { key, value, .. } => {
-            collect_named_variants_from_expr(key, enum_name, variants);
-            collect_named_variants_from_expr(value, enum_name, variants);
-        }
-        Update::MapIncrement { key, .. }
-        | Update::MapDecrement { key, .. }
-        | Update::MapRemove { key, .. } => {
-            collect_named_variants_from_expr(key, enum_name, variants);
-        }
-        Update::SetInsert { value, .. }
-        | Update::SetRemove { value, .. }
-        | Update::SeqAppend { value, .. }
-        | Update::SeqRemoveValue { value, .. } => {
-            collect_named_variants_from_expr(value, enum_name, variants);
-        }
-        Update::SeqPrepend { values, .. } | Update::SeqRemoveAll { values, .. } => {
-            collect_named_variants_from_expr(values, enum_name, variants);
-        }
-        Update::Conditional {
-            condition,
-            then_updates,
-            else_updates,
-        } => {
-            collect_named_variants_from_expr(condition, enum_name, variants);
-            for update in then_updates {
-                collect_named_variants_from_update(update, enum_name, variants);
-            }
-            for update in else_updates {
-                collect_named_variants_from_update(update, enum_name, variants);
-            }
-        }
-        Update::ForEach { over, updates, .. } => {
-            collect_named_variants_from_expr(over, enum_name, variants);
-            for update in updates {
-                collect_named_variants_from_update(update, enum_name, variants);
-            }
-        }
-        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
-    }
-}
-
-fn collect_named_variants_from_expr(expr: &Expr, enum_name: &str, variants: &mut BTreeSet<String>) {
-    match expr {
-        Expr::NamedVariant {
-            enum_name: candidate,
-            variant,
-        } if candidate == enum_name => {
-            variants.insert(variant.clone());
-        }
-        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
-            for item in items {
-                collect_named_variants_from_expr(item, enum_name, variants);
-            }
-        }
-        Expr::IfElse {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_named_variants_from_expr(condition, enum_name, variants);
-            collect_named_variants_from_expr(then_expr, enum_name, variants);
-            collect_named_variants_from_expr(else_expr, enum_name, variants);
-        }
-        Expr::Not(inner)
-        | Expr::Len(inner)
-        | Expr::Head(inner)
-        | Expr::SeqElements(inner)
-        | Expr::MapKeys(inner)
-        | Expr::Some(inner) => collect_named_variants_from_expr(inner, enum_name, variants),
-        Expr::Eq(left, right)
-        | Expr::Neq(left, right)
-        | Expr::Add(left, right)
-        | Expr::Sub(left, right)
-        | Expr::Gt(left, right)
-        | Expr::Gte(left, right)
-        | Expr::Lt(left, right)
-        | Expr::Lte(left, right) => {
-            collect_named_variants_from_expr(left, enum_name, variants);
-            collect_named_variants_from_expr(right, enum_name, variants);
-        }
-        Expr::Contains { collection, value }
-        | Expr::SeqStartsWith {
-            seq: collection,
-            prefix: value,
-        } => {
-            collect_named_variants_from_expr(collection, enum_name, variants);
-            collect_named_variants_from_expr(value, enum_name, variants);
-        }
-        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
-            collect_named_variants_from_expr(map, enum_name, variants);
-            collect_named_variants_from_expr(key, enum_name, variants);
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_named_variants_from_expr(arg, enum_name, variants);
-            }
-        }
-        Expr::Quantified { over, body, .. } => {
-            collect_named_variants_from_expr(over, enum_name, variants);
-            collect_named_variants_from_expr(body, enum_name, variants);
-        }
-        Expr::NamedVariant { .. }
-        | Expr::Bool(_)
-        | Expr::U64(_)
-        | Expr::String(_)
-        | Expr::EmptySet
-        | Expr::EmptyMap
-        | Expr::CurrentPhase
-        | Expr::Phase(_)
-        | Expr::Field(_)
-        | Expr::Binding(_)
-        | Expr::Variant(_)
-        | Expr::None => {}
     }
 }
 

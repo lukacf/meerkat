@@ -194,7 +194,7 @@ fn non_legacy_composition_drivers_fail_closed() {
 #[test]
 fn kernel_module_renders_named_variant_accessors_with_keyword_escaping() {
     let schema = MachineSchema {
-        machine: "KeywordEnumMachine".into(),
+        machine: "FlowFrameMachine".into(),
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-test".into(),

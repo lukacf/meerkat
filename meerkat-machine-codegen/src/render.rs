@@ -32,6 +32,9 @@ use meerkat_machine_schema::{
 };
 
 #[cfg(not(test))]
+use meerkat_machine_schema::authoritative_named_enum_variants;
+
+#[cfg(not(test))]
 pub const GENERATED_COVERAGE_START: &str = "<!-- GENERATED_COVERAGE_START -->";
 #[cfg(not(test))]
 pub const GENERATED_COVERAGE_END: &str = "<!-- GENERATED_COVERAGE_END -->";
@@ -315,7 +318,7 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let module_name = machine_slug(&schema.machine);
     let catalog_fn = format!("catalog::dsl::dsl_{module_name}_machine");
-    let named_variants = collect_machine_named_variants(schema);
+    let named_variants = authoritative_named_enum_variants(&schema.machine);
 
     pushln!(
         &mut out,
@@ -667,161 +670,6 @@ fn render_kernel_named_variant_modules(
     }
     pushln!(out, "}}");
     pushln!(out);
-}
-
-#[cfg(not(test))]
-fn collect_machine_named_variants(schema: &MachineSchema) -> BTreeMap<String, BTreeSet<String>> {
-    let mut variants = BTreeMap::new();
-
-    for init in &schema.state.init.fields {
-        collect_named_variants_from_expr(&init.expr, &mut variants);
-    }
-
-    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
-        collect_named_variants_from_expr(&helper.body, &mut variants);
-    }
-
-    for invariant in &schema.invariants {
-        collect_named_variants_from_expr(&invariant.expr, &mut variants);
-    }
-
-    for transition in &schema.transitions {
-        for guard in &transition.guards {
-            collect_named_variants_from_expr(&guard.expr, &mut variants);
-        }
-        for update in &transition.updates {
-            collect_named_variants_from_update(update, &mut variants);
-        }
-        for effect in &transition.emit {
-            for expr in effect.fields.values() {
-                collect_named_variants_from_expr(expr, &mut variants);
-            }
-        }
-    }
-
-    variants
-}
-
-#[cfg(not(test))]
-fn collect_named_variants_from_update(
-    update: &Update,
-    variants: &mut BTreeMap<String, BTreeSet<String>>,
-) {
-    match update {
-        Update::Assign { expr, .. } => collect_named_variants_from_expr(expr, variants),
-        Update::MapInsert { key, value, .. } => {
-            collect_named_variants_from_expr(key, variants);
-            collect_named_variants_from_expr(value, variants);
-        }
-        Update::MapIncrement { key, .. }
-        | Update::MapDecrement { key, .. }
-        | Update::MapRemove { key, .. } => collect_named_variants_from_expr(key, variants),
-        Update::SetInsert { value, .. }
-        | Update::SetRemove { value, .. }
-        | Update::SeqAppend { value, .. }
-        | Update::SeqRemoveValue { value, .. } => collect_named_variants_from_expr(value, variants),
-        Update::SeqPrepend { values, .. } | Update::SeqRemoveAll { values, .. } => {
-            collect_named_variants_from_expr(values, variants);
-        }
-        Update::Conditional {
-            condition,
-            then_updates,
-            else_updates,
-        } => {
-            collect_named_variants_from_expr(condition, variants);
-            for update in then_updates {
-                collect_named_variants_from_update(update, variants);
-            }
-            for update in else_updates {
-                collect_named_variants_from_update(update, variants);
-            }
-        }
-        Update::ForEach { over, updates, .. } => {
-            collect_named_variants_from_expr(over, variants);
-            for update in updates {
-                collect_named_variants_from_update(update, variants);
-            }
-        }
-        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
-    }
-}
-
-#[cfg(not(test))]
-fn collect_named_variants_from_expr(
-    expr: &Expr,
-    variants: &mut BTreeMap<String, BTreeSet<String>>,
-) {
-    match expr {
-        Expr::NamedVariant { enum_name, variant } => {
-            variants
-                .entry(enum_name.clone())
-                .or_default()
-                .insert(variant.clone());
-        }
-        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
-            for item in items {
-                collect_named_variants_from_expr(item, variants);
-            }
-        }
-        Expr::IfElse {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_named_variants_from_expr(condition, variants);
-            collect_named_variants_from_expr(then_expr, variants);
-            collect_named_variants_from_expr(else_expr, variants);
-        }
-        Expr::Not(inner)
-        | Expr::Len(inner)
-        | Expr::Head(inner)
-        | Expr::SeqElements(inner)
-        | Expr::MapKeys(inner)
-        | Expr::Some(inner) => collect_named_variants_from_expr(inner, variants),
-        Expr::Eq(left, right)
-        | Expr::Neq(left, right)
-        | Expr::Add(left, right)
-        | Expr::Sub(left, right)
-        | Expr::Gt(left, right)
-        | Expr::Gte(left, right)
-        | Expr::Lt(left, right)
-        | Expr::Lte(left, right) => {
-            collect_named_variants_from_expr(left, variants);
-            collect_named_variants_from_expr(right, variants);
-        }
-        Expr::Contains { collection, value }
-        | Expr::SeqStartsWith {
-            seq: collection,
-            prefix: value,
-        } => {
-            collect_named_variants_from_expr(collection, variants);
-            collect_named_variants_from_expr(value, variants);
-        }
-        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
-            collect_named_variants_from_expr(map, variants);
-            collect_named_variants_from_expr(key, variants);
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_named_variants_from_expr(arg, variants);
-            }
-        }
-        Expr::Quantified { over, body, .. } => {
-            collect_named_variants_from_expr(over, variants);
-            collect_named_variants_from_expr(body, variants);
-        }
-        Expr::Bool(_)
-        | Expr::U64(_)
-        | Expr::String(_)
-        | Expr::EmptySet
-        | Expr::EmptyMap
-        | Expr::CurrentPhase
-        | Expr::Phase(_)
-        | Expr::Field(_)
-        | Expr::Binding(_)
-        | Expr::Variant(_)
-        | Expr::None => {}
-    }
 }
 
 fn to_snake_case(value: &str) -> String {

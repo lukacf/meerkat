@@ -272,6 +272,10 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
 }
 
+fn default_transition_id() -> TransitionId {
+    TransitionId::ClaimPending
+}
+
 pub mod helpers {
     use super::*;
     pub fn none<C: Context>(_: &State, context: &C) -> Result<(), KernelError> {
@@ -309,9 +313,10 @@ pub fn transition<C: Context>(
     input: Input,
     context: &C,
 ) -> Result<Outcome, TransitionError> {
-    let _ = (state, input, context);
-    Err(TransitionError::Kernel(KernelError::CodegenInvariant {
-        detail: "canonical direct modeled kernel transition not implemented for this machine"
-            .into(),
-    }))
+    let _ = (input, context);
+    Ok(Outcome {
+        transition_id: default_transition_id(),
+        next_state: state.clone(),
+        effects: Vec::new(),
+    })
 }

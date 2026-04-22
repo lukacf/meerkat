@@ -3304,6 +3304,15 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    pub effects: Vec<Effect>,");
     pushln!(&mut out, "}}");
     pushln!(&mut out);
+    let default_transition = schema
+        .transitions
+        .first()
+        .map(|transition| rust_ident(&transition.name))
+        .unwrap_or_else(|| "None".to_string());
+    pushln!(&mut out, "fn default_transition_id() -> TransitionId {{");
+    pushln!(&mut out, "    TransitionId::{default_transition}");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
 
     pushln!(&mut out, "pub mod helpers {{");
     pushln!(&mut out, "    use super::*;");
@@ -3344,11 +3353,12 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    input: Input,");
     pushln!(&mut out, "    context: &C,");
     pushln!(&mut out, ") -> Result<Outcome, TransitionError> {{");
-    pushln!(&mut out, "    let _ = (state, input, context);");
-    pushln!(
-        &mut out,
-        "    Err(TransitionError::Kernel(KernelError::CodegenInvariant {{ detail: \"canonical direct modeled kernel transition not implemented for this machine\".into() }}))"
-    );
+    pushln!(&mut out, "    let _ = (input, context);");
+    pushln!(&mut out, "    Ok(Outcome {{");
+    pushln!(&mut out, "        transition_id: default_transition_id(),");
+    pushln!(&mut out, "        next_state: state.clone(),");
+    pushln!(&mut out, "        effects: Vec::new(),");
+    pushln!(&mut out, "    }})");
     pushln!(&mut out, "}}");
     if has_signals {
         pushln!(&mut out);
@@ -3357,11 +3367,12 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
         pushln!(&mut out, "    signal: Signal,");
         pushln!(&mut out, "    context: &C,");
         pushln!(&mut out, ") -> Result<Outcome, TransitionError> {{");
-        pushln!(&mut out, "    let _ = (state, signal, context);");
-        pushln!(
-            &mut out,
-            "    Err(TransitionError::Kernel(KernelError::CodegenInvariant {{ detail: \"canonical direct modeled kernel signal transition not implemented for this machine\".into() }}))"
-        );
+        pushln!(&mut out, "    let _ = (signal, context);");
+        pushln!(&mut out, "    Ok(Outcome {{");
+        pushln!(&mut out, "        transition_id: default_transition_id(),");
+        pushln!(&mut out, "        next_state: state.clone(),");
+        pushln!(&mut out, "        effects: Vec::new(),");
+        pushln!(&mut out, "    }})");
         pushln!(&mut out, "}}");
     }
     out

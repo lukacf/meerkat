@@ -243,6 +243,15 @@ impl FlowFrameMutator for FlowFrameKernel {
         run_id: &RunId,
         frame_id: &FrameId,
     ) -> Result<Option<Vec<flow_frame::Effect>>, MobError> {
+        if self
+            .require_frame(run_id, frame_id)
+            .await?
+            .kernel_state
+            .ready_queue
+            .is_empty()
+        {
+            return Ok(None);
+        }
         let input = flow_frame::Input::AdmitNextReadyNode(flow_frame::inputs::AdmitNextReadyNode);
         // Map Ok(effects) → Ok(Some(effects)); errors propagate as-is.
         self.transition_frame(run_id, frame_id, input, 5)

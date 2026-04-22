@@ -22,6 +22,7 @@ use crate::run::{
 use crate::runtime::flow_kernels::flow_run;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
@@ -75,6 +76,58 @@ fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, MobStoreError> {
 
 fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobStoreError> {
     serde_json::from_slice(bytes).map_err(|e| MobStoreError::Serialization(e.to_string()))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LegacyStoredRunEnvelope {
+    run_id: RunId,
+    mob_id: MobId,
+    flow_id: FlowId,
+    status: MobRunStatus,
+    #[serde(default)]
+    activation_params: serde_json::Value,
+    created_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    step_ledger: Vec<StepLedgerEntry>,
+    #[serde(default)]
+    failure_ledger: Vec<FailureLedgerEntry>,
+    #[serde(default)]
+    loop_iteration_ledger: Vec<LoopIterationLedgerEntry>,
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    root_step_outputs: IndexMap<StepId, serde_json::Value>,
+    #[serde(default)]
+    loop_iteration_outputs:
+        std::collections::BTreeMap<LoopId, Vec<IndexMap<StepId, serde_json::Value>>>,
+}
+
+fn decode_run_json(bytes: &[u8]) -> Result<MobRun, MobStoreError> {
+    match decode_json::<MobRun>(bytes) {
+        Ok(run) => Ok(run),
+        Err(typed_error) => match decode_json::<LegacyStoredRunEnvelope>(bytes) {
+            Ok(legacy) if legacy.schema_version < 5 => Ok(MobRun {
+                run_id: legacy.run_id,
+                mob_id: legacy.mob_id,
+                flow_id: legacy.flow_id,
+                status: legacy.status,
+                flow_state: flow_run::initial_state(),
+                activation_params: legacy.activation_params,
+                created_at: legacy.created_at,
+                completed_at: legacy.completed_at,
+                step_ledger: legacy.step_ledger,
+                failure_ledger: legacy.failure_ledger,
+                frames: std::collections::BTreeMap::new(),
+                loops: std::collections::BTreeMap::new(),
+                loop_iteration_ledger: legacy.loop_iteration_ledger,
+                schema_version: legacy.schema_version,
+                root_step_outputs: legacy.root_step_outputs,
+                loop_iteration_outputs: legacy.loop_iteration_outputs,
+            }),
+            _ => Err(typed_error),
+        },
+    }
 }
 
 fn cursor_to_i64(value: u64) -> Result<i64, MobStoreError> {
@@ -732,7 +785,7 @@ impl MobRunStore for SqliteMobRunStore {
                 .optional()
                 .map_err(se)?;
             match bytes {
-                Some(b) => Ok(Some(decode_json(&b)?)),
+                Some(b) => Ok(Some(decode_run_json(&b)?)),
                 None => Ok(None),
             }
         })
@@ -756,7 +809,7 @@ impl MobRunStore for SqliteMobRunStore {
             let mut runs = Vec::new();
             for row in rows {
                 let bytes = row.map_err(se)?;
-                let run: MobRun = decode_json(&bytes)?;
+                let run = decode_run_json(&bytes)?;
                 if run.mob_id == mob_id && flow_id.as_ref().is_none_or(|fid| run.flow_id == *fid) {
                     runs.push(run);
                 }
@@ -1925,6 +1978,7 @@ mod tests {
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
+    use crate::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
     use crate::store::ExternalBindingOverlayStatus;
     use futures::future::join_all;
     use indexmap::IndexMap;
@@ -2004,6 +2058,36 @@ mod tests {
         }
     }
 
+    fn legacy_run_json(
+        run_id: &RunId,
+        mob_id: &MobId,
+        flow_id: &FlowId,
+        status: MobRunStatus,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "run_id": run_id,
+            "mob_id": mob_id,
+            "flow_id": flow_id,
+            "status": status,
+            "flow_state": {
+                "phase": "Running",
+                "fields": {}
+            },
+            "activation_params": {},
+            "created_at": Utc::now(),
+            "completed_at": null,
+            "step_ledger": [],
+            "failure_ledger": [],
+            "frames": {},
+            "loops": {},
+            "loop_iteration_ledger": [],
+            "schema_version": 4,
+            "root_step_outputs": {},
+            "loop_iteration_outputs": {}
+        }))
+        .expect("serialize legacy run json")
+    }
+
     #[tokio::test]
     async fn test_sqlite_event_store_append_poll_replay_prune() {
         let (_dir, path) = temp_db_path();
@@ -2038,6 +2122,84 @@ mod tests {
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_get_run_routes_legacy_rows_into_hard_cut_recovery_gate() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let run_store = stores.run_store();
+        let run_id = RunId::new();
+        let mob_id = MobId::from("legacy-mob");
+        let flow_id = FlowId::from("legacy-flow");
+
+        {
+            let conn = open_connection(&path).expect("open sqlite");
+            conn.execute(
+                "INSERT INTO mob_runs (run_id, run_json) VALUES (?1, ?2)",
+                params![
+                    run_id.to_string(),
+                    legacy_run_json(&run_id, &mob_id, &flow_id, MobRunStatus::Running)
+                ],
+            )
+            .expect("insert legacy row");
+        }
+
+        let mut run = run_store
+            .get_run(&run_id)
+            .await
+            .expect("get_run")
+            .expect("legacy row present");
+
+        assert_eq!(run.schema_version, 4);
+        assert_eq!(run.status, MobRunStatus::Running);
+        assert!(matches!(
+            reconcile_run_state(&mut run),
+            Err(RestoreIncompatible::PreRow22Schema { schema_version: 4 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_list_runs_ignores_unrelated_legacy_rows() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let run_store = stores.run_store();
+
+        let healthy = sample_run(MobRunStatus::Pending);
+        let target_mob = healthy.mob_id.clone();
+        let target_run_id = healthy.run_id.clone();
+        run_store
+            .create_run(healthy)
+            .await
+            .expect("create healthy run");
+
+        let stale_run_id = RunId::new();
+        let stale_mob_id = MobId::from("other-mob");
+        let stale_flow_id = FlowId::from("other-flow");
+        {
+            let conn = open_connection(&path).expect("open sqlite");
+            conn.execute(
+                "INSERT INTO mob_runs (run_id, run_json) VALUES (?1, ?2)",
+                params![
+                    stale_run_id.to_string(),
+                    legacy_run_json(
+                        &stale_run_id,
+                        &stale_mob_id,
+                        &stale_flow_id,
+                        MobRunStatus::Running,
+                    )
+                ],
+            )
+            .expect("insert stale legacy row");
+        }
+
+        let runs = run_store
+            .list_runs(&target_mob, None)
+            .await
+            .expect("list_runs");
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, target_run_id);
     }
 
     #[tokio::test]

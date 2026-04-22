@@ -1705,6 +1705,62 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
+    fn mob_kickoff_clear_preserves_stopped_phase() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let stopped = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "Stop".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("stop");
+        assert_eq!(stopped.next_state.phase, "Stopped");
+
+        let pending = kernel
+            .transition(
+                &stopped.next_state,
+                &KernelInput {
+                    variant: "KickoffMarkPending".into(),
+                    fields: BTreeMap::from([(
+                        "member_id".into(),
+                        KernelValue::String("lead-stopped".into()),
+                    )]),
+                },
+            )
+            .expect("mark kickoff pending while stopped");
+        assert_eq!(
+            pending.next_state.phase, "Stopped",
+            "kickoff bookkeeping must not revive a stopped mob"
+        );
+
+        let cleared = kernel
+            .transition(
+                &pending.next_state,
+                &KernelInput {
+                    variant: "KickoffClear".into(),
+                    fields: BTreeMap::from([(
+                        "member_id".into(),
+                        KernelValue::String("lead-stopped".into()),
+                    )]),
+                },
+            )
+            .expect("clear kickoff while stopped");
+        assert_eq!(
+            cleared.next_state.phase, "Stopped",
+            "kickoff clear must preserve the stopped lifecycle phase"
+        );
+        assert_eq!(
+            cleared.next_state.fields.get("member_kickoff_pending"),
+            Some(&KernelValue::Set(BTreeSet::new())),
+            "kickoff clear should still remove the per-member pending marker"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
     fn kernel_value_map_roundtrips_through_json() {
         let value = KernelValue::Map(BTreeMap::from([
             (

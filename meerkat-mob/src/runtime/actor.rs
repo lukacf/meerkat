@@ -1083,32 +1083,30 @@ impl MobActor {
     }
 
     async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        self.with_dsl_authority_mut(|authority| {
-            authority
-                .state
-                .member_kickoff_pending
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_starting
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_started
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_failed
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_cancelled
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_error
-                .remove(&agent_identity.to_string());
-        });
+        match self
+            .apply_kickoff_input(
+                agent_identity,
+                mob_dsl::MobMachineInput::KickoffClear {
+                    member_id: agent_identity.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    "kickoff clear was rejected by the DSL authority"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    %error,
+                    "failed applying kickoff clear through the DSL authority"
+                );
+            }
+        }
         self.roster.write().await.set_kickoff(agent_identity, None);
     }
 
@@ -1223,6 +1221,12 @@ impl MobActor {
             Ok(transition) => transition,
             Err(_) => return Ok(false),
         };
+        if transition.from_phase != transition.to_phase {
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
+            let _ = self.phase_watch_tx.send(self.state());
+        }
 
         for effect in transition.effects {
             match effect {
@@ -1860,10 +1864,16 @@ impl MobActor {
                 }
             });
 
-            self.autonomous_initial_turns
-                .lock()
-                .await
-                .insert(agent_identity.clone(), InitialTurnHandle { handle });
+            let mut kickoff_handles = self.autonomous_initial_turns.lock().await;
+            if let Some(previous) =
+                kickoff_handles.insert(agent_identity.clone(), InitialTurnHandle { handle })
+            {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    "aborting superseded autonomous kickoff waiter"
+                );
+                previous.abort();
+            }
         }
 
         tracing::debug!(agent_identity = %agent_identity, "autonomous member started");

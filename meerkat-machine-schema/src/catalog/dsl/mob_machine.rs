@@ -327,9 +327,10 @@ machine! {
             to Running
         }
 
-        transition StartupMarkReady {
-            per_phase [Running, Stopped, Completed]
+        // Startup/kickoff bookkeeping must preserve the enclosing mob phase.
+        transition StartupMarkReadyRunning {
             on input StartupMarkReady { agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.member_startup_binding_requested.remove(agent_runtime_id);
@@ -339,9 +340,33 @@ machine! {
             to Running
         }
 
-        transition KickoffMarkPending {
-            per_phase [Running, Stopped, Completed]
+        transition StartupMarkReadyStopped {
+            on input StartupMarkReady { agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            update {
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.insert(agent_runtime_id);
+            }
+            to Stopped
+        }
+
+        transition StartupMarkReadyCompleted {
+            on input StartupMarkReady { agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            update {
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.insert(agent_runtime_id);
+            }
+            to Completed
+        }
+
+        transition KickoffMarkPendingRunning {
             on input KickoffMarkPending { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_not_started" {
                 !self.member_kickoff_pending.contains(member_id)
                 && !self.member_kickoff_starting.contains(member_id)
@@ -362,9 +387,55 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Pending }
         }
 
-        transition KickoffMarkStarting {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffMarkPendingStopped {
+            on input KickoffMarkPending { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_not_started" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_started.contains(member_id)
+                && !self.member_kickoff_failed.contains(member_id)
+                && !self.member_kickoff_cancelled.contains(member_id)
+            }
+            update {
+                self.member_kickoff_pending.insert(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Pending }
+        }
+
+        transition KickoffMarkPendingCompleted {
+            on input KickoffMarkPending { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_not_started" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_started.contains(member_id)
+                && !self.member_kickoff_failed.contains(member_id)
+                && !self.member_kickoff_cancelled.contains(member_id)
+            }
+            update {
+                self.member_kickoff_pending.insert(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Pending }
+        }
+
+        transition KickoffMarkStartingRunning {
             on input KickoffMarkStarting { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_pending" { self.member_kickoff_pending.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
@@ -379,9 +450,43 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Starting }
         }
 
-        transition KickoffResolveStarted {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffMarkStartingStopped {
+            on input KickoffMarkStarting { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_pending" { self.member_kickoff_pending.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.insert(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Starting }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Starting }
+        }
+
+        transition KickoffMarkStartingCompleted {
+            on input KickoffMarkStarting { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_pending" { self.member_kickoff_pending.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.insert(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Starting }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Starting }
+        }
+
+        transition KickoffResolveStartedRunning {
             on input KickoffResolveStarted { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
@@ -396,9 +501,43 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Started }
         }
 
-        transition KickoffResolveFailedFromStarting {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffResolveStartedStopped {
+            on input KickoffResolveStarted { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.insert(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Started }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Started }
+        }
+
+        transition KickoffResolveStartedCompleted {
+            on input KickoffResolveStarted { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.insert(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Started }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Started }
+        }
+
+        transition KickoffResolveFailedFromStartingRunning {
             on input KickoffResolveFailed { member_id, error }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_active_failed" {
                 (self.member_kickoff_pending.contains(member_id)
                     || self.member_kickoff_starting.contains(member_id))
@@ -416,9 +555,49 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Failed }
         }
 
-        transition KickoffResolveCancelled {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffResolveFailedFromStartingStopped {
+            on input KickoffResolveFailed { member_id, error }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_active_failed" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.insert(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.insert(member_id, error);
+            }
+            to Stopped
+            emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: error }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Failed }
+        }
+
+        transition KickoffResolveFailedFromStartingCompleted {
+            on input KickoffResolveFailed { member_id, error }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_active_failed" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.insert(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.insert(member_id, error);
+            }
+            to Completed
+            emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: error }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Failed }
+        }
+
+        transition KickoffResolveCancelledRunning {
             on input KickoffResolveCancelled { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_cancelled" { !self.member_kickoff_started.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
@@ -433,9 +612,43 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
         }
 
-        transition KickoffCancelRequested {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffResolveCancelledStopped {
+            on input KickoffResolveCancelled { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_cancelled" { !self.member_kickoff_started.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
+        }
+
+        transition KickoffResolveCancelledCompleted {
+            on input KickoffResolveCancelled { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_cancelled" { !self.member_kickoff_started.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
+        }
+
+        transition KickoffCancelRequestedRunning {
             on input KickoffCancelRequested { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "kickoff_cancellable" {
                 (self.member_kickoff_pending.contains(member_id)
                     || self.member_kickoff_starting.contains(member_id))
@@ -453,9 +666,49 @@ machine! {
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
         }
 
-        transition KickoffClear {
-            per_phase [Running, Stopped, Completed]
+        transition KickoffCancelRequestedStopped {
+            on input KickoffCancelRequested { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "kickoff_cancellable" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
+        }
+
+        transition KickoffCancelRequestedCompleted {
+            on input KickoffCancelRequested { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "kickoff_cancellable" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
+        }
+
+        transition KickoffClearRunning {
             on input KickoffClear { member_id }
+            guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
@@ -465,6 +718,34 @@ machine! {
                 self.member_kickoff_error.remove(member_id);
             }
             to Running
+        }
+
+        transition KickoffClearStopped {
+            on input KickoffClear { member_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Stopped
+        }
+
+        transition KickoffClearCompleted {
+            on input KickoffClear { member_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Completed
         }
 
         // SubmitWork formally requests runtime ingress on the bound member runtime.

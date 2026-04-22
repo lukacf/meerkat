@@ -1269,6 +1269,7 @@ fn rust_keyword(value: &str) -> bool {
             | "box"
             | "do"
             | "final"
+            | "gen"
             | "macro"
             | "override"
             | "priv"

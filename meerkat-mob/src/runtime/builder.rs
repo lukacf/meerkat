@@ -121,6 +121,12 @@ fn seed_mob_authority_sync_from_roster(
             .state
             .identity_to_runtime
             .insert(dsl_identity, dsl_runtime_id.clone());
+        if let Some(session_id) = entry.member_ref.bridge_session_id().cloned() {
+            authority.state.member_realtime_bindings.insert(
+                mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                mob_dsl::SessionId::from_domain(&session_id),
+            );
+        }
         authority.state.member_state_markers.insert(
             dsl_runtime_id.clone(),
             match entry.state {

@@ -1093,14 +1093,36 @@ impl MobActor {
     }
 
     async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        let _ = self
-            .apply_kickoff_input(
-                agent_identity,
-                mob_dsl::MobMachineInput::KickoffClear {
-                    member_id: agent_identity.to_string(),
-                },
-            )
-            .await;
+        self.with_dsl_authority_mut(|authority| {
+            authority
+                .state
+                .member_kickoff_pending
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_starting
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_callback_pending
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_started
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_failed
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_cancelled
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_error
+                .remove(&agent_identity.to_string());
+        });
         self.roster.write().await.set_kickoff(agent_identity, None);
     }
 

@@ -75,8 +75,13 @@ pub(super) fn dsl_realtime_binding_session_id(
     use crate::machines::mob_machine as mob_dsl;
 
     match member_ref.bridge_session_id() {
-        Some(session_id) => mob_dsl::SessionId::from_domain(session_id),
+        Some(session_id)
+            if *session_id != meerkat_core::types::SessionId::from_uuid(uuid::Uuid::nil()) =>
+        {
+            mob_dsl::SessionId::from_domain(session_id)
+        }
         None => mob_dsl::SessionId::default(),
+        Some(_) => mob_dsl::SessionId::default(),
     }
 }
 

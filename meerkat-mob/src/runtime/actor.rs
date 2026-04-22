@@ -228,7 +228,7 @@ struct RespawnSnapshot {
     /// Preserves real external identity across respawns.
     binding: crate::RuntimeBinding,
     /// Canonical realtime binding preserved through the retire-half of respawn.
-    preserved_realtime_binding: Option<SessionId>,
+    preserved_realtime_binding: Option<mob_dsl::SessionId>,
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
@@ -1134,12 +1134,12 @@ impl MobActor {
     fn release_realtime_binding_if_present(
         &self,
         agent_identity: &AgentIdentity,
-        session_id: &SessionId,
+        session_id: &mob_dsl::SessionId,
     ) -> Result<bool, MobError> {
         let Some(effects) = self.try_apply_dsl_input_with_effects(
             mob_dsl::MobMachineInput::ReleaseRealtimeBinding {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
-                session_id: mob_dsl::SessionId(session_id.to_string()),
+                session_id: session_id.clone(),
             },
         )?
         else {
@@ -1152,7 +1152,7 @@ impl MobActor {
     async fn finalize_respawn_failure(
         &self,
         agent_identity: &MeerkatId,
-        preserved_realtime_binding: Option<&SessionId>,
+        preserved_realtime_binding: Option<&mob_dsl::SessionId>,
         error: MobRespawnError,
     ) -> MobRespawnError {
         let MobRespawnError::SpawnAfterRetire { .. } = error else {
@@ -4819,7 +4819,7 @@ impl MobActor {
                 .dsl_state()
                 .member_realtime_bindings
                 .get(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
-                .and_then(|session_id| SessionId::parse(session_id.0.as_str()).ok());
+                .cloned();
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,

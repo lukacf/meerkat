@@ -1676,4 +1676,32 @@ mod tests {
             "peer-only resume seeding must use the same inert DSL binding sentinel as the live spawn path"
         );
     }
+
+    #[test]
+    fn seed_mob_authority_sync_from_legacy_spawn_event_treats_nil_session_as_unbound() {
+        let definition = definition_with_worker_profile(false);
+        let identity = AgentIdentity::from("legacy-sessionless");
+        let roster = Roster::project(&[crate::event::MobEvent {
+            cursor: 1,
+            timestamp: chrono::Utc::now(),
+            mob_id: crate::MobId::from("seed-test"),
+            kind: crate::event::MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                crate::ids::Generation::INITIAL,
+                crate::ids::FenceToken::new(3),
+                crate::ids::AgentRuntimeId::initial(identity.clone()),
+                ProfileName::from("worker"),
+            )),
+        }]);
+
+        let mut authority = seed_mob_authority(MobState::Running);
+        seed_mob_authority_sync_from_roster(&mut authority, &roster, &definition);
+        let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
+
+        assert_eq!(
+            authority.state.member_realtime_bindings.get(&dsl_identity),
+            Some(&crate::machines::mob_machine::SessionId::default()),
+            "legacy replay without a bridge session must seed the unbound DSL sentinel, not a fake live UUID"
+        );
+    }
 }

@@ -7882,6 +7882,14 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
         }
         other => panic!("expected backend peer after resume, got {other:?}"),
     }
+    assert_eq!(
+        resumed
+            .current_realtime_binding(AgentIdentity::from("w-ext"))
+            .await
+            .expect("read peer-only binding after resume"),
+        None,
+        "peer-only resume should keep the public realtime binding surface unbound"
+    );
 }
 
 #[tokio::test]

@@ -121,14 +121,9 @@ fn seed_mob_authority_sync_from_roster(
             .state
             .identity_to_runtime
             .insert(dsl_identity, dsl_runtime_id.clone());
-        let bridge_session_id = entry
-            .member_ref
-            .bridge_session_id()
-            .cloned()
-            .unwrap_or_default();
         authority.state.member_realtime_bindings.insert(
             mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-            mob_dsl::SessionId::from_domain(&bridge_session_id),
+            super::dsl_realtime_binding_session_id(&entry.member_ref),
         );
         authority.state.member_state_markers.insert(
             dsl_runtime_id.clone(),
@@ -1666,12 +1661,19 @@ mod tests {
 
         let mut authority = seed_mob_authority(MobState::Running);
         seed_mob_authority_sync_from_roster(&mut authority, &roster, &definition);
+        let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
 
         assert!(
-            authority.state.member_realtime_bindings.contains_key(
-                &crate::machines::mob_machine::AgentIdentity::from_domain(&identity)
-            ),
+            authority
+                .state
+                .member_realtime_bindings
+                .contains_key(&dsl_identity),
             "resume seeding should recreate the canonical binding key even when no bridge session is persisted"
+        );
+        assert_eq!(
+            authority.state.member_realtime_bindings.get(&dsl_identity),
+            Some(&crate::machines::mob_machine::SessionId::default()),
+            "peer-only resume seeding must use the same inert DSL binding sentinel as the live spawn path"
         );
     }
 }

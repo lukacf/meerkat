@@ -4280,10 +4280,7 @@ impl MobActor {
         // pass a synthetic empty session id — they are not realtime-WS
         // targets and their binding map entry is inert.
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
-        let bridge_session_id = match member_ref.bridge_session_id() {
-            Some(sid) => mob_dsl::SessionId::from_domain(sid),
-            None => mob_dsl::SessionId::default(),
-        };
+        let bridge_session_id = super::dsl_realtime_binding_session_id(&member_ref);
         let replacing = self
             .dsl_state()
             .member_realtime_bindings

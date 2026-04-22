@@ -63,6 +63,23 @@ pub(crate) fn flow_system_member_id() -> MeerkatId {
     MeerkatId::from(FLOW_SYSTEM_MEMBER_ID_RAW)
 }
 
+/// Map a member ref into the canonical MobMachine realtime-binding sentinel.
+///
+/// Session-backed members project their real bridge session id. Peer-only
+/// members project the DSL's empty-string default so the binding keyspace
+/// stays present for replace/retire guards while public readers continue to
+/// observe them as unbound (`SessionId::parse("")` fails and is dropped).
+pub(super) fn dsl_realtime_binding_session_id(
+    member_ref: &MemberRef,
+) -> crate::machines::mob_machine::SessionId {
+    use crate::machines::mob_machine as mob_dsl;
+
+    match member_ref.bridge_session_id() {
+        Some(session_id) => mob_dsl::SessionId::from_domain(session_id),
+        None => mob_dsl::SessionId::default(),
+    }
+}
+
 mod actor;
 mod actor_turn_executor;
 pub mod bridge;

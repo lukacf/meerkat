@@ -368,6 +368,7 @@ struct MockSessionService {
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
+    keep_alive_turns_callback_pending: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
@@ -410,6 +411,7 @@ impl MockSessionService {
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
+            keep_alive_turns_callback_pending: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
@@ -636,6 +638,11 @@ impl MockSessionService {
 
     fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
         self.keep_alive_turns_complete_immediately
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    fn set_keep_alive_turns_callback_pending(&self, enabled: bool) {
+        self.keep_alive_turns_callback_pending
             .store(enabled, Ordering::Relaxed);
     }
 
@@ -985,6 +992,17 @@ impl SessionService for MockSessionService {
         drop(sessions);
 
         if is_keep_alive {
+            if self
+                .keep_alive_turns_callback_pending
+                .load(Ordering::Relaxed)
+            {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::CallbackPending {
+                        tool_name: "external_mock".to_string(),
+                        args: serde_json::json!({ "value": "browser" }),
+                    },
+                ));
+            }
             let complete_immediately = self
                 .keep_alive_turns_complete_immediately
                 .load(Ordering::Relaxed);
@@ -5827,6 +5845,41 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
         kickoff.phase,
         crate::roster::MobMemberKickoffPhase::Started,
         "barrier must return only after kickoff reaches a terminal started phase"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_kickoff_complete_returns_failed_snapshot_for_callback_boundary() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_callback_pending(true);
+
+    let member = MeerkatId::from("lead-callback");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn lead");
+
+    let snapshots = handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("callback boundary should resolve kickoff as failed");
+
+    let kickoff = snapshots[0]
+        .1
+        .kickoff
+        .as_ref()
+        .expect("autonomous member should expose kickoff state");
+    assert_eq!(
+        kickoff.phase,
+        crate::roster::MobMemberKickoffPhase::Failed,
+        "unsupported kickoff callback boundary must become a terminal failed kickoff"
+    );
+    assert!(
+        kickoff
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("external_mock")),
+        "callback failure should preserve the tool identity in the kickoff error"
     );
 }
 

@@ -1963,6 +1963,9 @@ impl MobActor {
             );
         }
 
+        // Autonomous kickoff does not support resumable callback boundaries:
+        // startup must either complete or fail before the member is considered
+        // ready for orchestration.
         let _ = self
             .apply_kickoff_input(
                 agent_identity,

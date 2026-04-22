@@ -713,7 +713,7 @@ impl FlowFrameEngine {
             if !progressed && workers.is_empty() {
                 let run = self.require_run(run_id).await?;
                 if run.flow_state.active_node_count > 0 || run.flow_state.active_frame_count > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    crate::tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     continue;
                 }
                 return Err(MobError::Internal(format!(

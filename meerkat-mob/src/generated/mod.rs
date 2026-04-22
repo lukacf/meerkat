@@ -6,4 +6,4 @@
 // corresponding feedback submitter.
 
 pub(crate) mod flow_frame_loop_driver;
-pub(crate) mod protocol_flow_loop_until_evaluation;
+pub mod protocol_flow_loop_until_evaluation;

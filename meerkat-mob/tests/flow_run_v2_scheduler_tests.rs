@@ -5,11 +5,13 @@
     clippy::redundant_clone
 )]
 
+#[path = "test_oracle_support.rs"]
+mod test_oracle_support;
+
 use indexmap::IndexMap;
 use meerkat_core::types::ContentInput;
-use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
-use meerkat_machine_kernels::legacy_generated::flow_run as raw_flow_run;
-use meerkat_mob::compat_test_support::flow_run_state_to_raw;
+use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run as raw_flow_run;
+use meerkat_machine_kernels::test_oracle::{KernelInput, KernelState, KernelValue};
 use meerkat_mob::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowSpec, FlowStepSpec, LimitsSpec,
     StepOutputFormat,
@@ -17,6 +19,7 @@ use meerkat_mob::definition::{
 use meerkat_mob::ids::{FlowId, ProfileName, StepId};
 use meerkat_mob::run::{FlowRunConfig, MobRun};
 use std::collections::BTreeMap;
+use test_oracle_support::flow_run_state_to_raw;
 
 fn str_val(s: &str) -> KernelValue {
     KernelValue::String(s.into())

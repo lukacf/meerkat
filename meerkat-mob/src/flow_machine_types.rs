@@ -88,3 +88,13 @@ pub(crate) fn local_step_run_status(value: kernel_types::StepRunStatus) -> StepR
         kernel_types::StepRunStatus::Canceled => StepRunStatus::Canceled,
     }
 }
+
+pub(crate) fn step_run_status(value: &StepRunStatus) -> kernel_types::StepRunStatus {
+    match value {
+        StepRunStatus::Dispatched => kernel_types::StepRunStatus::Dispatched,
+        StepRunStatus::Completed => kernel_types::StepRunStatus::Completed,
+        StepRunStatus::Failed => kernel_types::StepRunStatus::Failed,
+        StepRunStatus::Skipped => kernel_types::StepRunStatus::Skipped,
+        StepRunStatus::Canceled => kernel_types::StepRunStatus::Canceled,
+    }
+}

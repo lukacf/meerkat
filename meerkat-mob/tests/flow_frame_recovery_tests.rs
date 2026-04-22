@@ -1,19 +1,22 @@
 //! Phase 4 recovery tests: REQ-10, REQ-11, REQ-12, REQ-13
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#[path = "test_oracle_support.rs"]
+mod test_oracle_support;
+
 use indexmap::IndexMap;
-use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
-use meerkat_machine_kernels::legacy_generated::flow_run as raw_flow_run;
-use meerkat_mob::compat_test_support::{
-    flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
-    loop_iteration_state_from_raw,
-};
+use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run as raw_flow_run;
+use meerkat_machine_kernels::test_oracle::{KernelState, KernelValue};
 use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
     FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
 };
 use meerkat_mob::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
 use std::collections::{BTreeMap, BTreeSet};
+use test_oracle_support::{
+    flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
+    loop_iteration_state_from_raw,
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

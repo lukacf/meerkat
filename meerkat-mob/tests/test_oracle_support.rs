@@ -1,12 +1,12 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, dead_code)]
 
 use meerkat_machine_kernels::{compat_generated, test_oracle};
 
 pub fn flow_run_state_from_raw(
     mut state: test_oracle::KernelState,
 ) -> compat_generated::flow_run::State {
-    let mut seeded = meerkat_machine_kernels::legacy_generated::flow_run::initial_state()
-        .expect("raw flow_run init");
+    let mut seeded =
+        test_oracle::legacy_generated::flow_run::initial_state().expect("raw flow_run init");
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);
     state = seeded;
@@ -22,8 +22,8 @@ pub fn flow_run_state_to_raw(
 pub fn flow_frame_state_from_raw(
     mut state: test_oracle::KernelState,
 ) -> compat_generated::flow_frame::State {
-    let mut seeded = meerkat_machine_kernels::legacy_generated::flow_frame::initial_state()
-        .expect("raw flow_frame init");
+    let mut seeded =
+        test_oracle::legacy_generated::flow_frame::initial_state().expect("raw flow_frame init");
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);
     state = seeded;
@@ -39,7 +39,7 @@ pub fn flow_frame_state_to_raw(
 pub fn loop_iteration_state_from_raw(
     mut state: test_oracle::KernelState,
 ) -> compat_generated::loop_iteration::State {
-    let mut seeded = meerkat_machine_kernels::legacy_generated::loop_iteration::initial_state()
+    let mut seeded = test_oracle::legacy_generated::loop_iteration::initial_state()
         .expect("raw loop_iteration init");
     seeded.phase = state.phase;
     seeded.fields.extend(state.fields);

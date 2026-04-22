@@ -624,6 +624,7 @@ fn effect_from_kernel(effect: LegacyEffect) -> Result<Effect, KernelError> {
     }
 }
 
+#[cfg(feature = "test-oracle")]
 fn effect_to_kernel(effect: &Effect) -> LegacyEffect {
     match effect {
         Effect::RequestBodyFrameStart(payload) => LegacyEffect {

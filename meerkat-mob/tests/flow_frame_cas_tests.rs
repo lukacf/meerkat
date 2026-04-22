@@ -6,13 +6,13 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_machine_kernels::legacy::{KernelInput, KernelState, KernelValue};
+#[path = "test_oracle_support.rs"]
+mod test_oracle_support;
+
+use meerkat_machine_kernels::test_oracle::{KernelInput, KernelState, KernelValue};
 use meerkat_machine_kernels::{
     compat_generated::flow_frame as typed_flow_frame,
-    legacy_generated::{flow_frame as raw_flow_frame, flow_run},
-};
-use meerkat_mob::compat_test_support::{
-    flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
+    test_oracle::legacy_generated::{flow_frame as raw_flow_frame, flow_run},
 };
 use meerkat_mob::ids::FrameId;
 use meerkat_mob::run::{FrameSnapshot, MobRun};
@@ -20,6 +20,9 @@ use meerkat_mob::store::MobRunStore;
 use meerkat_mob::{FlowFrameMutator, FlowId, InMemoryMobRunStore, MobId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use test_oracle_support::{
+    flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
+};
 
 fn build_minimal_mob_run() -> MobRun {
     MobRun::pending(
@@ -349,7 +352,7 @@ fn build_run_state_with_three_ready_frames() -> KernelState {
 #[tokio::test]
 async fn test_transition_frame_cas_exhaustion_returns_err() {
     use indexmap::IndexMap;
-    use meerkat_machine_kernels::legacy::KernelState;
+    use meerkat_machine_kernels::test_oracle::KernelState;
     use meerkat_mob::definition::{DependencyMode, FlowNodeSpec, FrameSpec, FrameStepSpec};
     use meerkat_mob::ids::{FlowNodeId, StepId};
     use meerkat_mob::run::FrameSnapshot;

@@ -1444,7 +1444,7 @@ fn render_compat_effect_from_kernel(out: &mut String, schema: &MachineSchema) {
 fn render_compat_effect_to_kernel(out: &mut String, schema: &MachineSchema) {
     pushln!(
         out,
-        "fn effect_to_kernel(effect: &Effect) -> LegacyEffect {{"
+        "#[cfg(feature = \"test-oracle\")]\nfn effect_to_kernel(effect: &Effect) -> LegacyEffect {{"
     );
     pushln!(out, "    match effect {{");
     for variant in &schema.effects.variants {

@@ -14,7 +14,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "machine-authority")]
-use crate::machines::HopcroftArgs;
+use crate::machines::{HopcroftArgs, VerifyStatsArgs};
 use crate::machines::{SelectionArgs, VerifyArgs};
 use crate::ownership_ledger::OwnershipLedgerArgs;
 use crate::rmat_audit::RmatAuditArgs;
@@ -34,6 +34,9 @@ enum Commands {
     #[command(name = "machine-verify")]
     Verify(VerifyArgs),
     #[cfg(feature = "machine-authority")]
+    #[command(name = "machine-verify-stats")]
+    VerifyStats(VerifyStatsArgs),
+    #[cfg(feature = "machine-authority")]
     #[command(name = "machine-hopcroft")]
     Hopcroft(HopcroftArgs),
     #[command(name = "machine-check-drift")]
@@ -52,6 +55,8 @@ pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Codegen(args) => machines::machine_codegen(args),
         Commands::Verify(args) => machines::machine_verify(args),
+        #[cfg(feature = "machine-authority")]
+        Commands::VerifyStats(args) => machines::machine_verify_stats(args),
         #[cfg(feature = "machine-authority")]
         Commands::Hopcroft(args) => machines::machine_hopcroft(args),
         Commands::CheckDrift(args) => machines::machine_check_drift(args),

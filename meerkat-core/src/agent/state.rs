@@ -1952,12 +1952,39 @@ where
                         // Feed OpsBarrierSatisfied through the shared turn-input
                         // path so the runtime handle remains the primary writer
                         // when present.
-                        use crate::generated::protocol_ops_barrier_satisfaction::accept_wait_all_satisfied;
-                        let obligation = accept_wait_all_satisfied(wait_result.satisfied);
-                        self.apply_turn_input(TurnExecutionInput::OpsBarrierSatisfied {
-                            run_id: run_id.clone(),
-                            operation_ids: obligation.operation_ids,
+                        use crate::generated::protocol_ops_barrier_satisfaction::{
+                            OpsBarrierSatisfactionContext, accept_wait_all_satisfied,
+                            submit_ops_barrier_satisfied,
+                        };
+
+                        struct RunContext {
+                            run_id: RunId,
+                        }
+
+                        impl OpsBarrierSatisfactionContext for RunContext {
+                            fn run_id(&self) -> RunId {
+                                self.run_id.clone()
+                            }
+                        }
+
+                        let obligation =
+                            accept_wait_all_satisfied(wait_result.satisfied).map_err(|err| {
+                                AgentError::InternalError(format!(
+                                    "ops_barrier_satisfaction accept failed: {err}"
+                                ))
+                            })?;
+                        let feedback = submit_ops_barrier_satisfied(
+                            obligation,
+                            &RunContext {
+                                run_id: run_id.clone(),
+                            },
+                        )
+                        .map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "ops_barrier_satisfaction submit failed: {err}"
+                            ))
                         })?;
+                        self.apply_turn_input(feedback)?;
                     }
                     self.observe_cancel_after_boundary_request(&run_id)?;
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {

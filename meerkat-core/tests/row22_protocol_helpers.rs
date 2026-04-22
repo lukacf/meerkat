@@ -4,13 +4,24 @@ use std::fs;
 use std::path::PathBuf;
 
 use meerkat_core::generated::protocol_ops_barrier_satisfaction::{
-    accept_wait_all_satisfied, submit_ops_barrier_satisfied,
+    OpsBarrierSatisfactionContext, accept_wait_all_satisfied, submit_ops_barrier_satisfied,
 };
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::identifiers::WaitRequestId;
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::WaitAllSatisfied;
 use meerkat_core::turn_execution_authority::TurnExecutionInput;
+
+#[derive(Clone)]
+struct RunContext {
+    run_id: RunId,
+}
+
+impl OpsBarrierSatisfactionContext for RunContext {
+    fn run_id(&self) -> RunId {
+        self.run_id.clone()
+    }
+}
 
 fn generated_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/generated")
@@ -32,6 +43,11 @@ fn ops_barrier_satisfaction_generated_helpers_are_typed() {
         "{} should expose a typed obligation",
         path.display()
     );
+    assert!(
+        source.contains("CompositionRefusal") && source.contains("OpsBarrierSatisfactionContext"),
+        "{} should expose typed refusal and context contracts",
+        path.display()
+    );
 }
 
 #[test]
@@ -43,9 +59,15 @@ fn ops_barrier_satisfaction_round_trips_typed_values() {
         operation_ids: operation_ids.clone(),
     };
 
-    let obligation = accept_wait_all_satisfied(source);
+    let obligation = accept_wait_all_satisfied(source).expect("accept");
     let run_id = RunId::new();
-    let input = submit_ops_barrier_satisfied(obligation, run_id.clone());
+    let input = submit_ops_barrier_satisfied(
+        obligation,
+        &RunContext {
+            run_id: run_id.clone(),
+        },
+    )
+    .expect("submit");
 
     match input {
         TurnExecutionInput::OpsBarrierSatisfied {

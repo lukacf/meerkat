@@ -17,8 +17,8 @@ use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
-use meerkat_machine_kernels::legacy::{KernelEffect, KernelInput, KernelState, KernelValue};
-use meerkat_machine_kernels::{TransitionOutcome, TransitionRefusal};
+use meerkat_machine_kernels::test_oracle::{KernelEffect, KernelInput, KernelState, KernelValue};
+use meerkat_machine_kernels::test_oracle::{TransitionOutcome, TransitionRefusal};
 use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine as schema_meerkat_machine;
 use meerkat_machine_schema::{MachineSchema, TriggerKind, TypeRef};
 use serde::Serialize;

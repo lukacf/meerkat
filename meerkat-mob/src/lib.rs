@@ -36,8 +36,6 @@ pub mod tokio {
 
 pub mod backend;
 mod build;
-#[doc(hidden)]
-pub mod compat_test_support;
 pub mod definition;
 pub mod error;
 pub mod event;
@@ -74,6 +72,7 @@ pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
 pub use mob_machine::canonical_mob_machine_command_manifest;
 
+pub use generated::protocol_flow_loop_until_evaluation;
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{

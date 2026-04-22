@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn dsl_dispatch_matches_kernel() {
         let schema = MeerkatMachineState::schema();
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         // Run the same sequence through both dispatchers:
         // Initialize (signal) → RegisterSession → PrepareBindings →
@@ -1566,7 +1566,7 @@ mod tests {
         // Initialize (signal)
         auth.apply_signal(MeerkatMachineSignal::Initialize).unwrap();
         // Advance kernel with Initialize signal
-        let init_signal = meerkat_machine_kernels::legacy::KernelSignal {
+        let init_signal = meerkat_machine_kernels::test_oracle::KernelSignal {
             variant: "Initialize".into(),
             fields: std::collections::BTreeMap::new(),
         };
@@ -1582,11 +1582,11 @@ mod tests {
                 session_id: "s1".into(),
             },
         );
-        let ki = meerkat_machine_kernels::legacy::KernelInput {
+        let ki = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "RegisterSession".into(),
             fields: std::collections::BTreeMap::from([(
                 "session_id".into(),
-                meerkat_machine_kernels::legacy::KernelValue::String("s1".into()),
+                meerkat_machine_kernels::test_oracle::KernelValue::String("s1".into()),
             )]),
         };
         let kr = kernel.transition(&kernel_state, &ki);
@@ -1611,20 +1611,20 @@ mod tests {
                 generation: "gen-1".into(),
             },
         );
-        let ki = meerkat_machine_kernels::legacy::KernelInput {
+        let ki = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "PrepareBindings".into(),
             fields: std::collections::BTreeMap::from([
                 (
                     "agent_runtime_id".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::String("rt-1".into()),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("rt-1".into()),
                 ),
                 (
                     "fence_token".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
                     "generation".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
             ]),
         };
@@ -1645,7 +1645,7 @@ mod tests {
         // StopRuntimeExecutor (from Attached → stays Attached)
         let dsl_result =
             MeerkatMachineMutator::apply(&mut auth, MeerkatMachineInput::StopRuntimeExecutor);
-        let ki = meerkat_machine_kernels::legacy::KernelInput {
+        let ki = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "StopRuntimeExecutor".into(),
             fields: std::collections::BTreeMap::new(),
         };

@@ -55,6 +55,13 @@ pub struct VerifyArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct VerifyStatsArgs {
+    /// Path to a captured `make machine-verify` log file.
+    #[arg(long)]
+    log: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct HopcroftArgs {
     #[command(flatten)]
     selection: SelectionArgs,
@@ -124,6 +131,17 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
         !args.skip_tlc
     );
     machine_verify_at_root(&root, &selection, !args.skip_tlc, args.profile, workers)
+}
+
+pub fn machine_verify_stats(args: VerifyStatsArgs) -> Result<()> {
+    let output =
+        fs::read_to_string(&args.log).with_context(|| format!("read {}", args.log.display()))?;
+    let stats = parse_machine_verify_stats(&output);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&stats).context("serialize machine verify stats")?
+    );
+    Ok(())
 }
 
 pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
@@ -2438,6 +2456,15 @@ struct TlcGraphStats {
     depth: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct VerifyStatsEntry {
+    target: String,
+    kind: String,
+    generated_states: Option<u64>,
+    distinct_states: Option<u64>,
+    depth: Option<u64>,
+}
+
 #[derive(Debug)]
 struct TlcDotGraph {
     states: Vec<TlcDotState>,
@@ -3686,6 +3713,69 @@ fn parse_tlc_graph_stats(output: &str) -> TlcGraphStats {
     }
 
     stats
+}
+
+fn parse_machine_verify_stats(output: &str) -> Vec<VerifyStatsEntry> {
+    let mut entries = Vec::new();
+    let mut current_kind: Option<&str> = None;
+    let mut current_target: Option<&str> = None;
+    let mut current_block = String::new();
+
+    let flush = |entries: &mut Vec<VerifyStatsEntry>,
+                 kind: Option<&str>,
+                 target: Option<&str>,
+                 block: &mut String| {
+        let (Some(kind), Some(target)) = (kind, target) else {
+            block.clear();
+            return;
+        };
+        let stats = parse_tlc_graph_stats(block);
+        entries.push(VerifyStatsEntry {
+            target: target.to_string(),
+            kind: kind.to_string(),
+            generated_states: stats.generated_states,
+            distinct_states: stats.distinct_states,
+            depth: stats.depth,
+        });
+        block.clear();
+    };
+
+    for line in output.lines() {
+        if let Some(target) = line.strip_prefix("machine: ") {
+            flush(
+                &mut entries,
+                current_kind,
+                current_target,
+                &mut current_block,
+            );
+            current_kind = Some("machine");
+            current_target = Some(target.trim());
+            continue;
+        }
+        if let Some(target) = line.strip_prefix("composition: ") {
+            flush(
+                &mut entries,
+                current_kind,
+                current_target,
+                &mut current_block,
+            );
+            current_kind = Some("composition");
+            current_target = Some(target.trim());
+            continue;
+        }
+        if current_target.is_some() {
+            current_block.push_str(line);
+            current_block.push('\n');
+        }
+    }
+
+    flush(
+        &mut entries,
+        current_kind,
+        current_target,
+        &mut current_block,
+    );
+    entries
 }
 
 fn print_hopcroft_summary(summary: &HopcroftSummary) {

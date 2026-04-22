@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::legacy::{KernelInput, KernelSignal, KernelValue};
+use meerkat_machine_kernels::test_oracle::{KernelInput, KernelSignal, KernelValue};
 
 fn string(value: &str) -> KernelValue {
     KernelValue::String(value.to_string())
@@ -44,7 +44,7 @@ fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     }
 }
 
-fn prepared_meerkat_state() -> meerkat_machine_kernels::legacy::KernelState {
+fn prepared_meerkat_state() -> meerkat_machine_kernels::test_oracle::KernelState {
     let initialized = meerkat::kernel()
         .transition_signal(
             &meerkat::kernel().initial_state().expect("initial state"),

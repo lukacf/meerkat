@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::legacy::{KernelSignal, KernelValue};
+use meerkat_machine_kernels::test_oracle::{KernelSignal, KernelValue};
 
 fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     KernelSignal {

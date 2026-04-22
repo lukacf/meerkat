@@ -10,15 +10,14 @@ fn generated_mod() -> PathBuf {
 #[test]
 fn typed_composition_modules_do_not_reference_legacy_kernel_types() {
     let source = fs::read_to_string(generated_mod()).expect("generated mod");
-    for compat in [
-        "flow_frame_loop_driver",
-        "protocol_flow_loop_until_evaluation",
-    ] {
-        assert!(
-            !source.contains(&format!("pub mod {compat};")),
-            "legacy compat bridge {compat} must not be part of the public generated surface"
-        );
-    }
+    assert!(
+        !source.contains("pub mod flow_frame_loop_driver;"),
+        "legacy compat bridge flow_frame_loop_driver must not be part of the public generated surface"
+    );
+    assert!(
+        source.contains("pub mod protocol_flow_loop_until_evaluation;"),
+        "typed flow_loop_until_evaluation protocol helper should stay public"
+    );
 }
 
 #[test]

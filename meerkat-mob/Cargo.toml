@@ -22,7 +22,7 @@ meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-machine-dsl = { workspace = true }
-meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
+meerkat-machine-kernels = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 
 # Async runtime
@@ -68,6 +68,7 @@ reqwest = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
+meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 
 # ## Features
 #

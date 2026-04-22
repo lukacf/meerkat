@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use meerkat_machine_kernels::legacy::{KernelInput, KernelValue};
-use meerkat_machine_kernels::legacy_generated::loop_iteration;
+use meerkat_machine_kernels::test_oracle::legacy_generated::loop_iteration;
+use meerkat_machine_kernels::test_oracle::{KernelInput, KernelValue};
 use std::collections::BTreeMap;
 
 fn str_val(s: &str) -> KernelValue {
@@ -56,8 +56,8 @@ fn body_frame_completed_input(loop_instance_id: &str, iteration: u64) -> KernelI
 fn advance_one_iteration(
     loop_instance_id: &str,
     iteration: u64,
-    state: meerkat_machine_kernels::legacy::KernelState,
-) -> meerkat_machine_kernels::legacy::KernelState {
+    state: meerkat_machine_kernels::test_oracle::KernelState,
+) -> meerkat_machine_kernels::test_oracle::KernelState {
     let started = body_frame_started_input(loop_instance_id, "frame-x", iteration);
     let state = loop_iteration::transition(&state, &started)
         .expect("BodyFrameStarted")

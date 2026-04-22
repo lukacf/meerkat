@@ -9,5 +9,5 @@ error[E0308]: mismatched types
 note: function defined here
   --> $WORKSPACE/meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs
    |
-   | pub fn accept_wait_all_satisfied(source: WaitAllSatisfied) -> OpsBarrierSatisfactionObligation {
+   | pub fn accept_wait_all_satisfied(
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^

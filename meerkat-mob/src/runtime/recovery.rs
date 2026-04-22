@@ -238,15 +238,49 @@ fn is_ready_variant(v: &kernel_types::NodeRunStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat_test_support::{
-        flow_frame_state_from_raw, flow_run_state_from_raw, flow_run_state_to_raw,
-        loop_iteration_state_from_raw,
-    };
     use crate::ids::RunId;
     use crate::run::{MobRun, MobRunStatus};
-    use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
-    use meerkat_machine_kernels::legacy_generated::flow_run as raw_flow_run;
+    use meerkat_machine_kernels::compat_generated;
+    use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run as raw_flow_run;
+    use meerkat_machine_kernels::test_oracle::{KernelState, KernelValue};
     use std::collections::BTreeMap;
+
+    fn flow_run_state_from_raw(mut state: KernelState) -> compat_generated::flow_run::State {
+        let mut seeded =
+            meerkat_machine_kernels::test_oracle::legacy_generated::flow_run::initial_state()
+                .expect("raw flow_run init");
+        seeded.phase = state.phase;
+        seeded.fields.extend(state.fields);
+        state = seeded;
+        compat_generated::flow_run::from_test_oracle_state(state).expect("typed flow_run state")
+    }
+
+    fn flow_run_state_to_raw(state: &compat_generated::flow_run::State) -> KernelState {
+        compat_generated::flow_run::to_test_oracle_state(state)
+    }
+
+    fn flow_frame_state_from_raw(mut state: KernelState) -> compat_generated::flow_frame::State {
+        let mut seeded =
+            meerkat_machine_kernels::test_oracle::legacy_generated::flow_frame::initial_state()
+                .expect("raw flow_frame init");
+        seeded.phase = state.phase;
+        seeded.fields.extend(state.fields);
+        state = seeded;
+        compat_generated::flow_frame::from_test_oracle_state(state).expect("typed flow_frame state")
+    }
+
+    fn loop_iteration_state_from_raw(
+        mut state: KernelState,
+    ) -> compat_generated::loop_iteration::State {
+        let mut seeded =
+            meerkat_machine_kernels::test_oracle::legacy_generated::loop_iteration::initial_state()
+                .expect("raw loop_iteration init");
+        seeded.phase = state.phase;
+        seeded.fields.extend(state.fields);
+        state = seeded;
+        compat_generated::loop_iteration::from_test_oracle_state(state)
+            .expect("typed loop_iteration state")
+    }
 
     fn minimal_v2_run_running() -> MobRun {
         let flow_state = flow_run_state_from_raw(raw_flow_run::initial_state().expect("init"));

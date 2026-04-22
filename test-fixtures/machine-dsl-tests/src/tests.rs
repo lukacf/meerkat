@@ -209,13 +209,13 @@ mod e2e_tla {
         let schema = TurnstileState::schema();
 
         // The kernel interpreter can construct from the schema and run transitions
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
         let state = kernel.initial_state().expect("initial state should work");
 
         assert_eq!(state.phase, "Locked");
 
         // Feed InsertCoin input
-        let input = meerkat_machine_kernels::legacy::KernelInput {
+        let input = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "InsertCoin".into(),
             fields: std::collections::BTreeMap::new(),
         };
@@ -232,7 +232,7 @@ mod e2e_tla {
     #[test]
     fn dsl_dispatch_matches_kernel_dispatch() {
         let schema = TurnstileState::schema();
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         // Run the same sequence through both dispatchers
         let mut auth = TurnstileAuthority::new();
@@ -248,7 +248,7 @@ mod e2e_tla {
         ];
 
         for (variant_name, dsl_input) in inputs {
-            let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
+            let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
                 variant: variant_name.into(),
                 fields: std::collections::BTreeMap::new(),
             };

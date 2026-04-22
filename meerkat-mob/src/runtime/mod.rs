@@ -81,7 +81,6 @@ mod flow_run_kernel;
 mod handle;
 #[cfg(feature = "runtime-adapter")]
 pub mod local_bridge;
-pub(crate) mod loop_iteration_authority;
 mod mob_member_lifecycle_authority;
 mod mob_runtime_bridge_authority;
 mod mob_wiring_authority;

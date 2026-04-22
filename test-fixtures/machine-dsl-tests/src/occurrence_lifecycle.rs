@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn dsl_dispatch_matches_kernel() {
         let schema = OccurrenceLifecycleMachineState::schema();
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         let mut auth = OccurrenceLifecycleMachineAuthority::new();
         let mut kernel_state = kernel.initial_state().unwrap();
@@ -511,24 +511,24 @@ mod tests {
         )
         .unwrap();
 
-        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
+        let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "Claim".into(),
             fields: std::collections::BTreeMap::from([
                 (
                     "owner_id".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::String("w".into()),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("w".into()),
                 ),
                 (
                     "at_utc_ms".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
                     "lease_expires_at_utc_ms".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(2),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(2),
                 ),
                 (
                     "claim_token".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::String("t".into()),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("t".into()),
                 ),
             ]),
         };
@@ -548,20 +548,20 @@ mod tests {
                 at_utc_ms: 5,
             },
         );
-        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
+        let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "Skip".into(),
             fields: std::collections::BTreeMap::from([
                 (
                     "detail".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::None,
+                    meerkat_machine_kernels::test_oracle::KernelValue::None,
                 ),
                 (
                     "failure_class".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::None,
+                    meerkat_machine_kernels::test_oracle::KernelValue::None,
                 ),
                 (
                     "at_utc_ms".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(5),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(5),
                 ),
             ]),
         };

@@ -10,15 +10,14 @@ fn generated_mod() -> PathBuf {
 #[test]
 fn public_generated_surface_returns_to_canonical_five() {
     let source = fs::read_to_string(generated_mod()).expect("generated mod");
-    for compat in [
-        "flow_frame_loop_driver",
-        "protocol_flow_loop_until_evaluation",
-    ] {
-        assert!(
-            source.contains(&format!("pub(crate) mod {compat};")),
-            "mob-local generated surface should keep legacy compat bridge {compat} crate-private"
-        );
-    }
+    assert!(
+        source.contains("pub(crate) mod flow_frame_loop_driver;"),
+        "mob-local generated surface should keep flow_frame_loop_driver crate-private"
+    );
+    assert!(
+        source.contains("pub mod protocol_flow_loop_until_evaluation;"),
+        "mob-local generated protocol helper should stay public while the driver stays crate-private"
+    );
 }
 
 #[test]

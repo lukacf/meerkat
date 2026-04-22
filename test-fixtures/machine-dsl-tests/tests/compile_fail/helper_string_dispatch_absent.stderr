@@ -1,3 +1,27 @@
+error[E0432]: unresolved import `meerkat_machine_kernels::TransitionRefusal`
+ --> tests/compile_fail/helper_string_dispatch_absent.rs:3:5
+  |
+3 | use meerkat_machine_kernels::TransitionRefusal;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `TransitionRefusal` in the root
+  |
+help: consider importing one of these enums instead
+  |
+3 | use meerkat_machine_kernels::compat_generated::flow_frame::TransitionRefusal;
+  |                              ++++++++++++++++++++++++++++++
+3 | use meerkat_machine_kernels::compat_generated::flow_run::TransitionRefusal;
+  |                              ++++++++++++++++++++++++++++
+3 | use meerkat_machine_kernels::compat_generated::loop_iteration::TransitionRefusal;
+  |                              ++++++++++++++++++++++++++++++++++
+3 | use meerkat_machine_kernels::generated::auth::TransitionRefusal;
+  |                              +++++++++++++++++
+  = and 5 other candidates
+
+error[E0432]: unresolved import `meerkat_machine_kernels::legacy`
+ --> tests/compile_fail/helper_string_dispatch_absent.rs:4:30
+  |
+4 | use meerkat_machine_kernels::legacy::{KernelState, KernelValue};
+  |                              ^^^^^^ could not find `legacy` in `meerkat_machine_kernels`
+
 error[E0425]: cannot find value `evaluate_helper` in module `meerkat_machine_kernels::generated::meerkat`
   --> tests/compile_fail/helper_string_dispatch_absent.rs:12:54
    |
@@ -6,11 +30,11 @@ error[E0425]: cannot find value `evaluate_helper` in module `meerkat_machine_ker
    |
 help: consider importing one of these functions
    |
- 1 + use meerkat_machine_kernels::legacy_generated::flow_frame::evaluate_helper;
+ 1 + use meerkat_machine_kernels::test_oracle::legacy_generated::flow_frame::evaluate_helper;
    |
- 1 + use meerkat_machine_kernels::legacy_generated::flow_run::evaluate_helper;
+ 1 + use meerkat_machine_kernels::test_oracle::legacy_generated::flow_run::evaluate_helper;
    |
- 1 + use meerkat_machine_kernels::legacy_generated::loop_iteration::evaluate_helper;
+ 1 + use meerkat_machine_kernels::test_oracle::legacy_generated::loop_iteration::evaluate_helper;
    |
 help: if you import `evaluate_helper`, refer to it directly
    |

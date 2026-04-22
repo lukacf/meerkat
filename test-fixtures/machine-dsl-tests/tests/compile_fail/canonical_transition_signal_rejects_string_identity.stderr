@@ -1,8 +1,14 @@
+error[E0432]: unresolved import `meerkat_machine_kernels::legacy`
+ --> tests/compile_fail/canonical_transition_signal_rejects_string_identity.rs:3:30
+  |
+3 | use meerkat_machine_kernels::legacy::KernelSignal;
+  |                              ^^^^^^ could not find `legacy` in `meerkat_machine_kernels`
+
 error[E0061]: this function takes 3 arguments but 2 arguments were supplied
   --> tests/compile_fail/canonical_transition_signal_rejects_string_identity.rs:11:13
    |
 11 |     let _ = meerkat_machine_kernels::generated::meerkat::transition_signal(&state, &signal);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^         ------- argument #2 of type `meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal` is missing
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------- argument #3 of type `&_` is missing
    |
 note: function defined here
   --> $WORKSPACE/meerkat-machine-kernels/src/generated/meerkat.rs
@@ -11,5 +17,5 @@ note: function defined here
    |        ^^^^^^^^^^^^^^^^^
 help: provide the argument
    |
-11 |     let _ = meerkat_machine_kernels::generated::meerkat::transition_signal(&state, /* meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal */, &signal);
-   |                                                                                    ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+11 |     let _ = meerkat_machine_kernels::generated::meerkat::transition_signal(&state, &signal, /* _context */);
+   |                                                                                           ++++++++++++++++

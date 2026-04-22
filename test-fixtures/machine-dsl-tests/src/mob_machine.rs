@@ -1186,7 +1186,7 @@ mod tests {
     #[test]
     fn dsl_dispatch_matches_kernel() {
         let schema = MobMachineState::schema();
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         let mut auth = MobMachineAuthority::new();
         let mut kernel_state = kernel.initial_state().unwrap();
@@ -1204,28 +1204,28 @@ mod tests {
         )
         .unwrap();
 
-        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
+        let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "Spawn".into(),
             fields: std::collections::BTreeMap::from([
                 (
                     "agent_identity".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::String("agent-1".into()),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("agent-1".into()),
                 ),
                 (
                     "agent_runtime_id".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::String("rt-1".into()),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("rt-1".into()),
                 ),
                 (
                     "fence_token".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(1),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
                     "generation".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::U64(0),
+                    meerkat_machine_kernels::test_oracle::KernelValue::U64(0),
                 ),
                 (
                     "external_addressable".into(),
-                    meerkat_machine_kernels::legacy::KernelValue::Bool(true),
+                    meerkat_machine_kernels::test_oracle::KernelValue::Bool(true),
                 ),
             ]),
         };
@@ -1238,7 +1238,7 @@ mod tests {
 
         // Run Stop through both
         let dsl_r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop);
-        let kernel_input = meerkat_machine_kernels::legacy::KernelInput {
+        let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
             variant: "Stop".into(),
             fields: std::collections::BTreeMap::new(),
         };

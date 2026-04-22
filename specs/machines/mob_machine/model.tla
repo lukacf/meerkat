@@ -534,6 +534,7 @@ DestroyMob ==
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
+    /\ externally_addressable_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
@@ -548,7 +549,12 @@ DestroyMob ==
     /\ member_kickoff_cancelled' = {}
     /\ member_kickoff_error' = [x \in {} |-> None]
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ wiring_edges' = {}
+    /\ identity_to_runtime' = [x \in {} |-> None]
+    /\ tasks' = [x \in {} |-> None]
+    /\ in_progress_task_ids' = {}
+    /\ completed_task_ids' = {}
+    /\ member_realtime_bindings' = [x \in {} |-> None]
 
 
 ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
@@ -557,6 +563,7 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
+    /\ externally_addressable_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
@@ -571,7 +578,12 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ member_kickoff_cancelled' = {}
     /\ member_kickoff_error' = [x \in {} |-> None]
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ wiring_edges' = {}
+    /\ identity_to_runtime' = [x \in {} |-> None]
+    /\ tasks' = [x \in {} |-> None]
+    /\ in_progress_task_ids' = {}
+    /\ completed_task_ids' = {}
+    /\ member_realtime_bindings' = [x \in {} |-> None]
 
 
 RecordOperatorActionProvenanceRunning ==
@@ -1173,6 +1185,42 @@ RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
+ReleaseRealtimeBindingRunning(agent_identity, session_id) ==
+    /\ phase = "Running"
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+ReleaseRealtimeBindingStopped(agent_identity, session_id) ==
+    /\ phase = "Stopped"
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+ReleaseRealtimeBindingCompleted(agent_identity, session_id) ==
+    /\ phase = "Completed"
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+ReleaseRealtimeBindingDestroyed(agent_identity, session_id) ==
+    /\ phase = "Destroyed"
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
 RetireAllRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -1205,11 +1253,27 @@ DestroyFromAny ==
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
+    /\ externally_addressable_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << externally_addressable_runtime_ids, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ member_startup_binding_requested' = {}
+    /\ member_startup_runtime_ready' = {}
+    /\ member_startup_ready' = {}
+    /\ member_kickoff_pending' = {}
+    /\ member_kickoff_starting' = {}
+    /\ member_kickoff_started' = {}
+    /\ member_kickoff_failed' = {}
+    /\ member_kickoff_cancelled' = {}
+    /\ member_kickoff_error' = [x \in {} |-> None]
+    /\ member_state_markers' = [x \in {} |-> None]
+    /\ wiring_edges' = {}
+    /\ identity_to_runtime' = [x \in {} |-> None]
+    /\ tasks' = [x \in {} |-> None]
+    /\ in_progress_task_ids' = {}
+    /\ completed_task_ids' = {}
+    /\ member_realtime_bindings' = [x \in {} |-> None]
 
 
 RespawnRunning(agent_runtime_id) ==
@@ -1340,6 +1404,10 @@ Next ==
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseRealtimeBindingRunning(agent_identity, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseRealtimeBindingStopped(agent_identity, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseRealtimeBindingCompleted(agent_identity, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseRealtimeBindingDestroyed(agent_identity, session_id)
     \/ RetireAllRunning
     \/ RetireAllStopped
     \/ CompleteSpawnRunning

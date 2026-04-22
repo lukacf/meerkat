@@ -227,6 +227,8 @@ struct RespawnSnapshot {
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
     binding: crate::RuntimeBinding,
+    /// Canonical realtime binding preserved through the retire-half of respawn.
+    preserved_realtime_binding: Option<SessionId>,
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
@@ -770,6 +772,25 @@ impl MobActor {
         Ok(transition.effects)
     }
 
+    fn try_apply_dsl_input_with_effects(
+        &self,
+        input: mob_dsl::MobMachineInput,
+    ) -> Result<Option<Vec<mob_dsl::MobMachineEffect>>, MobError> {
+        let transition = match self
+            .with_dsl_authority_mut(|authority| mob_dsl::MobMachineMutator::apply(authority, input))
+        {
+            Ok(transition) => transition,
+            Err(_) => return Ok(None),
+        };
+        if transition.from_phase != transition.to_phase {
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+        Ok(Some(transition.effects))
+    }
+
     /// W3-H: forward the canonical MobMachine realtime-binding effects onto
     /// the mob's broadcast channel for downstream observers (notably the
     /// realtime WS in meerkat-rpc), and emit a debug trace line for
@@ -1108,6 +1129,24 @@ impl MobActor {
             }
         }
         self.roster.write().await.set_kickoff(agent_identity, None);
+    }
+
+    fn release_realtime_binding_if_present(
+        &self,
+        agent_identity: &AgentIdentity,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        let Some(effects) = self.try_apply_dsl_input_with_effects(
+            mob_dsl::MobMachineInput::ReleaseRealtimeBinding {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                session_id: mob_dsl::SessionId(session_id.to_string()),
+            },
+        )?
+        else {
+            return Ok(false);
+        };
+        self.log_realtime_binding_effects(agent_identity, &effects);
+        Ok(true)
     }
 
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
@@ -4743,6 +4782,11 @@ impl MobActor {
                 .get(&agent_identity)
                 .cloned()
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+            let preserved_realtime_binding = self
+                .dsl_state()
+                .member_realtime_bindings
+                .get(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
+                .and_then(|session_id| SessionId::parse(session_id.0.as_str()).ok());
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
@@ -4776,6 +4820,7 @@ impl MobActor {
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
                 binding,
+                preserved_realtime_binding,
                 effective_profile_override: entry.effective_profile_override,
             }
         };
@@ -5077,7 +5122,26 @@ impl MobActor {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             })?;
-        let _replacement = replacement_result?;
+        let _replacement = match replacement_result {
+            Ok(replacement) => replacement,
+            Err(error @ MobRespawnError::SpawnAfterRetire { .. }) => {
+                if let Some(session_id) = snapshot.preserved_realtime_binding.as_ref()
+                    && let Err(release_error) = self.release_realtime_binding_if_present(
+                        &AgentIdentity::from(agent_identity.as_str()),
+                        session_id,
+                    )
+                {
+                    return Err(MobRespawnError::SpawnAfterRetire {
+                        identity: AgentIdentity::from(agent_identity.as_str()),
+                        reason: format!(
+                            "{error}; failed releasing preserved realtime binding: {release_error}"
+                        ),
+                    });
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
 
         // 5. Build the receipt from the committed replacement member reference.
         Ok(MemberRespawnReceipt::new(

@@ -365,6 +365,8 @@ struct MockSessionService {
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
+    fail_create_session_on_call: AtomicU64,
+    create_session_calls: AtomicU64,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
@@ -408,6 +410,8 @@ impl MockSessionService {
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
+            fail_create_session_on_call: AtomicU64::new(u64::MAX),
+            create_session_calls: AtomicU64::new(0),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
@@ -622,6 +626,12 @@ impl MockSessionService {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    fn set_fail_create_session_on_call(&self, call: Option<u64>) {
+        self.fail_create_session_on_call
+            .store(call.unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.create_session_calls.store(0, Ordering::Relaxed);
+    }
+
     #[allow(dead_code)]
     fn set_fail_inject(&self, enabled: bool) {
         self.fail_inject
@@ -803,6 +813,17 @@ impl SessionService for MockSessionService {
         let create_delay_ms = self.create_session_delay_ms.load(Ordering::Relaxed);
         if create_delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(create_delay_ms)).await;
+        }
+        let call_number = self
+            .create_session_calls
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if call_number == self.fail_create_session_on_call.load(Ordering::Relaxed) {
+            self.create_session_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                format!("mock create_session failure on call {call_number}"),
+            ))));
         }
 
         let mut session = req
@@ -5622,6 +5643,62 @@ async fn test_list_members_returns_after_respawn_without_hanging() {
     assert_eq!(
         listed.status,
         crate::runtime::handle::MobMemberStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn test_failed_respawn_releases_preserved_realtime_binding() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("respawn-binding-release");
+    let identity = AgentIdentity::from(member_id.as_str());
+
+    let original_session_id = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original member")
+        .bridge_session_id()
+        .expect("session-backed respawn target")
+        .clone();
+
+    let initial_binding = handle
+        .current_realtime_binding(identity.clone())
+        .await
+        .expect("read realtime binding before respawn")
+        .expect("spawned member should expose a realtime binding");
+
+    // Reset the call counter and fail the very next create_session, which is
+    // the replacement spawn after the old member has already been retired.
+    service.set_fail_create_session_on_call(Some(1));
+
+    let error = handle
+        .respawn(identity.clone(), None)
+        .await
+        .expect_err("respawn should fail after retiring the old member");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::handle::MobRespawnError::SpawnAfterRetire { .. }
+        ),
+        "replacement create_session failure should surface a post-retire replacement error: {error:?}"
+    );
+    assert!(
+        service.read(&original_session_id).await.is_err(),
+        "the old session should already be archived when the replacement create fails"
+    );
+
+    let binding = handle
+        .current_realtime_binding(identity.clone())
+        .await
+        .expect("read realtime binding after failed respawn");
+    assert_eq!(
+        binding, None,
+        "failed respawn must release the preserved realtime binding instead of leaving the retired session {initial_binding} pinned"
     );
 }
 

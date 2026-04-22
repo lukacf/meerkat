@@ -76,6 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `KickoffResolveCancelled`(member_id: String)
 - `KickoffCancelRequested`(member_id: String)
 - `KickoffClear`(member_id: String)
+- `ReleaseRealtimeBinding`(agent_identity: AgentIdentity, session_id: SessionId)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -908,6 +909,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Stopped`
+
+### `ReleaseRealtimeBindingRunning`
+- From: `Running`
+- On: `ReleaseRealtimeBinding`(agent_identity, session_id)
+- Guards:
+  - `prior_realtime_binding_present`
+- Emits: `MemberRealtimeBindingReleased`
+- To: `Running`
+
+### `ReleaseRealtimeBindingStopped`
+- From: `Stopped`
+- On: `ReleaseRealtimeBinding`(agent_identity, session_id)
+- Guards:
+  - `prior_realtime_binding_present`
+- Emits: `MemberRealtimeBindingReleased`
+- To: `Stopped`
+
+### `ReleaseRealtimeBindingCompleted`
+- From: `Completed`
+- On: `ReleaseRealtimeBinding`(agent_identity, session_id)
+- Guards:
+  - `prior_realtime_binding_present`
+- Emits: `MemberRealtimeBindingReleased`
+- To: `Completed`
+
+### `ReleaseRealtimeBindingDestroyed`
+- From: `Destroyed`
+- On: `ReleaseRealtimeBinding`(agent_identity, session_id)
+- Guards:
+  - `prior_realtime_binding_present`
+- Emits: `MemberRealtimeBindingReleased`
+- To: `Destroyed`
 
 ### `RetireAllRunning`
 - From: `Running`

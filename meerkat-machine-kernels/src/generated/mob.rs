@@ -194,6 +194,10 @@ pub mod field {
         super::KernelField::new_static("error")
     }
     #[must_use]
+    pub fn session_id() -> super::KernelField {
+        super::KernelField::new_static("session_id")
+    }
+    #[must_use]
     pub fn kind() -> super::KernelField {
         super::KernelField::new_static("kind")
     }
@@ -212,10 +216,6 @@ pub mod field {
     #[must_use]
     pub fn new_session_id() -> super::KernelField {
         super::KernelField::new_static("new_session_id")
-    }
-    #[must_use]
-    pub fn session_id() -> super::KernelField {
-        super::KernelField::new_static("session_id")
     }
 }
 
@@ -399,6 +399,10 @@ pub mod input {
     #[must_use]
     pub fn kickoff_clear() -> super::KernelInputVariant {
         super::KernelInputVariant::new_static("KickoffClear")
+    }
+    #[must_use]
+    pub fn release_realtime_binding() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("ReleaseRealtimeBinding")
     }
 }
 
@@ -1042,6 +1046,22 @@ pub mod transition {
     #[must_use]
     pub fn retire_stopped_no_binding() -> super::KernelTransitionName {
         super::KernelTransitionName::new_static("RetireStoppedNoBinding")
+    }
+    #[must_use]
+    pub fn release_realtime_binding_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("ReleaseRealtimeBindingRunning")
+    }
+    #[must_use]
+    pub fn release_realtime_binding_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("ReleaseRealtimeBindingStopped")
+    }
+    #[must_use]
+    pub fn release_realtime_binding_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("ReleaseRealtimeBindingCompleted")
+    }
+    #[must_use]
+    pub fn release_realtime_binding_destroyed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("ReleaseRealtimeBindingDestroyed")
     }
     #[must_use]
     pub fn retire_all_running() -> super::KernelTransitionName {

@@ -149,6 +149,7 @@ fn mob_machine_inputs_equal_runtime_manifest_exactly() {
         "KickoffResolveCancelled",
         "KickoffCancelRequested",
         "KickoffClear",
+        "ReleaseRealtimeBinding",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()

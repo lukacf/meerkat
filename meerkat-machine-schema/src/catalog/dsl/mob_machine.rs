@@ -131,6 +131,7 @@ machine! {
             KickoffResolveCancelled { member_id: String },
             KickoffCancelRequested { member_id: String },
             KickoffClear { member_id: String },
+            ReleaseRealtimeBinding { agent_identity: AgentIdentity, session_id: SessionId },
         }
 
         surface_only [
@@ -880,6 +881,7 @@ machine! {
             }
             update {
                 self.live_runtime_ids = EmptySet;
+                self.externally_addressable_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
@@ -891,6 +893,12 @@ machine! {
                 self.member_kickoff_cancelled = EmptySet;
                 self.member_kickoff_error = EmptyMap;
                 self.member_state_markers = EmptyMap;
+                self.wiring_edges = EmptySet;
+                self.identity_to_runtime = EmptyMap;
+                self.tasks = EmptyMap;
+                self.in_progress_task_ids = EmptySet;
+                self.completed_task_ids = EmptySet;
+                self.member_realtime_bindings = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;
@@ -910,6 +918,7 @@ machine! {
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.live_runtime_ids = EmptySet;
+                self.externally_addressable_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
@@ -921,6 +930,12 @@ machine! {
                 self.member_kickoff_cancelled = EmptySet;
                 self.member_kickoff_error = EmptyMap;
                 self.member_state_markers = EmptyMap;
+                self.wiring_edges = EmptySet;
+                self.identity_to_runtime = EmptyMap;
+                self.tasks = EmptyMap;
+                self.in_progress_task_ids = EmptySet;
+                self.completed_task_ids = EmptySet;
+                self.member_realtime_bindings = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;
@@ -1676,6 +1691,58 @@ machine! {
             emit RequestRuntimeRetire
         }
 
+        transition ReleaseRealtimeBindingRunning {
+            on input ReleaseRealtimeBinding { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "prior_realtime_binding_present" {
+                self.member_realtime_bindings.contains_key(agent_identity) == true
+            }
+            update {
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Running
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: session_id }
+        }
+
+        transition ReleaseRealtimeBindingStopped {
+            on input ReleaseRealtimeBinding { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "prior_realtime_binding_present" {
+                self.member_realtime_bindings.contains_key(agent_identity) == true
+            }
+            update {
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Stopped
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: session_id }
+        }
+
+        transition ReleaseRealtimeBindingCompleted {
+            on input ReleaseRealtimeBinding { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "prior_realtime_binding_present" {
+                self.member_realtime_bindings.contains_key(agent_identity) == true
+            }
+            update {
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Completed
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: session_id }
+        }
+
+        transition ReleaseRealtimeBindingDestroyed {
+            on input ReleaseRealtimeBinding { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "prior_realtime_binding_present" {
+                self.member_realtime_bindings.contains_key(agent_identity) == true
+            }
+            update {
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Destroyed
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: session_id }
+        }
+
         transition RetireAllRunning {
             on input RetireAll
             guard { self.lifecycle_phase == Phase::Running }
@@ -1726,7 +1793,24 @@ machine! {
             }
             update {
                 self.live_runtime_ids = EmptySet;
+                self.externally_addressable_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_startup_binding_requested = EmptySet;
+                self.member_startup_runtime_ready = EmptySet;
+                self.member_startup_ready = EmptySet;
+                self.member_kickoff_pending = EmptySet;
+                self.member_kickoff_starting = EmptySet;
+                self.member_kickoff_started = EmptySet;
+                self.member_kickoff_failed = EmptySet;
+                self.member_kickoff_cancelled = EmptySet;
+                self.member_kickoff_error = EmptyMap;
+                self.member_state_markers = EmptyMap;
+                self.wiring_edges = EmptySet;
+                self.identity_to_runtime = EmptyMap;
+                self.tasks = EmptyMap;
+                self.in_progress_task_ids = EmptySet;
+                self.completed_task_ids = EmptySet;
+                self.member_realtime_bindings = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;

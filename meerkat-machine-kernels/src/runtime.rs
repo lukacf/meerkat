@@ -1657,6 +1657,28 @@ mod tests {
             kickoff_starting
                 .next_state
                 .fields
+                .get("identity_to_runtime"),
+            Some(&KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("agent.lead".into()),
+                KernelValue::String(runtime_id.into()),
+            )]))),
+            "spawn must populate identity_to_runtime before destroy"
+        );
+        assert_eq!(
+            kickoff_starting
+                .next_state
+                .fields
+                .get("member_realtime_bindings"),
+            Some(&KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("agent.lead".into()),
+                KernelValue::String("bridge.lead.1".into()),
+            )]))),
+            "spawn must populate member_realtime_bindings before destroy"
+        );
+        assert_eq!(
+            kickoff_starting
+                .next_state
+                .fields
                 .get("member_kickoff_starting"),
             Some(&KernelValue::Set(BTreeSet::from([KernelValue::String(
                 member_id.into(),
@@ -1700,6 +1722,16 @@ mod tests {
             destroyed.next_state.fields.get("member_kickoff_error"),
             Some(&KernelValue::Map(BTreeMap::new())),
             "destroy should clear kickoff errors alongside the startup/kickoff sets"
+        );
+        assert_eq!(
+            destroyed.next_state.fields.get("identity_to_runtime"),
+            Some(&KernelValue::Map(BTreeMap::new())),
+            "destroy should clear identity_to_runtime alongside runtime teardown"
+        );
+        assert_eq!(
+            destroyed.next_state.fields.get("member_realtime_bindings"),
+            Some(&KernelValue::Map(BTreeMap::new())),
+            "destroy should clear member_realtime_bindings alongside runtime teardown"
         );
     }
 
@@ -1756,6 +1788,67 @@ mod tests {
             cleared.next_state.fields.get("member_kickoff_pending"),
             Some(&KernelValue::Set(BTreeSet::new())),
             "kickoff clear should still remove the per-member pending marker"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn mob_destroy_clears_identity_and_realtime_binding_state() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let spawned = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "Spawn".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_identity".into(),
+                            KernelValue::String("agent.destroy".into()),
+                        ),
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String("runtime.destroy.1".into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(7)),
+                        ("generation".into(), KernelValue::U64(1)),
+                        ("external_addressable".into(), KernelValue::Bool(true)),
+                        (
+                            "bridge_session_id".into(),
+                            KernelValue::String("bridge.destroy.1".into()),
+                        ),
+                        ("replacing".into(), KernelValue::None),
+                    ]),
+                },
+            )
+            .expect("spawn member");
+        let destroyed = kernel
+            .transition(
+                &spawned.next_state,
+                &KernelInput {
+                    variant: "Destroy".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("destroy");
+        assert_eq!(destroyed.next_state.phase, "Destroyed");
+        assert_eq!(
+            destroyed
+                .next_state
+                .fields
+                .get("externally_addressable_runtime_ids"),
+            Some(&KernelValue::Set(BTreeSet::new())),
+            "destroy should clear externally addressable runtime ids"
+        );
+        assert_eq!(
+            destroyed.next_state.fields.get("identity_to_runtime"),
+            Some(&KernelValue::Map(BTreeMap::new())),
+            "destroy should clear identity_to_runtime"
+        );
+        assert_eq!(
+            destroyed.next_state.fields.get("member_realtime_bindings"),
+            Some(&KernelValue::Map(BTreeMap::new())),
+            "destroy should clear member_realtime_bindings"
         );
     }
 

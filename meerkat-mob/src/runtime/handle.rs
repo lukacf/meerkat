@@ -3166,8 +3166,8 @@ impl MobHandle {
     /// In 0.6 autonomous members no longer run a synthetic second kickoff turn,
     /// but their initial prompt still resolves asynchronously through the
     /// runtime-backed input path. This barrier is satisfied once each targeted
-    /// autonomous member leaves `pending` / `starting` / `callback_pending`
-    /// and reaches a terminal kickoff phase.
+    /// autonomous member leaves `pending` / `starting` and reaches a resolved
+    /// kickoff phase (`started`, `callback_pending`, `failed`, or `cancelled`).
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -3589,7 +3589,7 @@ mod tests {
     }
 
     #[test]
-    fn kickoff_wait_treats_callback_pending_as_unresolved() {
+    fn kickoff_wait_treats_callback_pending_as_resolved() {
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
         let entry = RosterEntry {
@@ -3625,11 +3625,9 @@ mod tests {
             peer_connectivity: None,
             kickoff: entry.kickoff.clone(),
         };
-        let pending = BTreeSet::from([identity.to_string()]);
-
         assert!(
-            !MobHandle::kickoff_wait_is_satisfied(&entry, &material, &pending),
-            "callback-pending kickoff must keep blocking the kickoff barrier"
+            MobHandle::kickoff_wait_is_satisfied(&entry, &material, &BTreeSet::new()),
+            "callback-pending kickoff should satisfy the kickoff barrier once the initial turn hands off to a callback"
         );
     }
 

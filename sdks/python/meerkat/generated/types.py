@@ -171,7 +171,7 @@ class MobUnwireParams:
 
 @dataclass
 class RuntimeStateParams:
-    """Request payload for `session/runtime_state`."""
+    """Request payload for `session/status`."""
     session_id: str = ''
 
 
@@ -205,33 +205,33 @@ class RealtimeCapabilitiesParams:
 
 @dataclass
 class RuntimeAcceptParams:
-    """Request payload for `session/accept_input`."""
+    """Request payload for `session/submit`."""
     input: Any = None
     session_id: str = ''
 
 
 @dataclass
 class RuntimeRetireParams:
-    """Request payload for `session/retire_runtime`."""
+    """Request payload for `session/retire`."""
     session_id: str = ''
 
 
 @dataclass
 class RuntimeResetParams:
-    """Request payload for `session/reset_runtime`."""
+    """Request payload for `session/reset`."""
     session_id: str = ''
 
 
 @dataclass
 class InputStateParams:
-    """Request payload for `session/input_state`."""
+    """Request payload for `session/submission`."""
     input_id: str = ''
     session_id: str = ''
 
 
 @dataclass
 class InputListParams:
-    """Request payload for `session/inputs`."""
+    """Request payload for `session/submissions`."""
     session_id: str = ''
 
 
@@ -313,7 +313,7 @@ class MobUnwireResult:
 
 @dataclass
 class RuntimeStateResult:
-    """Response payload for `session/runtime_state`."""
+    """Response payload for `session/status`."""
     state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed'] = None
 
 
@@ -465,7 +465,7 @@ class RealtimeChannelClosedFrame:
 
 @dataclass
 class RuntimeAcceptResult:
-    """Response payload for `session/accept_input`."""
+    """Response payload for `session/submit`."""
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
     outcome_type: Literal['accepted', 'deduplicated', 'rejected'] = None
@@ -476,14 +476,14 @@ class RuntimeAcceptResult:
 
 @dataclass
 class RuntimeRetireResult:
-    """Response payload for `session/retire_runtime`."""
+    """Response payload for `session/retire`."""
     inputs_abandoned: int = 0
     inputs_pending_drain: int = 0
 
 
 @dataclass
 class RuntimeResetResult:
-    """Response payload for `session/reset_runtime`."""
+    """Response payload for `session/reset`."""
     inputs_abandoned: int = 0
 
 
@@ -518,7 +518,7 @@ class WireInputState:
 
 @dataclass
 class InputListResult:
-    """Response payload for `session/inputs`."""
+    """Response payload for `session/submissions`."""
     input_ids: list[str] = field(default_factory=list)
 
 
@@ -710,13 +710,13 @@ WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retir
 WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
 
 # Target for a public realtime channel.
-# 
+#
 # Two variants, one for each addressing mode:
-# 
+#
 # - `SessionTarget` — standalone sessions (no mob-member continuity). The
 #   session id is pinned for the channel's lifetime; when that session
 #   ends, the channel ends.
-# 
+#
 # - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 #   canonical anchor, and the server resolves the current bridge session
 #   on every tick from the MobMachine's `member_realtime_bindings` map.
@@ -756,7 +756,7 @@ RealtimeClientFrame = dict[str, Any]
 # Server-to-client realtime frame.
 RealtimeServerFrame = dict[str, Any]
 
-# Discriminator for `session/accept_input` responses.
+# Discriminator for `session/submit` responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
 
 # Public input lifecycle state projection used by RPC surfaces.
@@ -772,17 +772,17 @@ WireToolResultContent = str | list[dict[str, Any]]
 WireModelTier = str
 
 # Typed wire request for `comms/send`.
-# 
+#
 # Variants are serde-tagged on `kind` and validated structurally at the
 # deserialization boundary. Required fields per kind are enforced by the
 # type system; invalid discriminators (`source`, `stream`, `handling_mode`,
 # `status`) become serde deserialization errors rather than runtime
 # string-match failures.
-# 
+#
 # Cross-field invariants that cannot be expressed structurally (e.g.
 # `handling_mode` is forbidden on `Accepted` peer responses) are checked
 # in [`CommsCommandRequest::into_command`].
 CommsCommandRequest = dict[str, Any]
 
-# Response payload for `session/input_state`.
+# Response payload for `session/submission`.
 InputStateResult = Optional[WireInputState]

@@ -17,7 +17,7 @@ use crate::classify::IngressClassificationContext;
 use crate::classify::PreparedIngressItem;
 use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
-use crate::types::InboxItem;
+use crate::types::{Envelope, InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
     PeerInputClass,
@@ -124,6 +124,7 @@ struct ClassifiedInboxQueue {
     /// router's single source of truth. Per `IngressClassificationContext`
     /// the same `Arc<RwLock<TrustedPeers>>` is also used at the classify
     /// stage, so admission and classification can never disagree.
+    #[cfg_attr(not(test), allow(dead_code))]
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
@@ -161,13 +162,13 @@ impl ClassifiedInboxQueue {
     /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
     /// work keeps `Received`.
     fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> AdmissionDecision {
-        let InboxItem::External { envelope } = &prepared.item else {
+        let InboxItem::External { .. } = &prepared.item else {
             return AdmissionDecision {
                 outcome: AdmissionOutcome::Admitted,
                 trusted_snapshot: None,
             };
         };
-        let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
+        let trusted = prepared.trusted_sender;
         let admitted = trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
 
@@ -484,6 +485,37 @@ impl Inbox {
 }
 
 impl InboxSender {
+    /// Admit one external envelope at the inbox seam.
+    ///
+    /// This keeps trust ownership inside `InboxSender` instead of the
+    /// transport task. Classified runtimes route through `send_classified()`;
+    /// raw inboxes enforce the same auth-required admission rule here so
+    /// `handle_connection()` does not branch on trust itself.
+    pub fn send_connection_ingress(
+        &self,
+        envelope: Envelope,
+        require_peer_auth: bool,
+        trusted_peers: &Arc<RwLock<TrustedPeers>>,
+    ) -> AdmissionOutcome {
+        if self.classification_context.is_some() {
+            return self.send_classified(InboxItem::External { envelope });
+        }
+
+        let auth_exempt = is_auth_exempt_ingress(&envelope.kind);
+        if require_peer_auth && !auth_exempt && !trusted_peers.read().is_trusted(&envelope.from) {
+            tracing::warn!(
+                peer_id = %envelope.from.to_peer_id(),
+                auth_required = require_peer_auth,
+                auth_exempt,
+                reason = ?DropReason::UntrustedSender,
+                "raw inbox dropped external peer ingress at admission"
+            );
+            return self.record_drop(DropReason::UntrustedSender);
+        }
+
+        self.send(InboxItem::External { envelope })
+    }
+
     /// Send an item to the inbox.
     ///
     /// On classified runtimes, delegates to `send_classified()` so the item
@@ -666,6 +698,13 @@ impl Drop for Inbox {
             queue.lock().close();
         }
     }
+}
+
+fn is_auth_exempt_ingress(kind: &MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::Request { intent, .. } if intent == "supervisor.bridge"
+    )
 }
 
 fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
@@ -1306,5 +1345,46 @@ mod tests {
             }
         );
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_raw_connection_ingress_allows_auth_exempt_bridge_request() {
+        // DOGMA-12 defensive scan: raw transport ingress must not invent its
+        // own "drop bridge bootstrap traffic" rule. Auth-exempt bridge
+        // requests still flow through the canonical inbox admission seam.
+        let receiver = crate::identity::Keypair::generate();
+        let sender = crate::identity::Keypair::generate();
+        let trusted = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+        let (mut inbox, inbox_sender) = Inbox::new();
+
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: sender.public_key(),
+            to: receiver.public_key(),
+            kind: MessageKind::Request {
+                intent: "supervisor.bridge".to_string(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+            sig: crate::identity::Signature::new([0u8; 64]),
+        };
+        envelope.sign(&sender);
+        let envelope_id = envelope.id;
+
+        let outcome = inbox_sender.send_connection_ingress(envelope, true, &trusted);
+        assert_eq!(outcome, AdmissionOutcome::Admitted);
+
+        let items = inbox.try_drain();
+        assert_eq!(items.len(), 1, "auth-exempt ingress must reach the inbox");
+        match &items[0] {
+            InboxItem::External { envelope } => {
+                assert_eq!(envelope.id, envelope_id);
+                assert!(matches!(
+                    envelope.kind,
+                    MessageKind::Request { ref intent, .. } if intent == "supervisor.bridge"
+                ));
+            }
+            _ => panic!("expected External ingress item"),
+        }
     }
 }

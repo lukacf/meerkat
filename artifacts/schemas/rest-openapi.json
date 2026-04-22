@@ -212,11 +212,6 @@
         "summary": "Get session details"
       }
     },
-    "/sessions/{id}/accept-input": {
-      "post": {
-        "summary": "Accept a runtime input for a session"
-      }
-    },
     "/sessions/{id}/events": {
       "get": {
         "summary": "SSE event stream"
@@ -230,11 +225,6 @@
     "/sessions/{id}/history": {
       "get": {
         "summary": "Get full session history"
-      }
-    },
-    "/sessions/{id}/inputs": {
-      "get": {
-        "summary": "List active inputs for a session"
       }
     },
     "/sessions/{id}/interrupt": {
@@ -275,19 +265,29 @@
         "summary": "Get a session's realtime attachment status"
       }
     },
-    "/sessions/{id}/reset-runtime": {
+    "/sessions/{id}/reset": {
       "post": {
         "summary": "Reset a session runtime"
       }
     },
-    "/sessions/{id}/retire-runtime": {
+    "/sessions/{id}/retire": {
       "post": {
         "summary": "Retire a session runtime"
       }
     },
-    "/sessions/{id}/runtime-state": {
+    "/sessions/{id}/status": {
       "get": {
         "summary": "Get a session's current runtime state"
+      }
+    },
+    "/sessions/{id}/submissions": {
+      "get": {
+        "summary": "List active inputs for a session"
+      }
+    },
+    "/sessions/{id}/submit": {
+      "post": {
+        "summary": "Accept a runtime input for a session"
       }
     },
     "/sessions/{id}/system_context": {
@@ -295,7 +295,7 @@
         "summary": "Append system context to a session"
       }
     },
-    "/sessions/{session_id}/inputs/{input_id}": {
+    "/sessions/{session_id}/submissions/{submission_id}": {
       "get": {
         "summary": "Get the state of a specific input on a session"
       }

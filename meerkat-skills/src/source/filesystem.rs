@@ -157,15 +157,7 @@ fn record_failure(
 }
 
 fn default_source_uuid(scope: SkillScope) -> SourceUuid {
-    let raw = match scope {
-        SkillScope::Project => "00000000-0000-4000-8000-000000000101",
-        SkillScope::User => "00000000-0000-4000-8000-000000000102",
-        SkillScope::Builtin => "00000000-0000-4000-8000-000000000103",
-    };
-    match SourceUuid::parse(raw) {
-        Ok(source_uuid) => source_uuid,
-        Err(_) => unreachable!("hardcoded filesystem source UUID must remain valid"),
-    }
+    meerkat_core::skills_config::SkillsConfig::default_source_uuid_for_scope(scope)
 }
 
 /// Recursively find all `SKILL.md` files under `dir`.
@@ -641,7 +633,7 @@ mod tests {
         assert_eq!(diagnostics[0].skill_id.0, "broken/skill");
         assert_eq!(
             diagnostics[0].source_uuid.to_string(),
-            "00000000-0000-4000-8000-000000000101"
+            default_source_uuid(SkillScope::Project).to_string()
         );
         assert_eq!(diagnostics[0].error_class, "parse");
         assert_eq!(diagnostics[0].error_code, "parse_error");
@@ -670,7 +662,7 @@ mod tests {
         assert_eq!(first_diag.skill_id.0, "broken/skill");
         assert_eq!(
             first_diag.source_uuid.to_string(),
-            "00000000-0000-4000-8000-000000000101"
+            default_source_uuid(SkillScope::Project).to_string()
         );
         assert_eq!(first_diag.error_class, "parse");
         assert!(first_diag.location.ends_with("broken/skill/SKILL.md"));

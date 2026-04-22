@@ -1053,71 +1053,17 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     // returned watermark or via the freshly installed observer,
                     // never lost between the two.
                     let (wake_tx, mut wake_rx) = mpsc::channel::<()>(16);
-                    let realtime_handles =
-                        resolve_session_realtime_handles(&state.runtime, binding.as_ref()).await;
-                    let session_context_handle =
-                        realtime_handles.as_ref().map(|(ctx, _)| Arc::clone(ctx));
-                    let product_turn_handle =
-                        realtime_handles.as_ref().map(|(_, turn)| Arc::clone(turn));
-                    // Keep strong `Arc`s for both observers alive for the
-                    // socket's lifetime. The DSL handles store them as
-                    // `Weak` to avoid keeping the socket alive past its
-                    // natural teardown, but the caller MUST keep a matching
-                    // strong reference until the socket exits the select
-                    // loop — otherwise every `Weak::upgrade()` in the
-                    // effect-dispatch path returns `None` and the DSL
-                    // observer chain silently no-ops.
-                    let _wake_observer: Option<
-                        Arc<dyn meerkat_core::handles::RealtimeProjectionFreshnessObserver>,
-                    >;
-                    let _bridge_observer: Option<
-                        Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
-                    >;
-                    if let (Some(session_context), Some(product_turn)) = (
-                        session_context_handle.as_ref(),
-                        product_turn_handle.as_ref(),
-                    ) {
-                        // Install the freshness-wake observer first so the
-                        // baseline-reset transition that happens next lands on
-                        // a live observer (the wake is idempotent — the loop
-                        // will read the DSL state on its next poll).
-                        let wake_observer: Arc<
-                            dyn meerkat_core::handles::RealtimeProjectionFreshnessObserver,
-                        > = Arc::new(RealtimeSocketFreshnessWake {
-                            wake_tx: wake_tx.clone(),
-                        });
-                        product_turn
-                            .install_projection_freshness_observer(Arc::clone(&wake_observer));
-                        _wake_observer = Some(wake_observer);
-
-                        // Install the session-context → product-turn bridge.
-                        // The atomic baseline is used to seed the DSL frontier
-                        // to the session's current watermark so a freshly opened
-                        // socket starts `Clean` at the canonical frontier — no
-                        // spurious refresh on the very first observed tick.
-                        let bridge_observer: Arc<
-                            dyn meerkat_core::handles::SessionContextAdvancedObserver,
-                        > = Arc::new(BridgeProjectionToProductTurn {
-                            product_turn: Arc::clone(product_turn),
-                        });
-                        let initial_baseline_ms = session_context
-                            .install_observer_with_baseline(Arc::clone(&bridge_observer));
-                        _bridge_observer = Some(bridge_observer);
-                        // Seed the DSL freshness frontier to the sampled
-                        // watermark without scrubbing a newer observer tick that
-                        // might land after the install but before this seed call
-                        // runs. `projection_refreshed(baseline)` advances a
-                        // clean frontier to `baseline` in the common case, but
-                        // if a concurrent `context_advanced` already pushed the
-                        // frontier higher via the bridge observer, the
-                        // `not_behind_frontier` guard rejects and preserves the
-                        // owed stale state instead of collapsing it back to
-                        // `Clean`.
-                        let _ = product_turn.projection_refreshed(initial_baseline_ms);
-                    } else {
-                        _wake_observer = None;
-                        _bridge_observer = None;
-                    }
+                    let (
+                        mut session_context_handle,
+                        mut product_turn_handle,
+                        mut _wake_observer_guard,
+                        mut _bridge_observer_guard,
+                    ) = bind_realtime_session_observers(
+                        &state.runtime,
+                        binding.as_ref(),
+                        wake_tx.clone(),
+                    )
+                    .await;
 
                     loop {
                         tokio::select! {
@@ -2127,6 +2073,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 && *mob_id == event_mob_id
                                                 && *agent_identity == event_identity
                                             {
+                                                if *current_session_id == new_session_id {
+                                                    continue;
+                                                }
                                                 tracing::debug!(
                                                     %event_mob_id,
                                                     %event_identity,
@@ -2159,48 +2108,65 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         "realtime WS: failed to register rotated session executor; next status poll may fail"
                                                     );
                                                 }
-                                                // Attach the new session as a live
-                                                // realtime binding so subsequent status
-                                                // polls see it. Mirrors the
-                                                // `attach_live` call on initial bind for
-                                                // MobMember primaries.
-                                                if let Err(err) = state
-                                                    .runtime
-                                                    .runtime_adapter()
-                                                    .attach_live(&new_session_id)
+                                                let old_session_id = current_session_id.clone();
+                                                let rotated_status =
+                                                    match rotate_live_realtime_binding(
+                                                        &state.runtime,
+                                                        &old_session_id,
+                                                        &new_session_id,
+                                                        turning_mode,
+                                                        state.host.session_factory(),
+                                                        uses_product_session,
+                                                        &mut product_session,
+                                                    )
                                                     .await
-                                                {
-                                                    tracing::warn!(
-                                                        %event_mob_id,
-                                                        %event_identity,
-                                                        %new_session_id,
-                                                        ?err,
-                                                        "realtime WS: failed to attach rotated session"
-                                                    );
-                                                }
-                                                // Detach the old session so the runtime
-                                                // doesn't hold a stale live attachment
-                                                // for a bridge session that's already
-                                                // been retired.
-                                                let _ = state
-                                                    .runtime
-                                                    .runtime_adapter()
-                                                    .detach_live(current_session_id)
-                                                    .await;
+                                                    {
+                                                        Ok(status) => status,
+                                                        Err(error) => {
+                                                            let _ = send_server_frame(
+                                                                &mut socket,
+                                                                &RealtimeServerFrame::ChannelError(
+                                                                    error.clone(),
+                                                                ),
+                                                            )
+                                                            .await;
+                                                            let _ = send_server_frame(
+                                                                &mut socket,
+                                                                &RealtimeServerFrame::ChannelClosed(
+                                                                    RealtimeChannelClosedFrame {
+                                                                        reason: Some(
+                                                                            error.code.as_str()
+                                                                                .to_string(),
+                                                                        ),
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .await;
+                                                            break;
+                                                        }
+                                                    };
                                                 *current_session_id = new_session_id;
-                                                // Reset projection baseline so the
-                                                // poll-loop's next status tick is
-                                                // evaluated against the freshly
-                                                // rotated session. Dogma round 2
-                                                // U-C: fire the DSL
-                                                // `RealtimeProjectionReset` at the
-                                                // current session-context watermark.
-                                                if let (Some(session_context), Some(product_turn)) =
-                                                    (session_context_handle.as_ref(), product_turn_handle.as_ref())
-                                                {
-                                                    let watermark_ms = session_context.current_watermark_ms();
-                                                    let _ = product_turn.projection_reset(watermark_ms);
-                                                }
+                                                pending_turn = RealtimePendingTurn::default();
+                                                reconnect_overlay.clear();
+                                                (
+                                                    session_context_handle,
+                                                    product_turn_handle,
+                                                    _wake_observer_guard,
+                                                    _bridge_observer_guard,
+                                                ) = bind_realtime_session_observers(
+                                                    &state.runtime,
+                                                    binding.as_ref(),
+                                                    wake_tx.clone(),
+                                                )
+                                                .await;
+                                                let _ = emit_status_update(
+                                                    &mut socket,
+                                                    &mut last_visible_status,
+                                                    rotated_status,
+                                                    false,
+                                                    Some((state.host.as_ref(), &registered)),
+                                                )
+                                                .await;
                                             }
                                         }
                                         Some(Ok(MemberRealtimeBindingEvent::Released {
@@ -2495,14 +2461,15 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     }
                     // Dogma round 2 U-C: observer lifetime is bound to the
                     // strong `Arc`s the socket holds
-                    // (`_wake_observer`, `_bridge_observer`) plus the handle
+                    // (`_wake_observer_guard`, `_bridge_observer_guard`) plus
+                    // the handle
                     // `Arc`s themselves. The DSL-side observer slots store
                     // `Weak`s, so once these strong refs drop here the
                     // effect-dispatch `Weak::upgrade()` returns `None` and
                     // the observer chain goes silent — no separate task to
                     // abort.
-                    drop(_bridge_observer);
-                    drop(_wake_observer);
+                    drop(_bridge_observer_guard);
+                    drop(_wake_observer_guard);
                     drop(session_context_handle);
                     state.host.release_open(&registered).await;
                 }
@@ -2956,14 +2923,14 @@ fn projection_to_channel_status(projection: RealtimeBindingProjection) -> Realti
         },
         RealtimeBindingProjection::ReplacementPending => RealtimeChannelStatus {
             state: RealtimeChannelState::Reconnecting,
-            attempt_count: 0,
+            attempt_count: 1,
             next_retry_at: None,
             deadline_at: None,
             reason: Some("realtime attachment replacement is pending".to_string()),
         },
         RealtimeBindingProjection::ReattachRequired => RealtimeChannelStatus {
             state: RealtimeChannelState::Reconnecting,
-            attempt_count: 0,
+            attempt_count: 1,
             next_retry_at: None,
             deadline_at: None,
             reason: Some("realtime attachment requires reattach".to_string()),
@@ -3718,6 +3685,125 @@ async fn refresh_product_session_projection(
         update_rx,
     };
     Ok(())
+}
+
+type SessionContextHandleArc = Arc<dyn meerkat_core::handles::SessionContextHandle>;
+type RealtimeProductTurnHandleArc = Arc<dyn meerkat_core::handles::RealtimeProductTurnHandle>;
+type ProjectionWakeObserverArc =
+    Arc<dyn meerkat_core::handles::RealtimeProjectionFreshnessObserver>;
+type SessionContextObserverArc = Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>;
+
+async fn bind_realtime_session_observers(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+    wake_tx: mpsc::Sender<()>,
+) -> (
+    Option<SessionContextHandleArc>,
+    Option<RealtimeProductTurnHandleArc>,
+    Option<ProjectionWakeObserverArc>,
+    Option<SessionContextObserverArc>,
+) {
+    let realtime_handles = resolve_session_realtime_handles(runtime, binding).await;
+    let session_context_handle = realtime_handles.as_ref().map(|(ctx, _)| Arc::clone(ctx));
+    let product_turn_handle = realtime_handles.as_ref().map(|(_, turn)| Arc::clone(turn));
+    let (wake_observer, bridge_observer) = install_realtime_session_observers(
+        session_context_handle.as_ref(),
+        product_turn_handle.as_ref(),
+        wake_tx,
+    );
+    (
+        session_context_handle,
+        product_turn_handle,
+        wake_observer,
+        bridge_observer,
+    )
+}
+
+fn install_realtime_session_observers(
+    session_context_handle: Option<&SessionContextHandleArc>,
+    product_turn_handle: Option<&RealtimeProductTurnHandleArc>,
+    wake_tx: mpsc::Sender<()>,
+) -> (
+    Option<ProjectionWakeObserverArc>,
+    Option<SessionContextObserverArc>,
+) {
+    let (Some(session_context), Some(product_turn)) = (session_context_handle, product_turn_handle)
+    else {
+        return (None, None);
+    };
+    // Install the freshness-wake observer first so the baseline-reset
+    // transition that happens next lands on a live observer (the wake is
+    // idempotent — the loop will read the DSL state on its next poll).
+    let wake_observer: ProjectionWakeObserverArc =
+        Arc::new(RealtimeSocketFreshnessWake { wake_tx });
+    product_turn.install_projection_freshness_observer(Arc::clone(&wake_observer));
+
+    // Install the session-context → product-turn bridge. The atomic baseline
+    // is used to seed the DSL frontier to the session's current watermark so a
+    // freshly opened socket starts `Clean` at the canonical frontier — no
+    // spurious refresh on the very first observed tick.
+    let bridge_observer: SessionContextObserverArc = Arc::new(BridgeProjectionToProductTurn {
+        product_turn: Arc::clone(product_turn),
+    });
+    let initial_baseline_ms =
+        session_context.install_observer_with_baseline(Arc::clone(&bridge_observer));
+    // Seed the DSL freshness frontier to the sampled watermark without
+    // scrubbing a newer observer tick that might land after the install but
+    // before this seed call runs. `projection_refreshed(baseline)` advances a
+    // clean frontier to `baseline` in the common case, but if a concurrent
+    // `context_advanced` already pushed the frontier higher via the bridge
+    // observer, the `not_behind_frontier` guard rejects and preserves the
+    // owed stale state instead of collapsing it back to `Clean`.
+    let _ = product_turn.projection_refreshed(initial_baseline_ms);
+    (Some(wake_observer), Some(bridge_observer))
+}
+
+async fn rotate_live_realtime_binding(
+    runtime: &SessionRuntime,
+    old_session_id: &SessionId,
+    new_session_id: &SessionId,
+    turning_mode: meerkat_contracts::RealtimeTurningMode,
+    session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
+    uses_product_session: bool,
+    product_session: &mut Option<RealtimeProductSessionBridge>,
+) -> Result<RealtimeChannelStatus, RealtimeChannelErrorFrame> {
+    let (status, replacement_bridge) = if uses_product_session {
+        let session_factory = session_factory.ok_or_else(|| RealtimeChannelErrorFrame {
+            code: RealtimeErrorCode::ProviderSessionUnavailable,
+            message:
+                "realtime provider session factory is not available for rotated bridge recovery"
+                    .to_string(),
+            details: None,
+        })?;
+        let (status, bridge) =
+            open_product_session_bridge(runtime, new_session_id, turning_mode, session_factory)
+                .await?;
+        (status, Some(bridge))
+    } else {
+        runtime
+            .runtime_adapter()
+            .attach_live(new_session_id)
+            .await
+            .map_err(|err| runtime_error_frame(err, "attach"))?;
+        let status = runtime
+            .runtime_adapter()
+            .realtime_attachment_status(new_session_id)
+            .await
+            .map(session_projection_from_runtime)
+            .map(projection_to_channel_status)
+            .map_err(|err| runtime_error_frame(err, "status"))?;
+        (status, None)
+    };
+
+    if let Some(previous_product_session) = product_session.take() {
+        let _ = previous_product_session
+            .command_tx
+            .send(RealtimeProductSessionCommand::Close)
+            .await;
+    }
+    let _ = runtime.runtime_adapter().detach_live(old_session_id).await;
+    *product_session = replacement_bridge;
+    Ok(status)
 }
 
 /// Observer installed on the session's [`SessionContextHandle`] (dogma

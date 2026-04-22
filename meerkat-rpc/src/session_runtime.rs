@@ -13,6 +13,7 @@
 mod schedule_host;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -627,6 +628,8 @@ pub struct SessionRuntime {
     /// connects (each connection has its own transport sink).
     notification_sink: StdRwLock<crate::router::NotificationSink>,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
+    skill_identity_context_root: Arc<StdRwLock<Option<PathBuf>>>,
+    skill_identity_user_root: Arc<StdRwLock<Option<PathBuf>>>,
     #[cfg(feature = "mob")]
     mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
     #[cfg(feature = "mcp")]
@@ -741,6 +744,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mob")]
             mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
@@ -808,6 +813,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mob")]
             mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
@@ -832,6 +839,33 @@ impl SessionRuntime {
         self.realm_id = realm_id;
         self.instance_id = instance_id;
         self.backend = backend;
+    }
+
+    pub fn set_skill_identity_roots(
+        &mut self,
+        context_root: Option<PathBuf>,
+        user_root: Option<PathBuf>,
+    ) {
+        if let Ok(mut slot) = self.skill_identity_context_root.write() {
+            *slot = context_root;
+        }
+        if let Ok(mut slot) = self.skill_identity_user_root.write() {
+            *slot = user_root;
+        }
+    }
+
+    pub fn skill_identity_roots(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        let context_root = self
+            .skill_identity_context_root
+            .read()
+            .map(|slot| slot.clone())
+            .unwrap_or(None);
+        let user_root = self
+            .skill_identity_user_root
+            .read()
+            .map(|slot| slot.clone())
+            .unwrap_or(None);
+        (context_root, user_root)
     }
 
     /// Set the default mob tools factory for all agents built by this runtime.
@@ -994,6 +1028,7 @@ impl SessionRuntime {
                     .map(encode_llm_client_override_for_service),
                 external_tools: self.recovery_external_tools(),
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                require_runtime_build_mode: true,
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
                 backend: self.backend.clone(),
@@ -2507,8 +2542,20 @@ impl SessionRuntime {
     /// Build a source identity registry from runtime config.
     pub fn build_skill_identity_registry(
         config: &Config,
+        context_root: Option<&std::path::Path>,
+        user_root: Option<&std::path::Path>,
     ) -> Result<SourceIdentityRegistry, SkillError> {
-        config.skills.build_source_identity_registry()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            config
+                .skills
+                .build_source_identity_registry_with_roots(context_root, user_root)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (context_root, user_root);
+            config.skills.build_source_identity_registry()
+        }
     }
 
     /// Create a new session with the given build configuration.
@@ -6513,7 +6560,7 @@ mod tests {
             ..Config::default()
         };
 
-        let result = SessionRuntime::build_skill_identity_registry(&cfg);
+        let result = SessionRuntime::build_skill_identity_registry(&cfg, None, None);
         assert!(matches!(
             result,
             Err(meerkat_core::skills::SkillError::MissingSkillRemaps { .. })

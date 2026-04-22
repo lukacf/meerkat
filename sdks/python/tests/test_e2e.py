@@ -98,6 +98,9 @@ async def test_python_sdk_live_mob_stream_explicit_close():
     )
 
     async with MeerkatClient(rpc_path) as client:
+        if not client.has_capability("mob"):
+            pytest.skip("packaged binary does not advertise mob capability")
+
         mob = await client.create_mob(
             definition={
                 "id": "coding_swarm",

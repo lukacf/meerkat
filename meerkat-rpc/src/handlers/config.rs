@@ -90,7 +90,11 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> 
 }
 
 #[allow(clippy::result_large_err)]
-fn validate_config_for_commit(id: Option<RpcId>, config: &Config) -> Result<(), RpcResponse> {
+fn validate_config_for_runtime(
+    id: Option<RpcId>,
+    config: &Config,
+    runtime: &SessionRuntime,
+) -> Result<(), RpcResponse> {
     config.validate().map_err(|err| {
         RpcResponse::error(
             id.clone(),
@@ -98,21 +102,41 @@ fn validate_config_for_commit(id: Option<RpcId>, config: &Config) -> Result<(), 
             format!("Invalid config: {err}"),
         )
     })?;
-    build_registry_or_invalid_params(id, config).map(|_| ())
+    build_registry_for_runtime(id, config, runtime).map(|_| ())
 }
 
 #[allow(clippy::result_large_err)]
 fn build_registry_or_invalid_params(
     id: Option<RpcId>,
     config: &Config,
+    context_root: Option<&std::path::Path>,
+    user_root: Option<&std::path::Path>,
 ) -> Result<meerkat_core::skills::SourceIdentityRegistry, RpcResponse> {
-    SessionRuntime::build_skill_identity_registry(config).map_err(|err| {
+    SessionRuntime::build_skill_identity_registry(config, context_root, user_root).map_err(|err| {
         RpcResponse::error(
             id,
             error::INVALID_PARAMS,
             format!("Invalid skills source-identity configuration: {err}"),
         )
     })
+}
+
+fn runtime_skill_identity_roots(
+    runtime: &SessionRuntime,
+) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    let (context_root, user_root) = runtime.skill_identity_roots();
+    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    (context_root, user_root.or(default_user_root))
+}
+
+#[allow(clippy::result_large_err)]
+fn build_registry_for_runtime(
+    id: Option<RpcId>,
+    config: &Config,
+    runtime: &SessionRuntime,
+) -> Result<meerkat_core::skills::SourceIdentityRegistry, RpcResponse> {
+    let (context_root, user_root) = runtime_skill_identity_roots(runtime);
+    build_registry_or_invalid_params(id, config, context_root.as_deref(), user_root.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -169,11 +193,11 @@ pub async fn handle_set(
         }
     };
 
-    if let Err(response) = validate_config_for_commit(id.clone(), &config) {
+    if let Err(response) = validate_config_for_runtime(id.clone(), &config, runtime) {
         return response;
     }
 
-    let registry = match build_registry_or_invalid_params(id.clone(), &config) {
+    let registry = match build_registry_for_runtime(id.clone(), &config, runtime) {
         Ok(registry) => registry,
         Err(response) => return response,
     };
@@ -182,16 +206,18 @@ pub async fn handle_set(
         match config_runtime.set(config, expected_generation).await {
             Ok(snapshot) => {
                 let committed_registry =
-                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                    match build_registry_for_runtime(id.clone(), &snapshot.config, runtime) {
                         Ok(registry) => registry,
-                        Err(err) => {
-                            return RpcResponse::error(
-                                id,
-                                error::INTERNAL_ERROR,
-                                format!(
-                                    "Committed config has invalid source-identity registry: {err}"
-                                ),
-                            );
+                        Err(response) => {
+                            let message = response
+                                .error
+                                .as_ref()
+                                .map(|error| error.message.clone())
+                                .unwrap_or_else(|| {
+                                    "Committed config has invalid source-identity registry"
+                                        .to_string()
+                                });
+                            return RpcResponse::error(id, error::INTERNAL_ERROR, message);
                         }
                     };
                 runtime.set_skill_identity_registry_for_generation(
@@ -260,7 +286,7 @@ pub async fn handle_patch(
                 );
             }
         };
-        if let Err(response) = validate_config_for_commit(id.clone(), &preview) {
+        if let Err(response) = validate_config_for_runtime(id.clone(), &preview, runtime) {
             return response;
         }
 
@@ -270,16 +296,18 @@ pub async fn handle_patch(
         {
             Ok(snapshot) => {
                 let committed_registry =
-                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                    match build_registry_for_runtime(id.clone(), &snapshot.config, runtime) {
                         Ok(registry) => registry,
-                        Err(err) => {
-                            return RpcResponse::error(
-                                id,
-                                error::INTERNAL_ERROR,
-                                format!(
-                                    "Committed config has invalid source-identity registry: {err}"
-                                ),
-                            );
+                        Err(response) => {
+                            let message = response
+                                .error
+                                .as_ref()
+                                .map(|error| error.message.clone())
+                                .unwrap_or_else(|| {
+                                    "Committed config has invalid source-identity registry"
+                                        .to_string()
+                                });
+                            return RpcResponse::error(id, error::INTERNAL_ERROR, message);
                         }
                     };
                 runtime.set_skill_identity_registry_for_generation(
@@ -312,10 +340,10 @@ pub async fn handle_patch(
                 );
             }
         };
-        if let Err(response) = validate_config_for_commit(id.clone(), &preview) {
+        if let Err(response) = validate_config_for_runtime(id.clone(), &preview, runtime) {
             return response;
         }
-        let registry = match build_registry_or_invalid_params(id.clone(), &preview) {
+        let registry = match build_registry_for_runtime(id.clone(), &preview, runtime) {
             Ok(registry) => registry,
             Err(response) => return response,
         };

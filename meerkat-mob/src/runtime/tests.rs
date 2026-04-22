@@ -16469,6 +16469,19 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .or_default()
             .push(req.render_metadata.clone());
 
+        if let Some(notifier) = self
+            .keep_alive_notifiers
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            && !self
+                .keep_alive_turns_complete_immediately
+                .load(Ordering::Relaxed)
+        {
+            notifier.notified().await;
+        }
+
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
             receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
                 run_id,
@@ -16603,6 +16616,582 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
         delivered.has_images(),
         "peer message image block should survive runtime delivery: {delivered:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "exploratory runtime-backed kickoff contract; follow-up hardening pending"]
+async fn test_wait_for_ready_blocks_until_autonomous_kickoff_resolves() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, _service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-ready"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ready"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+
+    let kickoff = tokio::time::timeout(
+        Duration::from_millis(250),
+        handle.wait_for_members_kickoff_complete(
+            &[
+                AgentIdentity::from("l-ready"),
+                AgentIdentity::from("w-ready"),
+            ],
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        kickoff.is_err(),
+        "the harness should still have pending kickoff turns before they are explicitly released"
+    );
+
+    let ready = tokio::time::timeout(Duration::from_millis(250), handle.wait_for_ready(None)).await;
+    assert!(
+        ready.is_err(),
+        "wait_for_ready must not resolve while autonomous kickoff turns are still pending"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after readiness assertion")
+        .expect("stop after readiness assertion");
+}
+
+#[tokio::test]
+#[ignore = "exploratory runtime-backed active-member delivery probe; smoke lane covers the end-to-end contract"]
+async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settles() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+
+    let sid_a = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-prekickoff"),
+            None,
+        )
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_b = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-prekickoff"),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("l-prekickoff"),
+            MeerkatId::from("w-prekickoff"),
+        )
+        .await
+        .expect("wire should succeed");
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("wait_for_ready should resolve for startup-ready autonomous members");
+
+    let baseline_prompts = service.applied_runtime_prompts(&sid_b).await.len();
+    let comms_a = service
+        .real_comms(&sid_a)
+        .await
+        .expect("comms for l-prekickoff");
+    let receipt = CoreCommsRuntime::send(
+        &*comms_a,
+        CommsCommand::PeerMessage {
+            to: PeerName::new(test_comms_name("worker", "w-prekickoff")).expect("valid peer name"),
+            body: "body: immediate orchestration after wait_for_ready".to_string(),
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "caption: startup-ready multimodal comms must still deliver".to_string(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".into(),
+                },
+            ]),
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+        },
+    )
+    .await
+    .expect("PeerMessage should succeed");
+    assert!(
+        matches!(receipt, SendReceipt::PeerMessageSent { .. }),
+        "expected PeerMessageSent receipt, got: {receipt:?}"
+    );
+
+    let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_b).await;
+            if let Some(prompt) = prompts
+                .iter()
+                .skip(baseline_prompts)
+                .find(|prompt| {
+                    let text = prompt.text_content();
+                    prompt.has_images()
+                        || text.contains("body: immediate orchestration after wait_for_ready")
+                        || text
+                            .contains("caption: startup-ready multimodal comms must still deliver")
+                })
+                .cloned()
+            {
+                break prompt;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("peer message should reach a startup-ready autonomous member");
+    let delivered_text = delivered.text_content();
+    assert!(
+        delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-prekickoff]"),
+        "peer message should carry comms source label: {delivered_text:?}"
+    );
+    assert!(
+        delivered_text.contains("caption: startup-ready multimodal comms must still deliver"),
+        "peer message text block should survive runtime delivery: {delivered_text:?}"
+    );
+    assert!(
+        delivered.has_images(),
+        "peer message image block should survive runtime delivery: {delivered:?}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after direct peer delivery assertion")
+        .expect("stop after direct peer delivery assertion");
+}
+
+#[tokio::test]
+#[ignore = "exploratory runtime-backed multi-recipient delivery probe; smoke lane covers the end-to-end contract"]
+async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_settles() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+
+    let sid_lead = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-multi"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let targets = [
+        ("w-multi-1", "worker"),
+        ("w-multi-2", "worker"),
+        ("w-multi-3", "worker"),
+    ];
+    let mut target_sessions = Vec::new();
+    for (agent_identity, profile) in targets {
+        let sid = handle
+            .spawn(
+                ProfileName::from(profile),
+                MeerkatId::from(agent_identity),
+                None,
+            )
+            .await
+            .expect("spawn worker")
+            .bridge_session_id()
+            .expect("session-backed")
+            .clone();
+        handle
+            .wire(
+                AgentIdentity::from("l-multi"),
+                MeerkatId::from(agent_identity),
+            )
+            .await
+            .expect("wire should succeed");
+        target_sessions.push((agent_identity.to_string(), sid));
+    }
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("wait_for_ready should resolve for startup-ready autonomous members");
+
+    let baselines = futures::future::join_all(
+        target_sessions
+            .iter()
+            .map(|(_, sid)| service.applied_runtime_prompts(sid)),
+    )
+    .await
+    .into_iter()
+    .map(|prompts| prompts.len())
+    .collect::<Vec<_>>();
+
+    let comms_lead = service.real_comms(&sid_lead).await.expect("comms for lead");
+    for (agent_identity, _) in &target_sessions {
+        let receipt = CoreCommsRuntime::send(
+            &*comms_lead,
+            CommsCommand::PeerMessage {
+                to: PeerName::new(test_comms_name("worker", agent_identity))
+                    .expect("valid peer name"),
+                body: format!("body: fanout to {agent_identity}"),
+                blocks: Some(vec![
+                    meerkat_core::types::ContentBlock::Text {
+                        text: format!("caption: fanout should reach {agent_identity}"),
+                    },
+                    meerkat_core::types::ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "aGVsbG8=".into(),
+                    },
+                ]),
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+            },
+        )
+        .await
+        .expect("PeerMessage should succeed");
+        assert!(
+            matches!(receipt, SendReceipt::PeerMessageSent { .. }),
+            "expected PeerMessageSent receipt, got: {receipt:?}"
+        );
+    }
+
+    for ((agent_identity, sid), baseline_prompts) in target_sessions.iter().zip(baselines.iter()) {
+        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let prompts = service.applied_runtime_prompts(sid).await;
+                if let Some(prompt) = prompts
+                    .iter()
+                    .skip(*baseline_prompts)
+                    .find(|prompt| {
+                        let text = prompt.text_content();
+                        prompt.has_images()
+                            || text.contains(&format!("body: fanout to {agent_identity}"))
+                            || text
+                                .contains(&format!("caption: fanout should reach {agent_identity}"))
+                    })
+                    .cloned()
+                {
+                    break prompt;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("peer message should reach {agent_identity}"));
+
+        let delivered_text = delivered.text_content();
+        assert!(
+            delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-multi]"),
+            "peer message should carry comms source label for {agent_identity}: {delivered_text:?}"
+        );
+        assert!(
+            delivered_text.contains(&format!("caption: fanout should reach {agent_identity}")),
+            "peer message text block should survive runtime delivery for {agent_identity}: {delivered_text:?}"
+        );
+        assert!(
+            delivered.has_images(),
+            "peer message image block should survive runtime delivery for {agent_identity}: {delivered:?}"
+        );
+    }
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after multi-recipient delivery assertion")
+        .expect("stop after multi-recipient delivery assertion");
+}
+
+#[tokio::test]
+async fn test_running_peer_message_to_autonomous_member_drains_after_current_apply() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_artist = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-artist"), None)
+        .await
+        .expect("spawn artist")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_helper = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-helper"), None)
+        .await
+        .expect("spawn helper")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_worker = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-target"),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(AgentIdentity::from("l-artist"), MeerkatId::from("w-target"))
+        .await
+        .expect("wire artist→worker");
+    handle
+        .wire(AgentIdentity::from("l-helper"), MeerkatId::from("w-target"))
+        .await
+        .expect("wire helper→worker");
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("startup should settle with immediate keep-alive completions");
+    handle
+        .wait_for_members_kickoff_complete(
+            &[
+                AgentIdentity::from("l-artist"),
+                AgentIdentity::from("l-helper"),
+                AgentIdentity::from("w-target"),
+            ],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("kickoff should resolve before we switch into blocked-turn mode");
+
+    let baseline_prompts = service.applied_runtime_prompts(&sid_worker).await.len();
+    service.set_keep_alive_turns_complete_immediately(false);
+
+    let artist_comms = service.real_comms(&sid_artist).await.expect("artist comms");
+    let helper_comms = service.real_comms(&sid_helper).await.expect("helper comms");
+
+    CoreCommsRuntime::send(
+        &*artist_comms,
+        CommsCommand::PeerMessage {
+            to: PeerName::new(test_comms_name("worker", "w-target")).expect("valid peer name"),
+            body: "body: first peer message".to_string(),
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "caption: first peer message".to_string(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".into(),
+                },
+            ]),
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+        },
+    )
+    .await
+    .expect("first peer message should succeed");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_worker).await;
+            if prompts.iter().skip(baseline_prompts).any(|prompt| {
+                prompt.has_images()
+                    || prompt
+                        .text_content()
+                        .contains("caption: first peer message")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("worker should begin applying the first peer message");
+
+    CoreCommsRuntime::send(
+        &*helper_comms,
+        CommsCommand::PeerMessage {
+            to: PeerName::new(test_comms_name("worker", "w-target")).expect("valid peer name"),
+            body: "body: second peer message while running".to_string(),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+        },
+    )
+    .await
+    .expect("second peer message should succeed");
+
+    service
+        .interrupt(&sid_worker)
+        .await
+        .expect("interrupt should release blocked worker apply");
+
+    let delivered_second = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_worker).await;
+            if prompts.iter().skip(baseline_prompts + 1).any(|prompt| {
+                prompt
+                    .text_content()
+                    .contains("body: second peer message while running")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after running peer message assertion")
+        .expect("stop after running peer message assertion");
+
+    delivered_second.expect(
+        "second steer peer message should drain onto the next apply after the active turn completes",
+    );
+}
+
+#[tokio::test]
+#[ignore = "exploratory runtime-backed peer-response wake contract; follow-up hardening pending"]
+async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_requester = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-requester"),
+            None,
+        )
+        .await
+        .expect("spawn requester")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_responder = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-responder"),
+            None,
+        )
+        .await
+        .expect("spawn responder")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("l-requester"),
+            MeerkatId::from("w-responder"),
+        )
+        .await
+        .expect("wire requester↔responder");
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("wait_for_ready should resolve");
+
+    let requester_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
+    let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
+
+    let requester_comms = service
+        .real_comms(&sid_requester)
+        .await
+        .expect("requester comms");
+    let responder_comms = service
+        .real_comms(&sid_responder)
+        .await
+        .expect("responder comms");
+
+    let receipt = CoreCommsRuntime::send(
+        &*requester_comms,
+        CommsCommand::PeerRequest {
+            to: PeerName::new(test_comms_name("worker", "w-responder")).expect("valid peer name"),
+            intent: "interpret_image".to_string(),
+            params: serde_json::json!({"description":"tower with a light"}),
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+            stream: meerkat_core::InputStreamMode::ReserveInteraction,
+        },
+    )
+    .await
+    .expect("peer request should succeed");
+    let request_id = match receipt {
+        SendReceipt::PeerRequestSent { interaction_id, .. } => interaction_id,
+        other => panic!("expected PeerRequestSent receipt, got {other:?}"),
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_responder).await;
+            if prompts.iter().skip(responder_baseline).any(|prompt| {
+                prompt
+                    .text_content()
+                    .contains("[SYSTEM NOTICE][PEER_REQUEST]")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("responder should receive the peer request");
+
+    CoreCommsRuntime::send(
+        &*responder_comms,
+        CommsCommand::PeerResponse {
+            to: PeerName::new(test_comms_name("lead", "l-requester")).expect("valid peer name"),
+            in_reply_to: request_id,
+            status: meerkat_core::ResponseStatus::Completed,
+            result: serde_json::json!({"interpretation":"lighthouse"}),
+            handling_mode: None,
+        },
+    )
+    .await
+    .expect("peer response should succeed");
+
+    let requester_response_delivery = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_requester).await;
+            if prompts.iter().skip(requester_baseline).any(|prompt| {
+                let text = prompt.text_content();
+                text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                    && text.contains("from test-mob/worker/w-responder")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after peer response assertion")
+        .expect("stop after peer response assertion");
+
+    if requester_response_delivery.is_err() {
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_requester)
+            .await
+            .expect("requester snapshot should still exist");
+        let has_executor = service
+            .runtime_adapter
+            .session_has_executor(&sid_requester)
+            .await;
+        let has_comms = service
+            .runtime_adapter
+            .session_has_comms(&sid_requester)
+            .await;
+        panic!(
+            "requester should receive the terminal peer response; has_executor={has_executor} has_comms={has_comms} snapshot={snapshot:?}"
+        );
+    }
 }
 
 #[tokio::test]

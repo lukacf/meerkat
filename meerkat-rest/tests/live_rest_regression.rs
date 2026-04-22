@@ -88,6 +88,8 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         enable_builtins: false,
         enable_shell: false,
         project_root: Some(project_root),
+        context_root: None,
+        user_config_root: None,
         llm_client_override: Some(client),
         config_store: config_store_arc,
         event_tx,

@@ -3,10 +3,9 @@
 //! Each incoming connection spawns an IO task that:
 //! 1. Reads envelope (with length-prefix framing)
 //! 2. Verifies signature (optional)
-//! 3. Checks sender in trusted list (when peer-auth is enabled)
-//! 4. If valid: sends Ack immediately (unless it's an Ack or Response)
-//! 5. Enqueues to inbox
-//! 6. Closes connection (or keeps alive)
+//! 3. Runs ingress admission through the inbox seam
+//! 4. If admitted: sends Ack (unless it's an Ack or Response)
+//! 5. Closes connection (or keeps alive)
 
 use std::sync::Arc;
 
@@ -21,19 +20,19 @@ use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::transport::TransportError;
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::trust::TrustedPeers;
-use crate::types::{Envelope, InboxItem, MessageKind};
+use crate::types::{Envelope, MessageKind};
 
 /// Handle an incoming connection.
 ///
-/// Reads envelopes, validates them, sends acks as appropriate, and enqueues to inbox.
+/// Reads envelopes, validates them, admits them through the inbox seam,
+/// then sends acks for admitted ingress as appropriate.
 ///
 /// # Arguments
 /// * `stream` - The async read/write stream (e.g., TcpStream or UnixStream)
 /// * `keypair` - Our keypair for signing acks
 /// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
-/// * `trusted` - Router-owned trust set. The IO task reads through this
-///   shared handle (no snapshot clone) so admission and the transport-level
-///   trust gate cannot diverge on live mutation.
+/// * `trusted` - Router-owned trust set. `InboxSender` consults this on the
+///   raw fallback path so ingress trust still has a single semantic owner.
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
@@ -70,21 +69,6 @@ where
         return Ok(());
     }
 
-    // Trust gate — single read through the router-owned
-    // `Arc<RwLock<TrustedPeers>>`. The inbox admission gate consults the
-    // same handle, so a snapshot divergence between prefilter and admission
-    // is impossible. We keep this check here (rather than deferring all the
-    // way to admission) so untrusted senders do not receive an ack, which
-    // avoids leaking "I'm live" to unauthenticated scanners.
-    if require_peer_auth && !trusted.read().is_trusted(&envelope.from) {
-        tracing::warn!(
-            "Dropped message {} from {:?}: sender not trusted",
-            envelope.id,
-            envelope.from
-        );
-        return Ok(());
-    }
-
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
         tracing::warn!(
@@ -97,22 +81,21 @@ where
         return Ok(());
     }
 
-    // Send ack if appropriate (not for Ack or Response)
-    if should_ack(&envelope.kind) {
-        let ack = create_ack(&envelope, keypair);
-        let frame = EnvelopeFrame {
-            envelope: ack,
-            raw: Arc::new(Bytes::new()),
-        };
-        framed.send(frame).await?;
-    }
-
-    // Enqueue to inbox (with classification if context is available).
-    // Typed admission outcome: explicit drops are surfaced as `IoTaskError`
-    // so the IO task can react (close connection, log, etc.) rather than
-    // silently returning `Ok(())`.
-    match inbox_sender.send_classified(InboxItem::External { envelope }) {
-        AdmissionOutcome::Admitted => Ok(()),
+    // Admit through the inbox seam first. Typed admission outcome: explicit
+    // drops are surfaced as `IoTaskError` so the IO task can react (close
+    // connection, log, etc.) rather than silently returning `Ok(())`.
+    match inbox_sender.send_connection_ingress(envelope.clone(), require_peer_auth, trusted) {
+        AdmissionOutcome::Admitted => {
+            if should_ack(&envelope.kind) {
+                let ack = create_ack(&envelope, keypair);
+                let frame = EnvelopeFrame {
+                    envelope: ack,
+                    raw: Arc::new(Bytes::new()),
+                };
+                framed.send(frame).await?;
+            }
+            Ok(())
+        }
         AdmissionOutcome::Dropped { reason } => Err(match reason {
             DropReason::SessionClosed => IoTaskError::InboxClosed,
             DropReason::InboxFull => IoTaskError::InboxFull,
@@ -176,6 +159,7 @@ mod tests {
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
     use crate::trust::TrustedPeer;
+    use crate::types::InboxItem;
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::codec::FramedRead;
@@ -351,7 +335,10 @@ mod tests {
 
         let result =
             handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
-        assert!(result.is_ok()); // Silent drop, not an error
+        assert!(matches!(
+            result,
+            Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
+        ));
 
         // No item in inbox
         let items = inbox.try_drain();
@@ -756,9 +743,12 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
-            .await
-            .unwrap();
+        let result =
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        assert!(matches!(
+            result,
+            Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
+        ));
 
         // No ack sent - connection closes without data
         let result = read_one_envelope(&mut client_read).await;
@@ -767,6 +757,45 @@ mod tests {
         // No inbox item
         let items = inbox.try_drain();
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ack_waits_for_final_admission_outcome() {
+        // DOGMA-12 defensive scan: if admission rejects the ingress item,
+        // the transport must not send an Ack first.
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let trusted = make_trusted_peers(&sender_keypair.public_key());
+        let (inbox, inbox_sender) = Inbox::new();
+        drop(inbox);
+
+        let envelope = make_signed_envelope(
+            &sender_keypair,
+            receiver_keypair.public_key(),
+            MessageKind::Message {
+                blocks: None,
+                body: "hello".to_string(),
+                handling_mode: None,
+            },
+        );
+        let bytes = envelope_to_bytes(&envelope).await;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        let result =
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        assert!(matches!(result, Err(IoTaskError::InboxClosed)));
+
+        let read_result = read_one_envelope(&mut client_read).await;
+        assert!(
+            read_result.is_err(),
+            "admission rejection must not leak an Ack before the final outcome"
+        );
     }
 
     /// Regression: the IO task must read trust through the shared

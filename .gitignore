@@ -26,7 +26,9 @@
 # Temporary files
 nohup.out
 .release-hook-done
-.rct/
+.rct/*
+!.rct/round5/
+!.rct/round5/**
 test-project/
 .cache/
 .codemob-mcp/

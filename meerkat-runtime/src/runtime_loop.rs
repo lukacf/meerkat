@@ -12,6 +12,10 @@ use meerkat_core::lifecycle::run_primitive::{
     RunApplyBoundary, RunPrimitive, StagedRunInput,
 };
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::{
+    PeerConversationProjection, PeerResponseProgressProjectionPhase,
+    PeerResponseTerminalProjectionStatus,
+};
 
 use crate::input::Input;
 use crate::tokio;
@@ -231,93 +235,96 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 }
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let Input::Peer(peer) = input else {
-        return None;
-    };
-    let (
-        Some(crate::input::PeerConvention::ResponseTerminal { request_id, .. }),
-        crate::input::InputOrigin::Peer { peer_id, .. },
-    ) = (&peer.convention, &peer.header.source)
-    else {
-        return None;
-    };
+    let projection = peer_projection(input)?;
 
     Some(ConversationContextAppend {
-        // Transitional but runtime-owned: until the machine/DSL branch lands,
-        // correlated terminal peer results need one durable semantic owner.
-        // Using a stable context key here keeps replacement/dedup on the core
-        // session context path instead of helper-local comms state.
-        key: format!("peer_response_terminal:{peer_id}:{request_id}"),
+        key: projection.context_key()?,
         content: CoreRenderable::Text {
-            text: input_to_prompt(input),
+            text: projection.prompt_text(),
         },
     })
 }
 
 fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
-    match (&peer.convention, &peer.header.source) {
-        (
-            Some(crate::input::PeerConvention::Message),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => Some(format!("[COMMS MESSAGE from {peer_id}]")),
-        _ => None,
-    }
+    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
 }
 
 fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
-    match (&peer.convention, &peer.header.source) {
-        (
-            Some(crate::input::PeerConvention::Request { request_id, intent }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            // Transitional but intentional: until the machine/DSL branch owns a
-            // first-class peer-request/peer-response semantic seam, the runtime
-            // must derive the correlated request/response prompt text from the
-            // typed peer convention and payload here. We keep the ownership on
-            // runtime admission rather than trusting helper-rendered comms text,
-            // because the typed ingress record is already the most authoritative
-            // fact available on this branch.
-            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        (
-            Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
-            response_progress_phase_label(phase),
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        (
-            Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }),
-            crate::input::InputOrigin::Peer { peer_id, .. },
-        ) => format!(
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {peer_id}. Request ID: {request_id}. Status: {}. Result: {}.",
-            response_terminal_status_label(status),
-            format_peer_payload(peer.payload.as_ref())
-        ),
-        _ => peer.body.clone(),
-    }
+    peer_projection_from_peer_input(peer)
+        .map(|projection| {
+            let prompt = projection.prompt_text();
+            if prompt.is_empty() {
+                peer.body.clone()
+            } else {
+                prompt
+            }
+        })
+        .unwrap_or_else(|| peer.body.clone())
 }
 
-fn format_peer_payload(payload: Option<&serde_json::Value>) -> String {
-    serde_json::to_string_pretty(payload.unwrap_or(&serde_json::Value::Null))
-        .unwrap_or_else(|_| "null".to_string())
+fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
+    let Input::Peer(peer) = input else {
+        return None;
+    };
+    peer_projection_from_peer_input(peer)
 }
 
-fn response_progress_phase_label(phase: &crate::input::ResponseProgressPhase) -> &'static str {
-    match phase {
-        crate::input::ResponseProgressPhase::Accepted => "accepted",
-        crate::input::ResponseProgressPhase::InProgress => "in_progress",
-        crate::input::ResponseProgressPhase::PartialResult => "partial_result",
-    }
-}
+fn peer_projection_from_peer_input(
+    peer: &crate::input::PeerInput,
+) -> Option<PeerConversationProjection> {
+    let crate::input::InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
 
-fn response_terminal_status_label(status: &crate::input::ResponseTerminalStatus) -> &'static str {
-    match status {
-        crate::input::ResponseTerminalStatus::Completed => "completed",
-        crate::input::ResponseTerminalStatus::Failed => "failed",
-        crate::input::ResponseTerminalStatus::Cancelled => "cancelled",
+    match &peer.convention {
+        Some(crate::input::PeerConvention::Message) => Some(PeerConversationProjection::Message {
+            peer_id: peer_id.clone(),
+        }),
+        Some(crate::input::PeerConvention::Request { request_id, intent }) => {
+            Some(PeerConversationProjection::Request {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                intent: intent.clone(),
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }) => {
+            Some(PeerConversationProjection::ResponseProgress {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                phase: match phase {
+                    crate::input::ResponseProgressPhase::Accepted => {
+                        PeerResponseProgressProjectionPhase::Accepted
+                    }
+                    crate::input::ResponseProgressPhase::InProgress => {
+                        PeerResponseProgressProjectionPhase::InProgress
+                    }
+                    crate::input::ResponseProgressPhase::PartialResult => {
+                        PeerResponseProgressProjectionPhase::PartialResult
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }) => {
+            Some(PeerConversationProjection::ResponseTerminal {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                status: match status {
+                    crate::input::ResponseTerminalStatus::Completed => {
+                        PeerResponseTerminalProjectionStatus::Completed
+                    }
+                    crate::input::ResponseTerminalStatus::Failed => {
+                        PeerResponseTerminalProjectionStatus::Failed
+                    }
+                    crate::input::ResponseTerminalStatus::Cancelled => {
+                        PeerResponseTerminalProjectionStatus::Cancelled
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        None => None,
     }
 }
 
@@ -985,6 +992,35 @@ mod tests {
             handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
+    }
+
+    #[test]
+    fn input_to_prompt_peer_message_uses_body_when_projection_text_is_empty() {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            body: "[COMMS MESSAGE from peer-1]\nplain body payload".into(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        });
+
+        assert_eq!(
+            input_to_prompt(&input),
+            "[COMMS MESSAGE from peer-1]\nplain body payload"
+        );
     }
 
     #[test]

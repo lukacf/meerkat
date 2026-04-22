@@ -177,13 +177,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap_or_else(|_| Config::default());
     config.apply_env_overrides()?;
+    let cli_user_root = cli.user_config_root.clone();
+    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let identity_registry =
-        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(&config)
-            .map_err(|err| {
-                std::io::Error::other(format!(
-                    "failed to build skills source-identity registry from config: {err}"
-                ))
-            })?;
+        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(
+            &config,
+            cli.context_root.as_deref(),
+            cli_user_root.as_deref().or(default_user_root.as_deref()),
+        )
+        .map_err(|err| {
+            std::io::Error::other(format!(
+                "failed to build skills source-identity registry from config: {err}"
+            ))
+        })?;
 
     let store_path = persistence
         .store_path()
@@ -241,6 +247,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         64,
         persistence,
         meerkat_rpc::router::NotificationSink::noop(),
+    );
+    runtime.set_skill_identity_roots(
+        cli.context_root.clone(),
+        cli_user_root.clone().or(default_user_root.clone()),
     );
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_realm_context(

@@ -8,7 +8,9 @@ pub mod query;
 mod registry;
 
 pub use query::{CapabilitiesResponse, CapabilityEntry};
-pub use registry::{CapabilityRegistration, build_capabilities};
+pub use registry::{
+    CapabilityRegistration, available_capabilities, build_capabilities, resolve_capabilities,
+};
 
 use std::borrow::Cow;
 

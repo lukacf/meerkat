@@ -3,7 +3,7 @@
 //! Turns `SkillsConfig` into a composed concrete `CompositeSkillSource`.
 //! This is the single canonical path for all surfaces.
 
-use meerkat_core::skills::{SkillError, SkillScope, SourceUuid};
+use meerkat_core::skills::{SkillError, SkillScope};
 use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
 use std::path::Path;
 
@@ -43,6 +43,17 @@ pub async fn resolve_repositories_with_roots(
     let mut sources: Vec<NamedSource> = Vec::new();
 
     if config.repositories.is_empty() {
+        let default_records = config.default_source_identity_records(context_root, user_root);
+        let project_uuid = default_records
+            .iter()
+            .find(|record| record.display_name == "project")
+            .map(|record| record.source_uuid.clone())
+            .unwrap_or_else(|| SkillsConfig::default_source_uuid_for_scope(SkillScope::Project));
+        let user_uuid = default_records
+            .iter()
+            .find(|record| record.display_name == "user")
+            .map(|record| record.source_uuid.clone())
+            .unwrap_or_else(|| SkillsConfig::default_source_uuid_for_scope(SkillScope::User));
         // Explicit default chain: context FS -> user FS.
         if let Some(root) = context_root {
             sources.push(NamedSource {
@@ -50,7 +61,7 @@ pub async fn resolve_repositories_with_roots(
                 source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                     root.join(".rkat/skills"),
                     SkillScope::Project,
-                    source_uuid("00000000-0000-4000-8000-000000000101"),
+                    project_uuid,
                     config.health_thresholds,
                 )),
             });
@@ -61,7 +72,7 @@ pub async fn resolve_repositories_with_roots(
                 source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                     user.join(".rkat/skills"),
                     SkillScope::User,
-                    source_uuid("00000000-0000-4000-8000-000000000102"),
+                    user_uuid,
                     config.health_thresholds,
                 )),
             });
@@ -255,8 +266,9 @@ fn sanitize_repo_name(url: &str) -> String {
         .collect()
 }
 
-fn source_uuid(raw: &str) -> SourceUuid {
-    match SourceUuid::parse(raw) {
+#[cfg(test)]
+fn source_uuid(raw: &str) -> meerkat_core::skills::SourceUuid {
+    match meerkat_core::skills::SourceUuid::parse(raw) {
         Ok(source_uuid) => source_uuid,
         Err(_) => unreachable!("hardcoded source UUID must remain valid"),
     }

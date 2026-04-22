@@ -76,14 +76,14 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realtime/open_info` | Realtime | Get bootstrap metadata for opening a realtime channel |
 | `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
 | `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
-| `session/runtime_state` | Runtime | Read runtime-backed ingress state |
+| `session/status` | Runtime | Read runtime-backed ingress state |
 | `session/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status for a session |
 | `session/realtime_attachment_statuses` | Runtime | Batch read realtime attachment statuses for many sessions |
-| `session/accept_input` | Runtime | Admit external work directly into runtime ingress |
-| `session/retire_runtime` | Runtime | Retire runtime-backed ingress |
-| `session/reset_runtime` | Runtime | Reset runtime-backed ingress |
-| `session/input_state` | Runtime | Read runtime input lifecycle state |
-| `session/inputs` | Runtime | List runtime input lifecycle records |
+| `session/submit` | Runtime | Admit external work directly into runtime ingress |
+| `session/retire` | Runtime | Retire runtime-backed ingress |
+| `session/reset` | Runtime | Reset runtime-backed ingress |
+| `session/submission` | Runtime | Read runtime input lifecycle state |
+| `session/submissions` | Runtime | List runtime input lifecycle records |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
 | `mob/create` | Mob | Create a mob from a definition (mob feature) |
@@ -165,7 +165,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realm/get` | Realm | Get full realm connection set |
 
 <Note>
-`session/runtime_state`, `session/accept_input`, `session/retire_runtime`, `session/reset_runtime`, `session/input_state`, `session/inputs` are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
+`session/status`, `session/submit`, `session/retire`, `session/reset`, `session/submission`, `session/submissions` are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
 </Note>
 
 <Note>
@@ -246,8 +246,8 @@ Handshake. Returns server capabilities.
       "capabilities/get", "models/catalog",
       "skills/list", "skills/inspect",
       "realtime/open_info", "realtime/status", "realtime/capabilities",
-      "session/runtime_state", "session/realtime_attachment_status", "session/realtime_attachment_statuses", "session/accept_input", "session/retire_runtime", "session/reset_runtime",
-      "session/input_state", "session/inputs",
+      "session/status", "session/realtime_attachment_status", "session/realtime_attachment_statuses", "session/submit", "session/retire", "session/reset",
+      "session/submission", "session/submissions",
       "session/stream_open", "session/stream_close",
       "mob/create", "mob/list", "mob/status",
       "mob/members", "mob/spawn", "mob/spawn_many",

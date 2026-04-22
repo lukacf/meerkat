@@ -88,6 +88,8 @@ fn build_app() -> axum::Router {
         enable_builtins: false,
         enable_shell: false,
         project_root: Some(project_root.clone()),
+        context_root: None,
+        user_config_root: None,
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store,
         event_tx,

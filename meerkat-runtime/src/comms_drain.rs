@@ -31,9 +31,9 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
 };
-#[cfg(test)]
-use crate::meerkat_machine::SupervisorBindingStageError;
-use crate::meerkat_machine::{DrainExitReason, MeerkatMachine, SupervisorBinding};
+use crate::meerkat_machine::{
+    DrainExitReason, MeerkatMachine, SupervisorBinding, SupervisorBindingStageError,
+};
 use crate::service_ext::SessionServiceRuntimeExt as _;
 use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeControlPlane;
@@ -608,6 +608,61 @@ enum AuthorizeSupervisorGate {
     Proceed,
 }
 
+#[derive(Clone, Debug)]
+struct BoundSupervisorState {
+    name: String,
+    peer_id: String,
+    address: String,
+    epoch: u64,
+}
+
+impl BoundSupervisorState {
+    fn from_binding(binding: &SupervisorBinding) -> Option<Self> {
+        let SupervisorBinding::Bound {
+            name,
+            peer_id,
+            address,
+            epoch,
+        } = binding
+        else {
+            return None;
+        };
+        Some(Self {
+            name: name.clone(),
+            peer_id: peer_id.clone(),
+            address: address.clone(),
+            epoch: *epoch,
+        })
+    }
+}
+
+async fn rollback_bind_after_trust_publication_failure(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    peer_id: &str,
+    epoch: u64,
+) -> Result<(), SupervisorBindingStageError> {
+    adapter
+        .stage_supervisor_revoke(session_id, peer_id.to_string(), epoch)
+        .await
+}
+
+async fn rollback_authorize_after_trust_publication_failure(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    previous: &BoundSupervisorState,
+) -> Result<(), SupervisorBindingStageError> {
+    adapter
+        .stage_supervisor_authorize(
+            session_id,
+            previous.name.clone(),
+            previous.peer_id.clone(),
+            previous.address.clone(),
+            previous.epoch,
+        )
+        .await
+}
+
 /// Gate decision for `BindMember` when a supervisor is already bound.
 ///
 /// Once `supervisor_state` is populated, the only safe outcome is an
@@ -927,19 +982,6 @@ async fn try_handle_supervisor_bridge_command(
                         return true;
                     }
                 };
-            if let Err(error) = comms_runtime
-                .add_trusted_peer(supervisor_spec.clone())
-                .await
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("bind member failed: {error}"),
-                )
-                .await;
-                return true;
-            }
             // Canonical identity only: the BindMember reply echoes
             // the runtime's own public key, never `payload.expected_peer_id`.
             // A caller-supplied identity can't cross the canonical
@@ -979,6 +1021,34 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
+            if let Err(error) = comms_runtime
+                .add_trusted_peer(supervisor_spec.clone())
+                .await
+            {
+                let reason = match rollback_bind_after_trust_publication_failure(
+                    adapter,
+                    session_id,
+                    &supervisor_spec.peer_id,
+                    payload.epoch,
+                )
+                .await
+                {
+                    Ok(()) => format!(
+                        "bind member failed: trust publication failed after DSL commit: {error}"
+                    ),
+                    Err(rollback_error) => format!(
+                        "bind member failed: trust publication failed after DSL commit: {error}; rollback failed: {rollback_error}"
+                    ),
+                };
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    reason,
+                )
+                .await;
+                return true;
+            }
             send_bridge_response(
                 comms_runtime,
                 candidate,
@@ -1013,10 +1083,18 @@ async fn try_handle_supervisor_bridge_command(
 
             // Reached `Proceed`, so `validate_authorize_supervisor_request`
             // already confirmed `Bound`; extract the old identity for
-            // post-rotation cleanup.
-            let old_supervisor_peer_id = match &current_binding {
-                SupervisorBinding::Bound { peer_id, .. } => Some(peer_id.clone()),
-                SupervisorBinding::Unbound => None,
+            // rollback-safe trust publication if the post-commit runtime
+            // trust changes fail.
+            let Some(previous_binding) = BoundSupervisorState::from_binding(&current_binding)
+            else {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    "authorize supervisor failed: missing current binding",
+                )
+                .await;
+                return true;
             };
             let supervisor_spec = match TrustedPeerSpec::try_from(payload.supervisor.clone()) {
                 Ok(spec) => spec,
@@ -1033,34 +1111,6 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            if let Err(error) = comms_runtime
-                .add_trusted_peer(supervisor_spec.clone())
-                .await
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("authorize supervisor failed: {error}"),
-                )
-                .await;
-                return true;
-            }
-            if let Some(old_peer_id) = old_supervisor_peer_id
-                && old_peer_id != payload.supervisor.peer_id
-                && let Err(error) = comms_runtime.remove_trusted_peer(&old_peer_id).await
-            {
-                // Not a hard failure: the new supervisor is already trusted and
-                // the state cutover has happened. But leaving the old supervisor
-                // trusted is a cleanup regression we must surface — otherwise the
-                // old supervisor can still spend comms bandwidth until the next
-                // boundary.
-                tracing::warn!(
-                    old_supervisor = %old_peer_id,
-                    error = %error,
-                    "authorize supervisor: failed to remove previous supervisor trust"
-                );
-            }
             if let Err(error) = adapter
                 .stage_supervisor_authorize(
                     session_id,
@@ -1076,6 +1126,67 @@ async fn try_handle_supervisor_bridge_command(
                     candidate,
                     BridgeRejectionCause::Internal,
                     format!("authorize supervisor failed: DSL rejected rotation: {error}"),
+                )
+                .await;
+                return true;
+            }
+            if let Err(error) = comms_runtime
+                .add_trusted_peer(supervisor_spec.clone())
+                .await
+            {
+                let reason = match rollback_authorize_after_trust_publication_failure(
+                    adapter,
+                    session_id,
+                    &previous_binding,
+                )
+                .await
+                {
+                    Ok(()) => format!(
+                        "authorize supervisor failed: trust publication failed after DSL commit: {error}"
+                    ),
+                    Err(rollback_error) => format!(
+                        "authorize supervisor failed: trust publication failed after DSL commit: {error}; rollback failed: {rollback_error}"
+                    ),
+                };
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    reason,
+                )
+                .await;
+                return true;
+            }
+            if previous_binding.peer_id != payload.supervisor.peer_id
+                && let Err(error) = comms_runtime
+                    .remove_trusted_peer(&previous_binding.peer_id)
+                    .await
+            {
+                let rollback_result = rollback_authorize_after_trust_publication_failure(
+                    adapter,
+                    session_id,
+                    &previous_binding,
+                )
+                .await;
+                let cleanup_result = comms_runtime
+                    .remove_trusted_peer(&supervisor_spec.peer_id)
+                    .await;
+                let mut reason = format!(
+                    "authorize supervisor failed: previous supervisor trust removal failed after DSL commit: {error}"
+                );
+                if let Err(rollback_error) = rollback_result {
+                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                }
+                if let Err(cleanup_error) = cleanup_result {
+                    reason.push_str(&format!(
+                        "; cleanup failed while removing new supervisor trust: {cleanup_error}"
+                    ));
+                }
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    reason,
                 )
                 .await;
                 return true;
@@ -1498,6 +1609,7 @@ mod tests {
     use meerkat_core::interaction::InboxInteraction;
     use meerkat_core::types::HandlingMode;
     use serde_json::json;
+    use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
     struct BootstrapRuntime {
@@ -1505,7 +1617,9 @@ mod tests {
         address: String,
         bootstrap_token: Option<String>,
         inbox_notify: Arc<tokio::sync::Notify>,
-        remove_trusted_peer_error: Option<String>,
+        add_trusted_peer_errors: HashMap<String, String>,
+        remove_trusted_peer_errors: HashMap<String, String>,
+        trusted_peer_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -1530,15 +1644,35 @@ mod tests {
             self.inbox_notify.clone()
         }
 
-        async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+            if let Some(message) = self.add_trusted_peer_errors.get(&peer.peer_id) {
+                return Err(SendError::Internal(message.clone()));
+            }
+            self.trusted_peer_ids.lock().await.insert(peer.peer_id);
             Ok(())
         }
 
-        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-            match &self.remove_trusted_peer_error {
+        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+            match self.remove_trusted_peer_errors.get(peer_id) {
                 Some(message) => Err(SendError::Internal(message.clone())),
-                None => Ok(true),
+                None => Ok(self.trusted_peer_ids.lock().await.remove(peer_id)),
             }
+        }
+    }
+
+    fn bootstrap_runtime(
+        peer_id: &str,
+        address: &str,
+        bootstrap_token: Option<&str>,
+    ) -> BootstrapRuntime {
+        BootstrapRuntime {
+            peer_id: peer_id.to_string(),
+            address: address.to_string(),
+            bootstrap_token: bootstrap_token.map(ToString::to_string),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            add_trusted_peer_errors: HashMap::new(),
+            remove_trusted_peer_errors: HashMap::new(),
+            trusted_peer_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -1682,13 +1816,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_rejects_missing_or_wrong_bootstrap_token() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1714,13 +1846,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_accepts_matching_bootstrap_token() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1744,15 +1874,13 @@ mod tests {
 
     #[test]
     fn validate_bind_request_returns_runtime_advertised_address() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: format!(
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            &format!(
                 "inproc://receiver-real?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
             ),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1775,13 +1903,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_rejects_mismatched_expected_address() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver-real".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver-real",
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1807,13 +1933,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_rejects_protocol_version_mismatch() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1843,13 +1967,11 @@ mod tests {
         // v2 runtime at the protocol-version gate, *not* proceed with defaulted
         // fields. Uses the literal `1` (not `SUPERVISOR_BRIDGE_PROTOCOL_VERSION
         // - 1`) so that a future v3 bump re-confirms v1 stays rejected.
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -1871,13 +1993,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_rejects_invalid_supervisor_peer_name() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        ));
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: BridgePeerSpec {
                 name: "".to_string(),
@@ -2475,13 +2595,11 @@ mod tests {
 
     #[test]
     fn validate_bind_request_rejects_empty_bootstrap_token_at_runtime() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some(String::new()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: None,
-        });
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some(""),
+        ));
         let supervisor = BridgePeerSpec {
             name: "mob/__mob_supervisor__".to_string(),
             peer_id: "ed25519:supervisor".to_string(),
@@ -2582,14 +2700,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_member_rolls_back_binding_when_trust_publication_fails() {
+        // DOGMA-19 defensive scan: a post-bind trust publication failure must
+        // not leave the supervisor bound in the DSL.
+        let payload = sample_bind_payload();
+        let sender = payload.supervisor.peer_id.clone();
+        let mut runtime_impl = bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        runtime_impl
+            .add_trusted_peer_errors
+            .insert(payload.supervisor.peer_id.clone(), "boom".to_string());
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        assert!(
+            matches!(
+                adapter.supervisor_binding(&session_id).await,
+                SupervisorBinding::Unbound
+            ),
+            "failed trust publication must roll BindMember back to Unbound"
+        );
+        assert!(
+            trusted_peer_ids.lock().await.is_empty(),
+            "failed trust publication must not leave the supervisor trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
+        // DOGMA-19 defensive scan: the old supervisor remains authoritative
+        // until the new supervisor trust publishes successfully.
+        let old_supervisor = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            "ed25519:old-supervisor",
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid old supervisor");
+        let new_supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:new-supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = BridgeSupervisorPayload {
+            supervisor: new_supervisor.clone(),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        };
+        let mut runtime_impl = bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        runtime_impl
+            .add_trusted_peer_errors
+            .insert(new_supervisor.peer_id.clone(), "boom".to_string());
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        trusted_peer_ids
+            .lock()
+            .await
+            .insert(old_supervisor.peer_id.clone());
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                old_supervisor.name.clone(),
+                old_supervisor.peer_id.clone(),
+                old_supervisor.address.clone(),
+                1,
+            )
+            .await
+            .expect("pre-bind old supervisor");
+        let candidate = bridge_candidate(
+            &old_supervisor.peer_id,
+            &BridgeCommand::AuthorizeSupervisor(payload),
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        match adapter.supervisor_binding(&session_id).await {
+            SupervisorBinding::Bound { peer_id, epoch, .. } => {
+                assert_eq!(peer_id, old_supervisor.peer_id);
+                assert_eq!(epoch, 1);
+            }
+            SupervisorBinding::Unbound => panic!("old supervisor must remain bound"),
+        }
+        let trusted = trusted_peer_ids.lock().await.clone();
+        assert!(
+            trusted.contains(&old_supervisor.peer_id),
+            "old supervisor trust must stay active on failed rotation"
+        );
+        assert!(
+            !trusted.contains(&new_supervisor.peer_id),
+            "new supervisor trust must not publish on failed rotation"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_supervisor_rolls_back_when_old_trust_removal_fails() {
+        // DOGMA-19 defensive scan: if the old trust cannot be retired after
+        // the DSL rotates, restore the old binding and clean the new trust up.
+        let old_supervisor = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            "ed25519:old-supervisor",
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid old supervisor");
+        let new_supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:new-supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = BridgeSupervisorPayload {
+            supervisor: new_supervisor.clone(),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        };
+        let mut runtime_impl = bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        runtime_impl
+            .remove_trusted_peer_errors
+            .insert(old_supervisor.peer_id.clone(), "boom".to_string());
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        trusted_peer_ids
+            .lock()
+            .await
+            .insert(old_supervisor.peer_id.clone());
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                old_supervisor.name.clone(),
+                old_supervisor.peer_id.clone(),
+                old_supervisor.address.clone(),
+                1,
+            )
+            .await
+            .expect("pre-bind old supervisor");
+        let candidate = bridge_candidate(
+            &old_supervisor.peer_id,
+            &BridgeCommand::AuthorizeSupervisor(payload),
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        match adapter.supervisor_binding(&session_id).await {
+            SupervisorBinding::Bound { peer_id, epoch, .. } => {
+                assert_eq!(peer_id, old_supervisor.peer_id);
+                assert_eq!(epoch, 1);
+            }
+            SupervisorBinding::Unbound => panic!("old supervisor must be restored after rollback"),
+        }
+        let trusted = trusted_peer_ids.lock().await.clone();
+        assert!(
+            trusted.contains(&old_supervisor.peer_id),
+            "old supervisor trust must remain after rollback"
+        );
+        assert!(
+            !trusted.contains(&new_supervisor.peer_id),
+            "new supervisor trust must be cleaned up after rollback"
+        );
+    }
+
+    #[tokio::test]
     async fn revoke_supervisor_keeps_authority_when_trust_removal_fails() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
-            peer_id: "ed25519:receiver".to_string(),
-            address: "inproc://receiver".to_string(),
-            bootstrap_token: Some("expected-token".to_string()),
-            inbox_notify: Arc::new(tokio::sync::Notify::new()),
-            remove_trusted_peer_error: Some("boom".to_string()),
-        });
+        let mut runtime_impl = bootstrap_runtime(
+            "ed25519:receiver",
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        runtime_impl
+            .remove_trusted_peer_errors
+            .insert("ed25519:supervisor".to_string(), "boom".to_string());
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;

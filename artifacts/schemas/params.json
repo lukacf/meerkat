@@ -168,7 +168,7 @@
   },
   "InputListParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/inputs`.",
+    "description": "Request payload for `session/submissions`.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -182,7 +182,7 @@
   },
   "InputStateParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/input_state`.",
+    "description": "Request payload for `session/submission`.",
     "properties": {
       "input_id": {
         "type": "string"
@@ -1914,7 +1914,7 @@
   },
   "RuntimeAcceptParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/accept_input`.",
+    "description": "Request payload for `session/submit`.",
     "properties": {
       "input": true,
       "session_id": {
@@ -1944,7 +1944,7 @@
   },
   "RuntimeResetParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/reset_runtime`.",
+    "description": "Request payload for `session/reset`.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -1958,7 +1958,7 @@
   },
   "RuntimeRetireParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/retire_runtime`.",
+    "description": "Request payload for `session/retire`.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -1972,7 +1972,7 @@
   },
   "RuntimeStateParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/runtime_state`.",
+    "description": "Request payload for `session/status`.",
     "properties": {
       "session_id": {
         "type": "string"

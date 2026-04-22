@@ -7,10 +7,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_core::AuthError;
+#[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
+use meerkat_core::HttpAuthorizer;
+use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::refresh_allowed;
+use meerkat_auth_core::resolver::{
+    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
+    resolve_simple_secret,
+};
 use meerkat_llm_core::LlmClient;
+#[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
+use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -64,6 +75,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
 
     fn validate_binding(
         &self,
+        connection_ref: &meerkat_core::ConnectionRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -83,6 +95,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
             });
         }
         Ok(ValidatedBinding {
+            connection_ref: connection_ref.clone(),
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(backend_kind),
             auth: NormalizedAuthMethod::Google(auth_method),
@@ -114,56 +127,114 @@ impl ProviderRuntime for GoogleProviderRuntime {
             }
         };
 
-        // Plan §4b.12: Google metadata carried on the lease. Populated
-        // below when the GoogleOauth path finds an id_token with
-        // standard OIDC claims.
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut google_email: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut google_user_id: Option<String> = None;
-
-        // Plan §6.11: Option<String> for secret material; None for
-        // authorizer-backed paths (Adc / ComputeAdc / ExternalAuthorizer).
-        let secret_opt: Option<String> = match auth_method {
+        let source_label = format!("google:{}", binding.auth_profile.id);
+        let lease: Arc<dyn AuthLease> = match auth_method {
             GoogleAuthMethod::ApiKey
             | GoogleAuthMethod::BearerApiKey
             | GoogleAuthMethod::ApiKeyExpress => {
-                Some(resolve_simple_secret(&binding.auth_profile.source, env, binding).await?)
+                let secret =
+                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
+                Arc::new(StaticLease::inline_secret(
+                    secret,
+                    metadata,
+                    None,
+                    source_label.clone(),
+                ))
             }
             GoogleAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
-                None
+                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
             }
-            GoogleAuthMethod::Adc | GoogleAuthMethod::ComputeAdc => None,
+            GoogleAuthMethod::Adc => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
+                {
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(
+                        meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
+                            meerkat_auth_core::authorizers::GoogleAuthChain::Default,
+                            env.env_lookup.clone(),
+                        ),
+                    );
+                    let metadata = finalize_auth_metadata(
+                        binding,
+                        AuthMetadata {
+                            provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Google(
+                                meerkat_core::GoogleAuthMetadata {
+                                    project_id: backend_option_string(binding, "project_id"),
+                                    region: backend_option_string(binding, "region"),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    ))
+                }
+                #[cfg(any(target_arch = "wasm32", not(feature = "adc")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "adc requires the gemini `adc` feature on non-wasm32".into(),
+                    ));
+                }
+            }
+            GoogleAuthMethod::ComputeAdc => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
+                {
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(
+                        meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
+                            meerkat_auth_core::authorizers::GoogleAuthChain::ComputeOnly,
+                            env.env_lookup.clone(),
+                        ),
+                    );
+                    let metadata = finalize_auth_metadata(
+                        binding,
+                        AuthMetadata {
+                            provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Google(
+                                meerkat_core::GoogleAuthMetadata {
+                                    project_id: backend_option_string(binding, "project_id"),
+                                    region: backend_option_string(binding, "region"),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    ))
+                }
+                #[cfg(any(target_arch = "wasm32", not(feature = "adc")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "compute_adc requires the gemini `adc` feature on non-wasm32".into(),
+                    ));
+                }
+            }
             GoogleAuthMethod::GoogleOauth => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
                 {
                     let store = env
                         .token_store
                         .as_ref()
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-                    let realm_id = binding
-                        .backend_profile
-                        .options
-                        .get("realm_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("dev")
-                        .to_string();
+                        .ok_or_else(|| interactive_login_error(binding))?;
                     let key = meerkat_core::auth::TokenKey::new(
-                        realm_id,
-                        binding.auth_profile.id.clone(),
+                        binding.connection_ref.realm_id.clone(),
+                        binding.connection_ref.binding_id.clone(),
                     );
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                        .ok_or_else(|| interactive_login_error(binding))?;
+                    let mut google_email: Option<String> = None;
+                    let mut google_user_id: Option<String> = None;
                     // Plan §4b.12: lift OIDC claims into AuthMetadata.
                     if let Some(id_token) = persisted.id_token.as_deref()
                         && let Ok(claims) =
@@ -182,6 +253,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     {
                         access
                     } else {
+                        if !refresh_allowed(binding) {
+                            return Err(ProviderAuthError::Auth(AuthError::Expired));
+                        }
                         let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                             Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                         });
@@ -197,50 +271,40 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             .await
                             .map_err(|e| match e {
                                 oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired => {
-                                    ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
+                                    interactive_login_error(binding)
                                 }
                                 other => {
                                     ProviderAuthError::SourceResolutionFailed(other.to_string())
                                 }
                             })?
                     };
-                    Some(access)
+                    let mut metadata = AuthMetadata::default();
+                    if google_email.is_some() || google_user_id.is_some() {
+                        metadata.account_id =
+                            google_user_id.clone().or_else(|| google_email.clone());
+                        metadata.provider_metadata =
+                            Some(meerkat_core::ProviderAuthMetadata::Google(
+                                meerkat_core::GoogleAuthMetadata {
+                                    account_email: google_email,
+                                    project_id: backend_option_string(binding, "project_id"),
+                                    region: backend_option_string(binding, "region"),
+                                    code_assist_tier: backend_option_string(binding, "tier"),
+                                },
+                            ));
+                    }
+                    let metadata = finalize_auth_metadata(binding, metadata)?;
+                    Arc::new(StaticLease::inline_secret(
+                        access,
+                        metadata,
+                        persisted.expires_at,
+                        source_label.clone(),
+                    ))
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
-                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                    return Err(interactive_login_error(binding));
                 }
             }
-        };
-
-        // Plan §6.11 + §4b.12: populate the lease with resolved secret
-        // as a typed InlineSecret variant, or an empty lease for
-        // authorizer paths. Attach any OIDC claims lifted from the
-        // Code Assist id_token as `ProviderAuthMetadata::Google`.
-        let mut metadata = AuthMetadata::default();
-        if google_email.is_some() || google_user_id.is_some() {
-            metadata.account_id = google_user_id.clone().or_else(|| google_email.clone());
-            metadata.provider_metadata = Some(meerkat_core::ProviderAuthMetadata::Google(
-                meerkat_core::GoogleAuthMetadata {
-                    account_email: google_email,
-                    project_id: None,
-                    region: None,
-                    code_assist_tier: None,
-                },
-            ));
-        }
-        let source_label = format!("google:{}", binding.auth_profile.id);
-        let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
-            Some(secret) => Arc::new(StaticLease::inline_secret(
-                secret,
-                metadata,
-                None,
-                source_label,
-            )),
-            None => Arc::new(StaticLease::empty_lease(
-                AuthMetadata::default(),
-                source_label,
-            )),
         };
 
         Ok(ResolvedConnection {
@@ -374,6 +438,19 @@ impl ProviderRuntime for GoogleProviderRuntime {
             }
         }
     }
+}
+
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "adc"),
+    all(not(target_arch = "wasm32"), feature = "oauth")
+))]
+fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String> {
+    binding
+        .backend_profile
+        .options
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]

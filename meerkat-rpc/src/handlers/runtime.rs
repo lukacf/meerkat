@@ -1,5 +1,7 @@
-//! v9 runtime RPC handlers — session/runtime_state, session/accept_input, session/retire_runtime, session/reset_runtime,
-//! session/input_state, session/inputs.
+//! v9 runtime RPC handlers — session/status, session/submit, session/retire,
+//! session/reset, session/realtime_attachment_status,
+//! session/realtime_attachment_statuses, session/submission,
+//! session/submissions.
 
 use serde_json::value::RawValue;
 
@@ -184,8 +186,8 @@ pub(crate) fn to_wire_accept_result(
 
 // ---- Handlers ----
 
-/// Handle `session/runtime_state` — get the runtime state for a session.
-pub async fn handle_runtime_state(
+/// Handle `session/status` — get the runtime state for a session.
+pub async fn handle_status(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -287,8 +289,8 @@ pub async fn handle_runtime_realtime_attachment_statuses(
     RpcResponse::success(id, RuntimeRealtimeAttachmentStatusesResult { entries })
 }
 
-/// Handle `session/accept_input` — accept an input for a session.
-pub async fn handle_runtime_accept(
+/// Handle `session/submit` — accept an input for a session.
+pub async fn handle_submit(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -331,8 +333,8 @@ pub async fn handle_runtime_accept(
     }
 }
 
-/// Handle `session/retire_runtime` — retire a session's runtime.
-pub async fn handle_runtime_retire(
+/// Handle `session/retire` — retire a session's runtime.
+pub async fn handle_retire(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -361,8 +363,8 @@ pub async fn handle_runtime_retire(
     }
 }
 
-/// Handle `session/reset_runtime` — reset a session's runtime.
-pub async fn handle_runtime_reset(
+/// Handle `session/reset` — reset a session's runtime.
+pub async fn handle_reset(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -390,8 +392,8 @@ pub async fn handle_runtime_reset(
     }
 }
 
-/// Handle `session/input_state` — get the state of a specific input.
-pub async fn handle_input_state(
+/// Handle `session/submission` — get the state of a specific input.
+pub async fn handle_submission(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -423,8 +425,8 @@ pub async fn handle_input_state(
     }
 }
 
-/// Handle `session/inputs` — list active inputs for a session.
-pub async fn handle_input_list(
+/// Handle `session/submissions` — list active inputs for a session.
+pub async fn handle_submissions(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
@@ -555,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_accept_returns_rejected_result_when_runtime_is_retired() {
+    async fn submit_returns_rejected_result_when_runtime_is_retired() {
         let params_result = to_raw_value(&json!({
             "session_id": uuid::Uuid::new_v4().to_string(),
             "input": Input::Prompt(PromptInput::new("hello", None)),
@@ -565,7 +567,7 @@ mod tests {
             return;
         };
 
-        let response = handle_runtime_accept(
+        let response = handle_submit(
             Some(RpcId::Num(1)),
             Some(params.as_ref()),
             &RetiredRejectingAdapter,
@@ -599,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_realtime_attachment_status_returns_runtime_owned_status() {
+    async fn realtime_attachment_status_returns_runtime_owned_status() {
         struct ReattachRequiredAdapter;
 
         #[async_trait::async_trait]

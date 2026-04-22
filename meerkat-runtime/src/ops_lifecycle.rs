@@ -251,6 +251,11 @@ struct PendingWaitState {
     sender: tokio::sync::oneshot::Sender<WaitAllSatisfied>,
 }
 
+enum WaitAllAuthorityPlan {
+    AlreadySatisfied(WaitAllSatisfied),
+    ActivateBarrier,
+}
+
 impl ShellRecord {
     fn new(spec: OperationSpec) -> Self {
         Self {
@@ -698,6 +703,62 @@ impl ShellState {
     /// Whether the DSL has a barrier wait active.
     fn wait_active(&self) -> bool {
         self.dsl.0.state.wait_active
+    }
+
+    fn begin_wait_all_authority(
+        &mut self,
+        wait_request_id: &WaitRequestId,
+        operation_ids: &[OperationId],
+    ) -> Result<WaitAllAuthorityPlan, OpsLifecycleError> {
+        let mut seen = HashSet::new();
+        for operation_id in operation_ids {
+            if !seen.insert(operation_id.clone()) {
+                return Err(OpsLifecycleError::DuplicateWaitOperation(
+                    operation_id.clone(),
+                ));
+            }
+        }
+
+        if self.wait_active() {
+            return Err(OpsLifecycleError::WaitAlreadyActive);
+        }
+
+        for operation_id in operation_ids {
+            if !self.contains(operation_id) {
+                return Err(OpsLifecycleError::NotFound(operation_id.clone()));
+            }
+        }
+
+        let all_terminal = operation_ids.iter().all(|operation_id| {
+            self.status(operation_id)
+                .is_some_and(OperationStatus::is_terminal)
+        });
+        if all_terminal {
+            return Ok(WaitAllAuthorityPlan::AlreadySatisfied(WaitAllSatisfied {
+                wait_request_id: wait_request_id.clone(),
+                operation_ids: operation_ids.to_vec(),
+            }));
+        }
+
+        let dsl_ids: std::collections::BTreeSet<String> = operation_ids
+            .iter()
+            .map(|id| mm_dsl::OperationId::from_domain(id).0)
+            .collect();
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RequestWaitAll {
+                operation_ids: dsl_ids,
+            },
+            "RequestWaitAll",
+        )?;
+        Ok(WaitAllAuthorityPlan::ActivateBarrier)
+    }
+
+    fn owner_termination_targets(&self) -> Vec<(OperationId, OperationStatus)> {
+        self.operation_ids()
+            .into_iter()
+            .filter_map(|id| self.status(&id).map(|status| (id, status)))
+            .filter(|(_, status)| !status.is_terminal())
+            .collect()
     }
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.
@@ -1627,19 +1688,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // The shell loop is a mechanical cursor over DSL-owned state; the
-        // "is this op non-terminal?" decision is expressed as a typed read
-        // of the DSL's `op_statuses` map via `OperationStatus::is_terminal`,
-        // not a handwritten branch over stringly-typed state. The DSL's
-        // `TerminateOp` transition guards on the same non-terminal set, so
-        // guard rejection here indicates a genuine state desync rather than
-        // the common already-terminal no-op.
-        let to_terminate: Vec<(OperationId, OperationStatus)> = state
-            .operation_ids()
-            .into_iter()
-            .filter_map(|id| state.status(&id).map(|s| (id, s)))
-            .filter(|(_, s)| !s.is_terminal())
-            .collect();
+        let to_terminate = state.owner_termination_targets();
 
         for (op_id, status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
@@ -1711,115 +1760,51 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let state = match self.write_state() {
             Ok(mut state) => {
-                // Guard: duplicate ids.
-                let mut seen = HashSet::new();
-                for op_id in &owned_ids {
-                    if !seen.insert(op_id.clone()) {
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids.clone(),
-                            state: WaitAllFutureState::Ready(Some(Err(
-                                OpsLifecycleError::DuplicateWaitOperation(op_id.clone()),
-                            ))),
-                        });
+                match state.begin_wait_all_authority(&wait_request_id, &owned_ids) {
+                    Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied)) => {
+                        let outcomes =
+                            state
+                                .collect_wait_outcomes(&owned_ids)
+                                .map(|outcomes| WaitAllResult {
+                                    outcomes,
+                                    satisfied,
+                                });
+                        WaitAllFutureState::Ready(Some(outcomes))
                     }
-                }
-                // Guard: wait already active — check DSL, the sole barrier owner.
-                if state.wait_active() {
-                    return Box::pin(WaitAllFuture {
-                        registry: self,
-                        wait_request_id,
-                        operation_ids: owned_ids,
-                        state: WaitAllFutureState::Ready(Some(Err(
-                            OpsLifecycleError::WaitAlreadyActive,
-                        ))),
-                    });
-                }
-                // Guard: all ops known.
-                for op_id in &owned_ids {
-                    if !state.contains(op_id) {
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids.clone(),
-                            state: WaitAllFutureState::Ready(Some(Err(
-                                OpsLifecycleError::NotFound(op_id.clone()),
-                            ))),
-                        });
-                    }
-                }
+                    Ok(WaitAllAuthorityPlan::ActivateBarrier) => {
+                        state.wait_request_id = Some(wait_request_id.clone());
 
-                // Short-circuit when every target op is already terminal.
-                let all_terminal = owned_ids.iter().all(|op_id| {
-                    state
-                        .status(op_id)
-                        .is_some_and(OperationStatus::is_terminal)
-                });
-                if all_terminal {
-                    let outcomes =
-                        state
-                            .collect_wait_outcomes(&owned_ids)
-                            .map(|outcomes| WaitAllResult {
-                                outcomes,
-                                satisfied: WaitAllSatisfied {
-                                    wait_request_id: wait_request_id.clone(),
-                                    operation_ids: owned_ids.clone(),
-                                },
+                        if state.pending_wait.is_some() {
+                            // Roll back the DSL barrier we just activated so the
+                            // registry is not stuck in a wait-active state with
+                            // no correlation oneshot to resolve. `CancelWaitAll`
+                            // is the no-obligation clearer (members need not be
+                            // terminal).
+                            state.wait_request_id = None;
+                            let _ = state.dsl_apply(
+                                mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                                "CancelWaitAll(rollback)",
+                            );
+                            return Box::pin(WaitAllFuture {
+                                registry: self,
+                                wait_request_id,
+                                operation_ids: owned_ids,
+                                state: WaitAllFutureState::Ready(Some(Err(
+                                    OpsLifecycleError::Internal(
+                                        "wait_all started while a pending wait sender already existed"
+                                            .into(),
+                                    ),
+                                ))),
                             });
-                    WaitAllFutureState::Ready(Some(outcomes))
-                } else {
-                    // Populate DSL barrier membership via RequestWaitAll.
-                    // Membership is DSL-owned; shell holds only the oneshot
-                    // correlation id for delivering the result to the caller.
-                    let dsl_ids: std::collections::BTreeSet<String> = owned_ids
-                        .iter()
-                        .map(|id| mm_dsl::OperationId::from_domain(id).0)
-                        .collect();
-                    if let Err(err) = state.dsl_apply(
-                        mm_dsl::MeerkatMachineInput::RequestWaitAll {
-                            operation_ids: dsl_ids,
-                        },
-                        "RequestWaitAll",
-                    ) {
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids,
-                            state: WaitAllFutureState::Ready(Some(Err(err))),
+                        }
+                        let (sender, receiver) = tokio::sync::oneshot::channel();
+                        state.pending_wait = Some(PendingWaitState {
+                            wait_request_id: wait_request_id.clone(),
+                            sender,
                         });
+                        WaitAllFutureState::Waiting(receiver)
                     }
-                    state.wait_request_id = Some(wait_request_id.clone());
-
-                    if state.pending_wait.is_some() {
-                        // Roll back the DSL barrier we just activated so the
-                        // registry is not stuck in a wait-active state with
-                        // no correlation oneshot to resolve. `CancelWaitAll`
-                        // is the no-obligation clearer (members need not be
-                        // terminal).
-                        state.wait_request_id = None;
-                        let _ = state.dsl_apply(
-                            mm_dsl::MeerkatMachineInput::CancelWaitAll,
-                            "CancelWaitAll(rollback)",
-                        );
-                        return Box::pin(WaitAllFuture {
-                            registry: self,
-                            wait_request_id,
-                            operation_ids: owned_ids,
-                            state: WaitAllFutureState::Ready(Some(Err(
-                                OpsLifecycleError::Internal(
-                                    "wait_all started while a pending wait sender already existed"
-                                        .into(),
-                                ),
-                            ))),
-                        });
-                    }
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    state.pending_wait = Some(PendingWaitState {
-                        wait_request_id: wait_request_id.clone(),
-                        sender,
-                    });
-                    WaitAllFutureState::Waiting(receiver)
+                    Err(err) => WaitAllFutureState::Ready(Some(Err(err))),
                 }
             }
             Err(err) => WaitAllFutureState::Ready(Some(Err(err))),
@@ -2134,6 +2119,44 @@ mod tests {
         assert!(state.wait_request_id.is_none());
         assert!(state.wait_operation_ids().is_empty());
         assert!(!state.wait_active());
+    }
+
+    #[test]
+    fn terminate_owner_only_targets_non_terminal_operations() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let running_spec = background_spec("running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        let completed_spec = background_spec("completed");
+        let completed_id = completed_spec.id.clone();
+        registry.register_operation(completed_spec).unwrap();
+        registry.provisioning_succeeded(&completed_id).unwrap();
+        registry
+            .complete_operation(
+                &completed_id,
+                OperationResult {
+                    id: completed_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        registry.terminate_owner("shutdown".into()).unwrap();
+
+        assert!(matches!(
+            registry.snapshot(&running_id).unwrap().status,
+            OperationStatus::Terminated
+        ));
+        assert!(matches!(
+            registry.snapshot(&completed_id).unwrap().status,
+            OperationStatus::Completed
+        ));
     }
 
     #[test]

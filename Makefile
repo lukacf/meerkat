@@ -5,6 +5,7 @@ CRATE_NAME := meerkat
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
+PYTHON ?= $(shell command -v python3.11 2>/dev/null || command -v python3)
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -12,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -89,9 +90,9 @@ test-all:
 test-sdk-python:
 	@echo "$(GREEN)Running Python SDK tests...$(NC)"
 	@(cd sdks/python && \
-		python3 -m pip install --upgrade pip && \
-		python3 -m pip install -e ".[dev]" && \
-		python3 -m pytest -q tests)
+		$(PYTHON) -m pip install --upgrade pip && \
+		$(PYTHON) -m pip install -e ".[dev]" && \
+		$(PYTHON) -m pytest -q tests)
 
 # TypeScript SDK test suite
 test-sdk-typescript:
@@ -202,12 +203,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -220,6 +221,10 @@ legacy-surface-gate:
 legacy-surface-inventory:
 	@echo "$(GREEN)Generating legacy surface inventory baseline...$(NC)"
 	@scripts/m0_legacy_surface_scan.sh --no-fail --output=artifacts/m0_legacy_surface_inventory.txt
+
+session-control-gate:
+	@echo "$(GREEN)Checking retired session-control public names...$(NC)"
+	@scripts/session_control_public_name_scan.sh
 
 deprecated-backend-gate:
 	@echo "$(GREEN)Checking for deprecated backend references...$(NC)"
@@ -358,7 +363,7 @@ regen-schemas:
 	@echo "$(GREEN)Emitting schemas...$(NC)"
 	$(CARGO) run -p meerkat-contracts --features schema --bin emit-schemas
 	@echo "$(GREEN)Running SDK codegen...$(NC)"
-	python3 tools/sdk-codegen/generate.py
+	$(PYTHON) tools/sdk-codegen/generate.py
 	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
 
 # Full pre-release checklist
@@ -399,10 +404,10 @@ release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-pac
 publish-dry-run-python:
 	@echo "$(GREEN)Checking Python SDK publish readiness...$(NC)"
 	@(cd sdks/python && \
-		python3 -m pip install --upgrade build twine && \
+		$(PYTHON) -m pip install --upgrade build twine && \
 		rm -rf dist *.egg-info && \
-		python3 -m build && \
-		python3 -m twine check dist/* && \
+		$(PYTHON) -m build && \
+		$(PYTHON) -m twine check dist/* && \
 		rm -rf dist *.egg-info build)
 
 # Dry-run publish for TypeScript SDK (npm --dry-run)
@@ -426,12 +431,12 @@ publish-dry-run-web:
 smoke-sdk-python-artifact:
 	@echo "$(GREEN)Running Python SDK artifact smoke test...$(NC)"
 	@(cd sdks/python && \
-		python3 -m pip install --upgrade build twine && \
+		$(PYTHON) -m pip install --upgrade build twine && \
 		rm -rf dist *.egg-info build && \
-		python3 -m build && \
-		python3 -m twine check dist/* && \
+		$(PYTHON) -m build && \
+		$(PYTHON) -m twine check dist/* && \
 		VENV_DIR=$$(mktemp -d) && \
-		python3 -m venv "$$VENV_DIR" && \
+		$(PYTHON) -m venv "$$VENV_DIR" && \
 		"$$VENV_DIR/bin/python" -m pip install --upgrade pip && \
 		"$$VENV_DIR/bin/python" -m pip install dist/*.whl && \
 		"$$VENV_DIR/bin/python" -c "from meerkat import CONTRACT_VERSION, MeerkatClient; print(CONTRACT_VERSION); print(MeerkatClient.__name__)" && \

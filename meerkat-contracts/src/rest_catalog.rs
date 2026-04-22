@@ -232,7 +232,7 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/runtime-state",
+            "/sessions/{id}/status",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get a session's current runtime state",
@@ -246,35 +246,35 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/accept-input",
+            "/sessions/{id}/submit",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Accept a runtime input for a session",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/retire-runtime",
+            "/sessions/{id}/retire",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Retire a session runtime",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/reset-runtime",
+            "/sessions/{id}/reset",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Reset a session runtime",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/inputs",
+            "/sessions/{id}/submissions",
             vec![RestOperationDescriptor::new(
                 "get",
                 "List active inputs for a session",
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{session_id}/inputs/{input_id}",
+            "/sessions/{session_id}/submissions/{submission_id}",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get the state of a specific input on a session",

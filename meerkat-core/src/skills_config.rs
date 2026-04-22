@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use std::{fmt::Write as _, hash::Hasher};
 
 use crate::skills::{
-    SkillAlias, SkillError, SkillKeyRemap, SourceHealthThresholds, SourceIdentityLineage,
-    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
-    SourceUuid,
+    SkillAlias, SkillError, SkillKeyRemap, SkillScope, SourceHealthThresholds,
+    SourceIdentityLineage, SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus,
+    SourceTransportKind, SourceUuid,
 };
 
 // ---------------------------------------------------------------------------
@@ -209,6 +209,20 @@ impl SkillsConfig {
 }
 
 impl SkillsConfig {
+    /// Canonical default source UUIDs for convention-based sources when
+    /// `repositories` is empty.
+    pub fn default_source_uuid_for_scope(scope: SkillScope) -> SourceUuid {
+        let raw = match scope {
+            SkillScope::Project => "00000000-0000-4000-8000-000000000101",
+            SkillScope::User => "00000000-0000-4000-8000-000000000102",
+            SkillScope::Builtin => "00000000-0000-4000-8000-000000000103",
+        };
+        match SourceUuid::parse(raw) {
+            Ok(source_uuid) => source_uuid,
+            Err(_) => unreachable!("hardcoded default source UUID must remain valid"),
+        }
+    }
+
     /// Build a source identity registry from repository config + governance overlays.
     pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
         let records = self
@@ -222,6 +236,61 @@ impl SkillsConfig {
             self.identity.remaps.clone(),
             self.identity.aliases.clone(),
         )
+    }
+
+    /// Build a source identity registry using the same default `project` / `user`
+    /// convention sources that repository resolution uses when `repositories`
+    /// is empty.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_source_identity_registry_with_roots(
+        &self,
+        context_root: Option<&Path>,
+        user_root: Option<&Path>,
+    ) -> Result<SourceIdentityRegistry, SkillError> {
+        let records = if self.repositories.is_empty() {
+            self.default_source_identity_records(context_root, user_root)
+        } else {
+            self.repositories
+                .iter()
+                .map(repository_to_identity_record)
+                .collect()
+        };
+        SourceIdentityRegistry::build(
+            records,
+            self.identity.lineage.clone(),
+            self.identity.remaps.clone(),
+            self.identity.aliases.clone(),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn default_source_identity_records(
+        &self,
+        context_root: Option<&Path>,
+        user_root: Option<&Path>,
+    ) -> Vec<SourceIdentityRecord> {
+        let mut records = Vec::new();
+        let project_root = context_root.map(|root| root.join(".rkat/skills"));
+        let user_root = user_root.map(|root| root.join(".rkat/skills"));
+
+        if let Some(root) = project_root.as_ref() {
+            records.push(default_source_identity_record(
+                "project",
+                SkillScope::Project,
+                root.clone(),
+            ));
+        }
+        if let Some(root) = user_root.as_ref() {
+            if project_root.as_ref() == Some(root) {
+                return records;
+            }
+            records.push(default_source_identity_record(
+                "user",
+                SkillScope::User,
+                root.clone(),
+            ));
+        }
+        records
     }
 }
 
@@ -268,6 +337,21 @@ fn repository_fingerprint(repo: &SkillRepositoryConfig) -> String {
     fp.push_str("repo-");
     let _ = write!(&mut fp, "{hash:016x}");
     fp
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_source_identity_record(
+    display_name: &str,
+    scope: SkillScope,
+    root: std::path::PathBuf,
+) -> SourceIdentityRecord {
+    SourceIdentityRecord {
+        source_uuid: SkillsConfig::default_source_uuid_for_scope(scope),
+        display_name: display_name.to_string(),
+        transport_kind: SourceTransportKind::Filesystem,
+        fingerprint: format!("filesystem:{}", root.display()),
+        status: SourceIdentityStatus::Active,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -472,6 +556,19 @@ mod tests {
         assert_eq!(config.max_injection_bytes, 32 * 1024);
         assert_eq!(config.inventory_threshold, 12);
         assert!(config.repositories.is_empty());
+    }
+
+    #[test]
+    fn test_default_source_identity_records_dedup_same_root() {
+        let temp = TempDir::new().unwrap();
+        let config = SkillsConfig::default();
+        let records = config.default_source_identity_records(Some(temp.path()), Some(temp.path()));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].display_name, "project");
+        assert_eq!(
+            records[0].source_uuid,
+            SkillsConfig::default_source_uuid_for_scope(SkillScope::Project)
+        );
     }
 
     #[test]

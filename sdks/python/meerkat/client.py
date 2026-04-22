@@ -519,6 +519,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
+        connection_ref: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -553,7 +554,8 @@ class MeerkatClient:
             print(session.text)
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, system_prompt=system_prompt,
+            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
@@ -580,6 +582,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
+        connection_ref: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -618,7 +621,8 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, model=model, provider=provider, system_prompt=system_prompt,
+            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
@@ -656,6 +660,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
+        connection_ref: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -694,7 +699,8 @@ class MeerkatClient:
             result = await deferred.start_turn("Begin")
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, system_prompt=system_prompt,
+            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
@@ -2062,8 +2068,8 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
-    async def runtime_state(self, session_id: str) -> RuntimeStateResult:
-        raw = await self._request("session/runtime_state", {"session_id": session_id})
+    async def status(self, session_id: str) -> RuntimeStateResult:
+        raw = await self._request("session/status", {"session_id": session_id})
         return RuntimeStateResult(**raw)
 
     async def runtime_realtime_attachment_status(
@@ -2140,34 +2146,39 @@ class MeerkatClient:
         raw = await self._request("realtime/capabilities", _wire_params(params))
         return RealtimeCapabilitiesResult(**raw)
 
-    async def runtime_accept(
+    async def submit(
         self,
         session_id: str,
         input: dict[str, Any],
     ) -> RuntimeAcceptResult:
-        raw = await self._request("session/accept_input", {"session_id": session_id, "input": input})
+        raw = await self._request("session/submit", {"session_id": session_id, "input": input})
         state = raw.get("state")
         if isinstance(state, dict):
             raw = dict(raw)
             raw["state"] = self._parse_wire_input_state(state)
         return RuntimeAcceptResult(**raw)
 
-    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
-        raw = await self._request("session/retire_runtime", {"session_id": session_id})
+    async def retire(self, session_id: str) -> RuntimeRetireResult:
+        raw = await self._request("session/retire", {"session_id": session_id})
         return RuntimeRetireResult(**raw)
 
-    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
-        raw = await self._request("session/reset_runtime", {"session_id": session_id})
+    async def reset(self, session_id: str) -> RuntimeResetResult:
+        raw = await self._request("session/reset", {"session_id": session_id})
         return RuntimeResetResult(**raw)
 
-    async def input_state(self, session_id: str, input_id: str) -> WireInputState | None:
-        raw = await self._request("session/input_state", {"session_id": session_id, "input_id": input_id})
+    async def submission(
+        self, session_id: str, submission_id: str
+    ) -> WireInputState | None:
+        raw = await self._request(
+            "session/submission",
+            {"session_id": session_id, "input_id": submission_id},
+        )
         if raw is None:
             return None
         return self._parse_wire_input_state(raw)
 
-    async def input_list(self, session_id: str) -> list[str]:
-        result = await self._request("session/inputs", {"session_id": session_id})
+    async def submissions(self, session_id: str) -> list[str]:
+        result = await self._request("session/submissions", {"session_id": session_id})
         input_ids = result.get("input_ids", [])
         return [str(input_id) for input_id in input_ids]
 
@@ -2376,6 +2387,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
+        connection_ref: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -2404,6 +2416,8 @@ class MeerkatClient:
             params["model"] = model
         if provider:
             params["provider"] = provider
+        if connection_ref is not None:
+            params["connection_ref"] = connection_ref
         if system_prompt:
             params["system_prompt"] = system_prompt
         if max_tokens:

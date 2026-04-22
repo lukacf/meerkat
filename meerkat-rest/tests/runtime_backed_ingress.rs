@@ -121,6 +121,8 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root),
+        context_root: None,
+        user_config_root: None,
         llm_client_override: Some(llm.clone()),
         config_store: config_store_arc,
         event_tx,

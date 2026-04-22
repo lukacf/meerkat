@@ -78,6 +78,8 @@ fn build_state(
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root.to_path_buf()),
+        context_root: None,
+        user_config_root: None,
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store,
         event_tx,

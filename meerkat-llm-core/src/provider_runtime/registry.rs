@@ -177,12 +177,16 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm_id: realm.realm_id.clone(),
+            binding_id: binding.id.clone(),
+        };
         let runtime = self
             .runtimes
             .get(&backend.provider)
             .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
         let validated = runtime
-            .validate_binding(backend, auth, &binding.policy)
+            .validate_binding(&connection_ref, backend, auth, &binding.policy)
             .map_err(ProviderAuthError::Binding)?;
         runtime.resolve_binding(&validated, env).await
     }

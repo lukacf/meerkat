@@ -81,13 +81,13 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/realtime/open_info` | Issue a realtime websocket bootstrap token |
 | `POST` | `/realtime/status` | Read product-layer realtime status |
 | `POST` | `/realtime/capabilities` | Read product-layer realtime capabilities |
-| `GET` | `/sessions/{id}/runtime-state` | Read runtime state |
+| `GET` | `/sessions/{id}/status` | Read runtime state |
 | `GET` | `/sessions/{id}/realtime-attachment-status` | Read the runtime-owned realtime attachment status for a session |
-| `POST` | `/sessions/{id}/accept-input` | Admit runtime input explicitly |
-| `POST` | `/sessions/{id}/retire-runtime` | Retire a runtime |
-| `POST` | `/sessions/{id}/reset-runtime` | Reset a runtime |
-| `GET` | `/sessions/{id}/inputs` | List runtime input state entries |
-| `GET` | `/sessions/{session_id}/inputs/{input_id}` | Read one runtime input state |
+| `POST` | `/sessions/{id}/submit` | Admit runtime input explicitly |
+| `POST` | `/sessions/{id}/retire` | Retire a runtime |
+| `POST` | `/sessions/{id}/reset` | Reset a runtime |
+| `GET` | `/sessions/{id}/submissions` | List runtime input state entries |
+| `GET` | `/sessions/{session_id}/submissions/{submission_id}` | Read one runtime input state |
 | `GET` | `/auth/profiles` | List auth profiles |
 | `POST` | `/auth/profiles` | Create an auth profile |
 | `GET` | `/auth/profiles/{id}` | Read an auth profile |

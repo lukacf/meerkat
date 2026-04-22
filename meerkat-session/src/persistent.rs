@@ -551,6 +551,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext {
                 runtime_build_mode,
+                require_runtime_build_mode: true,
                 ..Default::default()
             },
         )
@@ -1102,6 +1103,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 &SurfaceSessionRecoveryOverrides::default(),
                 SurfaceSessionRecoveryContext {
                     runtime_build_mode,
+                    require_runtime_build_mode: true,
                     ..Default::default()
                 },
             )
@@ -2033,6 +2035,43 @@ mod tests {
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    fn test_runtime_bindings(session_id: SessionId) -> meerkat_core::SessionRuntimeBindings {
+        meerkat_core::SessionRuntimeBindings {
+            session_id,
+            epoch_id: meerkat_core::RuntimeEpochId::new(),
+            ops_lifecycle: Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
+            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
+            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
+            external_tool_surface: Arc::new(
+                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
+            ),
+            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
+            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
+            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
+            mcp_server_lifecycle: Arc::new(
+                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
+            ),
+            peer_interaction: None,
+            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
+            session_claim_handle: meerkat_core::handles::DefaultSessionClaimRegistry::global()
+                as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
+            interaction_stream: None,
+            realtime_product_turn: Arc::new(
+                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
+            ),
+        }
+    }
+
+    fn install_test_runtime_bindings_provider<B: SessionAgentBuilder + 'static>(
+        service: &mut PersistentSessionService<B>,
+    ) {
+        service.set_runtime_bindings_provider(Arc::new(|session_id| {
+            Box::pin(async move { Some(test_runtime_bindings(session_id)) })
+        }));
     }
 
     struct FailSaveStore {
@@ -3882,13 +3921,14 @@ mod tests {
     #[tokio::test]
     async fn test_apply_runtime_context_appends_recovers_stored_only_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
+        let mut service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
             None,
             memory_blob_store(),
         );
+        install_test_runtime_bindings_provider(&mut service);
 
         let mut session = Session::new();
         let id = session.id().clone();
@@ -4040,7 +4080,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_turn_recovers_after_discarding_stale_live_session() {
+    async fn test_apply_runtime_context_appends_rejects_missing_runtime_bindings() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
@@ -4049,6 +4089,67 @@ mod tests {
             None,
             memory_blob_store(),
         );
+
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some("realm-test".to_string()),
+                instance_id: Some("instance-test".to_string()),
+                backend: Some("sqlite".to_string()),
+                config_generation: Some(7),
+                connection_ref: None,
+            })
+            .expect("session metadata should serialize");
+        store
+            .save(&session)
+            .await
+            .expect("persisted session should save");
+
+        let error = service
+            .apply_runtime_context_appends(
+                &id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "recover me".to_string(),
+                    source: Some("system-generated:test".to_string()),
+                    idempotency_key: None,
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("runtime-backed recovery should reject missing bindings");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing StandaloneEphemeral fallback"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_turn_recovers_after_discarding_stale_live_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let mut service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+        install_test_runtime_bindings_provider(&mut service);
 
         let created = service
             .create_session(create_request_with_metadata(
@@ -4082,6 +4183,44 @@ mod tests {
             .await
             .expect("recovered session should be live again");
         assert_eq!(live.id(), &id);
+    }
+
+    #[tokio::test]
+    async fn test_start_turn_recovery_rejects_missing_runtime_bindings() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create deferred session");
+        let id = created.session_id;
+
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard live session");
+
+        let error = service
+            .start_turn(&id, start_turn_request("follow up"))
+            .await
+            .expect_err("runtime-backed recovery should reject missing bindings");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing StandaloneEphemeral fallback"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -4170,13 +4309,14 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let builder = CapturingBuildBuilder::new();
         let captured_builds = Arc::clone(&builder.captured_builds);
-        let service = PersistentSessionService::new(
+        let mut service = PersistentSessionService::new(
             builder,
             4,
             Arc::clone(&store),
             None,
             memory_blob_store(),
         );
+        install_test_runtime_bindings_provider(&mut service);
 
         let mut session = Session::new();
         let id = session.id().clone();
@@ -4253,13 +4393,14 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let builder = CapturingBuildBuilder::new();
         let captured_builds = Arc::clone(&builder.captured_builds);
-        let service = PersistentSessionService::new(
+        let mut service = PersistentSessionService::new(
             builder,
             4,
             Arc::clone(&store),
             None,
             memory_blob_store(),
         );
+        install_test_runtime_bindings_provider(&mut service);
 
         let mut session = Session::new();
         let id = session.id().clone();
@@ -4380,13 +4521,14 @@ mod tests {
 
         let recovering_builder = CapturingBuildBuilder::new();
         let captured_builds = Arc::clone(&recovering_builder.captured_builds);
-        let recovering_service = PersistentSessionService::new(
+        let mut recovering_service = PersistentSessionService::new(
             recovering_builder,
             4,
             Arc::clone(&store),
             None,
             memory_blob_store(),
         );
+        install_test_runtime_bindings_provider(&mut recovering_service);
         recovering_service
             .apply_runtime_context_appends(
                 &id,

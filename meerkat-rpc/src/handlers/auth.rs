@@ -14,7 +14,7 @@ use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
 };
-use meerkat_core::RealmConnectionSet;
+use meerkat_core::{ConnectionRef, RealmConnectionSet};
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
@@ -34,9 +34,9 @@ struct RealmIdParams {
 }
 
 #[derive(serde::Deserialize)]
-struct AuthProfileIdParams {
+struct BindingIdParams {
     realm_id: String,
-    profile_id: String,
+    binding_id: String,
 }
 
 async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, RpcResponse> {
@@ -76,6 +76,46 @@ async fn resolve_realm(
             format!("Realm config invalid: {e}"),
         )
     })
+}
+
+fn default_oauth_binding(mode: PersistedAuthMode) -> &'static str {
+    match mode {
+        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
+        PersistedAuthMode::ChatgptOauth => "openai_oauth",
+        PersistedAuthMode::GoogleOauth => "google_oauth",
+        _ => "oauth_profile",
+    }
+}
+
+async fn resolve_binding_identity(
+    runtime: &SessionRuntime,
+    realm_id: &str,
+    binding_id: &str,
+) -> Result<
+    (
+        ConnectionRef,
+        meerkat_core::ProviderBinding,
+        meerkat_core::AuthProfile,
+    ),
+    RpcResponse,
+> {
+    let realm = resolve_realm(runtime, realm_id).await?;
+    let resolved_realm_id = realm.realm_id.clone();
+    let (binding, _, auth_profile) = realm.lookup_binding(binding_id).map_err(|e| {
+        RpcResponse::error(
+            None,
+            error::INVALID_PARAMS,
+            format!("Unknown binding {realm_id}:{binding_id}: {e}"),
+        )
+    })?;
+    Ok((
+        ConnectionRef {
+            realm_id: resolved_realm_id,
+            binding_id: binding.id.clone(),
+        },
+        binding.clone(),
+        auth_profile.clone(),
+    ))
 }
 
 #[allow(clippy::result_large_err)]
@@ -207,36 +247,28 @@ pub async fn handle_auth_profile_get(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: AuthProfileIdParams = match parse_params(params) {
+    let parsed: BindingIdParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let realm = match resolve_realm(runtime, &parsed.realm_id).await {
-        Ok(r) => r,
-        Err(r) => return r.with_id(id),
-    };
-    match realm.auth_profiles.get(&parsed.profile_id) {
-        Some(p) => match serde_json::to_value(WireAuthProfile::from(p)) {
-            Ok(v) => RpcResponse::success(id, v),
-            Err(e) => {
-                RpcResponse::error(id, error::INTERNAL_ERROR, format!("Serialize error: {e}"))
-            }
-        },
-        None => RpcResponse::error(
+    match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+        Ok((connection_ref, binding, auth_profile)) => RpcResponse::success(
             id,
-            error::INVALID_PARAMS,
-            format!(
-                "Auth profile {}:{} not found",
-                parsed.realm_id, parsed.profile_id
-            ),
+            serde_json::json!({
+                "connection_ref": &connection_ref,
+                "binding_id": &binding.id,
+                "profile_id": &binding.auth_profile,
+                "auth_profile": WireAuthProfile::from(&auth_profile),
+            }),
         ),
+        Err(r) => r.with_id(id),
     }
 }
 
 #[derive(serde::Deserialize)]
 struct CreateProfileParams {
     realm_id: String,
-    profile_id: String,
+    binding_id: String,
     auth_method: String,
     secret: String,
 }
@@ -265,6 +297,21 @@ pub async fn handle_auth_profile_create(
             );
         }
     };
+    let (connection_ref, binding, auth_profile) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
+    if parsed.auth_method != auth_profile.auth_method {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!(
+                "binding {} resolves auth_method '{}' not '{}'",
+                parsed.binding_id, auth_profile.auth_method, parsed.auth_method,
+            ),
+        );
+    }
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
@@ -280,22 +327,29 @@ pub async fn handle_auth_profile_create(
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
+    let key = TokenKey::new(
+        connection_ref.realm_id.clone(),
+        connection_ref.binding_id.clone(),
+    );
     match store.save(&key, &tokens).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                binding_key = %connection_ref,
                 action = "create_profile",
-                auth_method = %parsed.auth_method,
-                "auth profile created via RPC"
+                provider = %auth_profile.provider.as_str(),
+                auth_method = %auth_profile.auth_method,
+                "binding-scoped auth credentials stored via RPC"
             );
             RpcResponse::success(
                 id,
                 serde_json::json!({
-                    "realm_id": parsed.realm_id,
-                    "profile_id": parsed.profile_id,
-                    "auth_method": parsed.auth_method,
+                    "realm_id": &connection_ref.realm_id,
+                    "binding_id": &connection_ref.binding_id,
+                    "connection_ref": &connection_ref,
+                    "profile_id": &binding.auth_profile,
+                    "provider": auth_profile.provider.as_str(),
+                    "auth_method": &auth_profile.auth_method,
                     "stored": true,
                 }),
             )
@@ -313,28 +367,38 @@ pub async fn handle_auth_profile_delete(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: AuthProfileIdParams = match parse_params(params) {
+    let parsed: BindingIdParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let (connection_ref, binding, _) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
+    let key = TokenKey::new(
+        connection_ref.realm_id.clone(),
+        connection_ref.binding_id.clone(),
+    );
     match store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                binding_key = %connection_ref,
                 action = "delete_profile",
-                "auth profile deleted via RPC"
+                "binding-scoped auth credentials deleted via RPC"
             );
             RpcResponse::success(
                 id,
                 serde_json::json!({
-                    "realm_id": parsed.realm_id,
-                    "profile_id": parsed.profile_id,
+                    "realm_id": &connection_ref.realm_id,
+                    "binding_id": &connection_ref.binding_id,
+                    "connection_ref": &connection_ref,
+                    "profile_id": &binding.auth_profile,
                     "cleared": true,
                 }),
             )
@@ -376,8 +440,13 @@ pub async fn handle_auth_profile_test(
             id,
             serde_json::json!({
                 "state": "valid",
+                "connection_ref": {
+                    "realm_id": &parsed.realm_id,
+                    "binding_id": &parsed.binding_id,
+                },
+                "binding_id": &parsed.binding_id,
                 "provider": conn.provider.as_str(),
-                "backend_profile_id": conn.backend_profile.id,
+                "backend_profile_id": &conn.backend_profile.id,
                 "has_credential": conn.resolved_secret().is_some()
                     || conn.resolved_authorizer().is_some(),
             }),
@@ -441,7 +510,7 @@ struct LoginCompleteParams {
     #[serde(default = "default_realm")]
     realm_id: String,
     #[serde(default)]
-    profile_id: Option<String>,
+    binding_id: Option<String>,
 }
 
 fn default_realm() -> String {
@@ -464,15 +533,26 @@ pub async fn handle_auth_login_complete(
                 return RpcResponse::error(id, error::INVALID_PARAMS, msg);
             }
         };
-    let default_binding = match mode {
-        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
-        PersistedAuthMode::ChatgptOauth => "openai_oauth",
-        PersistedAuthMode::GoogleOauth => "google_oauth",
-        _ => "oauth_profile",
-    };
-    let profile_id = parsed
-        .profile_id
-        .unwrap_or_else(|| default_binding.to_string());
+    let binding_id = parsed
+        .binding_id
+        .unwrap_or_else(|| default_oauth_binding(mode).to_string());
+    let (connection_ref, binding, auth_profile) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
+    if parsed.provider != auth_profile.provider.as_str() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!(
+                "binding {} resolves provider '{}' not '{}'",
+                binding.id,
+                auth_profile.provider.as_str(),
+                parsed.provider,
+            ),
+        );
+    }
 
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
@@ -522,7 +602,10 @@ pub async fn handle_auth_login_complete(
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    let key = TokenKey::new(parsed.realm_id.clone(), profile_id.clone());
+    let key = TokenKey::new(
+        connection_ref.realm_id.clone(),
+        connection_ref.binding_id.clone(),
+    );
     if let Err(e) = store.save(&key, &tokens).await {
         return RpcResponse::error(
             id,
@@ -532,7 +615,7 @@ pub async fn handle_auth_login_complete(
     }
     tracing::info!(
         target: "meerkat::auth::audit",
-        binding_key = %format!("{}:{}", parsed.realm_id, profile_id),
+        binding_key = %connection_ref,
         action = "login_oauth_complete",
         provider = %parsed.provider,
         has_refresh_token = %tokens.refresh_token.is_some(),
@@ -541,8 +624,10 @@ pub async fn handle_auth_login_complete(
     RpcResponse::success(
         id,
         serde_json::json!({
-            "realm_id": parsed.realm_id,
-            "profile_id": profile_id,
+            "realm_id": &connection_ref.realm_id,
+            "binding_id": &connection_ref.binding_id,
+            "connection_ref": &connection_ref,
+            "profile_id": &binding.auth_profile,
             "provider": parsed.provider,
             "expires_at": expires_at.map(|e| e.to_rfc3339()),
             "has_refresh_token": tokens.refresh_token.is_some(),
@@ -607,7 +692,7 @@ struct DeviceCompleteParams {
     #[serde(default = "default_dev_realm")]
     realm_id: String,
     #[serde(default)]
-    profile_id: Option<String>,
+    binding_id: Option<String>,
 }
 
 fn default_dev_realm() -> String {
@@ -620,8 +705,8 @@ fn default_dev_realm() -> String {
 ///   * `{ state: "pending" }`     (202-equivalent)
 ///   * `{ state: "slow_down" }`   (429-equivalent; bump caller's interval)
 ///   * `{ state: "access_denied" }` / `{ state: "expired" }` (terminal)
-///   * `{ state: "ready", realm_id, profile_id, expires_at, ... }`
-///     (tokens persisted to TokenStore under `<realm_id>:<profile_id>`).
+///   * `{ state: "ready", realm_id, binding_id, expires_at, ... }`
+///     (tokens persisted to TokenStore under `<realm_id>:<binding_id>`).
 pub async fn handle_auth_login_device_complete(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -645,15 +730,26 @@ pub async fn handle_auth_login_device_complete(
             ),
         );
     }
-    let default_binding = match mode {
-        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
-        PersistedAuthMode::ChatgptOauth => "openai_oauth",
-        PersistedAuthMode::GoogleOauth => "google_oauth",
-        _ => "oauth_profile",
-    };
-    let profile_id = parsed
-        .profile_id
-        .unwrap_or_else(|| default_binding.to_string());
+    let binding_id = parsed
+        .binding_id
+        .unwrap_or_else(|| default_oauth_binding(mode).to_string());
+    let (connection_ref, binding, auth_profile) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
+    if parsed.provider != auth_profile.provider.as_str() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!(
+                "binding {} resolves provider '{}' not '{}'",
+                binding.id,
+                auth_profile.provider.as_str(),
+                parsed.provider,
+            ),
+        );
+    }
     let http = reqwest::Client::new();
     let outcome =
         match poll_device_code(&http, &endpoints, &parsed.device_code, client_secret).await {
@@ -702,7 +798,10 @@ pub async fn handle_auth_login_device_complete(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            let key = TokenKey::new(parsed.realm_id.clone(), profile_id.clone());
+            let key = TokenKey::new(
+                connection_ref.realm_id.clone(),
+                connection_ref.binding_id.clone(),
+            );
             if let Err(e) = store.save(&key, &tokens).await {
                 return RpcResponse::error(
                     id,
@@ -712,7 +811,7 @@ pub async fn handle_auth_login_device_complete(
             }
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %format!("{}:{}", parsed.realm_id, profile_id),
+                binding_key = %connection_ref,
                 action = "login_device_complete",
                 provider = %parsed.provider,
                 has_refresh_token = %tokens.refresh_token.is_some(),
@@ -722,8 +821,10 @@ pub async fn handle_auth_login_device_complete(
                 id,
                 serde_json::json!({
                     "state": "ready",
-                    "realm_id": parsed.realm_id,
-                    "profile_id": profile_id,
+                    "realm_id": &connection_ref.realm_id,
+                    "binding_id": &connection_ref.binding_id,
+                    "connection_ref": &connection_ref,
+                    "profile_id": &binding.auth_profile,
                     "provider": parsed.provider,
                     "expires_at": expires_at.map(|e| e.to_rfc3339()),
                     "has_refresh_token": tokens.refresh_token.is_some(),
@@ -743,7 +844,7 @@ struct ProvisionApiKeyParams {
     /// Defaults to `anthropic_oauth_to_api_key` so the resolver's
     /// `OauthToApiKey` path can find the persisted api_key.
     #[serde(default)]
-    profile_id: Option<String>,
+    binding_id: Option<String>,
 }
 
 /// Plan §4b.5 closure: Console OAuth → API key provisioning. The
@@ -752,7 +853,7 @@ struct ProvisionApiKeyParams {
 /// access_token to this method. We POST to
 /// `https://api.anthropic.com/api/oauth/claude_cli/create_api_key`
 /// and persist the returned API key as a stable credential under
-/// `<realm_id>:<profile_id>` with auth_mode=OauthToApiKey — so
+/// `<realm_id>:<binding_id>` with auth_mode=OauthToApiKey — so
 /// future `resolve_binding` for the `oauth_to_api_key` method reads
 /// the provisioned api_key without needing any refresh.
 pub async fn handle_auth_login_provision_api_key(
@@ -765,14 +866,14 @@ pub async fn handle_auth_login_provision_api_key(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let profile_id = parsed
-        .profile_id
+    let binding_id = parsed
+        .binding_id
         .unwrap_or_else(|| "anthropic_oauth_to_api_key".to_string());
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let key = TokenKey::new(parsed.realm_id.clone(), profile_id.clone());
+    let key = TokenKey::new(parsed.realm_id.clone(), binding_id.clone());
     // Console endpoints drive `scope = org:create_api_key user:profile`.
     // The runtime wrapper's `provision_api_key` POSTs to
     // API_KEY_CREATE_URL with `Authorization: Bearer <access_token>`
@@ -784,8 +885,13 @@ pub async fn handle_auth_login_provision_api_key(
         Ok(tokens) => RpcResponse::success(
             id,
             serde_json::json!({
-                "realm_id": parsed.realm_id,
-                "profile_id": profile_id,
+                "realm_id": &parsed.realm_id,
+                "binding_id": &binding_id,
+                "connection_ref": {
+                    "realm_id": &parsed.realm_id,
+                    "binding_id": &binding_id,
+                },
+                "profile_id": "anthropic_oauth_to_api_key",
                 "provider": "anthropic",
                 "auth_mode": "oauth_to_api_key",
                 "has_api_key": tokens.primary_secret.is_some(),
@@ -805,23 +911,20 @@ pub async fn handle_auth_status_get(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: AuthProfileIdParams = match parse_params(params) {
+    let parsed: BindingIdParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let config = match load_config(runtime).await {
-        Ok(c) => c,
-        Err(r) => return r.with_id(id),
-    };
-    let profile = config
-        .realm
-        .get(&parsed.realm_id)
-        .and_then(|section| section.auth.get(&parsed.profile_id));
+    let (connection_ref, binding, auth_profile) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
     let stored = if let Some(store) = runtime.token_store() {
         store
             .load(&TokenKey::new(
-                parsed.realm_id.clone(),
-                parsed.profile_id.clone(),
+                connection_ref.realm_id.clone(),
+                connection_ref.binding_id.clone(),
             ))
             .await
             .unwrap_or(None)
@@ -839,10 +942,12 @@ pub async fn handle_auth_status_get(
     RpcResponse::success(
         id,
         serde_json::json!({
-            "profile_id": parsed.profile_id,
-            "realm_id": parsed.realm_id,
-            "provider": profile.map(|p| p.provider.as_str()),
-            "auth_method": profile.map(|p| p.auth_method.clone()),
+            "realm_id": &connection_ref.realm_id,
+            "binding_id": &connection_ref.binding_id,
+            "connection_ref": &connection_ref,
+            "profile_id": &binding.auth_profile,
+            "provider": auth_profile.provider.as_str(),
+            "auth_method": &auth_profile.auth_method,
             "state": state_label,
             "expires_at": stored.as_ref().and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),
             "last_refresh_at": stored.as_ref().and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
@@ -857,28 +962,38 @@ pub async fn handle_auth_logout(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: AuthProfileIdParams = match parse_params(params) {
+    let parsed: BindingIdParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let (connection_ref, binding, _) =
+        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+            Ok(v) => v,
+            Err(r) => return r.with_id(id),
+        };
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
+    let key = TokenKey::new(
+        connection_ref.realm_id.clone(),
+        connection_ref.binding_id.clone(),
+    );
     match store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                binding_key = %connection_ref,
                 action = "logout",
-                "auth profile logged out via RPC"
+                "binding-scoped auth credentials logged out via RPC"
             );
             RpcResponse::success(
                 id,
                 serde_json::json!({
-                    "realm_id": parsed.realm_id,
-                    "profile_id": parsed.profile_id,
+                    "realm_id": &connection_ref.realm_id,
+                    "binding_id": &connection_ref.binding_id,
+                    "connection_ref": &connection_ref,
+                    "profile_id": &binding.auth_profile,
                     "cleared": true,
                 }),
             )

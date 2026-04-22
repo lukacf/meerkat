@@ -400,7 +400,7 @@
   },
   "InputListResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/inputs`.",
+    "description": "Response payload for `session/submissions`.",
     "properties": {
       "input_ids": {
         "items": {
@@ -535,7 +535,7 @@
         "type": "null"
       }
     ],
-    "description": "Response payload for `session/input_state`.",
+    "description": "Response payload for `session/submission`.",
     "title": "InputStateResult"
   },
   "McpLiveOpResponse": {
@@ -5841,7 +5841,7 @@
   },
   "RuntimeAcceptOutcomeType": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Discriminator for `session/accept_input` responses.",
+    "description": "Discriminator for `session/submit` responses.",
     "enum": [
       "accepted",
       "deduplicated",
@@ -5853,7 +5853,7 @@
   "RuntimeAcceptResult": {
     "$defs": {
       "RuntimeAcceptOutcomeType": {
-        "description": "Discriminator for `session/accept_input` responses.",
+        "description": "Discriminator for `session/submit` responses.",
         "enum": [
           "accepted",
           "deduplicated",
@@ -5971,7 +5971,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/accept_input`.",
+    "description": "Response payload for `session/submit`.",
     "properties": {
       "existing_id": {
         "type": [
@@ -6042,7 +6042,7 @@
   },
   "RuntimeResetResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/reset_runtime`.",
+    "description": "Response payload for `session/reset`.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -6058,7 +6058,7 @@
   },
   "RuntimeRetireResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/retire_runtime`.",
+    "description": "Response payload for `session/retire`.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -6095,7 +6095,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/runtime_state`.",
+    "description": "Response payload for `session/status`.",
     "properties": {
       "state": {
         "$ref": "#/$defs/WireRuntimeState"
@@ -7588,6 +7588,16 @@
             "format": "date-time",
             "type": "string"
           },
+          "runtime_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RuntimeDeliveryOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stage": {
             "$ref": "#/$defs/DeliveryReceiptStage"
           }
@@ -7982,6 +7992,16 @@
           "phase": {
             "$ref": "#/$defs/OccurrencePhase"
           },
+          "runtime_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RuntimeDeliveryOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule_id": {
             "$ref": "#/$defs/ScheduleId"
           },
@@ -8166,6 +8186,76 @@
           "urgent"
         ],
         "type": "string"
+      },
+      "RuntimeDeliveryOutcome": {
+        "oneOf": [
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "admission_rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "completion_abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "completion_callback_pending",
+                "type": "string"
+              },
+              "payload": true,
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_name",
+              "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "completion_runtime_terminated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ScheduleId": {
         "description": "Opaque identifier for a persisted schedule.",

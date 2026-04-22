@@ -7,10 +7,29 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_core::AuthError;
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "bedrock"),
+    all(not(target_arch = "wasm32"), feature = "vertex"),
+    all(not(target_arch = "wasm32"), feature = "foundry")
+))]
+use meerkat_core::HttpAuthorizer;
+use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::refresh_allowed;
+use meerkat_auth_core::resolver::{
+    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
+    resolve_simple_secret,
+};
 use meerkat_llm_core::LlmClient;
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "bedrock"),
+    all(not(target_arch = "wasm32"), feature = "vertex"),
+    all(not(target_arch = "wasm32"), feature = "foundry")
+))]
+use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -93,6 +112,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
 
     fn validate_binding(
         &self,
+        connection_ref: &meerkat_core::ConnectionRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -112,6 +132,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             });
         }
         Ok(ValidatedBinding {
+            connection_ref: connection_ref.clone(),
             provider: Provider::Anthropic,
             backend: NormalizedBackendKind::Anthropic(backend_kind),
             auth: NormalizedAuthMethod::Anthropic(auth_method),
@@ -143,65 +164,166 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             }
         };
 
-        // Plan §4b.12: metadata carried on the lease. Populated below
-        // when the ClaudeAiOauth / OauthToApiKey path finds an id_token
-        // with user:profile claims.
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_email: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_user_id: Option<String> = None;
-        #[cfg_attr(
-            not(all(not(target_arch = "wasm32"), feature = "oauth")),
-            allow(unused_mut)
-        )]
-        let mut anthropic_subscription_tier: Option<String> = None;
-
-        // Plan §6.11: Option<String> for secret material; None for
-        // authorizer-backed paths (build_client constructs the concrete
-        // HttpAuthorizer for AWS SigV4 / Google / Azure AD at build time).
-        let secret_opt: Option<String> = match auth_method {
+        let source_label = format!("anthropic:{}", binding.auth_profile.id);
+        let lease: Arc<dyn AuthLease> = match auth_method {
             AnthropicAuthMethod::ApiKey
             | AnthropicAuthMethod::StaticBearer
             | AnthropicAuthMethod::BedrockBearer
             | AnthropicAuthMethod::FoundryApiKey => {
-                Some(resolve_simple_secret(&binding.auth_profile.source, env, binding).await?)
+                let secret =
+                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
+                Arc::new(StaticLease::inline_secret(
+                    secret,
+                    metadata,
+                    None,
+                    source_label.clone(),
+                ))
             }
             AnthropicAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?;
-                None
+                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
             }
-            AnthropicAuthMethod::BedrockAwsSigv4
-            | AnthropicAuthMethod::VertexGoogleAuth
-            | AnthropicAuthMethod::FoundryAzureAd => None,
+            AnthropicAuthMethod::BedrockAwsSigv4 => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+                {
+                    let region = bedrock_region(binding);
+                    let lookup = env.env_lookup.clone();
+                    let authorizer: Arc<dyn HttpAuthorizer> =
+                        Arc::new(meerkat_auth_core::authorizers::AwsStsAuthorizer::new(
+                            region.clone(),
+                            meerkat_auth_core::authorizers::AwsCredentialProvider::from_env(
+                                move |key| lookup(key),
+                            ),
+                        ));
+                    let metadata = finalize_auth_metadata(
+                        binding,
+                        AuthMetadata {
+                            provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Anthropic(
+                                meerkat_core::AnthropicAuthMetadata {
+                                    aws_region: Some(region),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    ))
+                }
+                #[cfg(any(target_arch = "wasm32", not(feature = "bedrock")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "bedrock_aws_sigv4 requires the anthropic `bedrock` feature on non-wasm32"
+                            .into(),
+                    ));
+                }
+            }
+            AnthropicAuthMethod::VertexGoogleAuth => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "vertex"))]
+                {
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(
+                        meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
+                            meerkat_auth_core::authorizers::GoogleAuthChain::Default,
+                            env.env_lookup.clone(),
+                        ),
+                    );
+                    let metadata = finalize_auth_metadata(
+                        binding,
+                        AuthMetadata {
+                            provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Anthropic(
+                                meerkat_core::AnthropicAuthMetadata {
+                                    vertex_project_id: backend_option_string(binding, "project_id")
+                                        .or_else(|| {
+                                            backend_option_string(binding, "vertex_project_id")
+                                        }),
+                                    vertex_region: backend_option_string(binding, "region")
+                                        .or_else(|| {
+                                            backend_option_string(binding, "vertex_region")
+                                        }),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    ))
+                }
+                #[cfg(any(target_arch = "wasm32", not(feature = "vertex")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "vertex_google_auth requires the anthropic `vertex` feature on non-wasm32"
+                            .into(),
+                    ));
+                }
+            }
+            AnthropicAuthMethod::FoundryAzureAd => {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "foundry"))]
+                {
+                    let lookup = env.env_lookup.clone();
+                    let creds = meerkat_auth_core::authorizers::AzureClientCredentials::from_env(
+                        move |key| lookup(key),
+                    )
+                    .map_err(|err| ProviderAuthError::Auth(err.into()))?;
+                    let authorizer: Arc<dyn HttpAuthorizer> =
+                        Arc::new(meerkat_auth_core::authorizers::AzureAdAuthorizer::new(
+                            "https://cognitiveservices.azure.com/.default",
+                            creds,
+                        ));
+                    let metadata = finalize_auth_metadata(
+                        binding,
+                        AuthMetadata {
+                            provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Anthropic(
+                                meerkat_core::AnthropicAuthMetadata {
+                                    foundry_deployment: binding.backend_profile.base_url.clone(),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Arc::new(DynamicLease::new(
+                        authorizer,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    ))
+                }
+                #[cfg(any(target_arch = "wasm32", not(feature = "foundry")))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "foundry_azure_ad requires the anthropic `foundry` feature on non-wasm32"
+                            .into(),
+                    ));
+                }
+            }
             AnthropicAuthMethod::ClaudeAiOauth | AnthropicAuthMethod::OauthToApiKey => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
                 {
                     let store = env
                         .token_store
                         .as_ref()
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-                    let realm_id = binding
-                        .backend_profile
-                        .options
-                        .get("realm_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("dev")
-                        .to_string();
+                        .ok_or_else(|| interactive_login_error(binding))?;
                     let key = meerkat_core::auth::TokenKey::new(
-                        realm_id,
-                        binding.auth_profile.id.clone(),
+                        binding.connection_ref.realm_id.clone(),
+                        binding.connection_ref.binding_id.clone(),
                     );
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                        .ok_or_else(|| interactive_login_error(binding))?;
+                    let mut anthropic_email: Option<String> = None;
+                    let mut anthropic_user_id: Option<String> = None;
+                    let mut anthropic_subscription_tier: Option<String> = None;
                     // Plan §4b.12: lift id_token claims.
                     if let Some(id_token) = persisted.id_token.as_deref()
                         && let Ok(claims) =
@@ -227,6 +349,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             {
                                 access
                             } else {
+                                if !refresh_allowed(binding) {
+                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                                }
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
@@ -241,9 +366,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                 runtime.get_or_refresh_access_token().await.map_err(
                                     |e| match e {
                                         oauth::AnthropicOAuthError::InteractiveLoginRequired => {
-                                            ProviderAuthError::Auth(
-                                                AuthError::InteractiveLoginRequired,
-                                            )
+                                            interactive_login_error(binding)
                                         }
                                         other => ProviderAuthError::SourceResolutionFailed(
                                             other.to_string(),
@@ -254,50 +377,36 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         }
                         _ => unreachable!("arm guarded by outer match"),
                     };
-                    Some(secret)
+                    let mut metadata = AuthMetadata::default();
+                    if anthropic_email.is_some()
+                        || anthropic_user_id.is_some()
+                        || anthropic_subscription_tier.is_some()
+                    {
+                        metadata.account_id = anthropic_user_id
+                            .clone()
+                            .or_else(|| anthropic_email.clone());
+                        metadata.plan = anthropic_subscription_tier.clone();
+                        metadata.provider_metadata =
+                            Some(meerkat_core::ProviderAuthMetadata::Anthropic(
+                                meerkat_core::AnthropicAuthMetadata {
+                                    subscription_tier: anthropic_subscription_tier,
+                                    ..Default::default()
+                                },
+                            ));
+                    }
+                    let metadata = finalize_auth_metadata(binding, metadata)?;
+                    Arc::new(StaticLease::inline_secret(
+                        secret,
+                        metadata,
+                        persisted.expires_at,
+                        source_label.clone(),
+                    ))
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
-                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                    return Err(interactive_login_error(binding));
                 }
             }
-        };
-
-        // Plan §6.11 + §4b.12: populate the lease with resolved secret
-        // as a typed InlineSecret variant, or an empty lease for
-        // authorizer paths. Attach id_token-lifted claims as
-        // `ProviderAuthMetadata::Anthropic`.
-        let mut metadata = AuthMetadata::default();
-        if anthropic_email.is_some()
-            || anthropic_user_id.is_some()
-            || anthropic_subscription_tier.is_some()
-        {
-            metadata.account_id = anthropic_user_id
-                .clone()
-                .or_else(|| anthropic_email.clone());
-            metadata.plan = anthropic_subscription_tier.clone();
-            metadata.provider_metadata = Some(meerkat_core::ProviderAuthMetadata::Anthropic(
-                meerkat_core::AnthropicAuthMetadata {
-                    subscription_tier: anthropic_subscription_tier,
-                    aws_region: None,
-                    vertex_project_id: None,
-                    vertex_region: None,
-                    foundry_deployment: None,
-                },
-            ));
-        }
-        let source_label = format!("anthropic:{}", binding.auth_profile.id);
-        let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
-            Some(secret) => Arc::new(StaticLease::inline_secret(
-                secret,
-                metadata,
-                None,
-                source_label,
-            )),
-            None => Arc::new(StaticLease::empty_lease(
-                AuthMetadata::default(),
-                source_label,
-            )),
         };
 
         Ok(ResolvedConnection {
@@ -459,6 +568,33 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             )),
         }
     }
+}
+
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "bedrock"),
+    all(not(target_arch = "wasm32"), feature = "vertex")
+))]
+fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String> {
+    binding
+        .backend_profile
+        .options
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+fn bedrock_region(binding: &ValidatedBinding) -> String {
+    backend_option_string(binding, "aws_region")
+        .or_else(|| backend_option_string(binding, "region"))
+        .or_else(|| {
+            binding.backend_profile.base_url.as_deref().and_then(|url| {
+                let after_prefix = url.split("bedrock-runtime.").nth(1)?;
+                let region = after_prefix.split('.').next()?;
+                (!region.is_empty()).then(|| region.to_string())
+            })
+        })
+        .unwrap_or_else(|| "us-east-1".to_string())
 }
 
 #[cfg(test)]

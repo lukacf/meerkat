@@ -60,7 +60,14 @@ describe("E2E Smoke: TypeScript SDK package", { skip: !binaryPath }, () => {
     );
   });
 
-  it("opens and explicitly closes a live mob stream through the packaged SDK", async () => {
+  it("opens and explicitly closes a live mob stream through the packaged SDK", async (t) => {
+    const supportsMob = Array.isArray(client.capabilities)
+      && client.capabilities.some((capability) => capability.id === "mob");
+    if (!supportsMob) {
+      t.skip("packaged binary does not advertise mob capability");
+      return;
+    }
+
     const mob = await client.createMob({
       definition: {
         id: "coding_swarm",

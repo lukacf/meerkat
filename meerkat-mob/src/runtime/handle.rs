@@ -2980,10 +2980,15 @@ impl MobHandle {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        if material.status != CanonicalMemberStatus::Active {
-            return true;
+        match material.status {
+            CanonicalMemberStatus::Unknown => false,
+            CanonicalMemberStatus::Active => {
+                !pending_kickoff_member_ids.contains(entry.agent_identity.as_str())
+            }
+            CanonicalMemberStatus::Retiring
+            | CanonicalMemberStatus::Broken
+            | CanonicalMemberStatus::Completed => true,
         }
-        !pending_kickoff_member_ids.contains(entry.agent_identity.as_str())
     }
 
     fn ready_wait_is_satisfied(
@@ -2994,10 +2999,15 @@ impl MobHandle {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        if material.status != CanonicalMemberStatus::Active {
-            return true;
+        match material.status {
+            CanonicalMemberStatus::Unknown => false,
+            CanonicalMemberStatus::Active => {
+                ready_runtime_ids.contains(&entry.agent_runtime_id.to_string())
+            }
+            CanonicalMemberStatus::Retiring
+            | CanonicalMemberStatus::Broken
+            | CanonicalMemberStatus::Completed => true,
         }
-        ready_runtime_ids.contains(&entry.agent_runtime_id.to_string())
     }
 
     async fn wait_for_kickoff_resolution(

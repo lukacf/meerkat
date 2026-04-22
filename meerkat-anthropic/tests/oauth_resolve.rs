@@ -28,8 +28,8 @@ use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
 use meerkat_core::{
-    AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec, ProviderBindingConfig,
-    RealmConfigSection, RealmConnectionSet,
+    AuthConstraints, AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec,
+    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
@@ -52,7 +52,10 @@ fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
             auth_method: auth_method.into(),
             source: CredentialSourceSpec::PlatformDefault,
             storage: None,
-            constraints: Default::default(),
+            constraints: AuthConstraints {
+                allow_interactive_login: true,
+                ..Default::default()
+            },
             metadata_defaults: Default::default(),
         },
     );
@@ -96,7 +99,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 
@@ -153,7 +156,7 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 
@@ -181,14 +184,14 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
     let runtime = oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
         store.clone(),
         endpoints,
-        TokenKey::new("dev", "claude_oauth"),
+        TokenKey::new("dev", "default_claude"),
     );
     let access = runtime.get_or_refresh_access_token().await.unwrap();
     assert_eq!(access, "refreshed-access-NEW");
 
     // Verify the new bundle was persisted.
     let updated = store
-        .load(&TokenKey::new("dev", "claude_oauth"))
+        .load(&TokenKey::new("dev", "default_claude"))
         .await
         .unwrap()
         .unwrap();
@@ -221,7 +224,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "claude_oauth"), &persisted)
+        .save(&TokenKey::new("dev", "default_claude"), &persisted)
         .await
         .unwrap();
 

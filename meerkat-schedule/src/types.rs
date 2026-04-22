@@ -788,6 +788,47 @@ pub enum OccurrenceFailureClass {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeDeliveryOutcome {
+    AdmissionRejected {
+        detail: String,
+    },
+    CompletionAbandoned {
+        detail: String,
+    },
+    CompletionCallbackPending {
+        tool_name: String,
+        payload: serde_json::Value,
+    },
+    CompletionRuntimeTerminated {
+        detail: String,
+    },
+}
+
+impl RuntimeDeliveryOutcome {
+    pub fn derived_failure_class(&self) -> OccurrenceFailureClass {
+        match self {
+            Self::AdmissionRejected { .. }
+            | Self::CompletionAbandoned { .. }
+            | Self::CompletionCallbackPending { .. } => OccurrenceFailureClass::RuntimeRejected,
+            Self::CompletionRuntimeTerminated { .. } => OccurrenceFailureClass::TransportError,
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::AdmissionRejected { detail }
+            | Self::CompletionAbandoned { detail }
+            | Self::CompletionRuntimeTerminated { detail } => detail.clone(),
+            Self::CompletionCallbackPending { tool_name, payload } => {
+                format!("callback pending for tool '{tool_name}': {payload}")
+            }
+        }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryReceiptStage {
@@ -820,6 +861,8 @@ pub struct DeliveryReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<OccurrenceFailureClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized_session_id: Option<SessionId>,
 }
 
@@ -834,6 +877,7 @@ impl DeliveryReceipt {
             correlation_id: None,
             detail: None,
             failure_class: None,
+            runtime_outcome: None,
             materialized_session_id: None,
         }
     }
@@ -948,6 +992,8 @@ pub struct Occurrence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<OccurrenceFailureClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
     #[serde(default)]
     pub attempt_count: u32,
@@ -986,6 +1032,7 @@ impl Occurrence {
             delivery_correlation_id: None,
             last_receipt: None,
             failure_class: None,
+            runtime_outcome: None,
             failure_detail: None,
             attempt_count: 0,
             created_at_utc: Utc::now(),

@@ -18,8 +18,8 @@ use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
 use meerkat_core::{
-    AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec, ProviderBindingConfig,
-    RealmConfigSection, RealmConnectionSet,
+    AuthConstraints, AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec,
+    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -43,7 +43,10 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
             auth_method: auth_method.into(),
             source: CredentialSourceSpec::PlatformDefault,
             storage: None,
-            constraints: Default::default(),
+            constraints: AuthConstraints {
+                allow_interactive_login: true,
+                ..Default::default()
+            },
             metadata_defaults: Default::default(),
         },
     );
@@ -89,7 +92,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "chatgpt_auth"), &persisted)
+        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
         .await
         .unwrap();
 
@@ -122,7 +125,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "chatgpt_auth"), &persisted)
+        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
         .await
         .unwrap();
 

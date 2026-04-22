@@ -283,6 +283,10 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     fn snapshot(&self) -> TurnStateSnapshot {
         let state = self.dsl.snapshot_state();
         TurnStateSnapshot {
+            active_run_id: state
+                .current_run_id
+                .as_ref()
+                .and_then(|run_id| uuid::Uuid::parse_str(&run_id.0).ok().map(RunId::from_uuid)),
             turn_phase: map_turn_phase(state.turn_phase),
             primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.clone(),
@@ -319,5 +323,37 @@ fn map_turn_phase(phase: mm_dsl::TurnPhase) -> TurnPhase {
         mm_dsl::TurnPhase::Completed => TurnPhase::Completed,
         mm_dsl::TurnPhase::Failed => TurnPhase::Failed,
         mm_dsl::TurnPhase::Cancelled => TurnPhase::Cancelled,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn snapshot_carries_active_run_id_for_runtime_backed_turns() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(7));
+
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                "conversation".into(),
+                true,
+                false,
+                2,
+            )
+            .unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.active_run_id, Some(run_id));
+        assert_eq!(snapshot.turn_phase, TurnPhase::ApplyingPrimitive);
+        assert_eq!(
+            snapshot.primitive_kind,
+            Some(TurnPrimitiveKind::ConversationTurn)
+        );
     }
 }

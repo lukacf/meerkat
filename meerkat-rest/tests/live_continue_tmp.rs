@@ -73,6 +73,8 @@ async fn integration_real_live_continue_hangs() {
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root.clone()),
+        context_root: None,
+        user_config_root: None,
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store,
         event_tx,

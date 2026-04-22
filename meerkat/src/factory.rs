@@ -3,6 +3,8 @@
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+#[cfg(feature = "skills")]
+use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1090,6 +1092,49 @@ impl AgentFactory {
     ///
     /// Returns `None` if skills are disabled or no source is available.
     #[cfg(feature = "skills")]
+    fn effective_skill_capabilities(
+        &self,
+        config: &Config,
+        build_config: Option<&AgentBuildConfig>,
+    ) -> Vec<String> {
+        let mut capabilities: BTreeSet<meerkat_contracts::CapabilityId> =
+            meerkat_contracts::available_capabilities(config)
+                .into_iter()
+                .collect();
+
+        let builtins_enabled = build_config
+            .map(|build| build.override_builtins.resolve(self.enable_builtins))
+            .unwrap_or(self.enable_builtins);
+        if !builtins_enabled {
+            capabilities.remove(&meerkat_contracts::CapabilityId::Builtins);
+        }
+
+        let shell_enabled = build_config
+            .map(|build| build.override_shell.resolve(self.enable_shell))
+            .unwrap_or(self.enable_shell);
+        if !shell_enabled {
+            capabilities.remove(&meerkat_contracts::CapabilityId::Shell);
+        }
+
+        let memory_enabled = build_config
+            .map(|build| build.override_memory.resolve(self.enable_memory))
+            .unwrap_or(self.enable_memory);
+        if !memory_enabled {
+            capabilities.remove(&meerkat_contracts::CapabilityId::MemoryStore);
+        }
+
+        #[cfg(feature = "comms")]
+        if !self.enable_comms {
+            capabilities.remove(&meerkat_contracts::CapabilityId::Comms);
+        }
+
+        capabilities
+            .into_iter()
+            .map(|cap| cap.to_string())
+            .collect()
+    }
+
+    #[cfg(feature = "skills")]
     pub async fn build_skill_runtime(
         &self,
         config: &Config,
@@ -1132,10 +1177,7 @@ impl AgentFactory {
             };
 
         skill_source.map(|source| {
-            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                .into_iter()
-                .map(|c| c.id.to_string())
-                .collect();
+            let available_caps = self.effective_skill_capabilities(config, None);
             let engine = Arc::new(
                 meerkat_skills::DefaultSkillEngine::new(source, available_caps)
                     .with_inventory_threshold(config.skills.inventory_threshold)
@@ -1980,50 +2022,48 @@ impl AgentFactory {
 
         // 6a. Build skill engine (override > factory > config > filesystem).
         #[cfg(feature = "skills")]
-        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> =
-            if let Some(engine) = build_config.skill_engine_override.take() {
-                Some(engine)
-            } else {
-                let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
-                    if self.skill_source.is_some() {
-                        self.skill_source.clone()
-                    } else if !config.skills.enabled {
-                        None
-                    } else {
-                        #[cfg(not(target_arch = "wasm32"))]
+        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = if let Some(engine) =
+            build_config.skill_engine_override.take()
+        {
+            Some(engine)
+        } else {
+            let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
+                if self.skill_source.is_some() {
+                    self.skill_source.clone()
+                } else if !config.skills.enabled {
+                    None
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match meerkat_skills::resolve_repositories_with_roots(
+                            &config.skills,
+                            _conventions_context_root,
+                            _conventions_user_root,
+                            Some(_realm_scope_root.as_path()),
+                        )
+                        .await
                         {
-                            match meerkat_skills::resolve_repositories_with_roots(
-                                &config.skills,
-                                _conventions_context_root,
-                                _conventions_user_root,
-                                Some(_realm_scope_root.as_path()),
-                            )
-                            .await
-                            {
-                                Ok(source) => source.map(Arc::new),
-                                Err(e) => {
-                                    tracing::warn!("Failed to resolve skill repositories: {e}");
-                                    None
-                                }
+                            Ok(source) => source.map(Arc::new),
+                            Err(e) => {
+                                tracing::warn!("Failed to resolve skill repositories: {e}");
+                                None
                             }
                         }
-                        #[cfg(target_arch = "wasm32")]
-                        None
-                    };
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    None
+                };
 
-                skill_source.map(|source| {
-                    let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                        .into_iter()
-                        .map(|c| c.id.to_string())
-                        .collect();
-                    let engine = Arc::new(
-                        meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                            .with_inventory_threshold(config.skills.inventory_threshold)
-                            .with_max_injection_bytes(config.skills.max_injection_bytes),
-                    );
-                    Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
-                })
-            }; // end else (filesystem resolution fallthrough)
+            skill_source.map(|source| {
+                let available_caps = self.effective_skill_capabilities(config, Some(&build_config));
+                let engine = Arc::new(
+                    meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                        .with_inventory_threshold(config.skills.inventory_threshold)
+                        .with_max_injection_bytes(config.skills.max_injection_bytes),
+                );
+                Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
+            })
+        }; // end else (filesystem resolution fallthrough)
         #[cfg(not(feature = "skills"))]
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 

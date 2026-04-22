@@ -385,7 +385,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
-    append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for session/runtime_state.")
+    append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for session/status.")
     append_python_dataclass(
         "RuntimeRealtimeAttachmentStatusParams",
         params_schema,
@@ -394,11 +394,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeOpenRequest", params_schema, "Request payload for realtime/open_info.")
     append_python_dataclass("RealtimeStatusParams", params_schema, "Request payload for realtime/status.")
     append_python_dataclass("RealtimeCapabilitiesParams", params_schema, "Request payload for realtime/capabilities.")
-    append_python_dataclass("RuntimeAcceptParams", params_schema, "Request payload for session/accept_input.")
-    append_python_dataclass("RuntimeRetireParams", params_schema, "Request payload for session/retire_runtime.")
-    append_python_dataclass("RuntimeResetParams", params_schema, "Request payload for session/reset_runtime.")
-    append_python_dataclass("InputStateParams", params_schema, "Request payload for session/input_state.")
-    append_python_dataclass("InputListParams", params_schema, "Request payload for session/inputs.")
+    append_python_dataclass("RuntimeAcceptParams", params_schema, "Request payload for session/submit.")
+    append_python_dataclass("RuntimeRetireParams", params_schema, "Request payload for session/retire.")
+    append_python_dataclass("RuntimeResetParams", params_schema, "Request payload for session/reset.")
+    append_python_dataclass("InputStateParams", params_schema, "Request payload for session/submission.")
+    append_python_dataclass("InputListParams", params_schema, "Request payload for session/submissions.")
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
@@ -408,7 +408,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
     append_python_dataclass("MobWireResult", wire_schema, "Response payload for mob/wire.")
     append_python_dataclass("MobUnwireResult", wire_schema, "Response payload for mob/unwire.")
-    append_python_dataclass("RuntimeStateResult", wire_schema, "Response payload for session/runtime_state.")
+    append_python_dataclass("RuntimeStateResult", wire_schema, "Response payload for session/status.")
     append_python_dataclass(
         "RuntimeRealtimeAttachmentStatusResult",
         wire_schema,
@@ -431,12 +431,12 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeChannelEventFrame", wire_schema, "Payload for channel.event.")
     append_python_dataclass("RealtimeChannelErrorFrame", wire_schema, "Payload for channel.error.")
     append_python_dataclass("RealtimeChannelClosedFrame", wire_schema, "Payload for channel.closed.")
-    append_python_dataclass("RuntimeAcceptResult", wire_schema, "Response payload for session/accept_input.")
-    append_python_dataclass("RuntimeRetireResult", wire_schema, "Response payload for session/retire_runtime.")
-    append_python_dataclass("RuntimeResetResult", wire_schema, "Response payload for session/reset_runtime.")
+    append_python_dataclass("RuntimeAcceptResult", wire_schema, "Response payload for session/submit.")
+    append_python_dataclass("RuntimeRetireResult", wire_schema, "Response payload for session/retire.")
+    append_python_dataclass("RuntimeResetResult", wire_schema, "Response payload for session/reset.")
     append_python_dataclass("WireInputStateHistoryEntry", wire_schema, "Input transition history entry.")
     append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
-    append_python_dataclass("InputListResult", wire_schema, "Response payload for session/inputs.")
+    append_python_dataclass("InputListResult", wire_schema, "Response payload for session/submissions.")
     append_python_dataclass("ScheduleListResult", wire_schema, "Response payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesResult", wire_schema, "Response payload for schedule/occurrences.")
     append_python_dataclass("WireSessionInfo", wire_schema, "Detailed session metadata payload.")
@@ -483,7 +483,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("RealtimeEvent", wire_schema, "Realtime event union.")
     append_python_alias("RealtimeClientFrame", wire_schema, "Realtime client frame union.")
     append_python_alias("RealtimeServerFrame", wire_schema, "Realtime server frame union.")
-    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for session/accept_input responses.")
+    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for session/submit responses.")
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
@@ -493,7 +493,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         wire_schema,
         "Typed comms/send command (serde-tagged on `kind`).",
     )
-    types_content += "\n# Response payload for `session/input_state`.\nInputStateResult = Optional[WireInputState]\n"
+    types_content += "\n# Response payload for `session/submission`.\nInputStateResult = Optional[WireInputState]\n"
 
     (output_dir / "types.py").write_text(types_content)
 

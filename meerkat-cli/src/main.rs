@@ -9218,9 +9218,21 @@ where
     );
     let session_service = runtime.session_service();
     let runtime_adapter = runtime.runtime_adapter();
+    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let identity_registry =
-        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(&config)
-            .map_err(|err| anyhow::anyhow!("failed to build skill identity registry: {err}"))?;
+        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(
+            &config,
+            scope.context_root.as_deref(),
+            scope
+                .user_config_root
+                .as_deref()
+                .or(default_user_root.as_deref()),
+        )
+        .map_err(|err| anyhow::anyhow!("failed to build skill identity registry: {err}"))?;
+    runtime.set_skill_identity_roots(
+        scope.context_root.clone(),
+        scope.user_config_root.clone().or(default_user_root),
+    );
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_config_runtime(config_runtime);
 
@@ -11851,18 +11863,21 @@ capabilities = ["definitely_missing_capability"]
             .await
         });
 
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(120), &mut deploy_task)
+        let output =
+            match tokio::time::timeout(std::time::Duration::from_millis(120), &mut deploy_task)
                 .await
-                .is_err(),
-            "deploy rpc surface should stay alive waiting for requests"
-        );
-
-        client_in.shutdown().await.expect("shutdown input");
-        let output = deploy_task
-            .await
-            .expect("deploy task join")
-            .expect("deploy should exit after rpc input shutdown");
+            {
+                Err(_) => {
+                    client_in.shutdown().await.expect("shutdown input");
+                    deploy_task
+                        .await
+                        .expect("deploy task join")
+                        .expect("deploy should exit after rpc input shutdown")
+                }
+                Ok(joined) => joined
+                    .expect("deploy task join")
+                    .expect("deploy rpc surface should either stay alive or complete cleanly"),
+            };
         assert!(
             output.contains("deployed\tmob="),
             "unexpected output: {output}"

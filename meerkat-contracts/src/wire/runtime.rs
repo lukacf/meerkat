@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::wire::session::WireContentBlock;
 use meerkat_core::comms::PeerName;
 
-/// Request payload for `session/runtime_state`.
+/// Request payload for `session/status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeStateParams {
@@ -32,7 +32,7 @@ pub struct RuntimeRealtimeAttachmentStatusesParams {
     pub session_ids: Vec<String>,
 }
 
-/// Request payload for `session/accept_input`.
+/// Request payload for `session/submit`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeAcceptParams {
@@ -86,21 +86,21 @@ pub enum SessionExternalEventEnvelope {
     },
 }
 
-/// Request payload for `session/retire_runtime`.
+/// Request payload for `session/retire`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeRetireParams {
     pub session_id: String,
 }
 
-/// Request payload for `session/reset_runtime`.
+/// Request payload for `session/reset`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeResetParams {
     pub session_id: String,
 }
 
-/// Request payload for `session/input_state`.
+/// Request payload for `session/submission`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputStateParams {
@@ -108,7 +108,7 @@ pub struct InputStateParams {
     pub input_id: String,
 }
 
-/// Request payload for `session/inputs`.
+/// Request payload for `session/submissions`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputListParams {
@@ -142,7 +142,7 @@ pub enum WireRealtimeAttachmentStatus {
     ReattachRequired,
 }
 
-/// Response payload for `session/runtime_state`.
+/// Response payload for `session/status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeStateResult {
@@ -182,7 +182,7 @@ pub struct RuntimeRealtimeAttachmentStatusesResult {
     pub entries: Vec<RuntimeRealtimeAttachmentStatusEntry>,
 }
 
-/// Discriminator for `session/accept_input` responses.
+/// Discriminator for `session/submit` responses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -251,7 +251,7 @@ pub struct WireInputState {
     pub updated_at: String,
 }
 
-/// Response payload for `session/input_state`.
+/// Response payload for `session/submission`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
@@ -260,7 +260,7 @@ pub enum InputStateResult {
     Missing(()),
 }
 
-/// Response payload for `session/accept_input`.
+/// Response payload for `session/submit`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeAcceptResult {
@@ -277,7 +277,7 @@ pub struct RuntimeAcceptResult {
     pub state: Option<WireInputState>,
 }
 
-/// Response payload for `session/retire_runtime`.
+/// Response payload for `session/retire`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeRetireResult {
@@ -286,14 +286,14 @@ pub struct RuntimeRetireResult {
     pub inputs_pending_drain: usize,
 }
 
-/// Response payload for `session/reset_runtime`.
+/// Response payload for `session/reset`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeResetResult {
     pub inputs_abandoned: usize,
 }
 
-/// Response payload for `session/inputs`.
+/// Response payload for `session/submissions`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputListResult {

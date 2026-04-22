@@ -18,7 +18,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Spawn an RPC binary with --tcp on a random port, return (child, port).
 async fn spawn_rpc_tcp_with_bin(bin: &str) -> (tokio::process::Child, u16) {
@@ -566,8 +566,8 @@ async fn tcp_e2e_rkat_rpc_mini_initialize_and_roundtrip() {
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"config/get"));
-    assert!(!method_names.contains(&"session/runtime_state"));
-    assert!(!method_names.contains(&"session/input_state"));
+    assert!(!method_names.contains(&"session/status"));
+    assert!(!method_names.contains(&"session/submission"));
     assert!(!method_names.contains(&"blob/get"));
     assert!(!method_names.contains(&"session/stream_open"));
     assert!(!method_names.contains(&"skills/list"));

@@ -43,6 +43,7 @@ pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
+    pub require_runtime_build_mode: bool,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
@@ -88,6 +89,8 @@ impl RecoveredSessionBuild {
 pub enum SurfaceSessionRecoveryError {
     #[error("persisted session {0} is missing session metadata")]
     MissingSessionMetadata(String),
+    #[error("{0}")]
+    MissingRuntimeBuildMode(String),
     #[error("{0}")]
     InvalidOverride(String),
 }
@@ -169,6 +172,11 @@ pub fn build_recovered_session(
     {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
             BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
+        ));
+    }
+    if context.require_runtime_build_mode && context.runtime_build_mode.is_none() {
+        return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
+            "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
         ));
     }
 
@@ -646,6 +654,27 @@ mod tests {
         assert!(
             matches!(error, SurfaceSessionRecoveryError::InvalidOverride(_)),
             "provider-only override should be treated as InvalidOverride"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_rejects_missing_runtime_build_mode_when_required() {
+        let error = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                require_runtime_build_mode: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("runtime-backed recovery must reject silent standalone fallback");
+
+        assert!(
+            matches!(
+                error,
+                SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
+            ),
+            "missing runtime bindings should be called out explicitly"
         );
     }
 

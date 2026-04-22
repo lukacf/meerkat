@@ -29,6 +29,14 @@ fn rkat_mini_binary_path() -> Option<PathBuf> {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?;
+    let codex_debug = workspace_root.join("target-codex/debug/rkat-mini");
+    if codex_debug.exists() {
+        return Some(codex_debug);
+    }
+    let codex_release = workspace_root.join("target-codex/release/rkat-mini");
+    if codex_release.exists() {
+        return Some(codex_release);
+    }
     let debug = workspace_root.join("target/debug/rkat-mini");
     if debug.exists() {
         return Some(debug);

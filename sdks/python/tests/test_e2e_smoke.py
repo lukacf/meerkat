@@ -280,14 +280,14 @@ if include_scenario(38):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 39: Persistent reconnect + runtime accept
+# Scenario 39: Persistent reconnect + session submit
 # ---------------------------------------------------------------------------
 
 
 if include_scenario(39):
     @pytest.mark.asyncio
     @requires_live_llm
-    async def test_smoke_scenario_39_persistent_reconnect_and_runtime_accept(tmp_path: Path):
+    async def test_smoke_scenario_39_persistent_reconnect_and_session_submit(tmp_path: Path):
         realm = persistent_realm_kwargs(tmp_path)
         marker = f"python-runtime-{uuid4().hex[:8]}"
 
@@ -304,7 +304,7 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await client_b.runtime_state(session_id)
+            runtime_state = await client_b.status(session_id)
             assert runtime_state.state in {
                 "attached",
                 "idle",
@@ -312,7 +312,7 @@ if include_scenario(39):
                 "initializing",
             }
 
-            accepted = await client_b.runtime_accept(
+            accepted = await client_b.submit(
                 session_id,
                 make_prompt_input(
                     f"Reply with PY-RUNTIME-39 and the marker {marker}.",
@@ -329,7 +329,7 @@ if include_scenario(39):
 
             input_state = await wait_for(
                 "runtime input to be consumed",
-                lambda: client_b.input_state(session_id, input_id),
+                lambda: client_b.submission(session_id, input_id),
                 lambda state: state is not None and state.current_state == "consumed",
                 timeout_secs=120.0,
             )

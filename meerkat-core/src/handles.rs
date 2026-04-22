@@ -165,11 +165,141 @@ impl DslTransitionError {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-crate peer prompt/context projection seam
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerResponseProgressProjectionPhase {
+    Accepted,
+    InProgress,
+    PartialResult,
+}
+
+impl PeerResponseProgressProjectionPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::InProgress => "in_progress",
+            Self::PartialResult => "partial_result",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerResponseTerminalProjectionStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl PeerResponseTerminalProjectionStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PeerConversationProjection {
+    Message {
+        peer_id: String,
+    },
+    Request {
+        peer_id: String,
+        request_id: String,
+        intent: String,
+        payload: Option<serde_json::Value>,
+    },
+    ResponseProgress {
+        peer_id: String,
+        request_id: String,
+        phase: PeerResponseProgressProjectionPhase,
+        payload: Option<serde_json::Value>,
+    },
+    ResponseTerminal {
+        peer_id: String,
+        request_id: String,
+        status: PeerResponseTerminalProjectionStatus,
+        payload: Option<serde_json::Value>,
+    },
+}
+
+impl PeerConversationProjection {
+    pub fn block_prefix_text(&self) -> Option<String> {
+        match self {
+            Self::Message { peer_id } => Some(format!("[COMMS MESSAGE from {peer_id}]")),
+            Self::Request { .. }
+            | Self::ResponseProgress { .. }
+            | Self::ResponseTerminal { .. } => None,
+        }
+    }
+
+    pub fn prompt_text(&self) -> String {
+        match self {
+            Self::Message { .. } => String::new(),
+            Self::Request {
+                peer_id,
+                request_id,
+                intent,
+                payload,
+            } => format!(
+                "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
+                format_peer_projection_payload(payload.as_ref())
+            ),
+            Self::ResponseProgress {
+                peer_id,
+                request_id,
+                phase,
+                payload,
+            } => format!(
+                "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
+                phase.label(),
+                format_peer_projection_payload(payload.as_ref())
+            ),
+            Self::ResponseTerminal {
+                peer_id,
+                request_id,
+                status,
+                payload,
+            } => format!(
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {peer_id}. Request ID: {request_id}. Status: {}. Result: {}.",
+                status.label(),
+                format_peer_projection_payload(payload.as_ref())
+            ),
+        }
+    }
+
+    pub fn context_key(&self) -> Option<String> {
+        match self {
+            Self::ResponseTerminal {
+                peer_id,
+                request_id,
+                ..
+            } => Some(peer_response_terminal_context_key(peer_id, request_id)),
+            Self::Message { .. } | Self::Request { .. } | Self::ResponseProgress { .. } => None,
+        }
+    }
+}
+
+pub fn peer_response_terminal_context_key(peer_id: &str, request_id: &str) -> String {
+    format!("peer_response_terminal:{peer_id}:{request_id}")
+}
+
+fn format_peer_projection_payload(payload: Option<&serde_json::Value>) -> String {
+    serde_json::to_string_pretty(payload.unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_else(|_| "null".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // TurnStateHandle
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
+    pub active_run_id: Option<RunId>,
     pub turn_phase: TurnPhase,
     /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means no primitive is currently in flight.
@@ -1237,4 +1367,59 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
     /// (`ReattachAndRecover`) or close the channel cleanly
     /// (`CleanExit`).
     fn reconnect_policy_on_clean_close(&self) -> RealtimeReconnectPolicy;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{
+        PeerConversationProjection, PeerResponseProgressProjectionPhase,
+        PeerResponseTerminalProjectionStatus, peer_response_terminal_context_key,
+    };
+
+    #[test]
+    fn peer_terminal_projection_owns_prompt_and_context_key() {
+        let projection = PeerConversationProjection::ResponseTerminal {
+            peer_id: "analyst-rt".into(),
+            request_id: "req-123".into(),
+            status: PeerResponseTerminalProjectionStatus::Completed,
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+        };
+
+        assert_eq!(
+            projection.context_key().as_deref(),
+            Some("peer_response_terminal:analyst-rt:req-123")
+        );
+        assert_eq!(
+            projection.prompt_text(),
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
+        );
+    }
+
+    #[test]
+    fn peer_progress_projection_formats_phase_from_shared_seam() {
+        let projection = PeerConversationProjection::ResponseProgress {
+            peer_id: "operator-rt".into(),
+            request_id: "req-789".into(),
+            phase: PeerResponseProgressProjectionPhase::PartialResult,
+            payload: Some(serde_json::json!({ "chunk": "alpha" })),
+        };
+
+        assert_eq!(projection.context_key(), None);
+        assert_eq!(
+            projection.prompt_text(),
+            "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from operator-rt. Request ID: req-789. Phase: partial_result. Payload: {\n  \"chunk\": \"alpha\"\n}."
+        );
+    }
+
+    #[test]
+    fn peer_terminal_context_key_helper_stays_canonical() {
+        assert_eq!(
+            peer_response_terminal_context_key("peer-a", "req-z"),
+            "peer_response_terminal:peer-a:req-z"
+        );
+    }
 }

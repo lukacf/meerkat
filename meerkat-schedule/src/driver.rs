@@ -4,7 +4,7 @@ use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
     DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrencePhase,
-    OverlapPolicy, SchedulePhase,
+    OverlapPolicy, RuntimeDeliveryOutcome, SchedulePhase,
 };
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -40,6 +40,7 @@ pub struct DeliveryTerminal {
     pub receipt: Option<DeliveryReceipt>,
     pub detail: Option<String>,
     pub failure_class: Option<OccurrenceFailureClass>,
+    pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
     pub materialized_session_id: Option<SessionId>,
 }
 
@@ -50,6 +51,7 @@ impl DeliveryTerminal {
             receipt,
             detail: None,
             failure_class: None,
+            runtime_outcome: None,
             materialized_session_id: None,
         }
     }
@@ -60,6 +62,7 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_outcome: None,
             materialized_session_id: None,
         }
     }
@@ -70,6 +73,7 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_outcome: None,
             materialized_session_id: None,
         }
     }
@@ -83,6 +87,7 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_outcome: None,
             materialized_session_id: None,
         }
     }
@@ -424,6 +429,7 @@ impl ScheduleDriver {
             stage,
             receipt,
             None,
+            None,
         )
         .await?;
         Ok(())
@@ -465,6 +471,7 @@ async fn complete_dispatched_occurrence(
             DeliveryReceiptStage::Superseded,
             None,
             terminal.materialized_session_id,
+            None,
         )
         .await?;
         return Ok(());
@@ -476,6 +483,7 @@ async fn complete_dispatched_occurrence(
             DeliveryReceiptStage::Completed,
             terminal.receipt.clone(),
             terminal.failure_class,
+            terminal.runtime_outcome.clone(),
             terminal.detail.clone(),
             terminal.materialized_session_id.clone(),
         )
@@ -531,6 +539,7 @@ async fn complete_dispatched_occurrence(
         receipt_stage,
         completed_receipt.or(terminal.receipt),
         terminal.materialized_session_id,
+        terminal.runtime_outcome,
     )
     .await?;
     Ok(())
@@ -543,6 +552,7 @@ async fn terminalize_occurrence_inner(
     stage: DeliveryReceiptStage,
     receipt: Option<DeliveryReceipt>,
     materialized_session_id: Option<SessionId>,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
 ) -> Result<bool, ScheduleDomainError> {
     let Some(mut updated) = store
         .transition_occurrence_if_current(
@@ -560,9 +570,11 @@ async fn terminalize_occurrence_inner(
         stage,
         receipt,
         updated.failure_class,
+        runtime_outcome.clone(),
         updated.failure_detail.clone(),
         materialized_session_id,
     );
+    updated.runtime_outcome = runtime_outcome;
     updated.last_receipt = Some(final_receipt.clone());
     store.put_occurrence(updated).await?;
     store.append_receipt(final_receipt).await?;
@@ -574,6 +586,7 @@ fn build_terminal_receipt(
     stage: DeliveryReceiptStage,
     receipt: Option<DeliveryReceipt>,
     failure_class: Option<OccurrenceFailureClass>,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
     detail: Option<String>,
     materialized_session_id: Option<SessionId>,
 ) -> DeliveryReceipt {
@@ -590,6 +603,9 @@ fn build_terminal_receipt(
     }
     if receipt.failure_class.is_none() {
         receipt.failure_class = failure_class;
+    }
+    if receipt.runtime_outcome.is_none() {
+        receipt.runtime_outcome = runtime_outcome;
     }
     if receipt.detail.is_none() {
         receipt.detail = detail;
@@ -657,6 +673,7 @@ mod tests {
                         receipt: None,
                         detail: Some("session creation failed".into()),
                         failure_class: Some(OccurrenceFailureClass::TargetMaterializationFailed),
+                        runtime_outcome: None,
                         materialized_session_id: None,
                     })
                 }),

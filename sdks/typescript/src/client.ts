@@ -1839,12 +1839,12 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeState(sessionId: string): Promise<RuntimeStateResult> {
-    const result = await this.request("session/runtime_state", { session_id: sessionId });
+  async status(sessionId: string): Promise<RuntimeStateResult> {
+    const result = await this.request("session/status", { session_id: sessionId });
     if (typeof result.state !== "string" || result.state.length === 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/runtime_state response: missing state",
+        "Invalid session/status response: missing state",
       );
     }
     return result as unknown as RuntimeStateResult;
@@ -1946,58 +1946,61 @@ export class MeerkatClient {
     return result as unknown as RealtimeCapabilitiesResult;
   }
 
-  async runtimeAccept(
+  async submit(
     sessionId: string,
     input: Record<string, unknown>,
   ): Promise<RuntimeAcceptResult> {
-    const result = await this.request("session/accept_input", { session_id: sessionId, input });
+    const result = await this.request("session/submit", { session_id: sessionId, input });
     if (typeof result.outcome_type !== "string" || result.outcome_type.length === 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/accept_input response: missing outcome_type",
+        "Invalid session/submit response: missing outcome_type",
       );
     }
     return result as unknown as RuntimeAcceptResult;
   }
 
-  async runtimeRetire(sessionId: string): Promise<RuntimeRetireResult> {
-    const result = await this.request("session/retire_runtime", { session_id: sessionId });
+  async retire(sessionId: string): Promise<RuntimeRetireResult> {
+    const result = await this.request("session/retire", { session_id: sessionId });
     if (typeof result.inputs_abandoned !== "number") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/retire_runtime response: missing inputs_abandoned",
+        "Invalid session/retire response: missing inputs_abandoned",
       );
     }
     return result as unknown as RuntimeRetireResult;
   }
 
-  async runtimeReset(sessionId: string): Promise<RuntimeResetResult> {
-    const result = await this.request("session/reset_runtime", { session_id: sessionId });
+  async reset(sessionId: string): Promise<RuntimeResetResult> {
+    const result = await this.request("session/reset", { session_id: sessionId });
     if (typeof result.inputs_abandoned !== "number") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/reset_runtime response: missing inputs_abandoned",
+        "Invalid session/reset response: missing inputs_abandoned",
       );
     }
     return result as unknown as RuntimeResetResult;
   }
 
-  async inputState(sessionId: string, inputId: string): Promise<WireInputState | null> {
-    const result = await this.request("session/input_state", { session_id: sessionId, input_id: inputId });
+  async submission(sessionId: string, submissionId: string): Promise<WireInputState | null> {
+    const result = await this.request("session/submission", {
+      session_id: sessionId,
+      input_id: submissionId,
+    });
     if (result === null) {
       return null;
     }
     if (typeof result !== "object" || result === null) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid session/input_state response: expected object or null",
+        "Invalid session/submission response: expected object or null",
       );
     }
     return result as unknown as WireInputState;
   }
 
-  async inputList(sessionId: string): Promise<string[]> {
-    const result = (await this.request("session/inputs", {
+  async submissions(sessionId: string): Promise<string[]> {
+    const result = (await this.request("session/submissions", {
       session_id: sessionId,
     })) as unknown as InputListResult;
     return Array.isArray(result.input_ids)
@@ -2804,6 +2807,12 @@ export class MeerkatClient {
 
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
+    if (options.connectionRef) {
+      params.connection_ref = {
+        realm_id: options.connectionRef.realmId,
+        binding_id: options.connectionRef.bindingId,
+      };
+    }
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options.maxTokens) params.max_tokens = options.maxTokens;
     if (options.outputSchema != null) params.output_schema = options.outputSchema;

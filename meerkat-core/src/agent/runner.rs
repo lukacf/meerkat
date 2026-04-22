@@ -34,7 +34,6 @@ fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
 
 fn runtime_execution_snapshot(
     handle: &dyn crate::TurnStateHandle,
-    active_run_id: Option<crate::lifecycle::RunId>,
     applied_cursor: crate::completion_feed::CompletionSeq,
 ) -> Option<crate::AgentExecutionSnapshot> {
     let snapshot = handle.snapshot();
@@ -68,7 +67,7 @@ fn runtime_execution_snapshot(
     Some(crate::AgentExecutionSnapshot {
         loop_state: turn_phase.to_loop_state(),
         turn_phase,
-        active_run_id,
+        active_run_id: snapshot.active_run_id,
         primitive_kind,
         admitted_content_shape: snapshot.admitted_content_shape.map(ContentShape),
         vision_enabled: snapshot.vision_enabled,
@@ -420,11 +419,7 @@ where
     /// Snapshot the agent's live execution state for diagnostics and mapping.
     pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
         if let Some(handle) = self.turn_state_handle.as_deref() {
-            if let Some(snapshot) = runtime_execution_snapshot(
-                handle,
-                self.turn_state.active_run().cloned(),
-                self.applied_cursor,
-            ) {
+            if let Some(snapshot) = runtime_execution_snapshot(handle, self.applied_cursor) {
                 return snapshot;
             }
             tracing::warn!(
@@ -1000,7 +995,16 @@ where
 
         // Route through the shared turn-input path so runtime-backed turn
         // state stays aligned with the standalone local fallback.
-        let input = if let Some(run_id) = self.turn_state.active_run().cloned() {
+        let input = if let Some(run_id) = self
+            .turn_state_handle
+            .as_deref()
+            .and_then(|handle| {
+                self.runtime_execution_kind
+                    .as_ref()
+                    .map(|_| handle.snapshot())
+            })
+            .and_then(|snapshot| snapshot.active_run_id)
+        {
             TurnExecutionInput::CancelNow { run_id }
         } else {
             TurnExecutionInput::ForceCancelNoRun

@@ -119,6 +119,10 @@ pub struct AppState {
     pub enable_shell: bool,
     /// Project root for file-based task store and shell working directory
     pub project_root: Option<PathBuf>,
+    /// Optional context root used by convention-based default skill sources.
+    pub context_root: Option<PathBuf>,
+    /// Optional user config root used by convention-based default skill sources.
+    pub user_config_root: Option<PathBuf>,
     /// Override the resolved LLM client (primarily for tests and embedding).
     pub llm_client_override: Option<Arc<dyn LlmClient>>,
     pub config_store: Arc<dyn ConfigStore>,
@@ -297,6 +301,7 @@ impl AppState {
             .shell(enable_shell)
             .schedule(true);
         let conventions_context_root = bootstrap.context.context_root.clone();
+        let conventions_user_root = bootstrap.context.user_config_root.clone();
         let task_project_root = conventions_context_root
             .clone()
             .unwrap_or_else(|| instance_root.clone());
@@ -337,6 +342,8 @@ impl AppState {
             enable_builtins,
             enable_shell,
             project_root: Some(task_project_root),
+            context_root: bootstrap.context.context_root.clone(),
+            user_config_root: conventions_user_root,
             llm_client_override: None,
             config_store,
             event_tx,
@@ -642,6 +649,7 @@ async fn apply_runtime_turn(
                     runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
                         bindings,
                     )),
+                    require_runtime_build_mode: true,
                     realm_id: Some(context.realm_id.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
@@ -835,6 +843,9 @@ pub struct CreateSessionRequest {
     /// Provider-specific parameters (for example reasoning config).
     #[serde(default)]
     pub provider_params: Option<Value>,
+    /// Override the realm-scoped connection binding for this session.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
     /// Skills to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<String>>,
@@ -890,10 +901,17 @@ async fn canonical_skill_keys_for_state(
         .get()
         .await
         .map_err(config_runtime_err_to_api)?;
+    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let registry = snapshot
         .config
         .skills
-        .build_source_identity_registry()
+        .build_source_identity_registry_with_roots(
+            state.context_root.as_deref(),
+            state
+                .user_config_root
+                .as_deref()
+                .or(default_user_root.as_deref()),
+        )
         .map_err(|e| ApiError::BadRequest(format!("Invalid skill_refs: {e}")))?;
 
     params
@@ -1132,16 +1150,19 @@ pub fn router(state: AppState) -> Router {
         .route("/realtime/status", post(realtime_status))
         .route("/realtime/capabilities", post(realtime_capabilities))
         // Session-scoped runtime / input endpoints.
-        .route("/sessions/{id}/runtime-state", get(runtime_state))
+        .route("/sessions/{id}/status", get(session_status))
         .route(
             "/sessions/{id}/realtime-attachment-status",
-            get(runtime_realtime_attachment_status),
+            get(session_realtime_attachment_status),
         )
-        .route("/sessions/{id}/accept-input", post(runtime_accept))
-        .route("/sessions/{id}/retire-runtime", post(runtime_retire))
-        .route("/sessions/{id}/reset-runtime", post(runtime_reset))
-        .route("/sessions/{id}/inputs", get(input_list))
-        .route("/sessions/{session_id}/inputs/{input_id}", get(input_state))
+        .route("/sessions/{id}/submit", post(session_submit))
+        .route("/sessions/{id}/retire", post(session_retire))
+        .route("/sessions/{id}/reset", post(session_reset))
+        .route("/sessions/{id}/submissions", get(session_submissions))
+        .route(
+            "/sessions/{session_id}/submissions/{submission_id}",
+            get(session_submission),
+        )
         // Phase 4d — auth + realm endpoints.
         .route(
             "/auth/profiles",
@@ -1286,8 +1307,8 @@ async fn ensure_runtime_session_registered(
     Ok(())
 }
 
-/// GET /sessions/{id}/runtime-state
-async fn runtime_state(
+/// GET /sessions/{id}/status
+async fn session_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
@@ -1307,7 +1328,7 @@ async fn runtime_state(
 }
 
 /// GET /sessions/{id}/realtime-attachment-status
-async fn runtime_realtime_attachment_status(
+async fn session_realtime_attachment_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
@@ -1587,8 +1608,8 @@ async fn realtime_open_info(
         .into_response())
 }
 
-/// POST /sessions/{id}/accept-input
-async fn runtime_accept(
+/// POST /sessions/{id}/submit
+async fn session_submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
@@ -1630,7 +1651,7 @@ async fn runtime_accept(
 }
 
 /// Translate an in-process [`meerkat_runtime::AcceptOutcome`] into the REST
-/// JSON shape exposed at `POST /sessions/{id}/accept-input`.
+/// JSON shape exposed at `POST /sessions/{id}/submit`.
 ///
 /// `AcceptOutcome` is a domain envelope without `Serialize`; the wire-facing
 /// projection is materialized here to keep parity with prior responses.
@@ -1661,8 +1682,8 @@ fn accept_outcome_to_json(outcome: meerkat_runtime::AcceptOutcome) -> Value {
     }
 }
 
-/// POST /sessions/{id}/retire-runtime
-async fn runtime_retire(
+/// POST /sessions/{id}/retire
+async fn session_retire(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
@@ -1681,8 +1702,8 @@ async fn runtime_retire(
     Ok(Json(json!({"inputs_abandoned": report.inputs_abandoned})))
 }
 
-/// POST /sessions/{id}/reset-runtime
-async fn runtime_reset(
+/// POST /sessions/{id}/reset
+async fn session_reset(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
@@ -1701,8 +1722,8 @@ async fn runtime_reset(
     Ok(Json(json!({"inputs_abandoned": report.inputs_abandoned})))
 }
 
-/// GET /sessions/{id}/inputs
-async fn input_list(
+/// GET /sessions/{id}/submissions
+async fn session_submissions(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
@@ -1722,10 +1743,10 @@ async fn input_list(
     Ok(Json(json!({"input_ids": id_strs})))
 }
 
-/// GET /sessions/{session_id}/inputs/{input_id}
-async fn input_state(
+/// GET /sessions/{session_id}/submissions/{submission_id}
+async fn session_submission(
     State(state): State<AppState>,
-    Path((session_id_str, input_id_str)): Path<(String, String)>,
+    Path((session_id_str, submission_id_str)): Path<(String, String)>,
 ) -> Result<Json<Value>, Response> {
     let sid = SessionId::parse(&session_id_str).map_err(|e| {
         (
@@ -1736,7 +1757,7 @@ async fn input_state(
     })?;
     ensure_runtime_session_registered(&state, &sid).await?;
     let adapter = get_runtime_adapter(&state);
-    let input_uuid = uuid::Uuid::parse_str(&input_id_str).map_err(|e| {
+    let input_uuid = uuid::Uuid::parse_str(&submission_id_str).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -2620,7 +2641,11 @@ async fn set_config(
         } => (config, expected_generation),
         SetConfigRequest::Direct(config) => (config, None),
     };
-    validate_config_for_commit(&config)?;
+    validate_config_for_commit_with_roots(
+        &config,
+        state.context_root.as_deref(),
+        state.user_config_root.as_deref(),
+    )?;
     let snapshot = state
         .config_runtime
         .set(config, expected_generation)
@@ -2654,7 +2679,11 @@ async fn patch_config(
         .await
         .map_err(config_runtime_err_to_api)?;
     let preview = apply_patch_preview(&current.config, delta.clone())?;
-    validate_config_for_commit(&preview)?;
+    validate_config_for_commit_with_roots(
+        &preview,
+        state.context_root.as_deref(),
+        state.user_config_root.as_deref(),
+    )?;
     let snapshot = state
         .config_runtime
         .patch(ConfigDelta(delta), expected_generation)
@@ -2681,13 +2710,21 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
     }
 }
 
-fn validate_config_for_commit(config: &Config) -> Result<(), ApiError> {
+fn validate_config_for_commit_with_roots(
+    config: &Config,
+    context_root: Option<&std::path::Path>,
+    user_root: Option<&std::path::Path>,
+) -> Result<(), ApiError> {
     config
         .validate()
         .map_err(|e| ApiError::BadRequest(format!("Invalid config: {e}")))?;
+    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     config
         .skills
-        .build_source_identity_registry()
+        .build_source_identity_registry_with_roots(
+            context_root,
+            user_root.or(default_user_root.as_deref()),
+        )
         .map_err(|e| ApiError::BadRequest(format!("Invalid skills source-identity config: {e}")))?;
     Ok(())
 }
@@ -3022,7 +3059,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: None,
+        connection_ref: req.connection_ref.clone(),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -4675,32 +4712,6 @@ mod tests {
         (addr, captured_rx, task)
     }
 
-    #[allow(dead_code)]
-    fn live_test_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
-        let mut profiles = std::collections::BTreeMap::new();
-        profiles.insert(
-            meerkat_mob::ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: Vec::new(),
-                tools: meerkat_mob::profile::ToolConfig {
-                    comms: true,
-                    ..meerkat_mob::profile::ToolConfig::default()
-                },
-                peer_description: "worker".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            }),
-        );
-        let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(mob_id));
-        definition.profiles = profiles;
-        definition
-    }
-
     struct MockLlmClient;
 
     struct ErrorLlmClient;
@@ -4731,22 +4742,6 @@ mod tests {
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
-    }
-
-    #[allow(dead_code)]
-    fn install_mock_mob_llm_client(
-        state: &mut AppState,
-        runtime_root: &std::path::Path,
-        mock_client: Arc<dyn LlmClient>,
-    ) {
-        state.mob_state = Arc::new(
-            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-                state.session_service.clone(),
-                Some(state.runtime_adapter.clone()),
-            )
-            .with_persistent_storage_root(Some(runtime_root.to_path_buf()))
-            .with_default_llm_client(Some(mock_client)),
-        );
     }
 
     #[async_trait]
@@ -5336,7 +5331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_state_route_is_available_for_live_sessions() {
+    async fn test_session_status_route_is_available_for_live_sessions() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -5375,7 +5370,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("GET")
-            .uri(format!("/sessions/{session_id}/runtime-state"))
+            .uri(format!("/sessions/{session_id}/status"))
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -5391,7 +5386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_realtime_attachment_status_route_reads_runtime_owned_status() {
+    async fn test_realtime_attachment_status_route_reads_runtime_owned_status() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -6106,7 +6101,8 @@ mod tests {
             },
         ];
 
-        let err = validate_config_for_commit(&config).expect_err("duplicate source uuid");
+        let err = validate_config_for_commit_with_roots(&config, None, None)
+            .expect_err("duplicate source uuid");
         assert!(matches!(&err, ApiError::BadRequest(_)));
         if let ApiError::BadRequest(message) = err {
             assert!(message.contains("Invalid skills source-identity config"));

@@ -104,6 +104,9 @@ pub struct CreateSessionParams {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
+    /// Override the realm-scoped connection binding for this session.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
     /// Skill IDs to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<String>>,
@@ -298,6 +301,7 @@ pub async fn handle_create(
     // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
+    build_config.connection_ref = params.connection_ref;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
@@ -365,10 +369,13 @@ pub async fn handle_create(
         }
     };
 
-    // Eagerly register executor BEFORE the first turn so the runtime loop
-    // is available from the start. This replaces the post-response registration
-    // that previously happened in the router.
-    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant {
+    // Immediate creates need a live runtime loop before the first turn starts.
+    // Deferred creates register on-demand through the session/* router entry
+    // points; eagerly attaching here is redundant and can recurse through the
+    // runtime control path before the pending session has ever been exercised.
+    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
+        && params.initial_turn != Some(InitialTurn::Deferred)
+    {
         let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
             runtime.clone(),
             session_id.clone(),

@@ -47,9 +47,7 @@ pub use schedule_host::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
 
-use meerkat_contracts::{
-    CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
-};
+use meerkat_contracts::{CapabilitiesResponse, CapabilityEntry, ContractVersion};
 use meerkat_core::{AgentEvent, Config, PeerMeta};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,19 +74,12 @@ use std::sync::{Mutex, OnceLock};
 /// to determine runtime status. Capabilities without a resolver are reported
 /// as `Available`. This keeps policy knowledge in the owning crate.
 pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
-    let registrations = build_capabilities();
-    let capabilities = registrations
+    let capabilities = meerkat_contracts::resolve_capabilities(config)
         .into_iter()
-        .map(|reg| {
-            let status = match reg.status_resolver {
-                Some(resolver) => resolver(config),
-                None => CapabilityStatus::Available,
-            };
-            CapabilityEntry {
-                id: reg.id,
-                description: reg.description.to_string(),
-                status,
-            }
+        .map(|(reg, status)| CapabilityEntry {
+            id: reg.id,
+            description: reg.description.to_string(),
+            status,
         })
         .collect();
 

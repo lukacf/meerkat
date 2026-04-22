@@ -1287,13 +1287,13 @@ impl MethodRouter {
             #[cfg(not(feature = "mini-surface"))]
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
-            "session/runtime_state" => {
+            "session/status" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/runtime_state",
+                        "Method not found: session/status",
                     )
                 } else {
                     let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
@@ -1304,12 +1304,8 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    handlers::runtime::handle_runtime_state(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
-                    )
-                    .await
+                    handlers::runtime::handle_status(id, params, self.runtime_adapter.as_ref())
+                        .await
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
@@ -1361,13 +1357,13 @@ impl MethodRouter {
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/accept_input" => {
+            "session/submit" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/accept_input",
+                        "Method not found: session/submit",
                     )
                 } else {
                     let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
@@ -1378,96 +1374,18 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    handlers::runtime::handle_runtime_accept(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/retire_runtime" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/retire_runtime",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_runtime_retire(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/reset_runtime" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/reset_runtime",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_runtime_reset(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/input_state" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/input_state",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_input_state(id, params, self.runtime_adapter.as_ref())
+                    handlers::runtime::handle_submit(id, params, self.runtime_adapter.as_ref())
                         .await
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/inputs" => {
+            "session/retire" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/inputs",
+                        "Method not found: session/retire",
                     )
                 } else {
                     let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
@@ -1478,7 +1396,72 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    handlers::runtime::handle_input_list(id, params, self.runtime_adapter.as_ref())
+                    handlers::runtime::handle_retire(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/reset" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: session/reset",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_reset(id, params, self.runtime_adapter.as_ref()).await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/submission" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: session/submission",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_submission(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/submissions" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: session/submissions",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_submissions(id, params, self.runtime_adapter.as_ref())
                         .await
                 }
             }
@@ -5009,7 +4992,7 @@ mod tests {
 
         let state_resp = router
             .dispatch(make_request(
-                "session/runtime_state",
+                "session/status",
                 serde_json::json!({ "session_id": session_id }),
             ))
             .await
@@ -5020,12 +5003,12 @@ mod tests {
         assert_eq!(
             state["state"].as_str(),
             Some("attached"),
-            "deferred sessions should be routable through session/runtime_state before their first turn"
+            "deferred sessions should be routable through session/status before their first turn"
         );
 
         let accept_resp = router
             .dispatch(make_request(
-                "session/accept_input",
+                "session/submit",
                 serde_json::json!({
                     "session_id": session_id,
                     "input": {
@@ -5050,7 +5033,7 @@ mod tests {
         assert_eq!(
             accepted["outcome_type"].as_str(),
             Some("accepted"),
-            "deferred sessions should also be routable through session/accept_input before their first turn"
+            "deferred sessions should also be routable through session/submit before their first turn"
         );
     }
 
@@ -5074,6 +5057,15 @@ mod tests {
             .to_string();
         let parsed_session_id =
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        let session_status = router
+            .dispatch(make_request(
+                "session/status",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let status = result_value(&session_status);
+        assert_eq!(status["state"].as_str(), Some("attached"));
         router
             .runtime_adapter()
             .project_realtime_attachment_intent(&parsed_session_id, true)

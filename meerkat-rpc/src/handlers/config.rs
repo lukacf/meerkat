@@ -90,6 +90,7 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> 
 }
 
 #[allow(clippy::result_large_err)]
+#[allow(dead_code)]
 fn validate_config_for_commit(id: Option<RpcId>, config: &Config) -> Result<(), RpcResponse> {
     config.validate().map_err(|err| {
         RpcResponse::error(

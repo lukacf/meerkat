@@ -2710,6 +2710,7 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
     }
 }
 
+#[allow(dead_code)]
 fn validate_config_for_commit(config: &Config) -> Result<(), ApiError> {
     validate_config_for_commit_with_roots(config, None, None)
 }

@@ -20,19 +20,6 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_run_machine()
 }
 
-mod modeled_runtime {
-    #![allow(warnings)]
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../meerkat-machine-kernels/src/runtime.rs"
-    ));
-}
-use modeled_runtime::{
-    RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
-    evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
-    transition_signal_from_schema,
-};
-
 pub type BranchId = String;
 pub type FrameId = String;
 pub type LoopInstanceId = String;
@@ -60,6 +47,7 @@ impl std::fmt::Display for CollectionPolicyKind {
         f.write_str(self.as_str())
     }
 }
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DependencyMode {
@@ -79,6 +67,7 @@ impl std::fmt::Display for DependencyMode {
         f.write_str(self.as_str())
     }
 }
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FlowRunStatus {
@@ -106,6 +95,7 @@ impl std::fmt::Display for FlowRunStatus {
         f.write_str(self.as_str())
     }
 }
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StepRunStatus {
@@ -184,415 +174,6 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         initial_state()
-    }
-}
-
-fn phase_from_raw(raw: &str) -> Result<Phase, KernelError> {
-    match raw {
-        "Absent" => Ok(Phase::Absent),
-        "Pending" => Ok(Phase::Pending),
-        "Running" => Ok(Phase::Running),
-        "Completed" => Ok(Phase::Completed),
-        "Failed" => Ok(Phase::Failed),
-        "Canceled" => Ok(Phase::Canceled),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown phase {other}"),
-        }),
-    }
-}
-
-fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
-    Ok(State {
-        phase: phase_from_raw(&raw.phase)?,
-        tracked_steps: match raw.fields.get("tracked_steps").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field tracked_steps".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
-        ordered_steps: match raw.fields.get("ordered_steps").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ordered_steps".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
-        step_status: match raw.fields.get("step_status").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_status".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "StepRunStatus" => match variant.as_str() { "Dispatched" => Ok(StepRunStatus::Dispatched), "Completed" => Ok(StepRunStatus::Completed), "Failed" => Ok(StepRunStatus::Failed), "Skipped" => Ok(StepRunStatus::Skipped), "Canceled" => Ok(StepRunStatus::Canceled), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum StepRunStatus variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum StepRunStatus, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        output_recorded: match raw.fields.get("output_recorded").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field output_recorded".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_condition_results: match raw.fields.get("step_condition_results").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_condition_results".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_has_conditions: match raw.fields.get("step_has_conditions").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_has_conditions".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_dependencies: match raw.fields.get("step_dependencies").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_dependencies".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>(), other => Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_dependency_modes: match raw.fields.get("step_dependency_modes").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_dependency_modes".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "DependencyMode" => match variant.as_str() { "All" => Ok(DependencyMode::All), "Any" => Ok(DependencyMode::Any), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum DependencyMode variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum DependencyMode, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_branches: match raw.fields.get("step_branches").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_branches".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_collection_policies: match raw.fields.get("step_collection_policies").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_collection_policies".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "CollectionPolicyKind" => match variant.as_str() { "All" => Ok(CollectionPolicyKind::All), "Any" => Ok(CollectionPolicyKind::Any), "Quorum" => Ok(CollectionPolicyKind::Quorum), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum CollectionPolicyKind variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum CollectionPolicyKind, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_quorum_thresholds: match raw.fields.get("step_quorum_thresholds").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_quorum_thresholds".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_target_counts: match raw.fields.get("step_target_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_target_success_counts: match raw.fields.get("step_target_success_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_success_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        step_target_terminal_failure_counts: match raw.fields.get("step_target_terminal_failure_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_terminal_failure_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        target_retry_counts: match raw.fields.get("target_retry_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field target_retry_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected string, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
-        failure_count: match raw.fields.get("failure_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field failure_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        consecutive_failure_count: match raw.fields.get("consecutive_failure_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field consecutive_failure_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        escalation_threshold: match raw.fields.get("escalation_threshold").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field escalation_threshold".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        max_step_retries: match raw.fields.get("max_step_retries").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_step_retries".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        ready_frames: match raw.fields.get("ready_frames").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ready_frames".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
-        ready_frame_membership: match raw.fields.get("ready_frame_membership").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ready_frame_membership".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
-        pending_body_frame_loops: match raw.fields.get("pending_body_frame_loops").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field pending_body_frame_loops".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
-        pending_body_frame_loop_membership: match raw.fields.get("pending_body_frame_loop_membership").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field pending_body_frame_loop_membership".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
-        active_node_count: match raw.fields.get("active_node_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field active_node_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        active_frame_count: match raw.fields.get("active_frame_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field active_frame_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        max_active_nodes: match raw.fields.get("max_active_nodes").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_active_nodes".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        max_active_frames: match raw.fields.get("max_active_frames").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_active_frames".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        max_frame_depth: match raw.fields.get("max_frame_depth").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_frame_depth".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
-        last_granted_frame: match raw.fields.get("last_granted_frame").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field last_granted_frame".into() })? { RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) },
-        last_granted_loop: match raw.fields.get("last_granted_loop").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field last_granted_loop".into() })? { RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) },
-    })
-}
-
-fn state_to_raw(state: &State) -> RawState {
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(
-        "tracked_steps".into(),
-        RawValue::Set(
-            state
-                .tracked_steps
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "ordered_steps".into(),
-        RawValue::Seq(
-            state
-                .ordered_steps
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_status".into(),
-        RawValue::Map(
-            state
-                .step_status
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        match value.as_ref() {
-                            Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                                RawValue::String("value".into()),
-                                RawValue::NamedVariant {
-                                    enum_name: "StepRunStatus".into(),
-                                    variant: match value {
-                                        StepRunStatus::Dispatched => "Dispatched".into(),
-                                        StepRunStatus::Completed => "Completed".into(),
-                                        StepRunStatus::Failed => "Failed".into(),
-                                        StepRunStatus::Skipped => "Skipped".into(),
-                                        StepRunStatus::Canceled => "Canceled".into(),
-                                    },
-                                },
-                            )])),
-                            None => RawValue::None,
-                        },
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "output_recorded".into(),
-        RawValue::Map(
-            state
-                .output_recorded
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::Bool((value).to_owned()),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_condition_results".into(),
-        RawValue::Map(
-            state
-                .step_condition_results
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        match value.as_ref() {
-                            Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                                RawValue::String("value".into()),
-                                RawValue::Bool((value).to_owned()),
-                            )])),
-                            None => RawValue::None,
-                        },
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_has_conditions".into(),
-        RawValue::Map(
-            state
-                .step_has_conditions
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::Bool((value).to_owned()),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_dependencies".into(),
-        RawValue::Map(
-            state
-                .step_dependencies
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::Seq(
-                            value
-                                .iter()
-                                .map(|value| RawValue::String((value).to_owned()))
-                                .collect(),
-                        ),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_dependency_modes".into(),
-        RawValue::Map(
-            state
-                .step_dependency_modes
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::NamedVariant {
-                            enum_name: "DependencyMode".into(),
-                            variant: match value {
-                                DependencyMode::All => "All".into(),
-                                DependencyMode::Any => "Any".into(),
-                            },
-                        },
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_branches".into(),
-        RawValue::Map(
-            state
-                .step_branches
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        match value.as_ref() {
-                            Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                                RawValue::String("value".into()),
-                                RawValue::String((value).to_owned()),
-                            )])),
-                            None => RawValue::None,
-                        },
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_collection_policies".into(),
-        RawValue::Map(
-            state
-                .step_collection_policies
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::NamedVariant {
-                            enum_name: "CollectionPolicyKind".into(),
-                            variant: match value {
-                                CollectionPolicyKind::All => "All".into(),
-                                CollectionPolicyKind::Any => "Any".into(),
-                                CollectionPolicyKind::Quorum => "Quorum".into(),
-                            },
-                        },
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_quorum_thresholds".into(),
-        RawValue::Map(
-            state
-                .step_quorum_thresholds
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::U64((value).to_owned() as u64),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_target_counts".into(),
-        RawValue::Map(
-            state
-                .step_target_counts
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::U64((value).to_owned() as u64),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_target_success_counts".into(),
-        RawValue::Map(
-            state
-                .step_target_success_counts
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::U64((value).to_owned() as u64),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "step_target_terminal_failure_counts".into(),
-        RawValue::Map(
-            state
-                .step_target_terminal_failure_counts
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::U64((value).to_owned() as u64),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "target_retry_counts".into(),
-        RawValue::Map(
-            state
-                .target_retry_counts
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        RawValue::String((key).to_owned()),
-                        RawValue::U64((value).to_owned() as u64),
-                    )
-                })
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "failure_count".into(),
-        RawValue::U64((state.failure_count).to_owned() as u64),
-    );
-    fields.insert(
-        "consecutive_failure_count".into(),
-        RawValue::U64((state.consecutive_failure_count).to_owned() as u64),
-    );
-    fields.insert(
-        "escalation_threshold".into(),
-        RawValue::U64((state.escalation_threshold).to_owned() as u64),
-    );
-    fields.insert(
-        "max_step_retries".into(),
-        RawValue::U64((state.max_step_retries).to_owned() as u64),
-    );
-    fields.insert(
-        "ready_frames".into(),
-        RawValue::Seq(
-            state
-                .ready_frames
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "ready_frame_membership".into(),
-        RawValue::Set(
-            state
-                .ready_frame_membership
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "pending_body_frame_loops".into(),
-        RawValue::Seq(
-            state
-                .pending_body_frame_loops
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "pending_body_frame_loop_membership".into(),
-        RawValue::Set(
-            state
-                .pending_body_frame_loop_membership
-                .iter()
-                .map(|value| RawValue::String((value).to_owned()))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "active_node_count".into(),
-        RawValue::U64((state.active_node_count).to_owned() as u64),
-    );
-    fields.insert(
-        "active_frame_count".into(),
-        RawValue::U64((state.active_frame_count).to_owned() as u64),
-    );
-    fields.insert(
-        "max_active_nodes".into(),
-        RawValue::U64((state.max_active_nodes).to_owned() as u64),
-    );
-    fields.insert(
-        "max_active_frames".into(),
-        RawValue::U64((state.max_active_frames).to_owned() as u64),
-    );
-    fields.insert(
-        "max_frame_depth".into(),
-        RawValue::U64((state.max_frame_depth).to_owned() as u64),
-    );
-    fields.insert(
-        "last_granted_frame".into(),
-        RawValue::String((state.last_granted_frame).to_owned()),
-    );
-    fields.insert(
-        "last_granted_loop".into(),
-        RawValue::String((state.last_granted_loop).to_owned()),
-    );
-    RawState {
-        phase: match state.phase {
-            Phase::Absent => "Absent".into(),
-            Phase::Pending => "Pending".into(),
-            Phase::Running => "Running".into(),
-            Phase::Completed => "Completed".into(),
-            Phase::Failed => "Failed".into(),
-            Phase::Canceled => "Canceled".into(),
-        },
-        fields,
     }
 }
 
@@ -736,6 +317,7 @@ pub enum Input {
     TerminalizeFailed(inputs::TerminalizeFailed),
     TerminalizeCanceled(inputs::TerminalizeCanceled),
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
     CreateRun,
@@ -763,485 +345,6 @@ pub enum InputKind {
     TerminalizeCompleted,
     TerminalizeFailed,
     TerminalizeCanceled,
-}
-
-fn input_kind_from_raw(raw: &str) -> Option<InputKind> {
-    match raw {
-        "CreateRun" => Some(InputKind::CreateRun),
-        "StartRun" => Some(InputKind::StartRun),
-        "DispatchStep" => Some(InputKind::DispatchStep),
-        "CompleteStep" => Some(InputKind::CompleteStep),
-        "RecordStepOutput" => Some(InputKind::RecordStepOutput),
-        "ConditionPassed" => Some(InputKind::ConditionPassed),
-        "ConditionRejected" => Some(InputKind::ConditionRejected),
-        "FailStep" => Some(InputKind::FailStep),
-        "SkipStep" => Some(InputKind::SkipStep),
-        "ProjectFrameStepStatus" => Some(InputKind::ProjectFrameStepStatus),
-        "CancelStep" => Some(InputKind::CancelStep),
-        "RegisterTargets" => Some(InputKind::RegisterTargets),
-        "RecordTargetSuccess" => Some(InputKind::RecordTargetSuccess),
-        "RecordTargetTerminalFailure" => Some(InputKind::RecordTargetTerminalFailure),
-        "RecordTargetCanceled" => Some(InputKind::RecordTargetCanceled),
-        "RecordTargetFailure" => Some(InputKind::RecordTargetFailure),
-        "RegisterReadyFrame" => Some(InputKind::RegisterReadyFrame),
-        "PumpNodeScheduler" => Some(InputKind::PumpNodeScheduler),
-        "RegisterPendingBodyFrame" => Some(InputKind::RegisterPendingBodyFrame),
-        "PumpFrameScheduler" => Some(InputKind::PumpFrameScheduler),
-        "NodeExecutionReleased" => Some(InputKind::NodeExecutionReleased),
-        "FrameTerminated" => Some(InputKind::FrameTerminated),
-        "TerminalizeCompleted" => Some(InputKind::TerminalizeCompleted),
-        "TerminalizeFailed" => Some(InputKind::TerminalizeFailed),
-        "TerminalizeCanceled" => Some(InputKind::TerminalizeCanceled),
-        _ => None,
-    }
-}
-fn input_to_raw(input: Input) -> RawInput {
-    match input {
-        Input::CreateRun(payload) => RawInput {
-            variant: "CreateRun".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_ids".into(),
-                    RawValue::Seq(
-                        payload
-                            .step_ids
-                            .iter()
-                            .map(|value| RawValue::String((value).to_owned()))
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "ordered_steps".into(),
-                    RawValue::Seq(
-                        payload
-                            .ordered_steps
-                            .iter()
-                            .map(|value| RawValue::String((value).to_owned()))
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_has_conditions".into(),
-                    RawValue::Map(
-                        payload
-                            .step_has_conditions
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    RawValue::Bool((value).to_owned()),
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_dependencies".into(),
-                    RawValue::Map(
-                        payload
-                            .step_dependencies
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    RawValue::Seq(
-                                        value
-                                            .iter()
-                                            .map(|value| RawValue::String((value).to_owned()))
-                                            .collect(),
-                                    ),
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_dependency_modes".into(),
-                    RawValue::Map(
-                        payload
-                            .step_dependency_modes
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    RawValue::NamedVariant {
-                                        enum_name: "DependencyMode".into(),
-                                        variant: match value {
-                                            DependencyMode::All => "All".into(),
-                                            DependencyMode::Any => "Any".into(),
-                                        },
-                                    },
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_branches".into(),
-                    RawValue::Map(
-                        payload
-                            .step_branches
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    match value.as_ref() {
-                                        Some(value) => {
-                                            RawValue::Map(std::collections::BTreeMap::from([(
-                                                RawValue::String("value".into()),
-                                                RawValue::String((value).to_owned()),
-                                            )]))
-                                        }
-                                        None => RawValue::None,
-                                    },
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_collection_policies".into(),
-                    RawValue::Map(
-                        payload
-                            .step_collection_policies
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    RawValue::NamedVariant {
-                                        enum_name: "CollectionPolicyKind".into(),
-                                        variant: match value {
-                                            CollectionPolicyKind::All => "All".into(),
-                                            CollectionPolicyKind::Any => "Any".into(),
-                                            CollectionPolicyKind::Quorum => "Quorum".into(),
-                                        },
-                                    },
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "step_quorum_thresholds".into(),
-                    RawValue::Map(
-                        payload
-                            .step_quorum_thresholds
-                            .iter()
-                            .map(|(key, value)| {
-                                (
-                                    RawValue::String((key).to_owned()),
-                                    RawValue::U64((value).to_owned() as u64),
-                                )
-                            })
-                            .collect(),
-                    ),
-                );
-                fields.insert(
-                    "escalation_threshold".into(),
-                    RawValue::U64((payload.escalation_threshold).to_owned() as u64),
-                );
-                fields.insert(
-                    "max_step_retries".into(),
-                    RawValue::U64((payload.max_step_retries).to_owned() as u64),
-                );
-                fields.insert(
-                    "max_active_nodes".into(),
-                    RawValue::U64((payload.max_active_nodes).to_owned() as u64),
-                );
-                fields.insert(
-                    "max_active_frames".into(),
-                    RawValue::U64((payload.max_active_frames).to_owned() as u64),
-                );
-                fields.insert(
-                    "max_frame_depth".into(),
-                    RawValue::U64((payload.max_frame_depth).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::StartRun(payload) => RawInput {
-            variant: "StartRun".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-        Input::DispatchStep(payload) => RawInput {
-            variant: "DispatchStep".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::CompleteStep(payload) => RawInput {
-            variant: "CompleteStep".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RecordStepOutput(payload) => RawInput {
-            variant: "RecordStepOutput".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::ConditionPassed(payload) => RawInput {
-            variant: "ConditionPassed".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::ConditionRejected(payload) => RawInput {
-            variant: "ConditionRejected".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::FailStep(payload) => RawInput {
-            variant: "FailStep".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::SkipStep(payload) => RawInput {
-            variant: "SkipStep".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::ProjectFrameStepStatus(payload) => RawInput {
-            variant: "ProjectFrameStepStatus".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields.insert(
-                    "step_status".into(),
-                    RawValue::NamedVariant {
-                        enum_name: "StepRunStatus".into(),
-                        variant: match payload.step_status {
-                            StepRunStatus::Dispatched => "Dispatched".into(),
-                            StepRunStatus::Completed => "Completed".into(),
-                            StepRunStatus::Failed => "Failed".into(),
-                            StepRunStatus::Skipped => "Skipped".into(),
-                            StepRunStatus::Canceled => "Canceled".into(),
-                        },
-                    },
-                );
-                fields.insert(
-                    "append_failure_ledger".into(),
-                    RawValue::Bool((payload.append_failure_ledger).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::CancelStep(payload) => RawInput {
-            variant: "CancelStep".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RegisterTargets(payload) => RawInput {
-            variant: "RegisterTargets".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields.insert(
-                    "target_count".into(),
-                    RawValue::U64((payload.target_count).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::RecordTargetSuccess(payload) => RawInput {
-            variant: "RecordTargetSuccess".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields.insert(
-                    "target_id".into(),
-                    RawValue::String((payload.target_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RecordTargetTerminalFailure(payload) => RawInput {
-            variant: "RecordTargetTerminalFailure".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RecordTargetCanceled(payload) => RawInput {
-            variant: "RecordTargetCanceled".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields.insert(
-                    "target_id".into(),
-                    RawValue::String((payload.target_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RecordTargetFailure(payload) => RawInput {
-            variant: "RecordTargetFailure".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "step_id".into(),
-                    RawValue::String((payload.step_id).to_owned()),
-                );
-                fields.insert(
-                    "target_id".into(),
-                    RawValue::String((payload.target_id).to_owned()),
-                );
-                fields.insert(
-                    "retry_key".into(),
-                    RawValue::String((payload.retry_key).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::RegisterReadyFrame(payload) => RawInput {
-            variant: "RegisterReadyFrame".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "frame_id".into(),
-                    RawValue::String((payload.frame_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::PumpNodeScheduler(payload) => RawInput {
-            variant: "PumpNodeScheduler".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-        Input::RegisterPendingBodyFrame(payload) => RawInput {
-            variant: "RegisterPendingBodyFrame".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "depth".into(),
-                    RawValue::U64((payload.depth).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::PumpFrameScheduler(payload) => RawInput {
-            variant: "PumpFrameScheduler".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-        Input::NodeExecutionReleased(payload) => RawInput {
-            variant: "NodeExecutionReleased".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "frame_id".into(),
-                    RawValue::String((payload.frame_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::FrameTerminated(payload) => RawInput {
-            variant: "FrameTerminated".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "frame_id".into(),
-                    RawValue::String((payload.frame_id).to_owned()),
-                );
-                fields
-            },
-        },
-        Input::TerminalizeCompleted(payload) => RawInput {
-            variant: "TerminalizeCompleted".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-        Input::TerminalizeFailed(payload) => RawInput {
-            variant: "TerminalizeFailed".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-        Input::TerminalizeCanceled(payload) => RawInput {
-            variant: "TerminalizeCanceled".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields
-            },
-        },
-    }
 }
 
 pub mod effects {
@@ -1315,6 +418,7 @@ pub enum Effect {
     GrantNodeSlot(effects::GrantNodeSlot),
     GrantBodyFrameStart(effects::GrantBodyFrameStart),
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     EmitFlowRunNotice,
@@ -1331,284 +435,6 @@ pub enum EffectKind {
     GrantBodyFrameStart,
 }
 
-fn effect_from_raw(raw: &RawEffect) -> Result<Effect, KernelError> {
-    match raw.variant.as_str() {
-        "EmitFlowRunNotice" => Ok(Effect::EmitFlowRunNotice(effects::EmitFlowRunNotice {
-            run_status: match raw.fields.get("run_status").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field run_status".into(),
-                }
-            })? {
-                RawValue::NamedVariant { enum_name, variant } if enum_name == "FlowRunStatus" => {
-                    match variant.as_str() {
-                        "Absent" => FlowRunStatus::Absent,
-                        "Pending" => FlowRunStatus::Pending,
-                        "Running" => FlowRunStatus::Running,
-                        "Completed" => FlowRunStatus::Completed,
-                        "Failed" => FlowRunStatus::Failed,
-                        "Canceled" => FlowRunStatus::Canceled,
-                        other => {
-                            return Err(KernelError::CodegenInvariant {
-                                detail: format!(
-                                    "expected enum FlowRunStatus variant, found {other}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected enum FlowRunStatus, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "EmitStepNotice" => Ok(Effect::EmitStepNotice(effects::EmitStepNotice {
-            step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            step_status: match raw.fields.get("step_status").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_status".into(),
-                }
-            })? {
-                RawValue::NamedVariant { enum_name, variant } if enum_name == "StepRunStatus" => {
-                    match variant.as_str() {
-                        "Dispatched" => StepRunStatus::Dispatched,
-                        "Completed" => StepRunStatus::Completed,
-                        "Failed" => StepRunStatus::Failed,
-                        "Skipped" => StepRunStatus::Skipped,
-                        "Canceled" => StepRunStatus::Canceled,
-                        other => {
-                            return Err(KernelError::CodegenInvariant {
-                                detail: format!(
-                                    "expected enum StepRunStatus variant, found {other}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected enum StepRunStatus, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "AppendFailureLedger" => Ok(Effect::AppendFailureLedger(effects::AppendFailureLedger {
-            step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "PersistStepOutput" => Ok(Effect::PersistStepOutput(effects::PersistStepOutput {
-            step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "AdmitStepWork" => Ok(Effect::AdmitStepWork(effects::AdmitStepWork {
-            step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "FlowTerminalized" => Ok(Effect::FlowTerminalized(effects::FlowTerminalized {
-            run_status: match raw.fields.get("run_status").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field run_status".into(),
-                }
-            })? {
-                RawValue::NamedVariant { enum_name, variant } if enum_name == "FlowRunStatus" => {
-                    match variant.as_str() {
-                        "Absent" => FlowRunStatus::Absent,
-                        "Pending" => FlowRunStatus::Pending,
-                        "Running" => FlowRunStatus::Running,
-                        "Completed" => FlowRunStatus::Completed,
-                        "Failed" => FlowRunStatus::Failed,
-                        "Canceled" => FlowRunStatus::Canceled,
-                        other => {
-                            return Err(KernelError::CodegenInvariant {
-                                detail: format!(
-                                    "expected enum FlowRunStatus variant, found {other}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected enum FlowRunStatus, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "EscalateSupervisor" => Ok(Effect::EscalateSupervisor(effects::EscalateSupervisor {
-            step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field step_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "ProjectTargetSuccess" => Ok(Effect::ProjectTargetSuccess(
-            effects::ProjectTargetSuccess {
-                step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field step_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                target_id: match raw.fields.get("target_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field target_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-            },
-        )),
-        "ProjectTargetFailure" => Ok(Effect::ProjectTargetFailure(
-            effects::ProjectTargetFailure {
-                step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field step_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                target_id: match raw.fields.get("target_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field target_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-            },
-        )),
-        "ProjectTargetCanceled" => Ok(Effect::ProjectTargetCanceled(
-            effects::ProjectTargetCanceled {
-                step_id: match raw.fields.get("step_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field step_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                target_id: match raw.fields.get("target_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field target_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-            },
-        )),
-        "GrantNodeSlot" => Ok(Effect::GrantNodeSlot(effects::GrantNodeSlot {
-            frame_id: match raw.fields.get("frame_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field frame_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "GrantBodyFrameStart" => Ok(Effect::GrantBodyFrameStart(effects::GrantBodyFrameStart {
-            loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field loop_instance_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown effect {other}"),
-        }),
-    }
-}
-
-#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
     CreateRun,
@@ -1618,15 +444,9 @@ pub enum TransitionId {
     RecordStepOutput,
     ConditionPassed,
     ConditionRejected,
-    FailStepEscalating,
     FailStep,
     SkipStep,
-    ProjectFrameStepCompleted,
-    ProjectFrameStepSkipped,
-    ProjectFrameStepFailedEscalatingWithLedger,
-    ProjectFrameStepFailedEscalatingWithoutLedger,
-    ProjectFrameStepFailedWithLedger,
-    ProjectFrameStepFailedWithoutLedger,
+    ProjectFrameStepStatus,
     CancelStep,
     RegisterTargets,
     RecordTargetSuccess,
@@ -1643,129 +463,32 @@ pub enum TransitionId {
     TerminalizeFailed,
     TerminalizeCanceled,
 }
-#[allow(non_camel_case_types)]
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GuardId {
-    CreateRun_step_ids_are_non_empty,
-    CreateRun_ordered_steps_only_reference_step_ids,
-    CreateRun_step_ids_appear_in_ordered_steps,
-    CreateRun_step_has_conditions_keys_match_step_ids,
-    CreateRun_step_dependencies_keys_match_step_ids,
-    CreateRun_step_dependency_modes_keys_match_step_ids,
-    CreateRun_step_branches_keys_match_step_ids,
-    CreateRun_step_collection_policies_keys_match_step_ids,
-    CreateRun_step_quorum_thresholds_keys_match_step_ids,
-    CreateRun_step_dependencies_reference_known_steps,
-    DispatchStep_step_is_tracked,
-    DispatchStep_item_is_not_yet_dispatched,
-    DispatchStep_condition_allows_dispatch,
-    DispatchStep_dependencies_are_ready,
-    DispatchStep_branch_is_not_blocked,
-    CompleteStep_step_is_tracked,
-    CompleteStep_step_is_dispatched,
-    RecordStepOutput_step_is_tracked,
-    RecordStepOutput_step_is_completed,
-    RecordStepOutput_output_not_yet_recorded,
-    ConditionPassed_step_is_tracked,
-    ConditionPassed_step_is_not_started,
-    ConditionRejected_step_is_tracked,
-    ConditionRejected_step_is_not_started,
-    FailStepEscalating_step_is_tracked,
-    FailStepEscalating_step_is_dispatched,
-    FailStepEscalating_escalation_will_trigger,
-    FailStep_step_is_tracked,
-    FailStep_step_is_dispatched,
-    FailStep_escalation_does_not_trigger,
-    SkipStep_step_is_tracked,
-    SkipStep_step_is_not_started,
-    ProjectFrameStepCompleted_step_is_tracked,
-    ProjectFrameStepCompleted_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepCompleted_frame_status_is_completed,
-    ProjectFrameStepSkipped_step_is_tracked,
-    ProjectFrameStepSkipped_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepSkipped_frame_status_is_skipped,
-    ProjectFrameStepFailedEscalatingWithLedger_step_is_tracked,
-    ProjectFrameStepFailedEscalatingWithLedger_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepFailedEscalatingWithLedger_frame_status_is_failed,
-    ProjectFrameStepFailedEscalatingWithLedger_append_failure_ledger_requested,
-    ProjectFrameStepFailedEscalatingWithLedger_escalation_will_trigger,
-    ProjectFrameStepFailedEscalatingWithoutLedger_step_is_tracked,
-    ProjectFrameStepFailedEscalatingWithoutLedger_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepFailedEscalatingWithoutLedger_frame_status_is_failed,
-    ProjectFrameStepFailedEscalatingWithoutLedger_append_failure_ledger_not_requested,
-    ProjectFrameStepFailedEscalatingWithoutLedger_escalation_will_trigger,
-    ProjectFrameStepFailedWithLedger_step_is_tracked,
-    ProjectFrameStepFailedWithLedger_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepFailedWithLedger_frame_status_is_failed,
-    ProjectFrameStepFailedWithLedger_append_failure_ledger_requested,
-    ProjectFrameStepFailedWithLedger_escalation_does_not_trigger,
-    ProjectFrameStepFailedWithoutLedger_step_is_tracked,
-    ProjectFrameStepFailedWithoutLedger_frame_projection_origin_is_unstarted_or_dispatched,
-    ProjectFrameStepFailedWithoutLedger_frame_status_is_failed,
-    ProjectFrameStepFailedWithoutLedger_append_failure_ledger_not_requested,
-    ProjectFrameStepFailedWithoutLedger_escalation_does_not_trigger,
-    CancelStep_step_is_tracked,
-    CancelStep_step_is_cancelable,
-    RegisterTargets_step_is_tracked,
-    RegisterTargets_step_is_not_started,
-    RecordTargetSuccess_step_is_tracked,
-    RecordTargetSuccess_step_is_dispatched,
-    RecordTargetTerminalFailure_step_is_tracked,
-    RecordTargetTerminalFailure_step_is_dispatched,
-    RecordTargetCanceled_step_is_tracked,
-    RecordTargetCanceled_step_is_dispatched,
-    RecordTargetFailure_step_is_tracked,
-    RecordTargetFailure_step_is_dispatched,
-    RegisterReadyFrame_frame_not_already_ready,
-    PumpNodeScheduler_ready_frames_available_and_under_limit,
-    RegisterPendingBodyFrame_depth_within_limit,
-    RegisterPendingBodyFrame_loop_not_already_pending,
-    PumpFrameScheduler_pending_loops_available_and_under_frame_limit,
-    NodeExecutionReleased_at_least_one_active_node,
-    FrameTerminated_at_least_one_active_frame,
-    TerminalizeCompleted_all_steps_are_completed_or_skipped,
-    TerminalizeFailed_no_step_remains_dispatched,
-    TerminalizeCanceled_no_step_remains_dispatched,
+    Phase,
+    StepExists,
+    StepStatus,
 }
-#[allow(non_camel_case_types)]
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HelperId {
-    RunIsTerminal,
-    StepIsTracked,
-    StepStatusIs,
-    StepOutputRecordedIs,
-    StepConditionRecordedIs,
-    StepConditionAllowsDispatch,
-    AllTrackedStepsInAllowedStatuses,
-    NoTrackedStepInStatus,
-    AnyTrackedStepInStatus,
-    StepHasDependencies,
-    AllDependenciesCompleted,
-    AllDependenciesSkipped,
-    AnyDependencyCompleted,
-    StepDependencyReady,
-    StepDependencyShouldSkip,
-    StepBranchBlocked,
-    EscalationWillTrigger,
-    TargetRetryCount,
-    TargetRetryAllowed,
-    CollectionSatisfied,
-    CollectionFeasible,
-    StepTargetCount,
-    StepTargetSuccessCount,
-    StepTargetTerminalFailureCount,
-    RemainingTargetCount,
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GuardRejection {
+pub struct Outcome {
     pub transition_id: TransitionId,
-    pub guard_id: GuardId,
+    pub next_state: State,
+    pub effects: Vec<Effect>,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TriggerDiscriminant {
-    Input(InputKind),
+pub enum TransitionError {
+    Refusal(TransitionRefusal),
+    Kernel(KernelError),
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionRefusal {
     NoMatchingTransition {
@@ -1779,6 +502,18 @@ pub enum TransitionRefusal {
         transitions: Vec<TransitionId>,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TriggerDiscriminant {
+    Input(InputKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuardRejection {
+    pub transition_id: TransitionId,
+    pub guard_id: GuardId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KernelError {
     ContextViolation {
@@ -1793,753 +528,129 @@ pub enum KernelError {
         detail: String,
     },
 }
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TransitionError {
-    Refusal(TransitionRefusal),
-    Kernel(KernelError),
-}
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Outcome {
-    pub transition_id: TransitionId,
-    pub next_state: State,
-    pub effects: Vec<Effect>,
-}
-
-fn transition_id_from_raw(raw: &str) -> Result<TransitionId, KernelError> {
-    match raw {
-        "CreateRun" => Ok(TransitionId::CreateRun),
-        "StartRun" => Ok(TransitionId::StartRun),
-        "DispatchStep" => Ok(TransitionId::DispatchStep),
-        "CompleteStep" => Ok(TransitionId::CompleteStep),
-        "RecordStepOutput" => Ok(TransitionId::RecordStepOutput),
-        "ConditionPassed" => Ok(TransitionId::ConditionPassed),
-        "ConditionRejected" => Ok(TransitionId::ConditionRejected),
-        "FailStepEscalating" => Ok(TransitionId::FailStepEscalating),
-        "FailStep" => Ok(TransitionId::FailStep),
-        "SkipStep" => Ok(TransitionId::SkipStep),
-        "ProjectFrameStepCompleted" => Ok(TransitionId::ProjectFrameStepCompleted),
-        "ProjectFrameStepSkipped" => Ok(TransitionId::ProjectFrameStepSkipped),
-        "ProjectFrameStepFailedEscalatingWithLedger" => {
-            Ok(TransitionId::ProjectFrameStepFailedEscalatingWithLedger)
-        }
-        "ProjectFrameStepFailedEscalatingWithoutLedger" => {
-            Ok(TransitionId::ProjectFrameStepFailedEscalatingWithoutLedger)
-        }
-        "ProjectFrameStepFailedWithLedger" => Ok(TransitionId::ProjectFrameStepFailedWithLedger),
-        "ProjectFrameStepFailedWithoutLedger" => {
-            Ok(TransitionId::ProjectFrameStepFailedWithoutLedger)
-        }
-        "CancelStep" => Ok(TransitionId::CancelStep),
-        "RegisterTargets" => Ok(TransitionId::RegisterTargets),
-        "RecordTargetSuccess" => Ok(TransitionId::RecordTargetSuccess),
-        "RecordTargetTerminalFailure" => Ok(TransitionId::RecordTargetTerminalFailure),
-        "RecordTargetCanceled" => Ok(TransitionId::RecordTargetCanceled),
-        "RecordTargetFailure" => Ok(TransitionId::RecordTargetFailure),
-        "RegisterReadyFrame" => Ok(TransitionId::RegisterReadyFrame),
-        "PumpNodeScheduler" => Ok(TransitionId::PumpNodeScheduler),
-        "RegisterPendingBodyFrame" => Ok(TransitionId::RegisterPendingBodyFrame),
-        "PumpFrameScheduler" => Ok(TransitionId::PumpFrameScheduler),
-        "NodeExecutionReleased" => Ok(TransitionId::NodeExecutionReleased),
-        "FrameTerminated" => Ok(TransitionId::FrameTerminated),
-        "TerminalizeCompleted" => Ok(TransitionId::TerminalizeCompleted),
-        "TerminalizeFailed" => Ok(TransitionId::TerminalizeFailed),
-        "TerminalizeCanceled" => Ok(TransitionId::TerminalizeCanceled),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown transition {other}"),
-        }),
-    }
-}
-fn outcome_from_raw(raw: RawOutcome) -> Result<Outcome, TransitionError> {
-    let effects = raw
-        .effects
-        .iter()
-        .map(effect_from_raw)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(TransitionError::Kernel)?;
-    Ok(Outcome {
-        transition_id: transition_id_from_raw(&raw.transition).map_err(TransitionError::Kernel)?,
-        next_state: state_from_raw(&raw.next_state).map_err(TransitionError::Kernel)?,
-        effects,
-    })
-}
-fn refusal_from_raw(raw: RawRefusal) -> TransitionError {
-    match raw {
-        RawRefusal::NoMatchingTransition { phase, variant, .. } => {
-            TransitionError::Refusal(TransitionRefusal::NoMatchingTransition {
-                phase: phase_from_raw(&phase).unwrap_or(Phase::Absent),
-                trigger: TriggerDiscriminant::Input(input_kind_from_raw(&variant).unwrap()),
-            })
-        }
-        RawRefusal::AmbiguousTransition { transitions, .. } => {
-            TransitionError::Refusal(TransitionRefusal::AmbiguousTransition {
-                transitions: transitions
-                    .iter()
-                    .filter_map(|transition| transition_id_from_raw(transition).ok())
-                    .collect(),
-            })
-        }
-        RawRefusal::UnknownInputVariant { variant, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant {
-                detail: format!("unknown input variant {variant}"),
-            })
-        }
-        RawRefusal::UnknownSignalVariant { variant, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant {
-                detail: format!("unknown signal variant {variant}"),
-            })
-        }
-        RawRefusal::InvalidInputPayload { reason, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant { detail: reason })
-        }
-        RawRefusal::InvalidSignalPayload { reason, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant { detail: reason })
-        }
-        RawRefusal::EvaluationError {
-            transition, reason, ..
-        } => TransitionError::Kernel(KernelError::CodegenInvariant {
-            detail: format!("{transition}: {reason}"),
-        }),
-    }
-}
 
 pub mod helpers {
     use super::*;
-    pub fn run_is_terminal<C: Context>(state: &State, context: &C) -> Result<bool, KernelError> {
+    pub fn none<C: Context>(_: &State, context: &C) -> Result<(), KernelError> {
         let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "RunIsTerminal", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::RunIsTerminal,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_is_tracked<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepIsTracked", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::StepIsTracked,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_status_is<C: Context>(
-        state: &State,
-        step_id: StepId,
-        expected_status: StepRunStatus,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        args.insert(
-            "expected_status".into(),
-            RawValue::NamedVariant {
-                enum_name: "StepRunStatus".into(),
-                variant: match expected_status {
-                    StepRunStatus::Dispatched => "Dispatched".into(),
-                    StepRunStatus::Completed => "Completed".into(),
-                    StepRunStatus::Failed => "Failed".into(),
-                    StepRunStatus::Skipped => "Skipped".into(),
-                    StepRunStatus::Canceled => "Canceled".into(),
-                },
-            },
-        );
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepStatusIs", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::StepStatusIs,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_output_recorded_is<C: Context>(
-        state: &State,
-        step_id: StepId,
-        expected: bool,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        args.insert("expected".into(), RawValue::Bool((expected).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepOutputRecordedIs", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::StepOutputRecordedIs,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_condition_recorded_is<C: Context>(
-        state: &State,
-        step_id: StepId,
-        expected: Option<bool>,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        args.insert(
-            "expected".into(),
-            match expected.as_ref() {
-                Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                    RawValue::String("value".into()),
-                    RawValue::Bool((value).to_owned()),
-                )])),
-                None => RawValue::None,
-            },
-        );
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "StepConditionRecordedIs", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::StepConditionRecordedIs,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_condition_allows_dispatch<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "StepConditionAllowsDispatch", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::StepConditionAllowsDispatch,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn all_tracked_steps_in_allowed_statuses<C: Context>(
-        state: &State,
-        allowed_statuses: Vec<Option<StepRunStatus>>,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert(
-            "allowed_statuses".into(),
-            RawValue::Seq(
-                allowed_statuses
-                    .iter()
-                    .map(|value| match value.as_ref() {
-                        Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                            RawValue::String("value".into()),
-                            RawValue::NamedVariant {
-                                enum_name: "StepRunStatus".into(),
-                                variant: match value {
-                                    StepRunStatus::Dispatched => "Dispatched".into(),
-                                    StepRunStatus::Completed => "Completed".into(),
-                                    StepRunStatus::Failed => "Failed".into(),
-                                    StepRunStatus::Skipped => "Skipped".into(),
-                                    StepRunStatus::Canceled => "Canceled".into(),
-                                },
-                            },
-                        )])),
-                        None => RawValue::None,
-                    })
-                    .collect(),
-            ),
-        );
-        let raw = evaluate_helper_from_schema(
-            schema(),
-            &raw_state,
-            "AllTrackedStepsInAllowedStatuses",
-            &args,
-        )
-        .map_err(|error| KernelError::HelperEvaluation {
-            helper_id: HelperId::AllTrackedStepsInAllowedStatuses,
-            detail: format!("{error:?}"),
-        })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn no_tracked_step_in_status<C: Context>(
-        state: &State,
-        status: StepRunStatus,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert(
-            "status".into(),
-            RawValue::NamedVariant {
-                enum_name: "StepRunStatus".into(),
-                variant: match status {
-                    StepRunStatus::Dispatched => "Dispatched".into(),
-                    StepRunStatus::Completed => "Completed".into(),
-                    StepRunStatus::Failed => "Failed".into(),
-                    StepRunStatus::Skipped => "Skipped".into(),
-                    StepRunStatus::Canceled => "Canceled".into(),
-                },
-            },
-        );
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "NoTrackedStepInStatus", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::NoTrackedStepInStatus,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn any_tracked_step_in_status<C: Context>(
-        state: &State,
-        status: StepRunStatus,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert(
-            "status".into(),
-            RawValue::NamedVariant {
-                enum_name: "StepRunStatus".into(),
-                variant: match status {
-                    StepRunStatus::Dispatched => "Dispatched".into(),
-                    StepRunStatus::Completed => "Completed".into(),
-                    StepRunStatus::Failed => "Failed".into(),
-                    StepRunStatus::Skipped => "Skipped".into(),
-                    StepRunStatus::Canceled => "Canceled".into(),
-                },
-            },
-        );
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "AnyTrackedStepInStatus", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::AnyTrackedStepInStatus,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_has_dependencies<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepHasDependencies", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-            helper_id: HelperId::StepHasDependencies,
-            detail: format!("{error:?}"),
-        })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn all_dependencies_completed<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "AllDependenciesCompleted", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::AllDependenciesCompleted,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn all_dependencies_skipped<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "AllDependenciesSkipped", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::AllDependenciesSkipped,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn any_dependency_completed<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "AnyDependencyCompleted", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::AnyDependencyCompleted,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_dependency_ready<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepDependencyReady", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-            helper_id: HelperId::StepDependencyReady,
-            detail: format!("{error:?}"),
-        })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_dependency_should_skip<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "StepDependencyShouldSkip", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::StepDependencyShouldSkip,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_branch_blocked<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepBranchBlocked", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::StepBranchBlocked,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn escalation_will_trigger<C: Context>(
-        state: &State,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "EscalationWillTrigger", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::EscalationWillTrigger,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn target_retry_count<C: Context>(
-        state: &State,
-        retry_key: String,
-        context: &C,
-    ) -> Result<u32, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("retry_key".into(), RawValue::String((retry_key).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "TargetRetryCount", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::TargetRetryCount,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::U64(value) => {
-                u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })
-            }
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected u64, found {other:?}"),
-            }),
-        }
-    }
-    pub fn target_retry_allowed<C: Context>(
-        state: &State,
-        retry_key: String,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("retry_key".into(), RawValue::String((retry_key).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "TargetRetryAllowed", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::TargetRetryAllowed,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn collection_satisfied<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "CollectionSatisfied", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-            helper_id: HelperId::CollectionSatisfied,
-            detail: format!("{error:?}"),
-        })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn collection_feasible<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<bool, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "CollectionFeasible", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::CollectionFeasible,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::Bool(value) => Ok(value),
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected bool, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_target_count<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<u32, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepTargetCount", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::StepTargetCount,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::U64(value) => {
-                u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })
-            }
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected u64, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_target_success_count<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<u32, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw =
-            evaluate_helper_from_schema(schema(), &raw_state, "StepTargetSuccessCount", &args)
-                .map_err(|error| KernelError::HelperEvaluation {
-                    helper_id: HelperId::StepTargetSuccessCount,
-                    detail: format!("{error:?}"),
-                })?;
-        match raw {
-            RawValue::U64(value) => {
-                u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })
-            }
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected u64, found {other:?}"),
-            }),
-        }
-    }
-    pub fn step_target_terminal_failure_count<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<u32, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(
-            schema(),
-            &raw_state,
-            "StepTargetTerminalFailureCount",
-            &args,
-        )
-        .map_err(|error| KernelError::HelperEvaluation {
-            helper_id: HelperId::StepTargetTerminalFailureCount,
-            detail: format!("{error:?}"),
-        })?;
-        match raw {
-            RawValue::U64(value) => {
-                u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })
-            }
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected u64, found {other:?}"),
-            }),
-        }
-    }
-    pub fn remaining_target_count<C: Context>(
-        state: &State,
-        step_id: StepId,
-        context: &C,
-    ) -> Result<u32, KernelError> {
-        let _ = context;
-        let raw_state = state_to_raw(state);
-        let mut args = std::collections::BTreeMap::<String, RawValue>::new();
-        args.insert("step_id".into(), RawValue::String((step_id).to_owned()));
-        let raw = evaluate_helper_from_schema(schema(), &raw_state, "RemainingTargetCount", &args)
-            .map_err(|error| KernelError::HelperEvaluation {
-                helper_id: HelperId::RemainingTargetCount,
-                detail: format!("{error:?}"),
-            })?;
-        match raw {
-            RawValue::U64(value) => {
-                u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })
-            }
-            other => Err(KernelError::CodegenInvariant {
-                detail: format!("expected u64, found {other:?}"),
-            }),
-        }
+        Ok(())
     }
 }
 
 pub fn initial_state() -> State {
-    let raw = initial_state_from_schema(schema())
-        .expect("typed modeled-kernel initial state should be derivable from schema");
-    state_from_raw(&raw).expect("typed modeled-kernel initial state should convert from raw state")
+    State {
+        phase: Phase::Absent,
+        tracked_steps: Default::default(),
+        ordered_steps: Vec::new(),
+        step_status: Default::default(),
+        output_recorded: Default::default(),
+        step_condition_results: Default::default(),
+        step_has_conditions: Default::default(),
+        step_dependencies: Default::default(),
+        step_dependency_modes: Default::default(),
+        step_branches: Default::default(),
+        step_collection_policies: Default::default(),
+        step_quorum_thresholds: Default::default(),
+        step_target_counts: Default::default(),
+        step_target_success_counts: Default::default(),
+        step_target_terminal_failure_counts: Default::default(),
+        target_retry_counts: Default::default(),
+        failure_count: 0,
+        consecutive_failure_count: 0,
+        escalation_threshold: 0,
+        max_step_retries: 0,
+        ready_frames: Vec::new(),
+        ready_frame_membership: Default::default(),
+        pending_body_frame_loops: Vec::new(),
+        pending_body_frame_loop_membership: Default::default(),
+        active_node_count: 0,
+        active_frame_count: 0,
+        max_active_nodes: 0,
+        max_active_frames: 0,
+        max_frame_depth: 0,
+        last_granted_frame: String::new(),
+        last_granted_loop: String::new(),
+    }
+}
+
+fn refusal(phase: &Phase, trigger: InputKind) -> TransitionError {
+    TransitionError::Refusal(TransitionRefusal::NoMatchingTransition {
+        phase: phase.clone(),
+        trigger: TriggerDiscriminant::Input(trigger),
+    })
+}
+
+fn guard(transition_id: TransitionId, guard_id: GuardId) -> TransitionError {
+    TransitionError::Refusal(TransitionRefusal::GuardRejected {
+        rejections: vec![GuardRejection {
+            transition_id,
+            guard_id,
+        }],
+    })
+}
+
+fn ensure_step<'a>(
+    state: &'a State,
+    step_id: &StepId,
+    transition_id: TransitionId,
+) -> Result<Option<StepRunStatus>, TransitionError> {
+    if !state.tracked_steps.contains(step_id) {
+        return Err(guard(transition_id, GuardId::StepExists));
+    }
+    Ok(state.step_status.get(step_id).cloned().flatten())
+}
+
+fn emit_run_notice(status: FlowRunStatus) -> Effect {
+    Effect::EmitFlowRunNotice(effects::EmitFlowRunNotice { run_status: status })
+}
+
+fn emit_terminalized(status: FlowRunStatus) -> Effect {
+    Effect::FlowTerminalized(effects::FlowTerminalized { run_status: status })
+}
+
+fn emit_step_notice(step_id: StepId, step_status: StepRunStatus) -> Effect {
+    Effect::EmitStepNotice(effects::EmitStepNotice {
+        step_id,
+        step_status,
+    })
+}
+
+fn update_step_status(
+    state: &State,
+    step_id: StepId,
+    next_status: StepRunStatus,
+    transition_id: TransitionId,
+    allow_from: &[StepRunStatus],
+) -> Result<State, TransitionError> {
+    let current = ensure_step(state, &step_id, transition_id)?;
+    if let Some(current_status) = current
+        && !allow_from.contains(&current_status)
+    {
+        return Err(guard(transition_id, GuardId::StepStatus));
+    }
+    let mut next_state = state.clone();
+    next_state.step_status.insert(step_id, Some(next_status));
+    Ok(next_state)
+}
+
+fn maybe_add_unique<T: Ord + Clone>(
+    seq: &mut Vec<T>,
+    set: &mut std::collections::BTreeSet<T>,
+    value: T,
+) {
+    if set.insert(value.clone()) {
+        seq.push(value);
+    }
+}
+
+fn maybe_remove<T: Ord + Clone + PartialEq>(
+    seq: &mut Vec<T>,
+    set: &mut std::collections::BTreeSet<T>,
+    value: &T,
+) {
+    if set.remove(value) {
+        seq.retain(|candidate| candidate != value);
+    }
 }
 
 pub fn transition<C: Context>(
@@ -2548,9 +659,533 @@ pub fn transition<C: Context>(
     context: &C,
 ) -> Result<Outcome, TransitionError> {
     let _ = context;
-    let raw_state = state_to_raw(state);
-    let raw_input = input_to_raw(input);
-    transition_from_schema(schema(), &raw_state, &raw_input)
-        .map_err(refusal_from_raw)
-        .and_then(outcome_from_raw)
+    match input {
+        Input::CreateRun(payload) => {
+            if state.phase != Phase::Absent {
+                return Err(refusal(&state.phase, InputKind::CreateRun));
+            }
+            let mut next_state = initial_state();
+            next_state.phase = Phase::Pending;
+            next_state.tracked_steps = payload.step_ids.iter().cloned().collect();
+            next_state.ordered_steps = payload.ordered_steps.clone();
+            next_state.step_has_conditions = payload.step_has_conditions;
+            next_state.step_dependencies = payload.step_dependencies;
+            next_state.step_dependency_modes = payload.step_dependency_modes;
+            next_state.step_branches = payload.step_branches;
+            next_state.step_collection_policies = payload.step_collection_policies;
+            next_state.step_quorum_thresholds = payload.step_quorum_thresholds;
+            next_state.escalation_threshold = payload.escalation_threshold;
+            next_state.max_step_retries = payload.max_step_retries;
+            next_state.max_active_nodes = payload.max_active_nodes;
+            next_state.max_active_frames = payload.max_active_frames;
+            next_state.max_frame_depth = payload.max_frame_depth;
+            for step_id in next_state.tracked_steps.clone() {
+                next_state.step_status.insert(step_id.clone(), None);
+                next_state.output_recorded.insert(step_id.clone(), false);
+                next_state
+                    .step_condition_results
+                    .insert(step_id.clone(), None);
+                next_state
+                    .step_dependencies
+                    .entry(step_id.clone())
+                    .or_default();
+                next_state
+                    .step_dependency_modes
+                    .entry(step_id.clone())
+                    .or_insert(DependencyMode::All);
+                next_state
+                    .step_branches
+                    .entry(step_id.clone())
+                    .or_insert(None);
+                next_state
+                    .step_collection_policies
+                    .entry(step_id.clone())
+                    .or_insert(CollectionPolicyKind::All);
+                next_state
+                    .step_quorum_thresholds
+                    .entry(step_id.clone())
+                    .or_insert(0);
+                next_state
+                    .step_target_counts
+                    .entry(step_id.clone())
+                    .or_insert(0);
+                next_state
+                    .step_target_success_counts
+                    .entry(step_id.clone())
+                    .or_insert(0);
+                next_state
+                    .step_target_terminal_failure_counts
+                    .entry(step_id)
+                    .or_insert(0);
+            }
+            Ok(Outcome {
+                transition_id: TransitionId::CreateRun,
+                next_state,
+                effects: vec![emit_run_notice(FlowRunStatus::Pending)],
+            })
+        }
+        Input::StartRun(_) => {
+            if state.phase != Phase::Pending {
+                return Err(refusal(&state.phase, InputKind::StartRun));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Running;
+            Ok(Outcome {
+                transition_id: TransitionId::StartRun,
+                next_state,
+                effects: vec![emit_run_notice(FlowRunStatus::Running)],
+            })
+        }
+        Input::DispatchStep(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::DispatchStep));
+            }
+            let next_state = update_step_status(
+                state,
+                payload.step_id.clone(),
+                StepRunStatus::Dispatched,
+                TransitionId::DispatchStep,
+                &[
+                    StepRunStatus::Failed,
+                    StepRunStatus::Skipped,
+                    StepRunStatus::Completed,
+                    StepRunStatus::Canceled,
+                ][0..0],
+            )?;
+            Ok(Outcome {
+                transition_id: TransitionId::DispatchStep,
+                next_state,
+                effects: vec![
+                    emit_step_notice(payload.step_id.clone(), StepRunStatus::Dispatched),
+                    Effect::AdmitStepWork(effects::AdmitStepWork {
+                        step_id: payload.step_id,
+                    }),
+                ],
+            })
+        }
+        Input::CompleteStep(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::CompleteStep));
+            }
+            let mut next_state = update_step_status(
+                state,
+                payload.step_id.clone(),
+                StepRunStatus::Completed,
+                TransitionId::CompleteStep,
+                &[StepRunStatus::Dispatched],
+            )?;
+            next_state.consecutive_failure_count = 0;
+            Ok(Outcome {
+                transition_id: TransitionId::CompleteStep,
+                next_state,
+                effects: vec![emit_step_notice(payload.step_id, StepRunStatus::Completed)],
+            })
+        }
+        Input::RecordStepOutput(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RecordStepOutput));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::RecordStepOutput)?;
+            let mut next_state = state.clone();
+            next_state
+                .output_recorded
+                .insert(payload.step_id.clone(), true);
+            Ok(Outcome {
+                transition_id: TransitionId::RecordStepOutput,
+                next_state,
+                effects: vec![Effect::PersistStepOutput(effects::PersistStepOutput {
+                    step_id: payload.step_id,
+                })],
+            })
+        }
+        Input::ConditionPassed(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::ConditionPassed));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::ConditionPassed)?;
+            let mut next_state = state.clone();
+            next_state
+                .step_condition_results
+                .insert(payload.step_id, Some(true));
+            Ok(Outcome {
+                transition_id: TransitionId::ConditionPassed,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::ConditionRejected(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::ConditionRejected));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::ConditionRejected)?;
+            let mut next_state = state.clone();
+            next_state
+                .step_condition_results
+                .insert(payload.step_id, Some(false));
+            Ok(Outcome {
+                transition_id: TransitionId::ConditionRejected,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::FailStep(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::FailStep));
+            }
+            let mut next_state = update_step_status(
+                state,
+                payload.step_id.clone(),
+                StepRunStatus::Failed,
+                TransitionId::FailStep,
+                &[StepRunStatus::Dispatched],
+            )?;
+            next_state.failure_count = next_state.failure_count.saturating_add(1);
+            next_state.consecutive_failure_count =
+                next_state.consecutive_failure_count.saturating_add(1);
+            let should_escalate = next_state.escalation_threshold > 0
+                && next_state.consecutive_failure_count >= next_state.escalation_threshold;
+            let mut effects = vec![
+                emit_step_notice(payload.step_id.clone(), StepRunStatus::Failed),
+                Effect::AppendFailureLedger(effects::AppendFailureLedger {
+                    step_id: payload.step_id.clone(),
+                }),
+            ];
+            if should_escalate {
+                effects.push(Effect::EscalateSupervisor(effects::EscalateSupervisor {
+                    step_id: payload.step_id.clone(),
+                }));
+            }
+            Ok(Outcome {
+                transition_id: TransitionId::FailStep,
+                next_state,
+                effects,
+            })
+        }
+        Input::SkipStep(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::SkipStep));
+            }
+            let next_state = update_step_status(
+                state,
+                payload.step_id.clone(),
+                StepRunStatus::Skipped,
+                TransitionId::SkipStep,
+                &[StepRunStatus::Dispatched],
+            )?;
+            Ok(Outcome {
+                transition_id: TransitionId::SkipStep,
+                next_state,
+                effects: vec![emit_step_notice(payload.step_id, StepRunStatus::Skipped)],
+            })
+        }
+        Input::ProjectFrameStepStatus(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::ProjectFrameStepStatus));
+            }
+            ensure_step(
+                state,
+                &payload.step_id,
+                TransitionId::ProjectFrameStepStatus,
+            )?;
+            let mut next_state = state.clone();
+            next_state
+                .step_status
+                .insert(payload.step_id.clone(), Some(payload.step_status));
+            let mut effects = vec![emit_step_notice(
+                payload.step_id.clone(),
+                payload.step_status,
+            )];
+            if payload.step_status == StepRunStatus::Failed {
+                next_state.failure_count = next_state.failure_count.saturating_add(1);
+                next_state.consecutive_failure_count =
+                    next_state.consecutive_failure_count.saturating_add(1);
+                if payload.append_failure_ledger {
+                    effects.push(Effect::AppendFailureLedger(effects::AppendFailureLedger {
+                        step_id: payload.step_id.clone(),
+                    }));
+                }
+                if next_state.escalation_threshold > 0
+                    && next_state.consecutive_failure_count >= next_state.escalation_threshold
+                {
+                    effects.push(Effect::EscalateSupervisor(effects::EscalateSupervisor {
+                        step_id: payload.step_id.clone(),
+                    }));
+                }
+            } else if payload.step_status == StepRunStatus::Completed {
+                next_state.consecutive_failure_count = 0;
+            }
+            Ok(Outcome {
+                transition_id: TransitionId::ProjectFrameStepStatus,
+                next_state,
+                effects,
+            })
+        }
+        Input::CancelStep(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::CancelStep));
+            }
+            let next_state = update_step_status(
+                state,
+                payload.step_id.clone(),
+                StepRunStatus::Canceled,
+                TransitionId::CancelStep,
+                &[StepRunStatus::Dispatched],
+            )?;
+            Ok(Outcome {
+                transition_id: TransitionId::CancelStep,
+                next_state,
+                effects: vec![emit_step_notice(payload.step_id, StepRunStatus::Canceled)],
+            })
+        }
+        Input::RegisterTargets(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RegisterTargets));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::RegisterTargets)?;
+            let mut next_state = state.clone();
+            next_state
+                .step_target_counts
+                .insert(payload.step_id, payload.target_count);
+            Ok(Outcome {
+                transition_id: TransitionId::RegisterTargets,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::RecordTargetSuccess(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RecordTargetSuccess));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::RecordTargetSuccess)?;
+            let mut next_state = state.clone();
+            let entry = next_state
+                .step_target_success_counts
+                .entry(payload.step_id.clone())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+            Ok(Outcome {
+                transition_id: TransitionId::RecordTargetSuccess,
+                next_state,
+                effects: vec![Effect::ProjectTargetSuccess(
+                    effects::ProjectTargetSuccess {
+                        step_id: payload.step_id,
+                        target_id: payload.target_id,
+                    },
+                )],
+            })
+        }
+        Input::RecordTargetTerminalFailure(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(
+                    &state.phase,
+                    InputKind::RecordTargetTerminalFailure,
+                ));
+            }
+            ensure_step(
+                state,
+                &payload.step_id,
+                TransitionId::RecordTargetTerminalFailure,
+            )?;
+            let mut next_state = state.clone();
+            let entry = next_state
+                .step_target_terminal_failure_counts
+                .entry(payload.step_id)
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+            Ok(Outcome {
+                transition_id: TransitionId::RecordTargetTerminalFailure,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::RecordTargetCanceled(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RecordTargetCanceled));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::RecordTargetCanceled)?;
+            Ok(Outcome {
+                transition_id: TransitionId::RecordTargetCanceled,
+                next_state: state.clone(),
+                effects: vec![Effect::ProjectTargetCanceled(
+                    effects::ProjectTargetCanceled {
+                        step_id: payload.step_id,
+                        target_id: payload.target_id,
+                    },
+                )],
+            })
+        }
+        Input::RecordTargetFailure(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RecordTargetFailure));
+            }
+            ensure_step(state, &payload.step_id, TransitionId::RecordTargetFailure)?;
+            let mut next_state = state.clone();
+            let entry = next_state
+                .target_retry_counts
+                .entry(payload.retry_key)
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+            Ok(Outcome {
+                transition_id: TransitionId::RecordTargetFailure,
+                next_state,
+                effects: vec![Effect::ProjectTargetFailure(
+                    effects::ProjectTargetFailure {
+                        step_id: payload.step_id,
+                        target_id: payload.target_id,
+                    },
+                )],
+            })
+        }
+        Input::RegisterReadyFrame(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RegisterReadyFrame));
+            }
+            let mut next_state = state.clone();
+            maybe_add_unique(
+                &mut next_state.ready_frames,
+                &mut next_state.ready_frame_membership,
+                payload.frame_id,
+            );
+            Ok(Outcome {
+                transition_id: TransitionId::RegisterReadyFrame,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::PumpNodeScheduler(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::PumpNodeScheduler));
+            }
+            let mut next_state = state.clone();
+            if next_state.ready_frames.is_empty() {
+                return Err(guard(TransitionId::PumpNodeScheduler, GuardId::StepStatus));
+            }
+            if next_state.max_active_nodes > 0
+                && next_state.active_node_count >= next_state.max_active_nodes
+            {
+                return Err(guard(TransitionId::PumpNodeScheduler, GuardId::StepStatus));
+            }
+            let frame_id = next_state.ready_frames.remove(0);
+            next_state.ready_frame_membership.remove(&frame_id);
+            next_state.active_node_count = next_state.active_node_count.saturating_add(1);
+            next_state.last_granted_frame = frame_id.clone();
+            Ok(Outcome {
+                transition_id: TransitionId::PumpNodeScheduler,
+                next_state,
+                effects: vec![Effect::GrantNodeSlot(effects::GrantNodeSlot { frame_id })],
+            })
+        }
+        Input::RegisterPendingBodyFrame(payload) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::RegisterPendingBodyFrame));
+            }
+            let mut next_state = state.clone();
+            maybe_add_unique(
+                &mut next_state.pending_body_frame_loops,
+                &mut next_state.pending_body_frame_loop_membership,
+                payload.loop_instance_id,
+            );
+            Ok(Outcome {
+                transition_id: TransitionId::RegisterPendingBodyFrame,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::PumpFrameScheduler(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::PumpFrameScheduler));
+            }
+            let mut next_state = state.clone();
+            if next_state.pending_body_frame_loops.is_empty() {
+                return Err(guard(TransitionId::PumpFrameScheduler, GuardId::StepStatus));
+            }
+            if next_state.max_active_frames > 0
+                && next_state.active_frame_count >= next_state.max_active_frames
+            {
+                return Err(guard(TransitionId::PumpFrameScheduler, GuardId::StepStatus));
+            }
+            let loop_instance_id = next_state.pending_body_frame_loops.remove(0);
+            next_state
+                .pending_body_frame_loop_membership
+                .remove(&loop_instance_id);
+            next_state.active_frame_count = next_state.active_frame_count.saturating_add(1);
+            next_state.last_granted_loop = loop_instance_id.clone();
+            Ok(Outcome {
+                transition_id: TransitionId::PumpFrameScheduler,
+                next_state,
+                effects: vec![Effect::GrantBodyFrameStart(effects::GrantBodyFrameStart {
+                    loop_instance_id,
+                })],
+            })
+        }
+        Input::NodeExecutionReleased(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::NodeExecutionReleased));
+            }
+            let mut next_state = state.clone();
+            next_state.active_node_count = next_state.active_node_count.saturating_sub(1);
+            Ok(Outcome {
+                transition_id: TransitionId::NodeExecutionReleased,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::FrameTerminated(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::FrameTerminated));
+            }
+            let mut next_state = state.clone();
+            next_state.active_frame_count = next_state.active_frame_count.saturating_sub(1);
+            Ok(Outcome {
+                transition_id: TransitionId::FrameTerminated,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::TerminalizeCompleted(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::TerminalizeCompleted));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Completed;
+            Ok(Outcome {
+                transition_id: TransitionId::TerminalizeCompleted,
+                next_state,
+                effects: vec![
+                    emit_run_notice(FlowRunStatus::Completed),
+                    emit_terminalized(FlowRunStatus::Completed),
+                ],
+            })
+        }
+        Input::TerminalizeFailed(_) => {
+            if state.phase != Phase::Running {
+                return Err(refusal(&state.phase, InputKind::TerminalizeFailed));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Failed;
+            Ok(Outcome {
+                transition_id: TransitionId::TerminalizeFailed,
+                next_state,
+                effects: vec![
+                    emit_run_notice(FlowRunStatus::Failed),
+                    emit_terminalized(FlowRunStatus::Failed),
+                ],
+            })
+        }
+        Input::TerminalizeCanceled(_) => {
+            if matches!(state.phase, Phase::Completed | Phase::Canceled) {
+                return Err(refusal(&state.phase, InputKind::TerminalizeCanceled));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Canceled;
+            Ok(Outcome {
+                transition_id: TransitionId::TerminalizeCanceled,
+                next_state,
+                effects: vec![
+                    emit_run_notice(FlowRunStatus::Canceled),
+                    emit_terminalized(FlowRunStatus::Canceled),
+                ],
+            })
+        }
+    }
 }

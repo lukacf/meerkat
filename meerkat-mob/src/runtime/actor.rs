@@ -7177,8 +7177,14 @@ impl MobActor {
         let cleanup_run_id = run_id.clone();
         let handle = tokio::spawn(async move {
             let run_id_for_execute = flow_run_id.clone();
+            let execution_cancel = cancel_token.clone();
             if let Err(error) = engine
-                .execute_flow(run_id_for_execute, config, activation_params, cancel_token)
+                .execute_flow(
+                    run_id_for_execute,
+                    config,
+                    activation_params,
+                    execution_cancel,
+                )
                 .await
             {
                 tracing::error!(
@@ -7187,15 +7193,48 @@ impl MobActor {
                     error = %error,
                     "flow task execution failed; delegating terminalization to flow-run kernel"
                 );
-                if let Err(finalize_error) = flow_engine
-                    .terminalize_failed(flow_run_id.clone(), flow_id_for_task, error.to_string())
-                    .await
-                {
-                    tracing::error!(
-                        run_id = %flow_run_id,
-                        error = %finalize_error,
-                        "failed to finalize run after flow task error"
-                    );
+                if cancel_token.is_cancelled() {
+                    if let Err(finalize_error) = flow_engine
+                        .terminalize_canceled(flow_run_id.clone(), flow_id_for_task)
+                        .await
+                    {
+                        tracing::error!(
+                            run_id = %flow_run_id,
+                            error = %finalize_error,
+                            "failed to finalize canceled run after flow task cancellation"
+                        );
+                    }
+                } else {
+                    match error {
+                        MobError::RunCanceled(_) => {
+                            if let Err(finalize_error) = flow_engine
+                                .terminalize_canceled(flow_run_id.clone(), flow_id_for_task)
+                                .await
+                            {
+                                tracing::error!(
+                                    run_id = %flow_run_id,
+                                    error = %finalize_error,
+                                    "failed to finalize canceled run after flow task cancellation"
+                                );
+                            }
+                        }
+                        other => {
+                            if let Err(finalize_error) = flow_engine
+                                .terminalize_failed(
+                                    flow_run_id.clone(),
+                                    flow_id_for_task,
+                                    other.to_string(),
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    run_id = %flow_run_id,
+                                    error = %finalize_error,
+                                    "failed to finalize run after flow task error"
+                                );
+                            }
+                        }
+                    }
                 }
             }
             if cleanup_tx
@@ -7353,6 +7392,21 @@ impl MobActor {
                 () = tokio::time::sleep(cancel_grace_timeout) => false,
             };
             if completed {
+                if let Err(error) = flow_engine.cancel_dispatched_steps(&run_id).await {
+                    tracing::error!(
+                        error = %error,
+                        "failed to settle dispatched steps after flow task completion during cancellation"
+                    );
+                }
+                if let Err(error) = flow_engine
+                    .terminalize_canceled(run_id.clone(), flow_id)
+                    .await
+                {
+                    tracing::error!(
+                        error = %error,
+                        "failed to apply canceled terminalization after flow task completion"
+                    );
+                }
                 if cleanup_tx
                     .send(MobCommand::FlowCanceledCleanup {
                         run_id: cleanup_run_id,

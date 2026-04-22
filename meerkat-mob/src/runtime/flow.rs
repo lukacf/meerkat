@@ -1169,6 +1169,9 @@ impl FlowEngine {
                     return Ok(Err(reason));
                 }
                 Ok(FlowTurnOutcome::Canceled) => {
+                    if cancel.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(MobError::RunCanceled(run_id.clone()));
+                    }
                     let cancel_reason = "canceled".to_string();
                     self.run_store
                         .append_step_entry(
@@ -2024,7 +2027,12 @@ impl FlowEngine {
 
         for attempt in 0..5u32 {
             let run = self.run_snapshot(&run_id).await?;
-            if run.status.is_terminal() {
+            if run.status.is_terminal()
+                && !matches!(
+                    (&target, &run.status),
+                    (TerminalizationTarget::Canceled, MobRunStatus::Failed)
+                )
+            {
                 return Ok(TerminalizationOutcome::Noop);
             }
             let next_state =

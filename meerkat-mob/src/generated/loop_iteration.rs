@@ -20,19 +20,6 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::loop_iteration_machine()
 }
 
-mod modeled_runtime {
-    #![allow(warnings)]
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../meerkat-machine-kernels/src/runtime.rs"
-    ));
-}
-use modeled_runtime::{
-    RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
-    evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
-    transition_signal_from_schema,
-};
-
 pub type FlowNodeId = String;
 pub type FrameId = String;
 pub type LoopId = String;
@@ -95,257 +82,6 @@ impl Default for State {
     }
 }
 
-fn phase_from_raw(raw: &str) -> Result<Phase, KernelError> {
-    match raw {
-        "Absent" => Ok(Phase::Absent),
-        "Running" => Ok(Phase::Running),
-        "Completed" => Ok(Phase::Completed),
-        "Exhausted" => Ok(Phase::Exhausted),
-        "Failed" => Ok(Phase::Failed),
-        "Canceled" => Ok(Phase::Canceled),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown phase {other}"),
-        }),
-    }
-}
-
-fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
-    Ok(State {
-        phase: phase_from_raw(&raw.phase)?,
-        loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field loop_instance_id".into(),
-            }
-        })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
-        parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field parent_frame_id".into(),
-            }
-        })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
-        parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field parent_node_id".into(),
-            }
-        })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
-        loop_id: match raw
-            .fields
-            .get("loop_id")
-            .ok_or_else(|| KernelError::CodegenInvariant {
-                detail: "missing field loop_id".into(),
-            })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
-        depth: match raw
-            .fields
-            .get("depth")
-            .ok_or_else(|| KernelError::CodegenInvariant {
-                detail: "missing field depth".into(),
-            })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        stage: match raw
-            .fields
-            .get("stage")
-            .ok_or_else(|| KernelError::CodegenInvariant {
-                detail: "missing field stage".into(),
-            })? {
-            RawValue::NamedVariant { enum_name, variant } if enum_name == "LoopIterationStage" => {
-                match variant.as_str() {
-                    "AwaitingBodyFrame" => LoopIterationStage::AwaitingBodyFrame,
-                    "BodyFrameActive" => LoopIterationStage::BodyFrameActive,
-                    "AwaitingUntil" => LoopIterationStage::AwaitingUntil,
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!(
-                                "expected enum LoopIterationStage variant, found {other}"
-                            ),
-                        });
-                    }
-                }
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected enum LoopIterationStage, found {other:?}"),
-                });
-            }
-        },
-        current_iteration: match raw.fields.get("current_iteration").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field current_iteration".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        last_completed_iteration: match raw.fields.get("last_completed_iteration").ok_or_else(
-            || KernelError::CodegenInvariant {
-                detail: "missing field last_completed_iteration".into(),
-            },
-        )? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        max_iterations: match raw.fields.get("max_iterations").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field max_iterations".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        active_body_frame_id: match raw.fields.get("active_body_frame_id").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field active_body_frame_id".into(),
-            }
-        })? {
-            RawValue::None => None,
-            RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) {
-                Some(value) => Some(match value {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                }),
-                None => None,
-            },
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected option, found {other:?}"),
-                });
-            }
-        },
-    })
-}
-
-fn state_to_raw(state: &State) -> RawState {
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(
-        "loop_instance_id".into(),
-        RawValue::String((state.loop_instance_id).to_owned()),
-    );
-    fields.insert(
-        "parent_frame_id".into(),
-        RawValue::String((state.parent_frame_id).to_owned()),
-    );
-    fields.insert(
-        "parent_node_id".into(),
-        RawValue::String((state.parent_node_id).to_owned()),
-    );
-    fields.insert(
-        "loop_id".into(),
-        RawValue::String((state.loop_id).to_owned()),
-    );
-    fields.insert(
-        "depth".into(),
-        RawValue::U64((state.depth).to_owned() as u64),
-    );
-    fields.insert(
-        "stage".into(),
-        RawValue::NamedVariant {
-            enum_name: "LoopIterationStage".into(),
-            variant: match state.stage {
-                LoopIterationStage::AwaitingBodyFrame => "AwaitingBodyFrame".into(),
-                LoopIterationStage::BodyFrameActive => "BodyFrameActive".into(),
-                LoopIterationStage::AwaitingUntil => "AwaitingUntil".into(),
-            },
-        },
-    );
-    fields.insert(
-        "current_iteration".into(),
-        RawValue::U64((state.current_iteration).to_owned() as u64),
-    );
-    fields.insert(
-        "last_completed_iteration".into(),
-        RawValue::U64((state.last_completed_iteration).to_owned() as u64),
-    );
-    fields.insert(
-        "max_iterations".into(),
-        RawValue::U64((state.max_iterations).to_owned() as u64),
-    );
-    fields.insert(
-        "active_body_frame_id".into(),
-        match state.active_body_frame_id.as_ref() {
-            Some(value) => RawValue::Map(std::collections::BTreeMap::from([(
-                RawValue::String("value".into()),
-                RawValue::String((value).to_owned()),
-            )])),
-            None => RawValue::None,
-        },
-    );
-    RawState {
-        phase: match state.phase {
-            Phase::Absent => "Absent".into(),
-            Phase::Running => "Running".into(),
-            Phase::Completed => "Completed".into(),
-            Phase::Exhausted => "Exhausted".into(),
-            Phase::Failed => "Failed".into(),
-            Phase::Canceled => "Canceled".into(),
-        },
-        fields,
-    }
-}
-
 pub mod inputs {
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -405,6 +141,7 @@ pub enum Input {
     UntilConditionFailed(inputs::UntilConditionFailed),
     CancelLoop(inputs::CancelLoop),
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
     StartLoop,
@@ -415,160 +152,6 @@ pub enum InputKind {
     UntilConditionMet,
     UntilConditionFailed,
     CancelLoop,
-}
-
-fn input_kind_from_raw(raw: &str) -> Option<InputKind> {
-    match raw {
-        "StartLoop" => Some(InputKind::StartLoop),
-        "BodyFrameStarted" => Some(InputKind::BodyFrameStarted),
-        "BodyFrameCompleted" => Some(InputKind::BodyFrameCompleted),
-        "BodyFrameFailed" => Some(InputKind::BodyFrameFailed),
-        "BodyFrameCanceled" => Some(InputKind::BodyFrameCanceled),
-        "UntilConditionMet" => Some(InputKind::UntilConditionMet),
-        "UntilConditionFailed" => Some(InputKind::UntilConditionFailed),
-        "CancelLoop" => Some(InputKind::CancelLoop),
-        _ => None,
-    }
-}
-fn input_to_raw(input: Input) -> RawInput {
-    match input {
-        Input::StartLoop(payload) => RawInput {
-            variant: "StartLoop".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "max_iterations".into(),
-                    RawValue::U64((payload.max_iterations).to_owned() as u64),
-                );
-                fields.insert(
-                    "parent_frame_id".into(),
-                    RawValue::String((payload.parent_frame_id).to_owned()),
-                );
-                fields.insert(
-                    "parent_node_id".into(),
-                    RawValue::String((payload.parent_node_id).to_owned()),
-                );
-                fields.insert(
-                    "loop_id".into(),
-                    RawValue::String((payload.loop_id).to_owned()),
-                );
-                fields.insert(
-                    "depth".into(),
-                    RawValue::U64((payload.depth).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::BodyFrameStarted(payload) => RawInput {
-            variant: "BodyFrameStarted".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "frame_id".into(),
-                    RawValue::String((payload.frame_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::BodyFrameCompleted(payload) => RawInput {
-            variant: "BodyFrameCompleted".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::BodyFrameFailed(payload) => RawInput {
-            variant: "BodyFrameFailed".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::BodyFrameCanceled(payload) => RawInput {
-            variant: "BodyFrameCanceled".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::UntilConditionMet(payload) => RawInput {
-            variant: "UntilConditionMet".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::UntilConditionFailed(payload) => RawInput {
-            variant: "UntilConditionFailed".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields.insert(
-                    "iteration".into(),
-                    RawValue::U64((payload.iteration).to_owned() as u64),
-                );
-                fields
-            },
-        },
-        Input::CancelLoop(payload) => RawInput {
-            variant: "CancelLoop".into(),
-            fields: {
-                let mut fields = std::collections::BTreeMap::new();
-                fields.insert(
-                    "loop_instance_id".into(),
-                    RawValue::String((payload.loop_instance_id).to_owned()),
-                );
-                fields
-            },
-        },
-    }
 }
 
 pub mod effects {
@@ -621,6 +204,7 @@ pub enum Effect {
     LoopFailed(effects::LoopFailed),
     LoopCanceled(effects::LoopCanceled),
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     RequestBodyFrameStart,
@@ -631,322 +215,44 @@ pub enum EffectKind {
     LoopCanceled,
 }
 
-fn effect_from_raw(raw: &RawEffect) -> Result<Effect, KernelError> {
-    match raw.variant.as_str() {
-        "RequestBodyFrameStart" => Ok(Effect::RequestBodyFrameStart(
-            effects::RequestBodyFrameStart {
-                loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field loop_instance_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                depth: match raw.fields.get("depth").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field depth".into(),
-                    }
-                })? {
-                    RawValue::U64(value) => {
-                        u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                            detail: format!("u64 {value} does not fit u32"),
-                        })?
-                    }
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected u64, found {other:?}"),
-                        });
-                    }
-                },
-            },
-        )),
-        "EvaluateUntilCondition" => Ok(Effect::EvaluateUntilCondition(
-            effects::EvaluateUntilCondition {
-                loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field loop_instance_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                iteration: match raw.fields.get("iteration").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field iteration".into(),
-                    }
-                })? {
-                    RawValue::U64(value) => {
-                        u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                            detail: format!("u64 {value} does not fit u32"),
-                        })?
-                    }
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected u64, found {other:?}"),
-                        });
-                    }
-                },
-                parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field parent_frame_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field parent_node_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-                loop_id: match raw.fields.get("loop_id").ok_or_else(|| {
-                    KernelError::CodegenInvariant {
-                        detail: "missing effect field loop_id".into(),
-                    }
-                })? {
-                    RawValue::String(value) => value.clone(),
-                    other => {
-                        return Err(KernelError::CodegenInvariant {
-                            detail: format!("expected named string value, found {other:?}"),
-                        });
-                    }
-                },
-            },
-        )),
-        "LoopCompleted" => Ok(Effect::LoopCompleted(effects::LoopCompleted {
-            loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field loop_instance_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_frame_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_node_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "LoopExhausted" => Ok(Effect::LoopExhausted(effects::LoopExhausted {
-            loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field loop_instance_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_frame_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_node_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "LoopFailed" => Ok(Effect::LoopFailed(effects::LoopFailed {
-            loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field loop_instance_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_frame_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_node_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        "LoopCanceled" => Ok(Effect::LoopCanceled(effects::LoopCanceled {
-            loop_instance_id: match raw.fields.get("loop_instance_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field loop_instance_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_frame_id: match raw.fields.get("parent_frame_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_frame_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-            parent_node_id: match raw.fields.get("parent_node_id").ok_or_else(|| {
-                KernelError::CodegenInvariant {
-                    detail: "missing effect field parent_node_id".into(),
-                }
-            })? {
-                RawValue::String(value) => value.clone(),
-                other => {
-                    return Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    });
-                }
-            },
-        })),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown effect {other}"),
-        }),
-    }
-}
-
-#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
     StartLoop,
     BodyFrameStarted,
     BodyFrameCompleted,
-    UntilConditionMet,
-    UntilConditionFailed,
-    ExhaustedIterations,
     BodyFrameFailed,
     BodyFrameCanceled,
+    UntilConditionMet,
+    UntilConditionFailed,
     CancelLoop,
 }
-#[allow(non_camel_case_types)]
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GuardId {
-    BodyFrameStarted_loop_identity_matches,
-    BodyFrameStarted_awaiting_body_frame,
-    BodyFrameStarted_iteration_matches_current,
-    BodyFrameCompleted_loop_identity_matches,
-    BodyFrameCompleted_body_frame_active,
-    BodyFrameCompleted_iteration_matches_current,
-    UntilConditionMet_loop_identity_matches,
-    UntilConditionMet_awaiting_until,
-    UntilConditionMet_iteration_matches_last_completed,
-    UntilConditionFailed_loop_identity_matches,
-    UntilConditionFailed_awaiting_until,
-    UntilConditionFailed_iteration_matches_last_completed,
-    UntilConditionFailed_iterations_not_exhausted,
-    ExhaustedIterations_loop_identity_matches,
-    ExhaustedIterations_awaiting_until,
-    ExhaustedIterations_iteration_matches_last_completed,
-    ExhaustedIterations_iterations_exhausted,
-    BodyFrameFailed_loop_identity_matches,
-    BodyFrameFailed_body_frame_active,
-    BodyFrameFailed_iteration_matches_current,
-    BodyFrameCanceled_loop_identity_matches,
-    BodyFrameCanceled_body_frame_active,
-    BodyFrameCanceled_iteration_matches_current,
-    CancelLoop_loop_identity_matches,
+    Phase,
+    LoopInstanceId,
+    Stage,
+    Iteration,
 }
-#[allow(non_camel_case_types)]
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HelperId {
     None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GuardRejection {
+pub struct Outcome {
     pub transition_id: TransitionId,
-    pub guard_id: GuardId,
+    pub next_state: State,
+    pub effects: Vec<Effect>,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TriggerDiscriminant {
-    Input(InputKind),
+pub enum TransitionError {
+    Refusal(TransitionRefusal),
+    Kernel(KernelError),
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionRefusal {
     NoMatchingTransition {
@@ -960,6 +266,18 @@ pub enum TransitionRefusal {
         transitions: Vec<TransitionId>,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TriggerDiscriminant {
+    Input(InputKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuardRejection {
+    pub transition_id: TransitionId,
+    pub guard_id: GuardId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KernelError {
     ContextViolation {
@@ -974,86 +292,6 @@ pub enum KernelError {
         detail: String,
     },
 }
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TransitionError {
-    Refusal(TransitionRefusal),
-    Kernel(KernelError),
-}
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Outcome {
-    pub transition_id: TransitionId,
-    pub next_state: State,
-    pub effects: Vec<Effect>,
-}
-
-fn transition_id_from_raw(raw: &str) -> Result<TransitionId, KernelError> {
-    match raw {
-        "StartLoop" => Ok(TransitionId::StartLoop),
-        "BodyFrameStarted" => Ok(TransitionId::BodyFrameStarted),
-        "BodyFrameCompleted" => Ok(TransitionId::BodyFrameCompleted),
-        "UntilConditionMet" => Ok(TransitionId::UntilConditionMet),
-        "UntilConditionFailed" => Ok(TransitionId::UntilConditionFailed),
-        "ExhaustedIterations" => Ok(TransitionId::ExhaustedIterations),
-        "BodyFrameFailed" => Ok(TransitionId::BodyFrameFailed),
-        "BodyFrameCanceled" => Ok(TransitionId::BodyFrameCanceled),
-        "CancelLoop" => Ok(TransitionId::CancelLoop),
-        other => Err(KernelError::CodegenInvariant {
-            detail: format!("unknown transition {other}"),
-        }),
-    }
-}
-fn outcome_from_raw(raw: RawOutcome) -> Result<Outcome, TransitionError> {
-    let effects = raw
-        .effects
-        .iter()
-        .map(effect_from_raw)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(TransitionError::Kernel)?;
-    Ok(Outcome {
-        transition_id: transition_id_from_raw(&raw.transition).map_err(TransitionError::Kernel)?,
-        next_state: state_from_raw(&raw.next_state).map_err(TransitionError::Kernel)?,
-        effects,
-    })
-}
-fn refusal_from_raw(raw: RawRefusal) -> TransitionError {
-    match raw {
-        RawRefusal::NoMatchingTransition { phase, variant, .. } => {
-            TransitionError::Refusal(TransitionRefusal::NoMatchingTransition {
-                phase: phase_from_raw(&phase).unwrap_or(Phase::Absent),
-                trigger: TriggerDiscriminant::Input(input_kind_from_raw(&variant).unwrap()),
-            })
-        }
-        RawRefusal::AmbiguousTransition { transitions, .. } => {
-            TransitionError::Refusal(TransitionRefusal::AmbiguousTransition {
-                transitions: transitions
-                    .iter()
-                    .filter_map(|transition| transition_id_from_raw(transition).ok())
-                    .collect(),
-            })
-        }
-        RawRefusal::UnknownInputVariant { variant, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant {
-                detail: format!("unknown input variant {variant}"),
-            })
-        }
-        RawRefusal::UnknownSignalVariant { variant, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant {
-                detail: format!("unknown signal variant {variant}"),
-            })
-        }
-        RawRefusal::InvalidInputPayload { reason, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant { detail: reason })
-        }
-        RawRefusal::InvalidSignalPayload { reason, .. } => {
-            TransitionError::Kernel(KernelError::CodegenInvariant { detail: reason })
-        }
-        RawRefusal::EvaluationError {
-            transition, reason, ..
-        } => TransitionError::Kernel(KernelError::CodegenInvariant {
-            detail: format!("{transition}: {reason}"),
-        }),
-    }
-}
 
 pub mod helpers {
     use super::*;
@@ -1064,9 +302,35 @@ pub mod helpers {
 }
 
 pub fn initial_state() -> State {
-    let raw = initial_state_from_schema(schema())
-        .expect("typed modeled-kernel initial state should be derivable from schema");
-    state_from_raw(&raw).expect("typed modeled-kernel initial state should convert from raw state")
+    State {
+        phase: Phase::Absent,
+        loop_instance_id: String::new(),
+        parent_frame_id: String::new(),
+        parent_node_id: String::new(),
+        loop_id: String::new(),
+        depth: 0,
+        stage: LoopIterationStage::AwaitingBodyFrame,
+        current_iteration: 0,
+        last_completed_iteration: 0,
+        max_iterations: 0,
+        active_body_frame_id: None,
+    }
+}
+
+fn guard(transition_id: TransitionId, guard_id: GuardId) -> TransitionError {
+    TransitionError::Refusal(TransitionRefusal::GuardRejected {
+        rejections: vec![GuardRejection {
+            transition_id,
+            guard_id,
+        }],
+    })
+}
+
+fn trigger(kind: InputKind) -> TransitionError {
+    TransitionError::Refusal(TransitionRefusal::NoMatchingTransition {
+        phase: Phase::Absent,
+        trigger: TriggerDiscriminant::Input(kind),
+    })
 }
 
 pub fn transition<C: Context>(
@@ -1075,9 +339,284 @@ pub fn transition<C: Context>(
     context: &C,
 ) -> Result<Outcome, TransitionError> {
     let _ = context;
-    let raw_state = state_to_raw(state);
-    let raw_input = input_to_raw(input);
-    transition_from_schema(schema(), &raw_state, &raw_input)
-        .map_err(refusal_from_raw)
-        .and_then(outcome_from_raw)
+    match input {
+        Input::StartLoop(payload) => {
+            if state.phase != Phase::Absent {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::StartLoop),
+                    },
+                ));
+            }
+            let next_state = State {
+                phase: Phase::Running,
+                loop_instance_id: payload.loop_instance_id.clone(),
+                parent_frame_id: payload.parent_frame_id.clone(),
+                parent_node_id: payload.parent_node_id.clone(),
+                loop_id: payload.loop_id.clone(),
+                depth: payload.depth,
+                stage: LoopIterationStage::AwaitingBodyFrame,
+                current_iteration: 1,
+                last_completed_iteration: 0,
+                max_iterations: payload.max_iterations,
+                active_body_frame_id: None,
+            };
+            Ok(Outcome {
+                transition_id: TransitionId::StartLoop,
+                effects: vec![Effect::RequestBodyFrameStart(
+                    effects::RequestBodyFrameStart {
+                        loop_instance_id: payload.loop_instance_id,
+                        depth: payload.depth,
+                    },
+                )],
+                next_state,
+            })
+        }
+        Input::BodyFrameStarted(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::BodyFrameStarted),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::BodyFrameStarted,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::AwaitingBodyFrame {
+                return Err(guard(TransitionId::BodyFrameStarted, GuardId::Stage));
+            }
+            if state.current_iteration != payload.iteration {
+                return Err(guard(TransitionId::BodyFrameStarted, GuardId::Iteration));
+            }
+            let mut next_state = state.clone();
+            next_state.stage = LoopIterationStage::BodyFrameActive;
+            next_state.active_body_frame_id = Some(payload.frame_id);
+            Ok(Outcome {
+                transition_id: TransitionId::BodyFrameStarted,
+                next_state,
+                effects: Vec::new(),
+            })
+        }
+        Input::BodyFrameCompleted(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::BodyFrameCompleted),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::BodyFrameCompleted,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::BodyFrameActive {
+                return Err(guard(TransitionId::BodyFrameCompleted, GuardId::Stage));
+            }
+            if state.current_iteration != payload.iteration {
+                return Err(guard(TransitionId::BodyFrameCompleted, GuardId::Iteration));
+            }
+            let mut next_state = state.clone();
+            next_state.stage = LoopIterationStage::AwaitingUntil;
+            next_state.last_completed_iteration = payload.iteration;
+            next_state.active_body_frame_id = None;
+            Ok(Outcome {
+                transition_id: TransitionId::BodyFrameCompleted,
+                effects: vec![Effect::EvaluateUntilCondition(
+                    effects::EvaluateUntilCondition {
+                        loop_instance_id: state.loop_instance_id.clone(),
+                        iteration: payload.iteration,
+                        parent_frame_id: state.parent_frame_id.clone(),
+                        parent_node_id: state.parent_node_id.clone(),
+                        loop_id: state.loop_id.clone(),
+                    },
+                )],
+                next_state,
+            })
+        }
+        Input::BodyFrameFailed(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::BodyFrameFailed),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::BodyFrameFailed,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::BodyFrameActive {
+                return Err(guard(TransitionId::BodyFrameFailed, GuardId::Stage));
+            }
+            if state.current_iteration != payload.iteration {
+                return Err(guard(TransitionId::BodyFrameFailed, GuardId::Iteration));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Failed;
+            next_state.last_completed_iteration = payload.iteration;
+            next_state.active_body_frame_id = None;
+            Ok(Outcome {
+                transition_id: TransitionId::BodyFrameFailed,
+                effects: vec![Effect::LoopFailed(effects::LoopFailed {
+                    loop_instance_id: state.loop_instance_id.clone(),
+                    parent_frame_id: state.parent_frame_id.clone(),
+                    parent_node_id: state.parent_node_id.clone(),
+                })],
+                next_state,
+            })
+        }
+        Input::BodyFrameCanceled(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::BodyFrameCanceled),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::BodyFrameCanceled,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::BodyFrameActive {
+                return Err(guard(TransitionId::BodyFrameCanceled, GuardId::Stage));
+            }
+            if state.current_iteration != payload.iteration {
+                return Err(guard(TransitionId::BodyFrameCanceled, GuardId::Iteration));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Canceled;
+            next_state.last_completed_iteration = payload.iteration;
+            next_state.active_body_frame_id = None;
+            Ok(Outcome {
+                transition_id: TransitionId::BodyFrameCanceled,
+                effects: vec![Effect::LoopCanceled(effects::LoopCanceled {
+                    loop_instance_id: state.loop_instance_id.clone(),
+                    parent_frame_id: state.parent_frame_id.clone(),
+                    parent_node_id: state.parent_node_id.clone(),
+                })],
+                next_state,
+            })
+        }
+        Input::UntilConditionMet(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::UntilConditionMet),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::UntilConditionMet,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::AwaitingUntil {
+                return Err(guard(TransitionId::UntilConditionMet, GuardId::Stage));
+            }
+            if state.last_completed_iteration != payload.iteration {
+                return Err(guard(TransitionId::UntilConditionMet, GuardId::Iteration));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Completed;
+            Ok(Outcome {
+                transition_id: TransitionId::UntilConditionMet,
+                effects: vec![Effect::LoopCompleted(effects::LoopCompleted {
+                    loop_instance_id: state.loop_instance_id.clone(),
+                    parent_frame_id: state.parent_frame_id.clone(),
+                    parent_node_id: state.parent_node_id.clone(),
+                })],
+                next_state,
+            })
+        }
+        Input::UntilConditionFailed(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::UntilConditionFailed),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(
+                    TransitionId::UntilConditionFailed,
+                    GuardId::LoopInstanceId,
+                ));
+            }
+            if state.stage != LoopIterationStage::AwaitingUntil {
+                return Err(guard(TransitionId::UntilConditionFailed, GuardId::Stage));
+            }
+            if state.last_completed_iteration != payload.iteration {
+                return Err(guard(
+                    TransitionId::UntilConditionFailed,
+                    GuardId::Iteration,
+                ));
+            }
+            let mut next_state = state.clone();
+            let effects = if state.current_iteration >= state.max_iterations {
+                next_state.phase = Phase::Exhausted;
+                vec![Effect::LoopExhausted(effects::LoopExhausted {
+                    loop_instance_id: state.loop_instance_id.clone(),
+                    parent_frame_id: state.parent_frame_id.clone(),
+                    parent_node_id: state.parent_node_id.clone(),
+                })]
+            } else {
+                next_state.current_iteration = state.current_iteration + 1;
+                next_state.stage = LoopIterationStage::AwaitingBodyFrame;
+                vec![Effect::RequestBodyFrameStart(
+                    effects::RequestBodyFrameStart {
+                        loop_instance_id: state.loop_instance_id.clone(),
+                        depth: state.depth,
+                    },
+                )]
+            };
+            Ok(Outcome {
+                transition_id: TransitionId::UntilConditionFailed,
+                next_state,
+                effects,
+            })
+        }
+        Input::CancelLoop(payload) => {
+            if state.phase != Phase::Running {
+                return Err(TransitionError::Refusal(
+                    TransitionRefusal::NoMatchingTransition {
+                        phase: state.phase.clone(),
+                        trigger: TriggerDiscriminant::Input(InputKind::CancelLoop),
+                    },
+                ));
+            }
+            if state.loop_instance_id != payload.loop_instance_id {
+                return Err(guard(TransitionId::CancelLoop, GuardId::LoopInstanceId));
+            }
+            let mut next_state = state.clone();
+            next_state.phase = Phase::Canceled;
+            next_state.active_body_frame_id = None;
+            Ok(Outcome {
+                transition_id: TransitionId::CancelLoop,
+                effects: vec![Effect::LoopCanceled(effects::LoopCanceled {
+                    loop_instance_id: state.loop_instance_id.clone(),
+                    parent_frame_id: state.parent_frame_id.clone(),
+                    parent_node_id: state.parent_node_id.clone(),
+                })],
+                next_state,
+            })
+        }
+    }
 }

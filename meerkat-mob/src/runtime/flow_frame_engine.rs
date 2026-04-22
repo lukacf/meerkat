@@ -711,6 +711,11 @@ impl FlowFrameEngine {
             }
 
             if !progressed && workers.is_empty() {
+                let run = self.require_run(run_id).await?;
+                if run.flow_state.active_node_count > 0 || run.flow_state.active_frame_count > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    continue;
+                }
                 return Err(MobError::Internal(format!(
                     "frame runtime stalled for root frame '{root_frame_id}' in run '{run_id}'"
                 )));
@@ -916,9 +921,15 @@ impl FlowFrameEngine {
                             .await?;
                     }
                     Err(error) => {
-                        self.frame_kernel
-                            .fail_node(run_id, &frame_id, &node_id)
-                            .await?;
+                        if matches!(error, MobError::RunCanceled(_)) {
+                            self.frame_kernel
+                                .cancel_node(run_id, &frame_id, &node_id)
+                                .await?;
+                        } else {
+                            self.frame_kernel
+                                .fail_node(run_id, &frame_id, &node_id)
+                                .await?;
+                        }
                         return Err(error);
                     }
                 }
@@ -1071,6 +1082,14 @@ impl FlowFrameEngine {
                                 context,
                             )
                             .await?;
+                            self.revisit_frame(
+                                run_id,
+                                root_frame_id,
+                                root_spec,
+                                context,
+                                &frame_id,
+                            )
+                            .await?;
                         }
                         Some(FlowNodeSpec::RepeatUntil(_)) => {
                             let loop_instance_id =
@@ -1123,6 +1142,14 @@ impl FlowFrameEngine {
                                 root_frame_id,
                                 root_spec,
                                 context,
+                            )
+                            .await?;
+                            self.revisit_frame(
+                                run_id,
+                                root_frame_id,
+                                root_spec,
+                                context,
+                                &frame_id,
                             )
                             .await?;
                         }

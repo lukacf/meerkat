@@ -2384,7 +2384,7 @@ impl MobActor {
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
                     }
-                    self.handle_spawn_provisioned_batch(completions).await;
+                    Box::pin(self.handle_spawn_provisioned_batch(completions)).await;
                 }
                 MobCommand::Retire {
                     agent_identity,
@@ -4944,7 +4944,8 @@ impl MobActor {
         }
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
-        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = async {
+        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> =
+            Box::pin(async {
             let prompt = initial_message.unwrap_or_else(|| {
                 ContentInput::from(
                     self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity),
@@ -5051,7 +5052,7 @@ impl MobActor {
             let replacement_result: Result<
                 super::handle::MemberSpawnReceipt,
                 MobRespawnError,
-            > = async {
+            > = Box::pin(async {
                 let spawn_receipt = self
                     .provisioner
                     .provision_member(provision_request)
@@ -5163,7 +5164,7 @@ impl MobActor {
                             .collect(),
                     })
                 }
-            }
+            })
             .await;
 
             let (_respawn_pending, respawn_task) =
@@ -5177,8 +5178,8 @@ impl MobActor {
                     reason: error.to_string(),
                 })?;
             replacement_result
-        }
-        .await;
+            })
+            .await;
         let _replacement = match replacement_result {
             Ok(replacement) => replacement,
             Err(error) => {

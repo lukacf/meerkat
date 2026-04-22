@@ -223,6 +223,11 @@ fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Erro
 }
 
 /// Structural event kinds covering all mob state transitions.
+///
+/// The enum intentionally carries a few large structured variants so the
+/// persisted event log remains a single authoritative record instead of
+/// splitting ownership across side channels.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MobEventKind {

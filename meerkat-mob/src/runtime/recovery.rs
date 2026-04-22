@@ -69,6 +69,13 @@ pub fn reconcile_run_state(run: &mut MobRun) -> Result<(), RestoreIncompatible> 
     Ok(())
 }
 
+fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: value.into(),
+    }
+}
+
 /// Check the per-frame invariant: node_status[n] == Ready ↔ n ∈ ready_queue.
 fn check_frame_invariant(
     frame_id: &FrameId,
@@ -128,13 +135,13 @@ fn reconcile_ready_frames(run: &mut MobRun) {
     let new_seq = KernelValue::Seq(
         active_frame_ids
             .iter()
-            .map(|s| KernelValue::String(s.clone()))
+            .map(|s| named_value("FrameId", s.clone()))
             .collect(),
     );
     let new_set = KernelValue::Set(
         active_frame_ids
             .iter()
-            .map(|s| KernelValue::String(s.clone()))
+            .map(|s| named_value("FrameId", s.clone()))
             .collect(),
     );
 
@@ -166,13 +173,13 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
     let new_seq = KernelValue::Seq(
         pending_loop_ids
             .iter()
-            .map(|s| KernelValue::String(s.clone()))
+            .map(|s| named_value("LoopInstanceId", s.clone()))
             .collect(),
     );
     let new_set = KernelValue::Set(
         pending_loop_ids
             .iter()
-            .map(|s| KernelValue::String(s.clone()))
+            .map(|s| named_value("LoopInstanceId", s.clone()))
             .collect(),
     );
 
@@ -272,10 +279,20 @@ fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
         .kernel_state
         .field(&loop_iteration::field::active_body_frame_id())
     {
+        Some(KernelValue::Named { type_name, value })
+            if type_name.as_str() == "FrameId" && !value.is_empty() =>
+        {
+            Some(FrameId::from(value.as_str()))
+        }
         Some(KernelValue::String(frame_id)) => Some(FrameId::from(frame_id.as_str())),
         Some(KernelValue::Map(entries)) => entries
             .get(&KernelValue::String("value".into()))
             .and_then(|value| match value {
+                KernelValue::Named { type_name, value }
+                    if type_name.as_str() == "FrameId" && !value.is_empty() =>
+                {
+                    Some(FrameId::from(value.as_str()))
+                }
                 KernelValue::String(frame_id) if !frame_id.is_empty() => {
                     Some(FrameId::from(frame_id.as_str()))
                 }
@@ -322,9 +339,10 @@ fn is_ready_variant(v: &KernelValue) -> bool {
     v.is_named_variant(&FRAME_NODE_STATUS_READY)
 }
 
-/// Extract the inner string from a `KernelValue::String`.
+/// Extract the inner string from a string-backed kernel value.
 fn kernel_value_string(v: &KernelValue) -> Option<String> {
     match v {
+        KernelValue::Named { value, .. } => Some(value.clone()),
         KernelValue::String(s) => Some(s.clone()),
         _ => None,
     }
@@ -369,12 +387,12 @@ mod tests {
         let ready_queue = KernelValue::Seq(
             ready_nodes
                 .iter()
-                .map(|s| KernelValue::String(s.to_string()))
+                .map(|s| named_value("FlowNodeId", s.to_string()))
                 .collect(),
         );
         let tracked: std::collections::BTreeSet<KernelValue> = ready_nodes
             .iter()
-            .map(|s| KernelValue::String(s.to_string()))
+            .map(|s| named_value("FlowNodeId", s.to_string()))
             .collect();
         let node_status = if all_nodes_ready {
             KernelValue::Map(
@@ -382,7 +400,7 @@ mod tests {
                     .iter()
                     .map(|s| {
                         (
-                            KernelValue::String(s.to_string()),
+                            named_value("FlowNodeId", s.to_string()),
                             KernelValue::NamedVariant {
                                 enum_name: "NodeRunStatus".into(),
                                 variant: "Ready".into(),
@@ -446,7 +464,7 @@ mod tests {
                         (
                             "node_status".into(),
                             KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("loop-node".into()),
+                                named_value("FlowNodeId", "loop-node"),
                                 KernelValue::NamedVariant {
                                     enum_name: "NodeRunStatus".into(),
                                     variant: "Running".into(),
@@ -456,7 +474,7 @@ mod tests {
                         (
                             "node_kind".into(),
                             KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("loop-node".into()),
+                                named_value("FlowNodeId", "loop-node"),
                                 KernelValue::NamedVariant {
                                     enum_name: "FlowNodeKind".into(),
                                     variant: "Loop".into(),
@@ -477,7 +495,7 @@ mod tests {
                         (
                             "node_status".into(),
                             KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("body-step".into()),
+                                named_value("FlowNodeId", "body-step"),
                                 KernelValue::NamedVariant {
                                     enum_name: "NodeRunStatus".into(),
                                     variant: "Running".into(),
@@ -487,7 +505,7 @@ mod tests {
                         (
                             "node_kind".into(),
                             KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("body-step".into()),
+                                named_value("FlowNodeId", "body-step"),
                                 KernelValue::NamedVariant {
                                     enum_name: "FlowNodeKind".into(),
                                     variant: "Step".into(),
@@ -506,7 +524,7 @@ mod tests {
                     phase: "Running".into(),
                     fields: BTreeMap::from([(
                         "active_body_frame_id".into(),
-                        KernelValue::String("body-frame".into()),
+                        named_value("FrameId", "body-frame"),
                     )]),
                 },
             },
@@ -536,7 +554,7 @@ mod tests {
                     (
                         "node_status".into(),
                         KernelValue::Map(BTreeMap::from([(
-                            KernelValue::String("node-a".into()),
+                            named_value("FlowNodeId", "node-a"),
                             KernelValue::NamedVariant {
                                 enum_name: "NodeRunStatus".into(),
                                 variant: "Running".into(),
@@ -560,7 +578,7 @@ mod tests {
                     (
                         "node_status".into(),
                         KernelValue::Map(BTreeMap::from([(
-                            KernelValue::String("node-a".into()),
+                            named_value("FlowNodeId", "node-a"),
                             KernelValue::NamedVariant {
                                 enum_name: "NodeRunStatus".into(),
                                 variant: "Ready".into(),
@@ -589,11 +607,11 @@ mod tests {
 
         // Manually insert frame-1 into ready_frames as a stale entry.
         if let Some(KernelValue::Seq(seq)) = run.flow_state.fields.get_mut("ready_frames") {
-            seq.push(KernelValue::String("frame-1".into()));
+            seq.push(named_value("FrameId", "frame-1"));
         }
         if let Some(KernelValue::Set(set)) = run.flow_state.fields.get_mut("ready_frame_membership")
         {
-            set.insert(KernelValue::String("frame-1".into()));
+            set.insert(named_value("FrameId", "frame-1"));
         }
 
         reconcile_run_state(&mut run).expect("reconcile");
@@ -601,7 +619,7 @@ mod tests {
         match run.flow_state.fields.get("ready_frames") {
             Some(KernelValue::Seq(seq)) => {
                 assert!(
-                    !seq.contains(&KernelValue::String("frame-1".into())),
+                    !seq.contains(&named_value("FrameId", "frame-1")),
                     "Stale frame-1 should be removed"
                 );
             }
@@ -623,7 +641,7 @@ mod tests {
         match run.flow_state.fields.get("ready_frames") {
             Some(KernelValue::Seq(seq)) => {
                 assert!(
-                    seq.contains(&KernelValue::String("frame-2".into())),
+                    seq.contains(&named_value("FrameId", "frame-2")),
                     "Missing frame-2 should be added"
                 );
             }

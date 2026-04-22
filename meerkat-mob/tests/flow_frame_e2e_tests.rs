@@ -1173,9 +1173,16 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
         Some(meerkat_machine_kernels::KernelValue::Map(map)) => map,
         other => panic!("unexpected node_status map: {other:?}"),
     };
-    match node_status.get(&meerkat_machine_kernels::KernelValue::String(
-        loop_node_id.to_string(),
-    )) {
+    match node_status
+        .get(&meerkat_machine_kernels::KernelValue::Named {
+            type_name: "FlowNodeId".into(),
+            value: loop_node_id.to_string(),
+        })
+        .or_else(|| {
+            node_status.get(&meerkat_machine_kernels::KernelValue::String(
+                loop_node_id.to_string(),
+            ))
+        }) {
         Some(meerkat_machine_kernels::KernelValue::NamedVariant { variant, .. }) => {
             assert_eq!(
                 variant, "Completed",

@@ -253,8 +253,15 @@ impl sealed::Sealed for FlowRunKernel {}
 
 /// Read-only helpers and construction. These do not mutate state.
 impl FlowRunKernel {
+    fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+        KernelValue::Named {
+            type_name: type_name.into(),
+            value: value.into(),
+        }
+    }
+
     fn step_id_value(step_id: &StepId) -> KernelValue {
-        KernelValue::String(step_id.to_string())
+        Self::named_value("StepId", step_id.to_string())
     }
 
     fn step_status_value(status: &crate::run::StepRunStatus) -> KernelValue {
@@ -271,7 +278,7 @@ impl FlowRunKernel {
     }
 
     fn target_id_value(target_id: &str) -> KernelValue {
-        KernelValue::String(target_id.to_string())
+        Self::named_value("MeerkatId", target_id.to_string())
     }
 
     fn retry_key(step_id: &StepId, target_id: &str) -> String {
@@ -413,11 +420,14 @@ impl FlowRunKernel {
             }
         };
         seq.iter()
-            .map(|value| match value {
-                KernelValue::String(step_id) => Ok(StepId::from(step_id.clone())),
-                other => Err(MobError::Internal(format!(
-                    "flow_run ordered_steps entry invalid for {run_id}: {other:?}"
-                ))),
+            .map(|value| {
+                parse_named_id(
+                    value,
+                    "StepId",
+                    "flow_run ordered_steps entry",
+                    &run_id.to_string(),
+                )
+                .map(StepId::from)
             })
             .collect()
     }
@@ -572,7 +582,8 @@ impl FlowRunKernel {
             }
         };
         let value = map
-            .get(&KernelValue::String(step_id.to_string()))
+            .get(&Self::step_id_value(step_id))
+            .or_else(|| map.get(&KernelValue::String(step_id.to_string())))
             .cloned()
             .unwrap_or(KernelValue::None);
         match value {
@@ -1130,6 +1141,11 @@ fn has_step_effect(
             continue;
         }
         match effect.field(&flow_run::field::step_id()) {
+            Some(KernelValue::Named { type_name, value })
+                if type_name.as_str() == "StepId" && value == &expected =>
+            {
+                return Ok(true);
+            }
             Some(KernelValue::String(candidate)) if candidate == &expected => return Ok(true),
             Some(other) => {
                 return Err(MobError::Internal(format!(
@@ -1146,11 +1162,33 @@ fn has_step_effect(
     Ok(false)
 }
 
+fn parse_named_id(
+    value: &KernelValue,
+    expected_type: &str,
+    context: &str,
+    run_id: &str,
+) -> Result<String, MobError> {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_type => {
+            Ok(value.clone())
+        }
+        KernelValue::String(value) => Ok(value.clone()),
+        KernelValue::Named { type_name, .. } => Err(MobError::Internal(format!(
+            "{context} invalid for {run_id}: expected {expected_type}, found {type_name}"
+        ))),
+        other => Err(MobError::Internal(format!(
+            "{context} invalid for {run_id}: {other:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::MobEventKind;
+    use crate::run::MobRun;
     use crate::store::{InMemoryMobEventStore, InMemoryMobRunStore, MobEventStore, MobRunStore};
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FlowRunEffectKind {
@@ -1181,6 +1219,51 @@ mod tests {
             .iter()
             .filter_map(FlowRunEffectKind::parse)
             .any(|effect| effect == expected)
+    }
+
+    #[tokio::test]
+    async fn flow_run_kernel_reads_named_step_ids_from_state() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel = FlowRunKernel::new(MobId::from("mob-kernel"), run_store.clone(), events);
+        let step_id = StepId::from("step-1");
+        let run = MobRun::pending(
+            MobId::from("mob-kernel"),
+            FlowId::from("demo"),
+            KernelState {
+                phase: flow_run::phase::running(),
+                fields: BTreeMap::from([
+                    (
+                        flow_run::field::ordered_steps(),
+                        KernelValue::Seq(vec![FlowRunKernel::step_id_value(&step_id)]),
+                    ),
+                    (
+                        flow_run::field::step_status(),
+                        KernelValue::Map(BTreeMap::from([(
+                            FlowRunKernel::step_id_value(&step_id),
+                            FlowRunKernel::step_status_value(
+                                &crate::run::StepRunStatus::Dispatched,
+                            ),
+                        )])),
+                    ),
+                ]),
+            },
+            serde_json::json!({}),
+        );
+        let run_id = run.run_id.clone();
+        run_store.create_run(run).await.expect("persist run");
+
+        assert_eq!(
+            kernel.ordered_steps(&run_id).await.expect("ordered steps"),
+            vec![step_id.clone()]
+        );
+        assert_eq!(
+            kernel
+                .step_status(&run_id, &step_id)
+                .await
+                .expect("step status"),
+            Some(crate::run::StepRunStatus::Dispatched)
+        );
     }
 
     #[tokio::test]

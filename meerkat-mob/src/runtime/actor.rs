@@ -1149,6 +1149,31 @@ impl MobActor {
         Ok(true)
     }
 
+    async fn finalize_respawn_failure(
+        &self,
+        agent_identity: &MeerkatId,
+        preserved_realtime_binding: Option<&SessionId>,
+        error: MobRespawnError,
+    ) -> MobRespawnError {
+        let MobRespawnError::SpawnAfterRetire { .. } = error else {
+            return error;
+        };
+        if let Some(session_id) = preserved_realtime_binding
+            && let Err(release_error) = self.release_realtime_binding_if_present(
+                &AgentIdentity::from(agent_identity.as_str()),
+                session_id,
+            )
+        {
+            return MobRespawnError::SpawnAfterRetire {
+                identity: AgentIdentity::from(agent_identity.as_str()),
+                reason: format!(
+                    "{error}; failed releasing preserved realtime binding: {release_error}"
+                ),
+            };
+        }
+        error
+    }
+
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
         if let Err(stop_error) = self.stop_all_autonomous_members().await {
             tracing::warn!(
@@ -3334,8 +3359,8 @@ impl MobActor {
                 return Err(MobError::ProfileNotFound(profile_name.clone()));
             }
 
-            // Capture the override for roster persistence before consuming it.
-            let effective_profile_override = override_profile.clone();
+            let definition_profile_binding = self.definition.profiles.get(&profile_name).cloned();
+            let explicit_profile_override = override_profile.clone();
 
             // Use override_profile if provided (from SpawnTooling::Profile resolution),
             // otherwise resolve from the mob definition.
@@ -3345,6 +3370,16 @@ impl MobActor {
                 self.definition
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
+            };
+
+            // Persist the effective profile whenever it did not come directly
+            // from an inline definition. RealmRef-backed members and explicit
+            // override profiles must resume with the exact resolved contract
+            // they were spawned with, even if the realm profile changes later.
+            let effective_profile_override = match definition_profile_binding {
+                Some(crate::profile::ProfileBinding::RealmRef { .. }) => Some(profile.clone()),
+                Some(crate::profile::ProfileBinding::Inline(_)) => explicit_profile_override,
+                None => explicit_profile_override,
             };
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
@@ -4166,7 +4201,8 @@ impl MobActor {
                     )
                     .with_bridge_member_ref(Some(Self::sanitized_member_ref(
                         provision.member_ref(),
-                    )));
+                    )))
+                    .with_effective_profile_override(effective_profile_override.clone());
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
                     event
@@ -4908,236 +4944,252 @@ impl MobActor {
         }
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
-        let prompt = initial_message.unwrap_or_else(|| {
-            ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity))
-        });
-        // Prefer roster's effective_profile_override on respawn for lifecycle safety.
-        let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
-            p
-        } else {
-            self.definition
-                .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
-                .await?
-        };
-        let external_tools = self.external_tools_for_profile(&profile)?;
-        let mut config = build::build_agent_config(build::BuildAgentConfigParams {
-            mob_id: &self.definition.id,
-            profile_name: &snapshot.profile_name,
-            agent_identity: &agent_identity,
-            profile: &profile,
-            definition: &self.definition,
-            external_tools,
-            context: None,
-            labels: Some(snapshot.labels.clone()),
-            additional_instructions: None,
-            shell_env: None,
-            mob_tool_access_context: crate::build::MobToolAccessContext::None,
-            inherited_tool_filter: None,
-        })
-        .await?;
-        config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
-        if let Some(ref client) = self.default_llm_client {
-            config.llm_client_override = Some(client.clone());
-        }
-        let req = build::to_create_session_request(&config, prompt.clone());
-        let peer_name = format!(
-            "{}/{}/{}",
-            self.definition.id, snapshot.profile_name, agent_identity
-        );
-        let provision_request = ProvisionMemberRequest {
-            create_session: req,
-            binding: snapshot.binding.clone(),
-            peer_name,
-            owner_bridge_session_id: None,
-            ops_registry: None,
-        };
-
-        let respawn_spawn_ticket = self.next_spawn_ticket;
-        self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        self.stage_orchestrator_spawn()
-            .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(agent_identity.as_str()),
-                reason: format!("failed to stage respawn replacement spawn: {error}"),
-            })?;
-        let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
-        let respawn_pending = PendingSpawn {
-            profile_name: snapshot.profile_name.clone(),
-            agent_identity: agent_identity.clone(),
-            prompt: prompt.clone(),
-            runtime_mode: snapshot.runtime_mode,
-            labels: snapshot.labels.clone(),
-            owner_bridge_session_id: None,
-            auto_wire_parent: false,
-            restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
-                || !snapshot.restore_wiring.external_peers.is_empty())
-            .then_some(snapshot.restore_wiring.clone()),
-            effective_profile_override: snapshot.effective_profile_override.clone(),
-            progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
-            reply_tx: respawn_inline_reply_tx,
-        };
-        let respawn_inline_task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-        });
-        self.insert_pending_spawn(respawn_spawn_ticket, respawn_pending, respawn_inline_task);
-        if let Err(error) = self.ensure_pending_spawn_alignment("handle_respawn staged replacement")
-        {
-            tracing::error!(
-                agent_identity = %agent_identity,
-                error = %error,
-                "pending spawn alignment violated while staging respawn replacement"
-            );
-            self.fail_all_pending_spawns(
-                "pending spawn alignment violated while staging respawn replacement",
-            )
-            .await;
-            return Err(MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(agent_identity.as_str()),
-                reason: error.to_string(),
+        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = async {
+            let prompt = initial_message.unwrap_or_else(|| {
+                ContentInput::from(
+                    self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity),
+                )
             });
-        }
-
-        // 4. Provision and finalize the replacement member inline so the receipt reflects
-        //    the committed canonical member/session state before we return.
-        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = Box::pin(async {
-            let spawn_receipt = self
-                .provisioner
-                .provision_member(provision_request)
-                .await
-                .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(agent_identity.as_str()),
-                    reason: error.to_string(),
-                })?;
-            if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                && let Err(capability_error) =
-                    Self::ensure_autonomous_dispatch_capability_for_provisioner(
-                        &self.provisioner,
-                        &agent_identity,
-                        &spawn_receipt.member_ref,
-                    )
+            let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
+                p
+            } else {
+                self.definition
+                    .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
                     .await
-            {
-                if let Err(retire_error) = self
-                    .provisioner
-                    .retire_member(&spawn_receipt.member_ref)
-                    .await
-                {
-                    return Err(MobRespawnError::SpawnAfterRetire {
+                    .map_err(|error| MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(agent_identity.as_str()),
-                        reason: format!(
-                            "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
-                        ),
-                    });
-                }
-                return Err(MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(agent_identity.as_str()),
-                    reason: capability_error.to_string(),
-                });
-            }
-
-            let provision = PendingProvision::new(
-                spawn_receipt.member_ref.clone(),
-                agent_identity.clone(),
-                self.provisioner.clone(),
-            );
-            if let Err(error) = self.require_state(&[MobState::Running]) {
-                if let Err(retire_error) = provision.rollback().await {
-                    return Err(MobRespawnError::SpawnAfterRetire {
+                        reason: error.to_string(),
+                    })?
+            };
+            let external_tools =
+                self.external_tools_for_profile(&profile)
+                    .map_err(|error| MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(agent_identity.as_str()),
-                        reason: format!(
-                            "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
-                        ),
-                    });
-                }
-                return Err(MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(agent_identity.as_str()),
-                    reason: error.to_string(),
-                });
-            }
-
-            if !snapshot.restore_wiring.local_peers.is_empty()
-                || !snapshot.restore_wiring.external_peers.is_empty()
-            {
-                tracing::info!(
-                    agent_identity = %agent_identity,
-                    local_peers = ?snapshot.restore_wiring.local_peers,
-                    external_peers = ?snapshot.restore_wiring.external_peers,
-                    "respawn: restoring peer wiring during replacement finalization"
-                );
-            }
-
-            let respawn_fence = self.issue_fence_token();
-            let finalized = self
-                .finalize_spawn_from_pending(
-                &snapshot.profile_name,
-                &agent_identity,
-                replacement_generation,
-                respawn_fence,
-                snapshot.runtime_mode,
-                prompt,
-                snapshot.labels.clone(),
-                provision,
-                spawn_receipt.operation_id,
-                None,
-                false,
-                (!snapshot.restore_wiring.local_peers.is_empty()
-                    || !snapshot.restore_wiring.external_peers.is_empty())
-                .then_some(snapshot.restore_wiring.clone()),
-                snapshot.effective_profile_override.clone(),
-            )
+                        reason: error.to_string(),
+                    })?;
+            let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+                mob_id: &self.definition.id,
+                profile_name: &snapshot.profile_name,
+                agent_identity: &agent_identity,
+                profile: &profile,
+                definition: &self.definition,
+                external_tools,
+                context: None,
+                labels: Some(snapshot.labels.clone()),
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter: None,
+            })
             .await
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             })?;
-
-            if finalized.failed_restore_peer_ids.is_empty() {
-                Ok(finalized.receipt)
-            } else {
-                Err(MobRespawnError::TopologyRestoreFailed {
-                    receipt: super::handle::MemberRespawnReceipt::new(
-                        AgentIdentity::from(agent_identity.as_str()),
-                        crate::ids::AgentRuntimeId::new(
-                            AgentIdentity::from(agent_identity.as_str()),
-                            replacement_generation,
-                        ),
-                        snapshot.old_fence_token,
-                        respawn_fence,
-                    ),
-                    failed_peer_ids: finalized.failed_restore_peer_ids.into_iter().map(|mid| AgentIdentity::from(mid.as_str())).collect(),
-                })
+            config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+            if let Some(ref client) = self.default_llm_client {
+                config.llm_client_override = Some(client.clone());
             }
-        })
-        .await;
+            let req = build::to_create_session_request(&config, prompt.clone());
+            let peer_name = format!(
+                "{}/{}/{}",
+                self.definition.id, snapshot.profile_name, agent_identity
+            );
+            let provision_request = ProvisionMemberRequest {
+                create_session: req,
+                binding: snapshot.binding.clone(),
+                peer_name,
+                owner_bridge_session_id: None,
+                ops_registry: None,
+            };
 
-        let (_respawn_pending, respawn_task) =
-            self.complete_pending_spawn_slot(respawn_spawn_ticket, "respawn replacement spawn");
-        if let Some(handle) = respawn_task {
-            handle.abort();
-        }
-        self.ensure_pending_spawn_alignment("handle_respawn completion")
-            .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(agent_identity.as_str()),
-                reason: error.to_string(),
-            })?;
-        let _replacement = match replacement_result {
-            Ok(replacement) => replacement,
-            Err(error @ MobRespawnError::SpawnAfterRetire { .. }) => {
-                if let Some(session_id) = snapshot.preserved_realtime_binding.as_ref()
-                    && let Err(release_error) = self.release_realtime_binding_if_present(
-                        &AgentIdentity::from(agent_identity.as_str()),
-                        session_id,
-                    )
+            let respawn_spawn_ticket = self.next_spawn_ticket;
+            self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
+            self.stage_orchestrator_spawn()
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: format!("failed to stage respawn replacement spawn: {error}"),
+                })?;
+            let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
+            let respawn_pending = PendingSpawn {
+                profile_name: snapshot.profile_name.clone(),
+                agent_identity: agent_identity.clone(),
+                prompt: prompt.clone(),
+                runtime_mode: snapshot.runtime_mode,
+                labels: snapshot.labels.clone(),
+                owner_bridge_session_id: None,
+                auto_wire_parent: false,
+                restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
+                    || !snapshot.restore_wiring.external_peers.is_empty())
+                .then_some(snapshot.restore_wiring.clone()),
+                effective_profile_override: snapshot.effective_profile_override.clone(),
+                progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
+                reply_tx: respawn_inline_reply_tx,
+            };
+            let respawn_inline_task = tokio::spawn(async {
+                std::future::pending::<()>().await;
+            });
+            self.insert_pending_spawn(respawn_spawn_ticket, respawn_pending, respawn_inline_task);
+            if let Err(error) =
+                self.ensure_pending_spawn_alignment("handle_respawn staged replacement")
+            {
+                tracing::error!(
+                    agent_identity = %agent_identity,
+                    error = %error,
+                    "pending spawn alignment violated while staging respawn replacement"
+                );
+                self.fail_all_pending_spawns(
+                    "pending spawn alignment violated while staging respawn replacement",
+                )
+                .await;
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: error.to_string(),
+                });
+            }
+
+            let replacement_result: Result<
+                super::handle::MemberSpawnReceipt,
+                MobRespawnError,
+            > = async {
+                let spawn_receipt = self
+                    .provisioner
+                    .provision_member(provision_request)
+                    .await
+                    .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                        identity: AgentIdentity::from(agent_identity.as_str()),
+                        reason: error.to_string(),
+                    })?;
+                if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                    && let Err(capability_error) =
+                        Self::ensure_autonomous_dispatch_capability_for_provisioner(
+                            &self.provisioner,
+                            &agent_identity,
+                            &spawn_receipt.member_ref,
+                        )
+                        .await
                 {
+                    if let Err(retire_error) = self
+                        .provisioner
+                        .retire_member(&spawn_receipt.member_ref)
+                        .await
+                    {
+                        return Err(MobRespawnError::SpawnAfterRetire {
+                            identity: AgentIdentity::from(agent_identity.as_str()),
+                            reason: format!(
+                                "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
+                            ),
+                        });
+                    }
                     return Err(MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(agent_identity.as_str()),
-                        reason: format!(
-                            "{error}; failed releasing preserved realtime binding: {release_error}"
-                        ),
+                        reason: capability_error.to_string(),
                     });
                 }
-                return Err(error);
+
+                let provision = PendingProvision::new(
+                    spawn_receipt.member_ref.clone(),
+                    agent_identity.clone(),
+                    self.provisioner.clone(),
+                );
+                if let Err(error) = self.require_state(&[MobState::Running]) {
+                    if let Err(retire_error) = provision.rollback().await {
+                        return Err(MobRespawnError::SpawnAfterRetire {
+                            identity: AgentIdentity::from(agent_identity.as_str()),
+                            reason: format!(
+                                "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
+                            ),
+                        });
+                    }
+                    return Err(MobRespawnError::SpawnAfterRetire {
+                        identity: AgentIdentity::from(agent_identity.as_str()),
+                        reason: error.to_string(),
+                    });
+                }
+
+                if !snapshot.restore_wiring.local_peers.is_empty()
+                    || !snapshot.restore_wiring.external_peers.is_empty()
+                {
+                    tracing::info!(
+                        agent_identity = %agent_identity,
+                        local_peers = ?snapshot.restore_wiring.local_peers,
+                        external_peers = ?snapshot.restore_wiring.external_peers,
+                        "respawn: restoring peer wiring during replacement finalization"
+                    );
+                }
+
+                let respawn_fence = self.issue_fence_token();
+                let finalized = self
+                    .finalize_spawn_from_pending(
+                        &snapshot.profile_name,
+                        &agent_identity,
+                        replacement_generation,
+                        respawn_fence,
+                        snapshot.runtime_mode,
+                        prompt,
+                        snapshot.labels.clone(),
+                        provision,
+                        spawn_receipt.operation_id,
+                        None,
+                        false,
+                        (!snapshot.restore_wiring.local_peers.is_empty()
+                            || !snapshot.restore_wiring.external_peers.is_empty())
+                        .then_some(snapshot.restore_wiring.clone()),
+                        snapshot.effective_profile_override.clone(),
+                    )
+                    .await
+                    .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                        identity: AgentIdentity::from(agent_identity.as_str()),
+                        reason: error.to_string(),
+                    })?;
+
+                if finalized.failed_restore_peer_ids.is_empty() {
+                    Ok(finalized.receipt)
+                } else {
+                    Err(MobRespawnError::TopologyRestoreFailed {
+                        receipt: super::handle::MemberRespawnReceipt::new(
+                            AgentIdentity::from(agent_identity.as_str()),
+                            crate::ids::AgentRuntimeId::new(
+                                AgentIdentity::from(agent_identity.as_str()),
+                                replacement_generation,
+                            ),
+                            snapshot.old_fence_token,
+                            respawn_fence,
+                        ),
+                        failed_peer_ids: finalized
+                            .failed_restore_peer_ids
+                            .into_iter()
+                            .map(|mid| AgentIdentity::from(mid.as_str()))
+                            .collect(),
+                    })
+                }
             }
-            Err(error) => return Err(error),
+            .await;
+
+            let (_respawn_pending, respawn_task) =
+                self.complete_pending_spawn_slot(respawn_spawn_ticket, "respawn replacement spawn");
+            if let Some(handle) = respawn_task {
+                handle.abort();
+            }
+            self.ensure_pending_spawn_alignment("handle_respawn completion")
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: error.to_string(),
+                })?;
+            replacement_result
+        }
+        .await;
+        let _replacement = match replacement_result {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                return Err(self
+                    .finalize_respawn_failure(
+                        &agent_identity,
+                        snapshot.preserved_realtime_binding.as_ref(),
+                        error,
+                    )
+                    .await);
+            }
         };
 
         // 5. Build the receipt from the committed replacement member reference.

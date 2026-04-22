@@ -1278,11 +1278,18 @@ fn root_outputs_from_run(run: &MobRun) -> IndexMap<StepId, serde_json::Value> {
 fn string_from_state_field(
     kernel_state: &meerkat_machine_kernels::KernelState,
     field: &KernelField,
+    expected_type: &str,
 ) -> Result<String, MobError> {
     match kernel_state.field(field) {
+        Some(KernelValue::Named { type_name, value }) if type_name.as_str() == expected_type => {
+            Ok(value.clone())
+        }
         Some(KernelValue::String(value)) => Ok(value.clone()),
+        Some(KernelValue::Named { type_name, .. }) => Err(MobError::Internal(format!(
+            "kernel state field '{field}' expected {expected_type}, found {type_name}"
+        ))),
         other => Err(MobError::Internal(format!(
-            "kernel state missing String field '{field}': {other:?}"
+            "kernel state missing {expected_type} field '{field}': {other:?}"
         ))),
     }
 }
@@ -1309,6 +1316,11 @@ fn frame_loop_instance_id(
     kernel_state: &meerkat_machine_kernels::KernelState,
 ) -> Option<LoopInstanceId> {
     match kernel_state.field(&flow_frame::field::loop_instance_id()) {
+        Some(KernelValue::Named { type_name, value })
+            if type_name.as_str() == "LoopInstanceId" && !value.is_empty() =>
+        {
+            Some(LoopInstanceId::from(value.as_str()))
+        }
         Some(KernelValue::String(loop_instance_id)) if !loop_instance_id.is_empty() => {
             Some(LoopInstanceId::from(loop_instance_id.as_str()))
         }
@@ -1323,21 +1335,29 @@ fn frame_iteration(kernel_state: &meerkat_machine_kernels::KernelState) -> Resul
 fn loop_parent_frame_id(
     kernel_state: &meerkat_machine_kernels::KernelState,
 ) -> Result<FrameId, MobError> {
-    string_from_state_field(kernel_state, &loop_iteration::field::parent_frame_id())
-        .map(|value| FrameId::from(value.as_str()))
+    string_from_state_field(
+        kernel_state,
+        &loop_iteration::field::parent_frame_id(),
+        "FrameId",
+    )
+    .map(|value| FrameId::from(value.as_str()))
 }
 
 fn loop_parent_node_id(
     kernel_state: &meerkat_machine_kernels::KernelState,
 ) -> Result<FlowNodeId, MobError> {
-    string_from_state_field(kernel_state, &loop_iteration::field::parent_node_id())
-        .map(|value| FlowNodeId::from(value.as_str()))
+    string_from_state_field(
+        kernel_state,
+        &loop_iteration::field::parent_node_id(),
+        "FlowNodeId",
+    )
+    .map(|value| FlowNodeId::from(value.as_str()))
 }
 
 fn loop_id_from_state(
     kernel_state: &meerkat_machine_kernels::KernelState,
 ) -> Result<LoopId, MobError> {
-    string_from_state_field(kernel_state, &loop_iteration::field::loop_id())
+    string_from_state_field(kernel_state, &loop_iteration::field::loop_id(), "LoopId")
         .map(|value| LoopId::from(value.as_str()))
 }
 
@@ -1360,12 +1380,22 @@ fn usize_from_u64(value: u64, context: &str) -> Result<usize, MobError> {
 
 fn active_body_frame_id(kernel_state: &meerkat_machine_kernels::KernelState) -> Option<FrameId> {
     match kernel_state.field(&loop_iteration::field::active_body_frame_id()) {
+        Some(KernelValue::Named { type_name, value })
+            if type_name.as_str() == "FrameId" && !value.is_empty() =>
+        {
+            Some(FrameId::from(value.as_str()))
+        }
         Some(KernelValue::String(frame_id)) if !frame_id.is_empty() => {
             Some(FrameId::from(frame_id.as_str()))
         }
         Some(KernelValue::Map(entries)) => entries
             .get(&KernelValue::String("value".into()))
             .and_then(|value| match value {
+                KernelValue::Named { type_name, value }
+                    if type_name.as_str() == "FrameId" && !value.is_empty() =>
+                {
+                    Some(FrameId::from(value.as_str()))
+                }
                 KernelValue::String(frame_id) if !frame_id.is_empty() => {
                     Some(FrameId::from(frame_id.as_str()))
                 }
@@ -1382,10 +1412,18 @@ fn running_node_ids(kernel_state: &meerkat_machine_kernels::KernelState) -> Vec<
         Some(KernelValue::Map(map)) => map
             .iter()
             .filter_map(|(key, status)| {
-                if status.is_named_variant(&FRAME_NODE_STATUS_RUNNING)
-                    && let KernelValue::String(id) = key
-                {
-                    return Some(FlowNodeId::from(id.as_str()));
+                if status.is_named_variant(&FRAME_NODE_STATUS_RUNNING) {
+                    match key {
+                        KernelValue::Named { type_name, value }
+                            if type_name.as_str() == "FlowNodeId" =>
+                        {
+                            return Some(FlowNodeId::from(value.as_str()));
+                        }
+                        KernelValue::String(id) => {
+                            return Some(FlowNodeId::from(id.as_str()));
+                        }
+                        _ => {}
+                    }
                 }
                 None
             })
@@ -1408,7 +1446,13 @@ fn collect_frame_step_statuses(
         let FlowNodeSpec::Step(step_spec) = node_spec else {
             continue;
         };
-        let Some(status) = status_map.get(&KernelValue::String(node_id.to_string())) else {
+        let Some(status) = status_map
+            .get(&KernelValue::Named {
+                type_name: "FlowNodeId".into(),
+                value: node_id.to_string(),
+            })
+            .or_else(|| status_map.get(&KernelValue::String(node_id.to_string())))
+        else {
             continue;
         };
         let Some(step_status) = node_terminal_step_status(status) else {

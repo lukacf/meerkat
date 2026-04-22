@@ -103,7 +103,7 @@ impl LoopIterationInput {
                 loop_iteration::fields([
                     (
                         loop_iteration::field::loop_instance_id(),
-                        KernelValue::String(loop_instance_id.to_string()),
+                        named_value("LoopInstanceId", loop_instance_id.to_string()),
                     ),
                     (
                         loop_iteration::field::iteration(),
@@ -119,7 +119,7 @@ impl LoopIterationInput {
                 loop_iteration::fields([
                     (
                         loop_iteration::field::loop_instance_id(),
-                        KernelValue::String(loop_instance_id.to_string()),
+                        named_value("LoopInstanceId", loop_instance_id.to_string()),
                     ),
                     (
                         loop_iteration::field::iteration(),
@@ -131,11 +131,29 @@ impl LoopIterationInput {
     }
 }
 
-fn parse_string(effect: &KernelEffect, field: &KernelField) -> Result<String, MobError> {
+fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: value.into(),
+    }
+}
+
+fn parse_named_id_string(
+    effect: &KernelEffect,
+    field: &KernelField,
+    expected_type: &str,
+) -> Result<String, MobError> {
     match effect.field(field) {
+        Some(KernelValue::Named { type_name, value }) if type_name.as_str() == expected_type => {
+            Ok(value.clone())
+        }
         Some(KernelValue::String(value)) => Ok(value.clone()),
+        Some(KernelValue::Named { type_name, .. }) => Err(MobError::Internal(format!(
+            "effect '{}' field '{}' expected {expected_type}, got named {type_name}",
+            effect.variant, field
+        ))),
         other => Err(MobError::Internal(format!(
-            "effect '{}' field '{}' expected string, got {other:?}",
+            "effect '{}' field '{}' expected {expected_type}, got {other:?}",
             effect.variant, field
         ))),
     }
@@ -160,19 +178,31 @@ fn parse_loop_instance_id(
     effect: &KernelEffect,
     field: &KernelField,
 ) -> Result<LoopInstanceId, MobError> {
-    Ok(LoopInstanceId::from(parse_string(effect, field)?))
+    Ok(LoopInstanceId::from(parse_named_id_string(
+        effect,
+        field,
+        "LoopInstanceId",
+    )?))
 }
 
 fn parse_frame_id(effect: &KernelEffect, field: &KernelField) -> Result<FrameId, MobError> {
-    Ok(FrameId::from(parse_string(effect, field)?))
+    Ok(FrameId::from(parse_named_id_string(
+        effect, field, "FrameId",
+    )?))
 }
 
 fn parse_flow_node_id(effect: &KernelEffect, field: &KernelField) -> Result<FlowNodeId, MobError> {
-    Ok(FlowNodeId::from(parse_string(effect, field)?))
+    Ok(FlowNodeId::from(parse_named_id_string(
+        effect,
+        field,
+        "FlowNodeId",
+    )?))
 }
 
 fn parse_loop_id(effect: &KernelEffect, field: &KernelField) -> Result<LoopId, MobError> {
-    Ok(LoopId::from(parse_string(effect, field)?))
+    Ok(LoopId::from(parse_named_id_string(
+        effect, field, "LoopId",
+    )?))
 }
 
 #[cfg(test)]
@@ -187,20 +217,20 @@ mod tests {
             fields: BTreeMap::from([
                 (
                     loop_iteration::field::loop_instance_id(),
-                    KernelValue::String("loop-1".into()),
+                    named_value("LoopInstanceId", "loop-1"),
                 ),
                 (loop_iteration::field::iteration(), KernelValue::U64(2)),
                 (
                     loop_iteration::field::parent_frame_id(),
-                    KernelValue::String("frame-root".into()),
+                    named_value("FrameId", "frame-root"),
                 ),
                 (
                     loop_iteration::field::parent_node_id(),
-                    KernelValue::String("loop-node".into()),
+                    named_value("FlowNodeId", "loop-node"),
                 ),
                 (
                     loop_iteration::field::loop_id(),
-                    KernelValue::String("loop".into()),
+                    named_value("LoopId", "loop"),
                 ),
             ]),
         };
@@ -211,5 +241,23 @@ mod tests {
         assert_eq!(request.parent_frame_id, FrameId::from("frame-root"));
         assert_eq!(request.parent_node_id, FlowNodeId::from("loop-node"));
         assert_eq!(request.loop_id, LoopId::from("loop"));
+    }
+
+    #[test]
+    fn until_feedback_inputs_use_named_loop_instance_id() {
+        let input = LoopIterationInput::UntilConditionMet {
+            loop_instance_id: LoopInstanceId::from("loop-1"),
+            iteration: 7,
+        }
+        .into_kernel_input();
+
+        assert_eq!(
+            input.fields.get(&loop_iteration::field::loop_instance_id()),
+            Some(&named_value("LoopInstanceId", "loop-1"))
+        );
+        assert_eq!(
+            input.fields.get(&loop_iteration::field::iteration()),
+            Some(&KernelValue::U64(7))
+        );
     }
 }

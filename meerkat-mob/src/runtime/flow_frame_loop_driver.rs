@@ -231,7 +231,7 @@ impl FlowFrameLoopDriver {
             && !state_set_contains(
                 &next_run_state,
                 &flow_run::field::ready_frame_membership(),
-                frame_id,
+                named_value("FrameId", frame_id.to_string()),
             )?
         {
             next_run_state = run_transition_state(
@@ -274,7 +274,7 @@ impl FlowFrameLoopDriver {
                 && !state_set_contains(
                     &next_run_state,
                     &flow_run::field::pending_body_frame_loop_membership(),
-                    &loop_instance_id,
+                    named_value("LoopInstanceId", loop_instance_id.to_string()),
                 )?
             {
                 next_run_state = run_transition_state(
@@ -349,11 +349,11 @@ impl FlowFrameLoopDriver {
             loop_iteration::fields([
                 (
                     loop_iteration::field::loop_instance_id(),
-                    KernelValue::String(grant.loop_instance_id.to_string()),
+                    named_value("LoopInstanceId", grant.loop_instance_id.to_string()),
                 ),
                 (
                     loop_iteration::field::frame_id(),
-                    KernelValue::String(frame_id.to_string()),
+                    named_value("FrameId", frame_id.to_string()),
                 ),
                 (
                     loop_iteration::field::iteration(),
@@ -374,7 +374,7 @@ impl FlowFrameLoopDriver {
             && !state_set_contains(
                 &next_run_state,
                 &flow_run::field::ready_frame_membership(),
-                &frame_id,
+                named_value("FrameId", frame_id.to_string()),
             )?
         {
             next_run_state = run_transition_state(
@@ -408,7 +408,7 @@ impl FlowFrameLoopDriver {
             || state_set_contains(
                 run_state,
                 &flow_run::field::ready_frame_membership(),
-                frame_id,
+                named_value("FrameId", frame_id.to_string()),
             )?
         {
             return Ok(None);
@@ -501,7 +501,7 @@ impl FlowFrameLoopDriver {
             loop_iteration::fields([
                 (
                     loop_iteration::field::loop_instance_id(),
-                    KernelValue::String(loop_instance_id.to_string()),
+                    named_value("LoopInstanceId", loop_instance_id.to_string()),
                 ),
                 (
                     loop_iteration::field::iteration(),
@@ -628,7 +628,7 @@ impl FlowFrameLoopDriver {
             if !state_set_contains(
                 run_state,
                 &flow_run::field::pending_body_frame_loop_membership(),
-                &obligation.loop_instance_id,
+                named_value("LoopInstanceId", obligation.loop_instance_id.to_string()),
             )? {
                 next_run_state = run_transition_state(
                     &next_run_state,
@@ -718,7 +718,7 @@ impl FlowFrameLoopDriver {
         if state_set_contains(
             run_state,
             &flow_run::field::pending_body_frame_loop_membership(),
-            &loop_instance_id,
+            named_value("LoopInstanceId", loop_instance_id.to_string()),
         )? {
             return Ok(None);
         }
@@ -787,7 +787,7 @@ fn build_complete_loop_decision(
         parent_input_variant,
         flow_frame::fields([(
             flow_frame::field::node_id(),
-            KernelValue::String(parent_node_id.to_string()),
+            named_value("FlowNodeId", parent_node_id.to_string()),
         )]),
     )?;
     let next_parent_frame = FrameSnapshot {
@@ -797,7 +797,7 @@ fn build_complete_loop_decision(
         && !state_set_contains(
             &next_run_state,
             &flow_run::field::ready_frame_membership(),
-            parent_frame_id,
+            named_value("FrameId", parent_frame_id.to_string()),
         )?
     {
         next_run_state = run_transition_state(
@@ -839,7 +839,7 @@ fn initial_loop_snapshot(
         loop_iteration::fields([
             (
                 loop_iteration::field::loop_instance_id(),
-                KernelValue::String(loop_instance_id.to_string()),
+                named_value("LoopInstanceId", loop_instance_id.to_string()),
             ),
             (
                 loop_iteration::field::max_iterations(),
@@ -847,15 +847,15 @@ fn initial_loop_snapshot(
             ),
             (
                 loop_iteration::field::parent_frame_id(),
-                KernelValue::String(parent_frame_id.to_string()),
+                named_value("FrameId", parent_frame_id.to_string()),
             ),
             (
                 loop_iteration::field::parent_node_id(),
-                KernelValue::String(parent_node_id.to_string()),
+                named_value("FlowNodeId", parent_node_id.to_string()),
             ),
             (
                 loop_iteration::field::loop_id(),
-                KernelValue::String(loop_spec.loop_id.to_string()),
+                named_value("LoopId", loop_spec.loop_id.to_string()),
             ),
             (
                 loop_iteration::field::depth(),
@@ -934,7 +934,7 @@ fn loop_register_pending_fields(loop_instance_id: &LoopInstanceId, depth: u64) -
     flow_run::fields([
         (
             flow_run::field::loop_instance_id(),
-            KernelValue::String(loop_instance_id.to_string()),
+            named_value("LoopInstanceId", loop_instance_id.to_string()),
         ),
         (flow_run::field::depth(), KernelValue::U64(depth)),
     ])
@@ -943,8 +943,15 @@ fn loop_register_pending_fields(loop_instance_id: &LoopInstanceId, depth: u64) -
 fn frame_id_fields(frame_id: &FrameId) -> KernelFields {
     flow_run::fields([(
         flow_run::field::frame_id(),
-        KernelValue::String(frame_id.to_string()),
+        named_value("FrameId", frame_id.to_string()),
     )])
+}
+
+fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: value.into(),
+    }
 }
 
 fn frame_scope_body() -> KernelNamedVariant {
@@ -980,7 +987,7 @@ fn all_nodes_terminal(state: &KernelState, spec: &FrameSpec) -> bool {
         return false;
     };
     for node_id in spec.nodes.keys() {
-        let key = KernelValue::String(node_id.to_string());
+        let key = named_value("FlowNodeId", node_id.to_string());
         match status_map.get(&key) {
             Some(status)
                 if status.is_named_variant(&node_run_status_completed())
@@ -1000,14 +1007,11 @@ fn frame_ready(state: &KernelState) -> bool {
     }
 }
 
-fn state_set_contains<T>(
+fn state_set_contains(
     state: &KernelState,
     field: &KernelField,
-    value: &T,
-) -> Result<bool, MobError>
-where
-    T: ToString,
-{
+    value: KernelValue,
+) -> Result<bool, MobError> {
     let set = match state.field(field) {
         Some(KernelValue::Set(set)) => set,
         other => {
@@ -1016,7 +1020,14 @@ where
             )));
         }
     };
-    Ok(set.contains(&KernelValue::String(value.to_string())))
+    if set.contains(&value) {
+        return Ok(true);
+    }
+    Ok(matches!(
+        value,
+        KernelValue::Named { ref value, .. }
+            if set.contains(&KernelValue::String(value.clone()))
+    ))
 }
 
 fn has_effect_variant(effects: &[KernelEffect], variant: &KernelEffectVariant) -> bool {
@@ -1043,7 +1054,7 @@ fn effect_node_id(
         .iter()
         .find(|effect| effect.variant_is(expected_variant))
         .map(|effect| {
-            string_from_effect_field(effect, &flow_frame::field::node_id())
+            string_from_effect_field(effect, &flow_frame::field::node_id(), "FlowNodeId")
                 .map(|value| FlowNodeId::from(value.as_str()))
         })
         .transpose()
@@ -1057,7 +1068,7 @@ fn effect_frame_id(
         .iter()
         .find(|effect| effect.variant_is(expected_variant))
         .map(|effect| {
-            string_from_effect_field(effect, &flow_run::field::frame_id())
+            string_from_effect_field(effect, &flow_run::field::frame_id(), "FrameId")
                 .map(|value| FrameId::from(value.as_str()))
         })
         .transpose()
@@ -1071,8 +1082,12 @@ fn effect_loop_id(
         .iter()
         .find(|effect| effect.variant_is(expected_variant))
         .map(|effect| {
-            string_from_effect_field(effect, &loop_iteration::field::loop_instance_id())
-                .map(|value| LoopInstanceId::from(value.as_str()))
+            string_from_effect_field(
+                effect,
+                &loop_iteration::field::loop_instance_id(),
+                "LoopInstanceId",
+            )
+            .map(|value| LoopInstanceId::from(value.as_str()))
         })
         .transpose()
 }
@@ -1092,11 +1107,19 @@ fn maybe_effect_u64(
 fn string_from_effect_field(
     effect: &KernelEffect,
     field: &KernelField,
+    expected_type: &str,
 ) -> Result<String, MobError> {
     match effect.field(field) {
+        Some(KernelValue::Named { type_name, value }) if type_name.as_str() == expected_type => {
+            Ok(value.clone())
+        }
         Some(KernelValue::String(value)) => Ok(value.clone()),
+        Some(KernelValue::Named { type_name, .. }) => Err(MobError::Internal(format!(
+            "effect '{}' field '{}' expected {expected_type}, found {type_name}",
+            effect.variant, field
+        ))),
         other => Err(MobError::Internal(format!(
-            "effect '{}' missing String field '{}': {other:?}",
+            "effect '{}' missing {expected_type} field '{}': {other:?}",
             effect.variant, field
         ))),
     }
@@ -1112,11 +1135,21 @@ fn u64_from_effect_field(effect: &KernelEffect, field: &KernelField) -> Result<u
     }
 }
 
-fn string_from_state_field(state: &KernelState, field: &KernelField) -> Result<String, MobError> {
+fn string_from_state_field(
+    state: &KernelState,
+    field: &KernelField,
+    expected_type: &str,
+) -> Result<String, MobError> {
     match state.field(field) {
+        Some(KernelValue::Named { type_name, value }) if type_name.as_str() == expected_type => {
+            Ok(value.clone())
+        }
         Some(KernelValue::String(value)) => Ok(value.clone()),
+        Some(KernelValue::Named { type_name, .. }) => Err(MobError::Internal(format!(
+            "kernel state field '{field}' expected {expected_type}, found {type_name}"
+        ))),
         other => Err(MobError::Internal(format!(
-            "kernel state missing String field '{field}': {other:?}"
+            "kernel state missing {expected_type} field '{field}': {other:?}"
         ))),
     }
 }
@@ -1162,6 +1195,11 @@ fn frame_is_body(state: &KernelState) -> bool {
 
 fn frame_loop_instance_id(state: &KernelState) -> Option<LoopInstanceId> {
     match state.field(&flow_frame::field::loop_instance_id()) {
+        Some(KernelValue::Named { type_name, value })
+            if type_name.as_str() == "LoopInstanceId" && !value.is_empty() =>
+        {
+            Some(LoopInstanceId::from(value.as_str()))
+        }
         Some(KernelValue::String(loop_instance_id)) if !loop_instance_id.is_empty() => {
             Some(LoopInstanceId::from(loop_instance_id.as_str()))
         }
@@ -1181,6 +1219,7 @@ fn loop_instance_id_from_state(state: &KernelState) -> Result<LoopInstanceId, Mo
     Ok(LoopInstanceId::from(string_from_state_field(
         state,
         &loop_iteration::field::loop_instance_id(),
+        "LoopInstanceId",
     )?))
 }
 
@@ -1188,6 +1227,7 @@ fn loop_parent_frame_id(state: &KernelState) -> Result<FrameId, MobError> {
     Ok(FrameId::from(string_from_state_field(
         state,
         &loop_iteration::field::parent_frame_id(),
+        "FrameId",
     )?))
 }
 
@@ -1195,6 +1235,7 @@ fn loop_parent_node_id(state: &KernelState) -> Result<FlowNodeId, MobError> {
     Ok(FlowNodeId::from(string_from_state_field(
         state,
         &loop_iteration::field::parent_node_id(),
+        "FlowNodeId",
     )?))
 }
 
@@ -1202,6 +1243,7 @@ fn loop_id_from_state(state: &KernelState) -> Result<LoopId, MobError> {
     Ok(LoopId::from(string_from_state_field(
         state,
         &loop_iteration::field::loop_id(),
+        "LoopId",
     )?))
 }
 
@@ -1211,12 +1253,22 @@ fn loop_stage(state: &KernelState) -> Result<KernelNamedVariant, MobError> {
 
 fn active_body_frame_id(state: &KernelState) -> Option<FrameId> {
     match state.field(&loop_iteration::field::active_body_frame_id()) {
+        Some(KernelValue::Named { type_name, value })
+            if type_name.as_str() == "FrameId" && !value.is_empty() =>
+        {
+            Some(FrameId::from(value.as_str()))
+        }
         Some(KernelValue::String(frame_id)) if !frame_id.is_empty() => {
             Some(FrameId::from(frame_id.as_str()))
         }
         Some(KernelValue::Map(entries)) => entries
             .get(&KernelValue::String("value".into()))
             .and_then(|value| match value {
+                KernelValue::Named { type_name, value }
+                    if type_name.as_str() == "FrameId" && !value.is_empty() =>
+                {
+                    Some(FrameId::from(value.as_str()))
+                }
                 KernelValue::String(frame_id) if !frame_id.is_empty() => {
                     Some(FrameId::from(frame_id.as_str()))
                 }
@@ -1256,5 +1308,29 @@ fn terminal_phase(state: &KernelState) -> Result<FlowFrameTerminalPhase, MobErro
         Err(MobError::Internal(format!(
             "frame is not in a terminal phase: '{other}'"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_bridge_fields_use_named_ids() {
+        let frame_fields = frame_id_fields(&FrameId::from("frame-root"));
+        assert_eq!(
+            frame_fields.get(&flow_run::field::frame_id()),
+            Some(&named_value("FrameId", "frame-root"))
+        );
+
+        let loop_fields = loop_register_pending_fields(&LoopInstanceId::from("loop-1"), 3);
+        assert_eq!(
+            loop_fields.get(&flow_run::field::loop_instance_id()),
+            Some(&named_value("LoopInstanceId", "loop-1"))
+        );
+        assert_eq!(
+            loop_fields.get(&flow_run::field::depth()),
+            Some(&KernelValue::U64(3))
+        );
     }
 }

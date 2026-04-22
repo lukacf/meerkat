@@ -86,12 +86,12 @@ fn get_ready_frames_from_run_state(flow_state: &KernelState) -> Vec<String> {
     match flow_state.fields.get("ready_frames") {
         Some(KernelValue::Seq(seq)) => seq
             .iter()
-            .filter_map(|v| {
-                if let KernelValue::String(s) = v {
-                    Some(s.clone())
-                } else {
-                    None
+            .filter_map(|v| match v {
+                KernelValue::Named { type_name, value } if type_name.as_str() == "FrameId" => {
+                    Some(value.clone())
                 }
+                KernelValue::String(s) => Some(s.clone()),
+                _ => None,
             })
             .collect(),
         _ => vec![],
@@ -302,12 +302,14 @@ fn get_pending_body_frame_loops_from_run_state(flow_state: &KernelState) -> Vec<
     match flow_state.fields.get("pending_body_frame_loops") {
         Some(KernelValue::Seq(seq)) => seq
             .iter()
-            .filter_map(|v| {
-                if let KernelValue::String(s) = v {
-                    Some(s.clone())
-                } else {
-                    None
+            .filter_map(|v| match v {
+                KernelValue::Named { type_name, value }
+                    if type_name.as_str() == "LoopInstanceId" =>
+                {
+                    Some(value.clone())
                 }
+                KernelValue::String(s) => Some(s.clone()),
+                _ => None,
             })
             .collect(),
         _ => vec![],

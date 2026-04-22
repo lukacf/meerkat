@@ -132,8 +132,15 @@ impl FlowFrameKernel {
         Self { run_store }
     }
 
+    fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+        KernelValue::Named {
+            type_name: type_name.into(),
+            value: value.into(),
+        }
+    }
+
     fn node_val(node_id: &FlowNodeId) -> KernelValue {
-        KernelValue::String(node_id.to_string())
+        Self::named_value("FlowNodeId", node_id.to_string())
     }
 
     /// Read the current `FrameSnapshot` for a frame, returning an error if not found.
@@ -438,12 +445,12 @@ fn build_frame_start_fields(
 ) -> KernelFields {
     let ordered_kv: Vec<KernelValue> = ordered
         .iter()
-        .map(|n| KernelValue::String(n.to_string()))
+        .map(|n| FlowFrameKernel::named_value("FlowNodeId", n.to_string()))
         .collect();
 
     let tracked: BTreeSet<KernelValue> = ordered
         .iter()
-        .map(|n| KernelValue::String(n.to_string()))
+        .map(|n| FlowFrameKernel::named_value("FlowNodeId", n.to_string()))
         .collect();
 
     let mut node_kind: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
@@ -452,7 +459,7 @@ fn build_frame_start_fields(
     let mut node_branches: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
 
     for (node_id, node_spec) in &spec.nodes {
-        let k = KernelValue::String(node_id.to_string());
+        let k = FlowFrameKernel::named_value("FlowNodeId", node_id.to_string());
         match node_spec {
             FlowNodeSpec::Step(s) => {
                 node_kind.insert(
@@ -467,16 +474,16 @@ fn build_frame_start_fields(
                     KernelValue::Seq(
                         s.depends_on
                             .iter()
-                            .map(|d| KernelValue::String(d.to_string()))
+                            .map(|d| FlowFrameKernel::named_value("FlowNodeId", d.to_string()))
                             .collect(),
                     ),
                 );
                 node_dep_modes.insert(k.clone(), dep_mode_kv(&s.depends_on_mode));
                 node_branches.insert(
                     k.clone(),
-                    s.branch
-                        .as_ref()
-                        .map_or(KernelValue::None, |b| KernelValue::String(b.to_string())),
+                    s.branch.as_ref().map_or(KernelValue::None, |b| {
+                        FlowFrameKernel::named_value("BranchId", b.to_string())
+                    }),
                 );
             }
             FlowNodeSpec::RepeatUntil(l) => {
@@ -492,7 +499,7 @@ fn build_frame_start_fields(
                     KernelValue::Seq(
                         l.depends_on
                             .iter()
-                            .map(|d| KernelValue::String(d.to_string()))
+                            .map(|d| FlowFrameKernel::named_value("FlowNodeId", d.to_string()))
                             .collect(),
                     ),
                 );
@@ -505,7 +512,7 @@ fn build_frame_start_fields(
     flow_frame::fields([
         (
             flow_frame::field::frame_id(),
-            KernelValue::String(frame_id.to_string()),
+            FlowFrameKernel::named_value("FrameId", frame_id.to_string()),
         ),
         (
             flow_frame::field::tracked_nodes(),
@@ -554,7 +561,7 @@ pub(crate) fn build_start_body_frame_input(
     let mut fields = build_frame_start_fields(frame_id, spec, ordered);
     fields.insert(
         flow_frame::field::loop_instance_id(),
-        KernelValue::String(loop_instance_id.to_string()),
+        FlowFrameKernel::named_value("LoopInstanceId", loop_instance_id.to_string()),
     );
     fields.insert(flow_frame::field::iteration(), KernelValue::U64(iteration));
     flow_frame::input(flow_frame::input::start_body_frame(), fields)
@@ -631,4 +638,87 @@ pub(crate) fn topological_order(spec: &FrameSpec) -> Result<Vec<FlowNodeId>, Mob
     }
 
     Ok(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::definition::{ConditionExpr, FrameStepSpec, RepeatUntilSpec};
+    use crate::ids::BranchId;
+    use indexmap::IndexMap;
+
+    fn sample_frame_spec() -> FrameSpec {
+        FrameSpec {
+            nodes: IndexMap::from([
+                (
+                    FlowNodeId::from("step-node"),
+                    FlowNodeSpec::Step(FrameStepSpec {
+                        step_id: StepId::from("step-1"),
+                        depends_on: Vec::new(),
+                        depends_on_mode: DependencyMode::All,
+                        branch: Some(BranchId::from("branch-a")),
+                    }),
+                ),
+                (
+                    FlowNodeId::from("loop-node"),
+                    FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+                        loop_id: LoopId::from("loop-a"),
+                        depends_on: vec![FlowNodeId::from("step-node")],
+                        depends_on_mode: DependencyMode::All,
+                        body: FrameSpec {
+                            nodes: IndexMap::new(),
+                        },
+                        until: ConditionExpr::Eq {
+                            path: "done".into(),
+                            value: serde_json::json!(true),
+                        },
+                        max_iterations: 3,
+                    }),
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn start_frame_inputs_use_named_kernel_ids() {
+        let spec = sample_frame_spec();
+        let ordered = vec![FlowNodeId::from("step-node"), FlowNodeId::from("loop-node")];
+
+        let root = build_start_root_frame_input(&FrameId::from("frame-root"), &spec, &ordered);
+        assert_eq!(
+            root.fields.get(&flow_frame::field::frame_id()),
+            Some(&FlowFrameKernel::named_value("FrameId", "frame-root"))
+        );
+        assert_eq!(
+            root.fields.get(&flow_frame::field::tracked_nodes()),
+            Some(&KernelValue::Set(std::collections::BTreeSet::from([
+                FlowFrameKernel::named_value("FlowNodeId", "loop-node"),
+                FlowFrameKernel::named_value("FlowNodeId", "step-node"),
+            ])))
+        );
+
+        let branches = match root.fields.get(&flow_frame::field::node_branches()) {
+            Some(KernelValue::Map(map)) => map,
+            other => panic!("expected node_branches map, got {other:?}"),
+        };
+        assert_eq!(
+            branches.get(&FlowFrameKernel::named_value("FlowNodeId", "step-node")),
+            Some(&FlowFrameKernel::named_value("BranchId", "branch-a"))
+        );
+
+        let body = build_start_body_frame_input(
+            &FrameId::from("body-frame"),
+            &LoopInstanceId::from("loop-node::iter"),
+            2,
+            &spec,
+            &ordered,
+        );
+        assert_eq!(
+            body.fields.get(&flow_frame::field::loop_instance_id()),
+            Some(&FlowFrameKernel::named_value(
+                "LoopInstanceId",
+                "loop-node::iter",
+            ))
+        );
+    }
 }

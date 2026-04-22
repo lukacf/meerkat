@@ -19391,7 +19391,16 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     };
     assert!(
         matches!(
-            node_status.get(&meerkat_machine_kernels::KernelValue::String("loop-node".into())),
+            node_status
+                .get(&meerkat_machine_kernels::KernelValue::Named {
+                    type_name: "FlowNodeId".into(),
+                    value: "loop-node".into(),
+                })
+                .or_else(|| {
+                    node_status.get(&meerkat_machine_kernels::KernelValue::String(
+                        "loop-node".into(),
+                    ))
+                }),
             Some(meerkat_machine_kernels::KernelValue::NamedVariant { variant, .. })
                 if variant == "Completed"
         ),
@@ -19673,7 +19682,11 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         other => panic!("expected node_status map, got {other:?}"),
     };
     let start_status = node_status
-        .get(&KernelValue::String("start-node".to_string()))
+        .get(&KernelValue::Named {
+            type_name: "FlowNodeId".into(),
+            value: "start-node".to_string(),
+        })
+        .or_else(|| node_status.get(&KernelValue::String("start-node".to_string())))
         .expect("start node status");
     assert!(
         matches!(start_status, KernelValue::NamedVariant { variant, .. } if variant == "Failed"),
@@ -19866,7 +19879,11 @@ async fn test_root_frame_cancel_cleans_up_inflight_node() {
         other => panic!("expected node_status map, got {other:?}"),
     };
     let start_status = node_status
-        .get(&KernelValue::String("start-node".to_string()))
+        .get(&KernelValue::Named {
+            type_name: "FlowNodeId".into(),
+            value: "start-node".to_string(),
+        })
+        .or_else(|| node_status.get(&KernelValue::String("start-node".to_string())))
         .expect("start node status");
     assert!(
         !matches!(start_status, KernelValue::NamedVariant { variant, .. } if variant == "Running"),
@@ -20019,6 +20036,129 @@ async fn test_spawn_realm_ref_resolves_from_store() {
         )
         .await;
     assert!(result.is_ok(), "realm ref profile spawn should succeed");
+}
+
+#[tokio::test]
+async fn test_resume_realm_ref_member_preserves_effective_profile_snapshot() {
+    use crate::store::InMemoryRealmProfileStore;
+
+    let realm_store = Arc::new(InMemoryRealmProfileStore::new());
+    let initial_profile = Profile {
+        model: "claude-sonnet-4-5".into(),
+        skills: vec!["realm-skill".into()],
+        tools: ToolConfig {
+            comms: true,
+            ..ToolConfig::default()
+        },
+        peer_description: "realm worker v1".into(),
+        external_addressable: true,
+        backend: None,
+        runtime_mode: crate::MobRuntimeMode::TurnDriven,
+        max_inline_peer_notifications: None,
+        output_schema: None,
+        provider_params: None,
+    };
+    let stored_profile = realm_store
+        .create("shared-worker", &initial_profile)
+        .await
+        .expect("seed realm profile");
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage {
+        events: Arc::new(InMemoryMobEventStore::new()),
+        runs: Arc::new(InMemoryMobRunStore::new()),
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+        realm_profiles: Some(realm_store.clone()),
+    };
+    let storage_for_resume = MobStorage {
+        events: storage.events.clone(),
+        runs: storage.runs.clone(),
+        specs: storage.specs.clone(),
+        runtime_metadata: storage.runtime_metadata.clone(),
+        realm_profiles: storage.realm_profiles.clone(),
+    };
+    let handle = MobBuilder::new(sample_definition_with_realm_ref_profile(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob with realm store");
+
+    let member_ref = handle
+        .spawn(
+            ProfileName::from("realm-worker"),
+            MeerkatId::from("rw-resume"),
+            None,
+        )
+        .await
+        .expect("spawn realm-backed member");
+    let original_session_id = member_ref
+        .bridge_session_id()
+        .expect("session-backed realm member")
+        .clone();
+    let original_view = service
+        .read(&original_session_id)
+        .await
+        .expect("read original session");
+    assert_eq!(original_view.state.model, "claude-sonnet-4-5");
+
+    handle.stop().await.expect("stop original mob");
+
+    let updated_profile = Profile {
+        model: "gemini-2.5-flash".into(),
+        skills: vec!["different-realm-skill".into()],
+        tools: ToolConfig {
+            comms: true,
+            ..ToolConfig::default()
+        },
+        peer_description: "realm worker v2".into(),
+        external_addressable: false,
+        backend: None,
+        runtime_mode: crate::MobRuntimeMode::TurnDriven,
+        max_inline_peer_notifications: None,
+        output_schema: None,
+        provider_params: None,
+    };
+    realm_store
+        .update("shared-worker", &updated_profile, stored_profile.revision)
+        .await
+        .expect("mutate realm profile after shutdown");
+
+    let resumed = MobBuilder::for_resume(storage_for_resume)
+        .with_session_service(service.clone())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("resume mob");
+
+    resumed
+        .member(&AgentIdentity::from("rw-resume"))
+        .await
+        .expect("resume should preserve external addressability")
+        .send(
+            "outside hello after resume".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("resumed member should keep pre-crash external turn contract");
+
+    let resumed_snapshot = resumed
+        .member_status(&AgentIdentity::from("rw-resume"))
+        .await
+        .expect("resumed member snapshot");
+    let resumed_session_id = resumed_snapshot
+        .current_bridge_session_id()
+        .cloned()
+        .expect("resumed member session");
+    let resumed_view = service
+        .read(&resumed_session_id)
+        .await
+        .expect("read resumed session");
+    assert_eq!(
+        resumed_view.state.model, "claude-sonnet-4-5",
+        "resume should restore the original effective profile, not today's realm definition"
+    );
 }
 
 #[tokio::test]
@@ -22477,14 +22617,15 @@ fn mob_modeled_kernel_value_from_json(
         {
             meerkat_machine_kernels::KernelValue::U64(value.as_u64().unwrap_or(0))
         }
-        meerkat_machine_schema::TypeRef::Named(_) => {
+        meerkat_machine_schema::TypeRef::Named(name) => {
             let normalized = value
                 .as_str()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .unwrap_or_else(|| value.clone());
-            meerkat_machine_kernels::KernelValue::String(
-                serde_json::to_string(&normalized).unwrap_or_else(|_| "null".into()),
-            )
+            meerkat_machine_kernels::KernelValue::Named {
+                type_name: name.clone().into(),
+                value: serde_json::to_string(&normalized).unwrap_or_else(|_| "null".into()),
+            }
         }
         meerkat_machine_schema::TypeRef::Enum(name) => {
             meerkat_machine_kernels::KernelValue::NamedVariant {
@@ -22555,6 +22696,9 @@ fn mob_modeled_json_from_kernel_value(
             serde_json::Value::Number(serde_json::Number::from(*value))
         }
         meerkat_machine_kernels::KernelValue::String(value) => {
+            serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        meerkat_machine_kernels::KernelValue::Named { value, .. } => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
         }
         meerkat_machine_kernels::KernelValue::NamedVariant { variant, .. } => {

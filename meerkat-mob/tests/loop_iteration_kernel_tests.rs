@@ -4,17 +4,20 @@ use meerkat_machine_kernels::{KernelInput, KernelValue};
 use meerkat_mob::runtime::flow_kernels::loop_iteration;
 use std::collections::BTreeMap;
 
-fn str_val(s: &str) -> KernelValue {
-    KernelValue::String(s.into())
+fn named(type_name: &'static str, s: &str) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: s.into(),
+    }
 }
 fn u64_val(n: u64) -> KernelValue {
     KernelValue::U64(n)
 }
 fn frame_id(s: &str) -> KernelValue {
-    str_val(s)
+    named("FrameId", s)
 }
 fn loop_inst(s: &str) -> KernelValue {
-    str_val(s)
+    named("LoopInstanceId", s)
 }
 
 fn start_loop_input(loop_instance_id: &str, max_iterations: u64) -> KernelInput {
@@ -24,8 +27,8 @@ fn start_loop_input(loop_instance_id: &str, max_iterations: u64) -> KernelInput 
             ("loop_instance_id".into(), loop_inst(loop_instance_id)),
             ("max_iterations".into(), u64_val(max_iterations)),
             ("parent_frame_id".into(), frame_id("parent-frame")),
-            ("parent_node_id".into(), str_val("parent-node")),
-            ("loop_id".into(), str_val("loop-spec")),
+            ("parent_node_id".into(), named("FlowNodeId", "parent-node")),
+            ("loop_id".into(), named("LoopId", "loop-spec")),
             ("depth".into(), u64_val(1)),
         ]),
     }

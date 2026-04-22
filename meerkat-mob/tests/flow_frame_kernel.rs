@@ -39,8 +39,19 @@ fn node_kind_loop() -> KernelValue {
     }
 }
 
-fn str_val(s: &str) -> KernelValue {
-    KernelValue::String(s.into())
+fn named(type_name: &'static str, s: &str) -> KernelValue {
+    KernelValue::Named {
+        type_name: type_name.into(),
+        value: s.into(),
+    }
+}
+
+fn node_val(s: &str) -> KernelValue {
+    named("FlowNodeId", s)
+}
+
+fn frame_val(s: &str) -> KernelValue {
+    named("FrameId", s)
 }
 fn seq(items: Vec<KernelValue>) -> KernelValue {
     KernelValue::Seq(items)
@@ -84,12 +95,12 @@ fn assert_ready_queue_invariant(state: &KernelState, label: &str) {
 }
 
 fn frame_id_val() -> KernelValue {
-    str_val("frame-test-1")
+    frame_val("frame-test-1")
 }
 
 fn start_frame_input_single_root_node() -> KernelInput {
     // Single node "A" with no deps, kind=Step
-    let node_a = str_val("node-a");
+    let node_a = node_val("node-a");
     KernelInput {
         variant: "StartRootFrame".into(),
         fields: BTreeMap::from([
@@ -118,8 +129,8 @@ fn start_frame_input_single_root_node() -> KernelInput {
 
 fn start_frame_input_dag_a_then_b() -> KernelInput {
     // Two nodes: A (root) -> B (depends on A)
-    let node_a = str_val("node-a");
-    let node_b = str_val("node-b");
+    let node_a = node_val("node-a");
+    let node_b = node_val("node-b");
     KernelInput {
         variant: "StartRootFrame".into(),
         fields: BTreeMap::from([
@@ -183,7 +194,7 @@ fn test_ready_queue_invariant_holds_across_all_transitions() {
         _ => panic!("not seq"),
     };
     assert_eq!(queue.len(), 1, "only root node should be ready");
-    assert_eq!(queue[0], str_val("node-a"));
+    assert_eq!(queue[0], node_val("node-a"));
 
     // AdmitNextReadyNode (should admit A as step-run)
     let admit_input = KernelInput {
@@ -206,7 +217,7 @@ fn test_ready_queue_invariant_holds_across_all_transitions() {
     // CompleteNode A -> B should become ready
     let complete_input = KernelInput {
         variant: "CompleteNode".into(),
-        fields: BTreeMap::from([("node_id".into(), str_val("node-a"))]),
+        fields: BTreeMap::from([("node_id".into(), node_val("node-a"))]),
     };
     let outcome = flow_frame::transition(&state, &complete_input).expect("CompleteNode");
     let state = outcome.next_state;
@@ -217,7 +228,7 @@ fn test_ready_queue_invariant_holds_across_all_transitions() {
         _ => panic!("not seq"),
     };
     assert_eq!(queue.len(), 1, "B should be ready after A completes");
-    assert_eq!(queue[0], str_val("node-b"));
+    assert_eq!(queue[0], node_val("node-b"));
 
     // AdmitNextReadyNode (B)
     let admit_input = KernelInput {
@@ -231,7 +242,7 @@ fn test_ready_queue_invariant_holds_across_all_transitions() {
     // CompleteNode B
     let complete_b = KernelInput {
         variant: "CompleteNode".into(),
-        fields: BTreeMap::from([("node_id".into(), str_val("node-b"))]),
+        fields: BTreeMap::from([("node_id".into(), node_val("node-b"))]),
     };
     let outcome = flow_frame::transition(&state, &complete_b).expect("CompleteNode B");
     let state = outcome.next_state;
@@ -251,9 +262,9 @@ fn test_ready_queue_invariant_holds_across_all_transitions() {
 #[test]
 fn test_refresh_ready_frontier_seeds_roots_on_start_frame() {
     // A->B->C (all All-mode), only A should be in queue after StartRootFrame
-    let node_a = str_val("node-a");
-    let node_b = str_val("node-b");
-    let node_c = str_val("node-c");
+    let node_a = node_val("node-a");
+    let node_b = node_val("node-b");
+    let node_c = node_val("node-c");
     let state = flow_frame::initial_state().expect("init");
     let start = KernelInput {
         variant: "StartRootFrame".into(),
@@ -349,7 +360,7 @@ fn test_admit_step_run_pops_head_and_marks_running() {
     assert!(queue.is_empty());
     let status_a = state.fields.get("node_status").and_then(|m| {
         if let KernelValue::Map(m) = m {
-            m.get(&str_val("node-a")).cloned()
+            m.get(&node_val("node-a")).cloned()
         } else {
             None
         }
@@ -372,8 +383,8 @@ fn test_admit_step_run_pops_head_and_marks_running() {
 fn test_admit_skip_when_all_dep_failed() {
     // A (root) -> B (depends on A, All mode)
     // After A fails, B should be admitted as Skip
-    let node_a = str_val("node-a");
-    let node_b = str_val("node-b");
+    let node_a = node_val("node-a");
+    let node_b = node_val("node-b");
     let state = flow_frame::initial_state().expect("init");
     let start = start_frame_input_dag_a_then_b();
     let outcome = flow_frame::transition(&state, &start).expect("StartRootFrame");
@@ -430,7 +441,7 @@ fn test_admit_skip_when_all_dep_failed() {
 #[test]
 fn test_admit_loop_node_emits_start_loop_node() {
     // Single node "loop-node" with kind=Loop, no deps
-    let loop_node = str_val("loop-node");
+    let loop_node = node_val("loop-node");
     let state = flow_frame::initial_state().expect("init");
     let start = KernelInput {
         variant: "StartRootFrame".into(),
@@ -488,9 +499,9 @@ fn test_admit_fail_when_any_mode_all_deps_skipped_or_failed() {
     // Setup: C depends on A and B via Any mode
     // A gets admitted and Skipped, B gets admitted and Skipped
     // Then C should be admitted as Fail (Any mode, no dep Completed)
-    let node_a = str_val("node-a");
-    let node_b = str_val("node-b");
-    let node_c = str_val("node-c");
+    let node_a = node_val("node-a");
+    let node_b = node_val("node-b");
+    let node_c = node_val("node-c");
 
     let dep_mode_any = || KernelValue::NamedVariant {
         enum_name: "DependencyMode".into(),
@@ -501,7 +512,7 @@ fn test_admit_fail_when_any_mode_all_deps_skipped_or_failed() {
     let start = KernelInput {
         variant: "StartRootFrame".into(),
         fields: BTreeMap::from([
-            ("frame_id".into(), str_val("frame-test")),
+            ("frame_id".into(), frame_val("frame-test")),
             (
                 "tracked_nodes".into(),
                 set(vec![node_a.clone(), node_b.clone(), node_c.clone()]),

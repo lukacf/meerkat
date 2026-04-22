@@ -17,14 +17,17 @@ use meerkat_mob::run::{FlowRunConfig, MobRun};
 use meerkat_mob::runtime::flow_kernels::flow_run;
 use std::collections::BTreeMap;
 
-fn str_val(s: &str) -> KernelValue {
-    KernelValue::String(s.into())
-}
 fn frame_id(s: &str) -> KernelValue {
-    str_val(s)
+    KernelValue::Named {
+        type_name: "FrameId".into(),
+        value: s.into(),
+    }
 }
 fn loop_inst(s: &str) -> KernelValue {
-    str_val(s)
+    KernelValue::Named {
+        type_name: "LoopInstanceId".into(),
+        value: s.into(),
+    }
 }
 fn u64_val(n: u64) -> KernelValue {
     KernelValue::U64(n)

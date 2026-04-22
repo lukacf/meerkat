@@ -78,6 +78,33 @@ pub struct MobRun {
 }
 
 impl MobRun {
+    fn named_value(type_name: &'static str, value: impl Into<String>) -> KernelValue {
+        KernelValue::Named {
+            type_name: type_name.into(),
+            value: value.into(),
+        }
+    }
+
+    fn parse_named_string(
+        value: &KernelValue,
+        expected_type: &str,
+        context: &str,
+        run_id: &RunId,
+    ) -> Result<String, MobError> {
+        match value {
+            KernelValue::Named { type_name, value } if type_name.as_str() == expected_type => {
+                Ok(value.clone())
+            }
+            KernelValue::String(value) => Ok(value.clone()),
+            KernelValue::Named { type_name, .. } => Err(MobError::Internal(format!(
+                "{context} invalid for {run_id}: expected {expected_type}, found {type_name}"
+            ))),
+            other => Err(MobError::Internal(format!(
+                "{context} invalid for {run_id}: {other:?}"
+            ))),
+        }
+    }
+
     /// Read-only access to the run's current status.
     pub fn status(&self) -> &MobRunStatus {
         &self.status
@@ -100,12 +127,14 @@ impl MobRun {
             }
         };
         seq.iter()
-            .map(|value| match value {
-                KernelValue::String(step_id) => Ok(StepId::from(step_id.clone())),
-                other => Err(MobError::Internal(format!(
-                    "flow_run ordered_steps entry invalid for {}: {other:?}",
-                    self.run_id
-                ))),
+            .map(|value| {
+                Self::parse_named_string(
+                    value,
+                    "StepId",
+                    "flow_run ordered_steps entry",
+                    &self.run_id,
+                )
+                .map(StepId::from)
             })
             .collect()
     }
@@ -124,15 +153,12 @@ impl MobRun {
 
         let mut dependencies = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_dependencies key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_dependencies key",
+                &self.run_id,
+            )?);
             let seq = match value {
                 KernelValue::Seq(seq) => seq,
                 other => {
@@ -144,12 +170,14 @@ impl MobRun {
             };
             let deps = seq
                 .iter()
-                .map(|value| match value {
-                    KernelValue::String(step_id) => Ok(StepId::from(step_id.clone())),
-                    other => Err(MobError::Internal(format!(
-                        "flow_run step_dependencies dependency invalid for {} step '{}': {other:?}",
-                        self.run_id, step_id
-                    ))),
+                .map(|value| {
+                    Self::parse_named_string(
+                        value,
+                        "StepId",
+                        &format!("flow_run step_dependencies dependency for step '{step_id}'"),
+                        &self.run_id,
+                    )
+                    .map(StepId::from)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             dependencies.insert(step_id, deps);
@@ -172,15 +200,12 @@ impl MobRun {
 
         let mut modes = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_dependency_modes key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_dependency_modes key",
+                &self.run_id,
+            )?);
 
             let mode = match value {
                 KernelValue::NamedVariant { enum_name, variant }
@@ -225,15 +250,12 @@ impl MobRun {
 
         let mut condition_flags = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_has_conditions key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_has_conditions key",
+                &self.run_id,
+            )?);
 
             let has_condition = match value {
                 KernelValue::Bool(flag) => *flag,
@@ -265,18 +287,18 @@ impl MobRun {
 
         let mut branches = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_branches key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_branches key",
+                &self.run_id,
+            )?);
 
             let branch = match value {
                 KernelValue::None => None,
+                KernelValue::Named { type_name, value } if type_name.as_str() == "BranchId" => {
+                    Some(BranchId::from(value.clone()))
+                }
                 KernelValue::String(branch_id) => Some(BranchId::from(branch_id.clone())),
                 other => {
                     return Err(MobError::Internal(format!(
@@ -308,15 +330,12 @@ impl MobRun {
 
         let mut policies = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_collection_policies key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_collection_policies key",
+                &self.run_id,
+            )?);
 
             let policy = match value {
                 KernelValue::NamedVariant { enum_name, variant }
@@ -362,15 +381,12 @@ impl MobRun {
 
         let mut thresholds = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_quorum_thresholds key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_quorum_thresholds key",
+                &self.run_id,
+            )?);
 
             let threshold = match value {
                 KernelValue::U64(value) => u32::try_from(*value).map_err(|_| {
@@ -407,15 +423,12 @@ impl MobRun {
 
         let mut statuses = BTreeMap::new();
         for (step_key, value) in map {
-            let step_id = match step_key {
-                KernelValue::String(step_id) => StepId::from(step_id.clone()),
-                other => {
-                    return Err(MobError::Internal(format!(
-                        "flow_run step_status key invalid for {}: {other:?}",
-                        self.run_id
-                    )));
-                }
-            };
+            let step_id = StepId::from(Self::parse_named_string(
+                step_key,
+                "StepId",
+                "flow_run step_status key",
+                &self.run_id,
+            )?);
             if matches!(value, KernelValue::None) {
                 continue;
             }
@@ -529,11 +542,11 @@ impl MobRun {
             .flow_spec
             .steps
             .keys()
-            .map(|step_id| KernelValue::String(step_id.to_string()))
+            .map(|step_id| Self::named_value("StepId", step_id.to_string()))
             .collect();
         let ordered_steps = ordered_steps
             .into_iter()
-            .map(|step_id| KernelValue::String(step_id.to_string()))
+            .map(|step_id| Self::named_value("StepId", step_id.to_string()))
             .collect();
         let step_dependencies = config
             .flow_spec
@@ -541,11 +554,11 @@ impl MobRun {
             .iter()
             .map(|(step_id, step)| {
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     KernelValue::Seq(
                         step.depends_on
                             .iter()
-                            .map(|dependency| KernelValue::String(dependency.to_string()))
+                            .map(|dependency| Self::named_value("StepId", dependency.to_string()))
                             .collect(),
                     ),
                 )
@@ -557,7 +570,7 @@ impl MobRun {
             .iter()
             .map(|(step_id, step)| {
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     dependency_mode_value(step.depends_on_mode.clone()),
                 )
             })
@@ -568,7 +581,7 @@ impl MobRun {
             .iter()
             .map(|(step_id, step)| {
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     KernelValue::Bool(step.condition.is_some()),
                 )
             })
@@ -579,9 +592,9 @@ impl MobRun {
             .iter()
             .map(|(step_id, step)| {
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     step.branch.as_ref().map_or(KernelValue::None, |branch| {
-                        KernelValue::String(branch.to_string())
+                        Self::named_value("BranchId", branch.to_string())
                     }),
                 )
             })
@@ -592,7 +605,7 @@ impl MobRun {
             .iter()
             .map(|(step_id, step)| {
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     collection_policy_kind_value(&step.collection_policy),
                 )
             })
@@ -607,7 +620,7 @@ impl MobRun {
                     _ => 0,
                 };
                 (
-                    KernelValue::String(step_id.to_string()),
+                    Self::named_value("StepId", step_id.to_string()),
                     KernelValue::U64(threshold),
                 )
             })
@@ -1302,7 +1315,7 @@ mod tests {
 
         let error = run.step_dependencies().unwrap_err();
         assert!(
-            matches!(error, MobError::Internal(ref message) if message.contains("step_dependencies dependency invalid")),
+            matches!(error, MobError::Internal(ref message) if message.contains("flow_run step_dependencies dependency for step 'step-a' invalid")),
             "expected explicit dependency parse failure, got {error:?}"
         );
     }

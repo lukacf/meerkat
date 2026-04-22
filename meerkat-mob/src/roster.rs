@@ -183,7 +183,7 @@ impl Roster {
                     member_ref,
                     peer_id: None,
                     labels: member_spawned.labels.clone(),
-                    effective_profile_override: None,
+                    effective_profile_override: member_spawned.effective_profile_override.clone(),
                 });
             }
             MobEventKind::MemberRetired { agent_identity, .. } => {

@@ -48,12 +48,14 @@ pub fn pump_schedulers_to_exhaustion(
                 .iter()
                 .filter(|e| e.variant == flow_run::effect::grant_node_slot())
                 .filter_map(|e| e.field(&flow_run::field::frame_id()))
-                .filter_map(|v| {
-                    if let KernelValue::String(fid) = v {
-                        Some(SchedulerGrant::NodeSlot(FrameId::from(fid.as_str())))
-                    } else {
-                        None
+                .filter_map(|v| match v {
+                    KernelValue::Named { type_name, value } if type_name.as_str() == "FrameId" => {
+                        Some(SchedulerGrant::NodeSlot(FrameId::from(value.as_str())))
                     }
+                    KernelValue::String(fid) => {
+                        Some(SchedulerGrant::NodeSlot(FrameId::from(fid.as_str())))
+                    }
+                    _ => None,
                 })
                 .collect();
             if !node_grants.is_empty() {
@@ -74,14 +76,18 @@ pub fn pump_schedulers_to_exhaustion(
                 .iter()
                 .filter(|e| e.variant == flow_run::effect::grant_body_frame_start())
                 .filter_map(|e| e.field(&flow_run::field::loop_instance_id()))
-                .filter_map(|v| {
-                    if let KernelValue::String(lid) = v {
+                .filter_map(|v| match v {
+                    KernelValue::Named { type_name, value }
+                        if type_name.as_str() == "LoopInstanceId" =>
+                    {
                         Some(SchedulerGrant::BodyFrameStart(LoopInstanceId::from(
-                            lid.as_str(),
+                            value.as_str(),
                         )))
-                    } else {
-                        None
                     }
+                    KernelValue::String(lid) => Some(SchedulerGrant::BodyFrameStart(
+                        LoopInstanceId::from(lid.as_str()),
+                    )),
+                    _ => None,
                 })
                 .collect();
             if !frame_grants.is_empty() {

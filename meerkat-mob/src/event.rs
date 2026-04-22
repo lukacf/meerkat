@@ -468,6 +468,10 @@ pub struct MemberSpawnedEvent {
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
     pub(crate) bridge_member_ref: Option<MemberRef>,
+    /// Effective resolved profile persisted for durable resume/replay.
+    /// Not part of the public identity-native contract.
+    #[serde(skip, default)]
+    pub(crate) effective_profile_override: Option<crate::profile::Profile>,
 }
 
 impl MemberSpawnedEvent {
@@ -487,11 +491,20 @@ impl MemberSpawnedEvent {
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
             bridge_member_ref: None,
+            effective_profile_override: None,
         }
     }
 
     pub(crate) fn with_bridge_member_ref(mut self, bridge_member_ref: Option<MemberRef>) -> Self {
         self.bridge_member_ref = bridge_member_ref;
+        self
+    }
+
+    pub(crate) fn with_effective_profile_override(
+        mut self,
+        effective_profile_override: Option<crate::profile::Profile>,
+    ) -> Self {
+        self.effective_profile_override = effective_profile_override;
         self
     }
 
@@ -531,6 +544,20 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             "bridge_member_ref".to_string(),
             serde_json::to_value(bridge_member_ref)?,
         );
+        if let Some(effective_profile_override) = &member_spawned.effective_profile_override {
+            kind.insert(
+                "effective_profile_override".to_string(),
+                serde_json::to_value(effective_profile_override)?,
+            );
+        }
+    } else if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(effective_profile_override) = &member_spawned.effective_profile_override
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "effective_profile_override".to_string(),
+            serde_json::to_value(effective_profile_override)?,
+        );
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -568,11 +595,22 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| kind.remove("bridge_member_ref"))
         .map(serde_json::from_value)
         .transpose()?;
+    let effective_profile_override = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| kind.remove("effective_profile_override"))
+        .map(serde_json::from_value)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
+    }
+    if let Some(effective_profile_override) = effective_profile_override
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.effective_profile_override = Some(effective_profile_override);
     }
     Ok(event)
 }
@@ -869,6 +907,53 @@ mod tests {
                         .bridge_member_ref()
                         .and_then(MemberRef::bridge_session_id),
                     Some(&sid)
+                );
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_stored_mob_event_roundtrip_preserves_effective_profile_override() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("researcher");
+        let override_profile = Profile {
+            model: "claude-opus-4-6".to_string(),
+            skills: vec!["analysis".to_string()],
+            tools: ToolConfig::default(),
+            peer_description: "realm override".to_string(),
+            external_addressable: true,
+            backend: None,
+            runtime_mode: MobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        };
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+                .with_effective_profile_override(Some(override_profile.clone())),
+            ),
+        };
+
+        let encoded = encode_stored_mob_event(&event).unwrap();
+        let decoded = decode_stored_mob_event(&encoded).unwrap();
+
+        match decoded.kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(
+                    member_spawned.effective_profile_override,
+                    Some(override_profile)
                 );
             }
             other => panic!("expected MemberSpawned, got {other:?}"),

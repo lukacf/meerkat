@@ -310,7 +310,13 @@ fn build_run_state_with_three_ready_frames() -> KernelState {
             &state,
             &KernelInput {
                 variant: "RegisterReadyFrame".into(),
-                fields: BTreeMap::from([("frame_id".into(), KernelValue::String((*fid).into()))]),
+                fields: BTreeMap::from([(
+                    "frame_id".into(),
+                    KernelValue::Named {
+                        type_name: "FrameId".into(),
+                        value: (*fid).into(),
+                    },
+                )]),
             },
         )
         .expect("RegisterReadyFrame")

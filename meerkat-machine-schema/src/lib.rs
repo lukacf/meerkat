@@ -29,7 +29,7 @@ pub use machine::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     FieldType, Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema,
     MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TriggerKind,
-    TypeRef, Update, VariantSchema, authoritative_named_enum_variants,
+    TypeRef, Update, VariantSchema, authoritative_named_enum_variants, named_type_is_u64,
 };
 
 #[cfg(test)]

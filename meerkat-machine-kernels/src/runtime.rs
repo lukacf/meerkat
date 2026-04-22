@@ -6,7 +6,7 @@ use std::{
 
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TriggerKind,
-    TypeRef, Update, authoritative_named_enum_variants,
+    TypeRef, Update, authoritative_named_enum_variants, named_type_is_u64,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -1427,7 +1427,8 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
 fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef) -> bool {
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
-        (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
+        (KernelValue::U64(value), TypeRef::U32) => u32::try_from(*value).is_ok(),
+        (KernelValue::U64(_), TypeRef::U64) => true,
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name) => true,
         (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name) => true,
@@ -1458,13 +1459,6 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
         }
         _ => false,
     }
-}
-
-fn named_type_is_u64(name: &str) -> bool {
-    matches!(
-        name,
-        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
-    )
 }
 
 #[cfg(test)]

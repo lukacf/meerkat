@@ -2215,8 +2215,11 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
 fn literal_matches_type(machine: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bool {
     match (expr, ty) {
         (Expr::Bool(_), TypeRef::Bool) => true,
-        (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
-        (Expr::String(_), TypeRef::String | TypeRef::Named(_)) => true,
+        (Expr::U64(value), TypeRef::U32) => u32::try_from(*value).is_ok(),
+        (Expr::U64(_), TypeRef::U64) => true,
+        (Expr::String(_), TypeRef::String) => true,
+        (Expr::U64(_), TypeRef::Named(name)) if crate::named_type_is_u64(name) => true,
+        (Expr::String(_), TypeRef::Named(name)) if !crate::named_type_is_u64(name) => true,
         (Expr::NamedVariant { enum_name, variant }, TypeRef::Enum(name)) if enum_name == name => {
             let authoritative = crate::authoritative_named_enum_variants(&machine.machine);
             authoritative

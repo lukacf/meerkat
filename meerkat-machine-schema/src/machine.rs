@@ -72,6 +72,13 @@ fn named_enum_variants(values: impl IntoIterator<Item = &'static str>) -> BTreeS
     values.into_iter().map(str::to_owned).collect()
 }
 
+pub fn named_type_is_u64(name: &str) -> bool {
+    matches!(
+        name,
+        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+    )
+}
+
 impl MachineSchema {
     pub fn validate(&self) -> Result<(), MachineSchemaError> {
         let phase_names = self.state.phase.variants_by_name()?;

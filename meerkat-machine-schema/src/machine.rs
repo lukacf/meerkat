@@ -170,6 +170,11 @@ impl MachineSchema {
         let named_variants = collect_named_variant_accessors(self);
         let authoritative_named_variants = authoritative_named_enum_variants(&self.machine);
         if !authoritative_named_variants.is_empty() {
+            for enum_name in collect_declared_enum_names(self) {
+                if !authoritative_named_variants.contains_key(&enum_name) {
+                    return Err(MachineSchemaError::UnknownEnumType { enum_name });
+                }
+            }
             for (enum_name, variants) in &named_variants {
                 let Some(allowed) = authoritative_named_variants.get(enum_name) else {
                     return Err(MachineSchemaError::UnknownNamedVariantEnum {
@@ -1347,6 +1352,51 @@ fn collect_named_variant_accessors(schema: &MachineSchema) -> BTreeMap<String, B
     variants
 }
 
+fn collect_declared_enum_names(schema: &MachineSchema) -> BTreeSet<String> {
+    let mut enums = BTreeSet::new();
+    for field in &schema.state.fields {
+        collect_enum_names_from_type(&field.ty, &mut enums);
+    }
+    for variant in &schema.inputs.variants {
+        for field in &variant.fields {
+            collect_enum_names_from_type(&field.ty, &mut enums);
+        }
+    }
+    for variant in &schema.signals.variants {
+        for field in &variant.fields {
+            collect_enum_names_from_type(&field.ty, &mut enums);
+        }
+    }
+    for variant in &schema.effects.variants {
+        for field in &variant.fields {
+            collect_enum_names_from_type(&field.ty, &mut enums);
+        }
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        for field in &helper.params {
+            collect_enum_names_from_type(&field.ty, &mut enums);
+        }
+        collect_enum_names_from_type(&helper.returns, &mut enums);
+    }
+    enums
+}
+
+fn collect_enum_names_from_type(ty: &TypeRef, enums: &mut BTreeSet<String>) {
+    match ty {
+        TypeRef::Enum(name) => {
+            enums.insert(name.clone());
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            collect_enum_names_from_type(inner, enums);
+        }
+        TypeRef::Map(key, value) => {
+            collect_enum_names_from_type(key, enums);
+            collect_enum_names_from_type(value, enums);
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
+    }
+}
+
 fn collect_named_variants_from_update(
     update: &Update,
     variants: &mut BTreeMap<String, BTreeSet<String>>,
@@ -1604,6 +1654,9 @@ pub enum MachineSchemaError {
     UnknownNamedVariantEnum {
         enum_name: String,
     },
+    UnknownEnumType {
+        enum_name: String,
+    },
     UnknownNamedVariantValue {
         enum_name: String,
         variant: String,
@@ -1671,6 +1724,9 @@ impl fmt::Display for MachineSchemaError {
             }
             Self::UnknownNamedVariantEnum { enum_name } => {
                 write!(f, "unknown named-variant enum `{enum_name}`")
+            }
+            Self::UnknownEnumType { enum_name } => {
+                write!(f, "unknown enum type `{enum_name}`")
             }
             Self::UnknownNamedVariantValue { enum_name, variant } => {
                 write!(

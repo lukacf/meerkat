@@ -411,6 +411,26 @@ impl GeneratedMachineKernel {
             state.fields.insert(init.field.clone().into(), value);
         }
 
+        for field in &self.schema.state.fields {
+            let value = state.fields.get(field.name.as_str()).ok_or_else(|| {
+                TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: "<init>".to_string(),
+                    reason: format!("missing initial value for field `{}`", field.name),
+                }
+            })?;
+            if !value_matches_type(&self.schema, value, &field.ty) {
+                return Err(TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: "<init>".to_string(),
+                    reason: format!(
+                        "initial value for field `{}` does not match declared type",
+                        field.name
+                    ),
+                });
+            }
+        }
+
         Ok(state)
     }
 
@@ -1396,10 +1416,7 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) if named_type_is_u64(name) => KernelValue::U64(0),
         TypeRef::Named(_) => KernelValue::String(String::new()),
-        TypeRef::Enum(name) => KernelValue::NamedVariant {
-            enum_name: name.clone().into(),
-            variant: KernelEnumVariant::default(),
-        },
+        TypeRef::Enum(_) => KernelValue::None,
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),

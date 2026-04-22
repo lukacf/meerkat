@@ -408,3 +408,16 @@ fn default_ci_limits() -> CompositionStateLimits {
         map_limit: 0,
     }
 }
+
+/// Compositions declared to host cross-machine handoff protocols whose
+/// producer side is still backed by a compat machine schema (or by a
+/// canonical machine whose DSL is mid-absorption). They sit alongside
+/// `canonical_composition_schemas()` in the codegen iteration.
+///
+/// Populated as each handoff protocol's producer side is wired up.
+/// An empty return is a valid intermediate state — the audit tool
+/// treats the emit set as a closed world computed from both the
+/// canonical and compat catalogs together.
+pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
+    Vec::new()
+}

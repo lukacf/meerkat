@@ -6,8 +6,8 @@ use crate::{CompositionSchema, MachineSchema};
 
 // Canonical exposures for the two-kernel cutover
 pub use compositions::{
-    meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
-    schedule_runtime_bundle_composition,
+    compat_composition_schemas, meerkat_mob_seam_composition, schedule_bundle_composition,
+    schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,

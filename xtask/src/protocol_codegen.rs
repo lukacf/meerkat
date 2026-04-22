@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use meerkat_machine_schema::{
     ClosurePolicy, CompositionSchema, EffectHandoffProtocol, FeedbackFieldSource, MachineSchema,
     ProtocolGenerationMode, TypeRef, canonical_composition_schemas, canonical_machine_schemas,
+    compat_composition_schemas,
 };
 
 use crate::public_contracts::repo_root;
@@ -16,8 +17,17 @@ use crate::public_contracts::repo_root;
 /// for each declared `EffectHandoffProtocol`, plus the terminal surface mapping.
 pub fn run_protocol_codegen() -> Result<()> {
     let root = repo_root()?;
-    let compositions = canonical_composition_schemas();
-    let machines = canonical_machine_schemas();
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+    let mut machines = canonical_machine_schemas();
+    // Compat machines host handoff declarations for effects whose canonical
+    // absorption is still in flight. They must be discoverable by the same
+    // producer-lookup path as canonical machines.
+    machines.extend([
+        meerkat_machine_schema::flow_frame_machine(),
+        meerkat_machine_schema::flow_run_machine(),
+        meerkat_machine_schema::loop_iteration_machine(),
+    ]);
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();
 
@@ -155,28 +165,66 @@ fn generate_protocol_helpers(
 
     let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
 
-    match protocol.rust.generation_mode {
-        ProtocolGenerationMode::Executor => {
-            generate_executor_helpers(&mut out, protocol, producer_machine, &obligation_type)?;
-        }
-        ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
+    // Primary mode first, then each declared additional mode. Stacking order
+    // is deterministic: primary block leads, additional modes follow in the
+    // order declared on the binding. The composition validator guarantees no
+    // duplicates.
+    emit_mode(
+        &mut out,
+        protocol,
+        producer_machine,
+        composition,
+        machine_by_name,
+        &obligation_type,
+        &protocol.rust.generation_mode,
+    )?;
+    for extra in &protocol.rust.additional_modes {
+        emit_mode(
             &mut out,
             protocol,
             producer_machine,
             composition,
             machine_by_name,
             &obligation_type,
-        )?,
-        ProtocolGenerationMode::ShellBridge => generate_shell_bridge_helpers(
-            &mut out,
-            protocol,
-            composition,
-            machine_by_name,
-            &obligation_type,
-        )?,
+            extra,
+        )?;
     }
 
     Ok(out)
+}
+
+fn emit_mode(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+    obligation_type: &str,
+    mode: &ProtocolGenerationMode,
+) -> Result<()> {
+    match mode {
+        ProtocolGenerationMode::Executor => {
+            generate_executor_helpers(out, protocol, producer_machine, obligation_type)
+        }
+        ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
+            out,
+            protocol,
+            producer_machine,
+            composition,
+            machine_by_name,
+            obligation_type,
+        ),
+        ProtocolGenerationMode::ShellBridge => generate_shell_bridge_helpers(
+            out,
+            protocol,
+            composition,
+            machine_by_name,
+            obligation_type,
+        ),
+        ProtocolGenerationMode::HandleBridge => {
+            generate_handle_bridge_helpers(out, protocol, obligation_type)
+        }
+    }
 }
 
 fn generate_obligation_struct(
@@ -384,6 +432,115 @@ fn generate_effect_extractor_helpers(
         )?;
     }
 
+    Ok(())
+}
+
+/// Emit one `submit_*` helper per feedback input that forwards the
+/// obligation through a handle trait method instead of calling
+/// `authority.apply` directly.
+///
+/// The handle-method mapping is declared on `ProtocolRustBinding`:
+/// `handle_trait_path` names the trait; `handle_method_names` maps each
+/// feedback's `input_variant` to a method on that trait;
+/// `handle_arg_accessors` optionally rewrites obligation-field access
+/// paths (e.g., `surface_id` → `surface_id.0`).
+///
+/// The generator renders positional arguments in field-bindings-declared
+/// order: obligation-sourced fields first, owner-context fields next.
+/// The return type is always `Result<(), DslTransitionError>` — the
+/// canonical shape of the handle trait.
+fn generate_handle_bridge_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let handle_trait = short_type(
+        rust.handle_trait_path
+            .as_deref()
+            .context("HandleBridge handle_trait_path missing")?,
+    );
+
+    // Stable ordering: feedback entries as declared, which matches the
+    // primary-mode output for dual-mode protocols (bit-for-bit parity).
+    for feedback in &protocol.allowed_feedback_inputs {
+        let method_name = rust
+            .handle_method_names
+            .get(&feedback.input_variant)
+            .with_context(|| {
+                format!(
+                    "HandleBridge missing handle_method_names entry for `{}`",
+                    feedback.input_variant
+                )
+            })?;
+
+        // Dual-mode suffix rule: when HandleBridge is stacked with another
+        // mode that already emits a `submit_*` per feedback variant, append
+        // `_handle` to avoid symbol collision. When HandleBridge is the
+        // primary (and only) mode, the bare `submit_*` name is used.
+        let fn_name = if rust
+            .additional_modes
+            .contains(&ProtocolGenerationMode::HandleBridge)
+            || rust.generation_mode != ProtocolGenerationMode::HandleBridge
+        {
+            // Any mode that isn't HandleBridge as primary → the HandleBridge
+            // block is secondary, add `_handle` to avoid collision.
+            if rust.generation_mode == ProtocolGenerationMode::HandleBridge {
+                format!("submit_{}", to_snake_case(&feedback.input_variant))
+            } else {
+                format!("submit_{}_handle", to_snake_case(&feedback.input_variant))
+            }
+        } else {
+            format!("submit_{}", to_snake_case(&feedback.input_variant))
+        };
+
+        // Split bindings into obligation-sourced (emit as
+        // `obligation.<field>[accessor]`) and owner-context (emit as
+        // `<snake_name>: <ty>` parameters + `.into()` if the destination
+        // method signature accepts `String`-typed error reasons).
+        let mut owner_params: Vec<String> = Vec::new();
+        let mut call_args: Vec<String> = Vec::new();
+        for binding in &feedback.field_bindings {
+            match &binding.source {
+                FeedbackFieldSource::ObligationField(field) => {
+                    let accessor_key =
+                        format!("{}.{}", feedback.input_variant, to_snake_case(field));
+                    let suffix = rust
+                        .handle_arg_accessors
+                        .get(&accessor_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    call_args.push(format!("obligation.{}{suffix}", to_snake_case(field)));
+                }
+                FeedbackFieldSource::OwnerContext(name) => {
+                    let snake = to_snake_case(name);
+                    owner_params.push(format!("{snake}: impl Into<String>"));
+                    call_args.push(format!("{snake}.into()"));
+                }
+            }
+        }
+
+        writeln!(
+            out,
+            "pub fn {fn_name}(handle: &(impl {handle_trait} + ?Sized), obligation: {obligation_type}{}{}) -> Result<(), meerkat_core::handles::DslTransitionError> {{",
+            if owner_params.is_empty() { "" } else { ", " },
+            owner_params.join(", ")
+        )?;
+        if call_args.is_empty() {
+            writeln!(out, "    handle.{method_name}()")?;
+        } else if call_args.len() == 1 {
+            writeln!(out, "    handle.{method_name}({})", call_args[0])?;
+        } else {
+            writeln!(out, "    handle.{method_name}(")?;
+            for (idx, arg) in call_args.iter().enumerate() {
+                let comma = if idx + 1 == call_args.len() { "" } else { "," };
+                writeln!(out, "        {arg}{comma}")?;
+            }
+            writeln!(out, "    )")?;
+        }
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+    }
     Ok(())
 }
 

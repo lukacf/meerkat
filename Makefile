@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -274,6 +274,13 @@ rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
 	$(CARGO) run -p xtask -- rmat-audit --strict
+
+# Strict `@generated` header truthfulness audit: every `@generated` marker
+# must correspond to a codegen-emit path, and every codegen-emit path must
+# carry the marker. No exceptions, no allowlist.
+audit-generated-headers:
+	@echo "$(GREEN)Running audit-generated-headers...$(NC)"
+	$(CARGO) run -p xtask -- audit-generated-headers
 
 # Generate documentation
 doc:

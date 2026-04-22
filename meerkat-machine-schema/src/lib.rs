@@ -12,7 +12,8 @@ pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, compat_composition_schemas,
+    meerkat_mob_seam_composition,
 };
 pub use compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine};
 pub use composition::{

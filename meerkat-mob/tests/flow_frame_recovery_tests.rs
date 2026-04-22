@@ -36,19 +36,14 @@ fn minimal_run_with_schema_v2() -> MobRun {
 
 /// Build a FrameSnapshot with a specific ready_queue and matching node_status.
 fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> FrameSnapshot {
+    use meerkat_mob::FlowNodeId;
     let mut state = flow_frame::initial_state();
     state.phase = flow_frame::Phase::Running;
-    state.ready_queue = ready_nodes
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-    state.tracked_nodes = ready_nodes
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
+    state.ready_queue = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
+    state.tracked_nodes = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
     state.node_status = ready_nodes
         .iter()
-        .map(|s| (s.to_string(), flow_frame::NodeRunStatus::Ready))
+        .map(|s| (FlowNodeId::from(*s), flow_frame::NodeRunStatus::Ready))
         .collect();
     FrameSnapshot {
         kernel_state: state,
@@ -57,13 +52,14 @@ fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> Fra
 
 /// Insert a frame_id into the ready_frames Seq and ready_frame_membership Set of flow_state.
 fn insert_frame_to_ready_queue(flow_state: &mut flow_run::State, frame_id: &str) {
-    flow_state.ready_frames.push(frame_id.to_string());
+    use meerkat_mob::FrameId;
+    flow_state.ready_frames.push(FrameId::from(frame_id));
     flow_state
         .ready_frame_membership
-        .insert(frame_id.to_string());
+        .insert(FrameId::from(frame_id));
 }
 
-fn get_ready_frames_from_run_state(flow_state: &flow_run::State) -> Vec<String> {
+fn get_ready_frames_from_run_state(flow_state: &flow_run::State) -> Vec<meerkat_mob::FrameId> {
     flow_state.ready_frames.clone()
 }
 
@@ -165,7 +161,7 @@ fn test_recovery_drops_stale_ready_frames() {
 
     let ready_frames = get_ready_frames_from_run_state(&run.flow_state);
     assert!(
-        !ready_frames.contains(&"frame-1".to_string()),
+        !ready_frames.contains(&FrameId::from("frame-1")),
         "Stale frame-1 should be removed from ready_frames; got: {ready_frames:?}"
     );
 }
@@ -187,7 +183,7 @@ fn test_recovery_adds_missing_ready_frames() {
 
     let ready_frames = get_ready_frames_from_run_state(&run.flow_state);
     assert!(
-        ready_frames.contains(&"frame-2".to_string()),
+        ready_frames.contains(&FrameId::from("frame-2")),
         "Missing frame-2 should be added to ready_frames; got: {ready_frames:?}"
     );
 }
@@ -203,8 +199,13 @@ fn test_recovery_invalid_frame_invariant() {
     let bad_frame = FrameSnapshot {
         kernel_state: flow_frame::State {
             phase: flow_frame::Phase::Running,
-            tracked_nodes: ["node-a".to_string()].into_iter().collect(),
-            node_status: BTreeMap::from([("node-a".to_string(), flow_frame::NodeRunStatus::Ready)]),
+            tracked_nodes: [meerkat_mob::FlowNodeId::from("node-a")]
+                .into_iter()
+                .collect(),
+            node_status: BTreeMap::from([(
+                meerkat_mob::FlowNodeId::from("node-a"),
+                flow_frame::NodeRunStatus::Ready,
+            )]),
             ..flow_frame::initial_state()
         },
     };
@@ -249,7 +250,9 @@ fn test_pre_v3_pending_run_is_accepted() {
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────
 
-fn get_pending_body_frame_loops_from_run_state(flow_state: &flow_run::State) -> Vec<String> {
+fn get_pending_body_frame_loops_from_run_state(
+    flow_state: &flow_run::State,
+) -> Vec<meerkat_mob::LoopInstanceId> {
     flow_state.pending_body_frame_loops.clone()
 }
 
@@ -277,7 +280,7 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
 
     let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
     assert!(
-        pending.contains(&"loop-inst-1".to_string()),
+        pending.contains(&LoopInstanceId::from("loop-inst-1")),
         "Missing loop-inst-1 should be added to pending_body_frame_loops; got: {pending:?}"
     );
 }
@@ -293,7 +296,7 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
     let loop_snap = LoopSnapshot {
         kernel_state: loop_iteration::State {
             phase: loop_iteration::Phase::Running,
-            active_body_frame_id: Some("body-frame-1".into()),
+            active_body_frame_id: Some(meerkat_mob::FrameId::from("body-frame-1")),
             ..loop_iteration::initial_state()
         },
     };
@@ -301,15 +304,15 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
         .insert(LoopInstanceId::from("loop-inst-2"), loop_snap);
 
     // Manually add loop-inst-2 to pending_body_frame_loops as a stale entry.
-    run.flow_state.pending_body_frame_loops = vec!["loop-inst-2".into()];
+    run.flow_state.pending_body_frame_loops = vec![LoopInstanceId::from("loop-inst-2")];
     run.flow_state.pending_body_frame_loop_membership =
-        ["loop-inst-2".to_string()].into_iter().collect();
+        [LoopInstanceId::from("loop-inst-2")].into_iter().collect();
 
     reconcile_run_state(&mut run).expect("reconcile");
 
     let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
     assert!(
-        !pending.contains(&"loop-inst-2".to_string()),
+        !pending.contains(&LoopInstanceId::from("loop-inst-2")),
         "Stale loop-inst-2 should be removed from pending_body_frame_loops; got: {pending:?}"
     );
 }

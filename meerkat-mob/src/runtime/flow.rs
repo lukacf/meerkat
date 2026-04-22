@@ -1586,22 +1586,21 @@ impl FlowEngine {
         step_id: &StepId,
     ) -> Result<bool, MobError> {
         let run = self.run_snapshot(run_id).await?;
-        let step_key = step_id.to_string();
         let Some(branch) = run
             .flow_state
             .step_branches
-            .get(&step_key)
-            .and_then(|b: &Option<String>| b.as_ref())
+            .get(step_id)
+            .and_then(|b| b.as_ref())
         else {
             return Ok(false);
         };
         Ok(run.flow_state.tracked_steps.iter().any(|candidate| {
-            candidate != &step_key
+            candidate != step_id
                 && run
                     .flow_state
                     .step_branches
                     .get(candidate)
-                    .and_then(|b: &Option<String>| b.as_ref())
+                    .and_then(|b| b.as_ref())
                     == Some(branch)
                 && matches!(
                     run.flow_state.step_status.get(candidate).and_then(
@@ -1620,11 +1619,10 @@ impl FlowEngine {
         step_id: &StepId,
     ) -> Result<bool, MobError> {
         let run = self.run_snapshot(run_id).await?;
-        let step_key = step_id.to_string();
         let deps = run
             .flow_state
             .step_dependencies
-            .get(&step_key)
+            .get(step_id)
             .cloned()
             .unwrap_or_default();
         if deps.is_empty() {
@@ -1633,7 +1631,7 @@ impl FlowEngine {
         let mode = run
             .flow_state
             .step_dependency_modes
-            .get(&step_key)
+            .get(step_id)
             .map(flow_run::DependencyMode::as_str)
             .unwrap_or("All");
         let statuses = &run.flow_state.step_status;
@@ -1667,11 +1665,10 @@ impl FlowEngine {
         step_id: &StepId,
     ) -> Result<bool, MobError> {
         let run = self.run_snapshot(run_id).await?;
-        let step_key = step_id.to_string();
         let deps = run
             .flow_state
             .step_dependencies
-            .get(&step_key)
+            .get(step_id)
             .cloned()
             .unwrap_or_default();
         if deps.is_empty() {
@@ -1680,7 +1677,7 @@ impl FlowEngine {
         let mode = run
             .flow_state
             .step_dependency_modes
-            .get(&step_key)
+            .get(step_id)
             .map(flow_run::DependencyMode::as_str)
             .unwrap_or("All");
         let statuses = &run.flow_state.step_status;
@@ -1732,7 +1729,7 @@ impl FlowEngine {
             .cas_flow_input_with_effects(
                 run_id,
                 flow_run::Input::ConditionPassed(flow_run::inputs::ConditionPassed {
-                    step_id: step_id.to_string(),
+                    step_id: step_id.clone(),
                 }),
             )
             .await?
@@ -1747,7 +1744,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::SkipStep(flow_run::inputs::SkipStep {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1761,7 +1758,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::FailStep(flow_run::inputs::FailStep {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1777,7 +1774,7 @@ impl FlowEngine {
                     .cas_flow_input_with_effects(
                         run_id,
                         flow_run::Input::CancelStep(flow_run::inputs::CancelStep {
-                            step_id: step_id.to_string(),
+                            step_id: step_id.clone(),
                         }),
                     )
                     .await?;
@@ -1796,7 +1793,7 @@ impl FlowEngine {
                     .cas_flow_input_with_effects(
                         run_id,
                         flow_run::Input::FailStep(flow_run::inputs::FailStep {
-                            step_id: step_id.to_string(),
+                            step_id: step_id.clone(),
                         }),
                     )
                     .await?;
@@ -1813,7 +1810,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::DispatchStep(flow_run::inputs::DispatchStep {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1827,7 +1824,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::CompleteStep(flow_run::inputs::CompleteStep {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1841,7 +1838,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::RecordStepOutput(flow_run::inputs::RecordStepOutput {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1855,7 +1852,7 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             flow_run::Input::ConditionRejected(flow_run::inputs::ConditionRejected {
-                step_id: step_id.to_string(),
+                step_id: step_id.clone(),
             }),
         )
         .await
@@ -1890,7 +1887,7 @@ impl FlowEngine {
             .cas_flow_input_with_effects(
                 run_id,
                 flow_run::Input::ProjectFrameStepStatus(flow_run::inputs::ProjectFrameStepStatus {
-                    step_id: step_id.to_string(),
+                    step_id: step_id.clone(),
                     step_status: match step_status {
                         StepRunStatus::Dispatched => flow_run::StepRunStatus::Dispatched,
                         StepRunStatus::Completed => flow_run::StepRunStatus::Completed,

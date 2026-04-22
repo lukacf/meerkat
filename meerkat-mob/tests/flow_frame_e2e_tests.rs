@@ -1099,10 +1099,10 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
             LoopSnapshot {
                 kernel_state: meerkat_mob::generated::loop_iteration::State {
                     phase: meerkat_mob::generated::loop_iteration::Phase::Completed,
-                    loop_instance_id: loop_instance_id.to_string(),
-                    parent_frame_id: frame_id.to_string(),
-                    parent_node_id: loop_node_id.to_string(),
-                    loop_id: loop_id.to_string(),
+                    loop_instance_id: loop_instance_id.clone(),
+                    parent_frame_id: frame_id.clone(),
+                    parent_node_id: loop_node_id.clone(),
+                    loop_id: loop_id.clone(),
                     depth: 1,
                     stage:
                         meerkat_mob::generated::loop_iteration::LoopIterationStage::AwaitingUntil,
@@ -1216,7 +1216,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
         .expect("body frame snapshot");
     let mut body_frame = rootish_body_frame.clone();
     body_frame.kernel_state.frame_scope = meerkat_mob::generated::flow_frame::FrameScope::Body;
-    body_frame.kernel_state.loop_instance_id = loop_instance_id.to_string();
+    body_frame.kernel_state.loop_instance_id = loop_instance_id.clone();
     body_frame.kernel_state.iteration = 0;
     assert!(
         store
@@ -1237,17 +1237,17 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             LoopSnapshot {
                 kernel_state: meerkat_mob::generated::loop_iteration::State {
                     phase: meerkat_mob::generated::loop_iteration::Phase::Running,
-                    loop_instance_id: loop_instance_id.to_string(),
-                    parent_frame_id: frame_id.to_string(),
-                    parent_node_id: loop_node_id.to_string(),
-                    loop_id: loop_id.to_string(),
+                    loop_instance_id: loop_instance_id.clone(),
+                    parent_frame_id: frame_id.clone(),
+                    parent_node_id: loop_node_id.clone(),
+                    loop_id: loop_id.clone(),
                     depth: 1,
                     stage:
                         meerkat_mob::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 1,
-                    active_body_frame_id: Some(body_frame_id.to_string()),
+                    active_body_frame_id: Some(body_frame_id.clone()),
                 },
             },
             None,
@@ -1428,51 +1428,60 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
     let orphaned_snapshot = FrameSnapshot {
         kernel_state: meerkat_mob::generated::flow_frame::State {
             phase: meerkat_mob::generated::flow_frame::Phase::Running,
-            frame_id: frame_id.to_string(),
+            frame_id: frame_id.clone(),
             frame_scope: meerkat_mob::generated::flow_frame::FrameScope::Root,
-            loop_instance_id: String::new(),
+            loop_instance_id: meerkat_mob::LoopInstanceId::from(""),
             iteration: 0,
-            last_admitted_node: "node-a".into(),
-            tracked_nodes: ["node-a".to_string(), "node-b".to_string()]
-                .into_iter()
-                .collect(),
-            ordered_nodes: vec!["node-a".into(), "node-b".into()],
+            last_admitted_node: meerkat_mob::FlowNodeId::from("node-a"),
+            tracked_nodes: [
+                meerkat_mob::FlowNodeId::from("node-a"),
+                meerkat_mob::FlowNodeId::from("node-b"),
+            ]
+            .into_iter()
+            .collect(),
+            ordered_nodes: vec![
+                meerkat_mob::FlowNodeId::from("node-a"),
+                meerkat_mob::FlowNodeId::from("node-b"),
+            ],
             node_kind: std::collections::BTreeMap::from([
                 (
-                    "node-a".into(),
+                    meerkat_mob::FlowNodeId::from("node-a"),
                     meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
                 ),
                 (
-                    "node-b".into(),
+                    meerkat_mob::FlowNodeId::from("node-b"),
                     meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
                 ),
             ]),
             node_dependencies: std::collections::BTreeMap::from([
-                ("node-a".into(), vec![]),
-                ("node-b".into(), vec!["node-a".into()]),
+                (meerkat_mob::FlowNodeId::from("node-a"), vec![]),
+                (
+                    meerkat_mob::FlowNodeId::from("node-b"),
+                    vec![meerkat_mob::FlowNodeId::from("node-a")],
+                ),
             ]),
             node_dependency_modes: std::collections::BTreeMap::from([
                 (
-                    "node-a".into(),
+                    meerkat_mob::FlowNodeId::from("node-a"),
                     meerkat_mob::generated::flow_frame::DependencyMode::All,
                 ),
                 (
-                    "node-b".into(),
+                    meerkat_mob::FlowNodeId::from("node-b"),
                     meerkat_mob::generated::flow_frame::DependencyMode::All,
                 ),
             ]),
             node_branches: std::collections::BTreeMap::from([
-                ("node-a".into(), None),
-                ("node-b".into(), None),
+                (meerkat_mob::FlowNodeId::from("node-a"), None),
+                (meerkat_mob::FlowNodeId::from("node-b"), None),
             ]),
             branch_winners: Default::default(),
             node_status: std::collections::BTreeMap::from([
                 (
-                    "node-a".into(),
+                    meerkat_mob::FlowNodeId::from("node-a"),
                     meerkat_mob::generated::flow_frame::NodeRunStatus::Running,
                 ),
                 (
-                    "node-b".into(),
+                    meerkat_mob::FlowNodeId::from("node-b"),
                     meerkat_mob::generated::flow_frame::NodeRunStatus::Pending,
                 ),
             ]),

@@ -233,13 +233,18 @@ async fn test_execute_two_node_frame_through_cas_chain() {
 
 /// Helper: build a FlowRunMachine in Running state with 3 frames in ready_frames
 fn build_run_state_with_three_ready_frames() -> flow_run::State {
+    use meerkat_mob::FrameId;
     flow_run::State {
         phase: flow_run::Phase::Running,
-        ready_frames: vec!["frame-a".into(), "frame-b".into(), "frame-c".into()],
+        ready_frames: vec![
+            FrameId::from("frame-a"),
+            FrameId::from("frame-b"),
+            FrameId::from("frame-c"),
+        ],
         ready_frame_membership: [
-            "frame-a".to_string(),
-            "frame-b".to_string(),
-            "frame-c".to_string(),
+            FrameId::from("frame-a"),
+            FrameId::from("frame-b"),
+            FrameId::from("frame-c"),
         ]
         .into_iter()
         .collect(),

@@ -5,7 +5,7 @@
 //! consistent with the per-frame and per-loop kernel snapshots.
 
 use crate::generated::{flow_frame, loop_iteration};
-use crate::ids::{FrameId, LoopInstanceId};
+use crate::ids::{FlowNodeId, FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
 
 /// Errors that prevent a run from being resumed.
@@ -64,7 +64,7 @@ fn check_frame_invariant(
     frame_id: &FrameId,
     snap: &FrameSnapshot,
 ) -> Result<(), RestoreIncompatible> {
-    let ready_by_status: std::collections::BTreeSet<String> = snap
+    let ready_by_status: std::collections::BTreeSet<FlowNodeId> = snap
         .kernel_state
         .node_status
         .iter()
@@ -72,7 +72,7 @@ fn check_frame_invariant(
         .map(|(node_id, _)| node_id.clone())
         .collect();
 
-    let in_ready_queue: std::collections::BTreeSet<String> =
+    let in_ready_queue: std::collections::BTreeSet<FlowNodeId> =
         snap.kernel_state.ready_queue.iter().cloned().collect();
 
     if ready_by_status != in_ready_queue {
@@ -91,11 +91,11 @@ fn check_frame_invariant(
 /// - it exists in `run.frames`, AND
 /// - its `ready_queue` is non-empty.
 fn reconcile_ready_frames(run: &mut MobRun) {
-    let mut active_frame_ids: Vec<String> = run
+    let mut active_frame_ids: Vec<FrameId> = run
         .frames
         .iter()
         .filter(|(_, snap)| frame_has_nonempty_ready_queue(snap))
-        .map(|(frame_id, _)| frame_id.to_string())
+        .map(|(frame_id, _)| frame_id.clone())
         .collect();
     active_frame_ids.sort();
     run.flow_state.ready_frames = active_frame_ids.clone();
@@ -110,11 +110,11 @@ fn reconcile_ready_frames(run: &mut MobRun) {
 /// - its kernel state phase is "Running"
 /// - its `active_body_frame_id` field is `None` (requested body frame but not yet started)
 fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
-    let mut pending_loop_ids: Vec<String> = run
+    let mut pending_loop_ids: Vec<LoopInstanceId> = run
         .loops
         .iter()
         .filter(|(loop_id, snap)| loop_is_pending_body_frame(loop_id, snap))
-        .map(|(loop_id, _)| loop_id.to_string())
+        .map(|(loop_id, _)| loop_id.clone())
         .collect();
     pending_loop_ids.sort();
     run.flow_state.pending_body_frame_loops = pending_loop_ids.clone();
@@ -168,10 +168,7 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
 }
 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
-    snap.kernel_state
-        .active_body_frame_id
-        .as_ref()
-        .map(|frame_id| FrameId::from(frame_id.as_str()))
+    snap.kernel_state.active_body_frame_id.clone()
 }
 
 fn count_running_step_nodes(snap: &FrameSnapshot) -> u32 {
@@ -233,20 +230,14 @@ mod tests {
     ) -> FrameSnapshot {
         let mut state = crate::generated::flow_frame::initial_state();
         state.phase = crate::generated::flow_frame::Phase::Running;
-        state.ready_queue = ready_nodes
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
-        state.tracked_nodes = ready_nodes
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
+        state.ready_queue = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
+        state.tracked_nodes = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
         if all_nodes_ready {
             state.node_status = ready_nodes
                 .iter()
                 .map(|s| {
                     (
-                        s.to_string(),
+                        FlowNodeId::from(*s),
                         crate::generated::flow_frame::NodeRunStatus::Ready,
                     )
                 })
@@ -289,11 +280,11 @@ mod tests {
         let mut root = crate::generated::flow_frame::initial_state();
         root.phase = crate::generated::flow_frame::Phase::Running;
         root.node_status = BTreeMap::from([(
-            "loop-node".into(),
+            FlowNodeId::from("loop-node"),
             crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         root.node_kind = BTreeMap::from([(
-            "loop-node".into(),
+            FlowNodeId::from("loop-node"),
             crate::generated::flow_frame::FlowNodeKind::Loop,
         )]);
         run.frames
@@ -302,11 +293,11 @@ mod tests {
         let mut body = crate::generated::flow_frame::initial_state();
         body.phase = crate::generated::flow_frame::Phase::Running;
         body.node_status = BTreeMap::from([(
-            "body-step".into(),
+            FlowNodeId::from("body-step"),
             crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         body.node_kind = BTreeMap::from([(
-            "body-step".into(),
+            FlowNodeId::from("body-step"),
             crate::generated::flow_frame::FlowNodeKind::Step,
         )]);
         run.frames.insert(
@@ -316,7 +307,7 @@ mod tests {
 
         let mut loop_state = crate::generated::loop_iteration::initial_state();
         loop_state.phase = crate::generated::loop_iteration::Phase::Running;
-        loop_state.active_body_frame_id = Some("body-frame".into());
+        loop_state.active_body_frame_id = Some(FrameId::from("body-frame"));
         run.loops.insert(
             LoopInstanceId::from("loop-1"),
             LoopSnapshot {
@@ -335,7 +326,7 @@ mod tests {
         let mut state = crate::generated::flow_frame::initial_state();
         state.phase = crate::generated::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
-            "node-a".into(),
+            FlowNodeId::from("node-a"),
             crate::generated::flow_frame::NodeRunStatus::Running,
         )]);
         let snap = FrameSnapshot {
@@ -350,7 +341,7 @@ mod tests {
         let mut state = crate::generated::flow_frame::initial_state();
         state.phase = crate::generated::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
-            "node-a".into(),
+            FlowNodeId::from("node-a"),
             crate::generated::flow_frame::NodeRunStatus::Ready,
         )]);
         let snap = FrameSnapshot {
@@ -368,12 +359,16 @@ mod tests {
         let mut run = minimal_v2_run_running();
         let stale = frame_snapshot_with_ready_queue("frame-1", vec![], false);
         run.frames.insert(crate::FrameId::from("frame-1"), stale);
-        run.flow_state.ready_frames.push("frame-1".into());
+        run.flow_state.ready_frames.push(FrameId::from("frame-1"));
         run.flow_state
             .ready_frame_membership
-            .insert("frame-1".into());
+            .insert(FrameId::from("frame-1"));
         reconcile_run_state(&mut run).expect("reconcile");
-        assert!(!run.flow_state.ready_frames.contains(&"frame-1".to_string()));
+        assert!(
+            !run.flow_state
+                .ready_frames
+                .contains(&FrameId::from("frame-1"))
+        );
     }
 
     #[test]
@@ -382,6 +377,10 @@ mod tests {
         let active = frame_snapshot_with_ready_queue("frame-2", vec!["node-a"], true);
         run.frames.insert(crate::FrameId::from("frame-2"), active);
         reconcile_run_state(&mut run).expect("reconcile");
-        assert!(run.flow_state.ready_frames.contains(&"frame-2".to_string()));
+        assert!(
+            run.flow_state
+                .ready_frames
+                .contains(&FrameId::from("frame-2"))
+        );
     }
 }

@@ -19727,10 +19727,10 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
             crate::run::LoopSnapshot {
                 kernel_state: crate::generated::loop_iteration::State {
                     phase: crate::generated::loop_iteration::Phase::Running,
-                    loop_instance_id: loop_instance_id.to_string(),
-                    parent_frame_id: frame_id.to_string(),
-                    parent_node_id: "loop-node".into(),
-                    loop_id: "retry".into(),
+                    loop_instance_id: loop_instance_id.clone(),
+                    parent_frame_id: frame_id.clone(),
+                    parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
+                    loop_id: crate::ids::LoopId::from("retry"),
                     depth: 1,
                     stage: crate::generated::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
                     current_iteration: 0,
@@ -19865,16 +19865,16 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             crate::run::LoopSnapshot {
                 kernel_state: crate::generated::loop_iteration::State {
                     phase: crate::generated::loop_iteration::Phase::Running,
-                    loop_instance_id: loop_instance_id.to_string(),
-                    parent_frame_id: frame_id.to_string(),
-                    parent_node_id: "loop-node".into(),
-                    loop_id: "retry".into(),
+                    loop_instance_id: loop_instance_id.clone(),
+                    parent_frame_id: frame_id.clone(),
+                    parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
+                    loop_id: crate::ids::LoopId::from("retry"),
                     depth: 1,
                     stage: crate::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 3,
-                    active_body_frame_id: Some(body_frame_id.to_string()),
+                    active_body_frame_id: Some(body_frame_id.clone()),
                 },
             },
             Some(crate::run::LoopIterationLedgerEntry {
@@ -19891,7 +19891,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         .expect("seed body frame");
     let mut body_frame = root_body_frame.clone();
     body_frame.kernel_state.frame_scope = crate::generated::flow_frame::FrameScope::Body;
-    body_frame.kernel_state.loop_instance_id = loop_instance_id.to_string();
+    body_frame.kernel_state.loop_instance_id = loop_instance_id.clone();
     body_frame.kernel_state.iteration = 0;
     assert!(
         store

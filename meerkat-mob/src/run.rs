@@ -264,35 +264,19 @@ impl MobRun {
         let initial = flow_run::initial_state();
         let ordered_steps = topological_steps(&config.flow_spec)?;
         let input = flow_run::Input::CreateRun(flow_run::inputs::CreateRun {
-            step_ids: config
-                .flow_spec
-                .steps
-                .keys()
-                .map(std::string::ToString::to_string)
-                .collect(),
-            ordered_steps: ordered_steps
-                .into_iter()
-                .map(|step_id| step_id.to_string())
-                .collect(),
+            step_ids: config.flow_spec.steps.keys().cloned().collect(),
+            ordered_steps,
             step_has_conditions: config
                 .flow_spec
                 .steps
                 .iter()
-                .map(|(step_id, step)| (step_id.to_string(), step.condition.is_some()))
+                .map(|(step_id, step)| (step_id.clone(), step.condition.is_some()))
                 .collect(),
             step_dependencies: config
                 .flow_spec
                 .steps
                 .iter()
-                .map(|(step_id, step)| {
-                    (
-                        step_id.to_string(),
-                        step.depends_on
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect(),
-                    )
-                })
+                .map(|(step_id, step)| (step_id.clone(), step.depends_on.clone()))
                 .collect(),
             step_dependency_modes: config
                 .flow_spec
@@ -300,7 +284,7 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        step_id.to_string(),
+                        step_id.clone(),
                         dependency_mode_value(step.depends_on_mode.clone()),
                     )
                 })
@@ -309,12 +293,7 @@ impl MobRun {
                 .flow_spec
                 .steps
                 .iter()
-                .map(|(step_id, step)| {
-                    (
-                        step_id.to_string(),
-                        step.branch.as_ref().map(ToString::to_string),
-                    )
-                })
+                .map(|(step_id, step)| (step_id.clone(), step.branch.clone()))
                 .collect(),
             step_collection_policies: config
                 .flow_spec
@@ -322,7 +301,7 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        step_id.to_string(),
+                        step_id.clone(),
                         collection_policy_kind_value(&step.collection_policy),
                     )
                 })
@@ -336,7 +315,7 @@ impl MobRun {
                         crate::definition::CollectionPolicy::Quorum { n } => u32::from(n),
                         _ => 0,
                     };
-                    (step_id.to_string(), threshold)
+                    (step_id.clone(), threshold)
                 })
                 .collect(),
             escalation_threshold: config
@@ -386,11 +365,11 @@ impl MobRun {
                 .flow_spec
                 .steps
                 .keys()
-                .map(|step_id| mob_dsl::StepId::from(step_id.to_string()))
+                .map(|step_id| mob_dsl::StepId::from(step_id.as_str()))
                 .collect(),
             ordered_steps: ordered_steps
-                .into_iter()
-                .map(|step_id| mob_dsl::StepId::from(step_id.to_string()))
+                .iter()
+                .map(|step_id| mob_dsl::StepId::from(step_id.as_str()))
                 .collect(),
             step_has_conditions: config
                 .flow_spec
@@ -398,7 +377,7 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        mob_dsl::StepId::from(step_id.to_string()),
+                        mob_dsl::StepId::from(step_id.as_str()),
                         step.condition.is_some(),
                     )
                 })
@@ -409,10 +388,10 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        mob_dsl::StepId::from(step_id.to_string()),
+                        mob_dsl::StepId::from(step_id.as_str()),
                         step.depends_on
                             .iter()
-                            .map(|dep| mob_dsl::StepId::from(dep.to_string()))
+                            .map(|dep| mob_dsl::StepId::from(dep.as_str()))
                             .collect(),
                     )
                 })
@@ -423,7 +402,7 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        mob_dsl::StepId::from(step_id.to_string()),
+                        mob_dsl::StepId::from(step_id.as_str()),
                         dependency_mode_seed_value(step.depends_on_mode.clone()),
                     )
                 })
@@ -434,10 +413,10 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        mob_dsl::StepId::from(step_id.to_string()),
+                        mob_dsl::StepId::from(step_id.as_str()),
                         step.branch
                             .as_ref()
-                            .map(|branch| mob_dsl::BranchId::from(branch.to_string())),
+                            .map(|branch| mob_dsl::BranchId::from(branch.as_str())),
                     )
                 })
                 .collect(),
@@ -447,7 +426,7 @@ impl MobRun {
                 .iter()
                 .map(|(step_id, step)| {
                     (
-                        mob_dsl::StepId::from(step_id.to_string()),
+                        mob_dsl::StepId::from(step_id.as_str()),
                         collection_policy_seed_value(&step.collection_policy),
                     )
                 })
@@ -461,7 +440,7 @@ impl MobRun {
                         crate::definition::CollectionPolicy::Quorum { n } => u32::from(n),
                         _ => 0,
                     };
-                    (mob_dsl::StepId::from(step_id.to_string()), threshold)
+                    (mob_dsl::StepId::from(step_id.as_str()), threshold)
                 })
                 .collect(),
             escalation_threshold: config
@@ -508,11 +487,11 @@ impl MobRun {
     ) -> Result<mob_dsl::MobMachineInput, MobError> {
         let tracked_nodes = ordered
             .iter()
-            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.to_string()))
+            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.as_str()))
             .collect();
         let ordered_nodes = ordered
             .iter()
-            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.to_string()))
+            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.as_str()))
             .collect();
         let mut node_kind = BTreeMap::new();
         let mut node_dependencies = BTreeMap::new();
@@ -520,7 +499,7 @@ impl MobRun {
         let mut node_branches = BTreeMap::new();
 
         for (node_id, node_spec) in &spec.nodes {
-            let key = mob_dsl::FlowNodeId::from(node_id.to_string());
+            let key = mob_dsl::FlowNodeId::from(node_id.as_str());
             match node_spec {
                 FlowNodeSpec::Step(step) => {
                     node_kind.insert(key.clone(), mob_dsl::FlowNodeKind::Step);
@@ -528,7 +507,7 @@ impl MobRun {
                         key.clone(),
                         step.depends_on
                             .iter()
-                            .map(|dep| mob_dsl::FlowNodeId::from(dep.to_string()))
+                            .map(|dep| mob_dsl::FlowNodeId::from(dep.as_str()))
                             .collect(),
                     );
                     node_dependency_modes.insert(
@@ -539,7 +518,7 @@ impl MobRun {
                         key,
                         step.branch
                             .as_ref()
-                            .map(|branch| mob_dsl::BranchId::from(branch.to_string())),
+                            .map(|branch| mob_dsl::BranchId::from(branch.as_str())),
                     );
                 }
                 FlowNodeSpec::RepeatUntil(loop_spec) => {
@@ -549,7 +528,7 @@ impl MobRun {
                         loop_spec
                             .depends_on
                             .iter()
-                            .map(|dep| mob_dsl::FlowNodeId::from(dep.to_string()))
+                            .map(|dep| mob_dsl::FlowNodeId::from(dep.as_str()))
                             .collect(),
                     );
                     node_dependency_modes.insert(
@@ -563,10 +542,9 @@ impl MobRun {
 
         Ok(mob_dsl::MobMachineInput::CreateFrameSeed {
             run_id: mob_dsl::RunId::from(run_id.to_string()),
-            frame_id: mob_dsl::FrameId::from(frame_id.to_string()),
+            frame_id: mob_dsl::FrameId::from(frame_id.as_str()),
             frame_scope,
-            loop_instance_id: loop_instance_id
-                .map(|id| mob_dsl::LoopInstanceId::from(id.to_string())),
+            loop_instance_id: loop_instance_id.map(|id| mob_dsl::LoopInstanceId::from(id.as_str())),
             iteration,
             tracked_nodes,
             ordered_nodes,
@@ -582,11 +560,13 @@ impl MobRun {
     ) -> Result<mob_dsl::MobMachineInput, MobError> {
         Ok(mob_dsl::MobMachineInput::CreateLoopSeed {
             loop_instance_id: mob_dsl::LoopInstanceId::from(
-                snapshot.kernel_state.loop_instance_id.clone(),
+                snapshot.kernel_state.loop_instance_id.as_str(),
             ),
-            parent_frame_id: mob_dsl::FrameId::from(snapshot.kernel_state.parent_frame_id.clone()),
-            parent_node_id: mob_dsl::FlowNodeId::from(snapshot.kernel_state.parent_node_id.clone()),
-            loop_id: mob_dsl::LoopId::from(snapshot.kernel_state.loop_id.clone()),
+            parent_frame_id: mob_dsl::FrameId::from(snapshot.kernel_state.parent_frame_id.as_str()),
+            parent_node_id: mob_dsl::FlowNodeId::from(
+                snapshot.kernel_state.parent_node_id.as_str(),
+            ),
+            loop_id: mob_dsl::LoopId::from(snapshot.kernel_state.loop_id.as_str()),
             depth: snapshot.kernel_state.depth,
             max_iterations: snapshot.kernel_state.max_iterations,
         })
@@ -620,7 +600,7 @@ impl MobRun {
         phase: mob_dsl::FrameStatus,
     ) -> mob_dsl::MobMachineInput {
         mob_dsl::MobMachineInput::ProjectFramePhase {
-            frame_id: mob_dsl::FrameId::from(frame_id.to_string()),
+            frame_id: mob_dsl::FrameId::from(frame_id.as_str()),
             phase,
         }
     }
@@ -632,11 +612,11 @@ impl MobRun {
         active_body_frame_id: Option<&FrameId>,
     ) -> mob_dsl::MobMachineInput {
         mob_dsl::MobMachineInput::ProjectLoopState {
-            loop_instance_id: mob_dsl::LoopInstanceId::from(loop_instance_id.to_string()),
+            loop_instance_id: mob_dsl::LoopInstanceId::from(loop_instance_id.as_str()),
             phase,
             stage,
             active_body_frame_id: active_body_frame_id
-                .map(|frame_id| mob_dsl::FrameId::from(frame_id.to_string())),
+                .map(|frame_id| mob_dsl::FrameId::from(frame_id.as_str())),
         }
     }
 
@@ -1083,10 +1063,10 @@ mod tests {
         );
         run.flow_state.step_status = BTreeMap::from([
             (
-                "step-a".to_string(),
+                StepId::from("step-a"),
                 Some(flow_run::StepRunStatus::Completed),
             ),
-            ("step-b".to_string(), None),
+            (StepId::from("step-b"), None),
         ]);
         run.flow_state.failure_count = 3;
         run.flow_state.consecutive_failure_count = 2;
@@ -1155,7 +1135,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_status = BTreeMap::from([(
-            "step-a".to_string(),
+            StepId::from("step-a"),
             Some(flow_run::StepRunStatus::Completed),
         )]);
         assert_eq!(
@@ -1173,7 +1153,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_status = BTreeMap::from([(
-            "step-a".to_string(),
+            StepId::from("step-a"),
             Some(flow_run::StepRunStatus::Completed),
         )]);
 
@@ -1207,7 +1187,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_dependency_modes =
-            BTreeMap::from([("step-a".to_string(), flow_run::DependencyMode::All)]);
+            BTreeMap::from([(StepId::from("step-a"), flow_run::DependencyMode::All)]);
 
         assert_eq!(
             run.step_dependency_modes().unwrap(),
@@ -1224,7 +1204,7 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_collection_policies =
-            BTreeMap::from([("step-a".to_string(), flow_run::CollectionPolicyKind::All)]);
+            BTreeMap::from([(StepId::from("step-a"), flow_run::CollectionPolicyKind::All)]);
 
         assert_eq!(
             run.step_collection_policy_kinds().unwrap(),

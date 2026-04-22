@@ -448,7 +448,7 @@ impl FlowFrameMutator for FlowFrameKernel {
             let snap = self.require_frame(run_id, frame_id).await?;
             let complete_input =
                 flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
-                    node_id: node_id.to_string(),
+                    node_id: node_id.clone(),
                 });
             let next_outcome = flow_frame::transition(
                 &snap.kernel_state,
@@ -491,7 +491,7 @@ impl FlowFrameMutator for FlowFrameKernel {
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
         let input = flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
-            node_id: node_id.to_string(),
+            node_id: node_id.clone(),
         });
         self.transition_frame(run_id, frame_id, input, 5)
             .await
@@ -505,7 +505,7 @@ impl FlowFrameMutator for FlowFrameKernel {
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
         let input = flow_frame::Input::FailNode(flow_frame::inputs::FailNode {
-            node_id: node_id.to_string(),
+            node_id: node_id.clone(),
         });
         self.transition_frame(run_id, frame_id, input, 5)
             .await
@@ -519,7 +519,7 @@ impl FlowFrameMutator for FlowFrameKernel {
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
         let input = flow_frame::Input::SkipNode(flow_frame::inputs::SkipNode {
-            node_id: node_id.to_string(),
+            node_id: node_id.clone(),
         });
         self.transition_frame(run_id, frame_id, input, 5)
             .await
@@ -533,7 +533,7 @@ impl FlowFrameMutator for FlowFrameKernel {
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
         let input = flow_frame::Input::CancelNode(flow_frame::inputs::CancelNode {
-            node_id: node_id.to_string(),
+            node_id: node_id.clone(),
         });
         self.transition_frame(run_id, frame_id, input, 5)
             .await
@@ -1487,14 +1487,10 @@ impl FlowFrameEngine {
                         initial_loop,
                     )?)
                     .await?;
-                let active_body = initial_loop
-                    .kernel_state
-                    .active_body_frame_id
-                    .as_ref()
-                    .map(|frame_id| FrameId::from(frame_id.as_str()));
+                let active_body = initial_loop.kernel_state.active_body_frame_id.clone();
                 projector
                     .project_machine_input(crate::run::MobRun::create_loop_state_input(
-                        &LoopInstanceId::from(initial_loop.kernel_state.loop_instance_id.as_str()),
+                        &initial_loop.kernel_state.loop_instance_id,
                         crate::machines::mob_machine::LoopStatus::Running,
                         crate::machines::mob_machine::LoopIterationStage::AwaitingBodyFrame,
                         active_body.as_ref(),
@@ -1867,8 +1863,8 @@ fn frame_is_body(kernel_state: &flow_frame::State) -> bool {
 }
 
 fn frame_loop_instance_id(kernel_state: &flow_frame::State) -> Option<LoopInstanceId> {
-    (!kernel_state.loop_instance_id.is_empty())
-        .then(|| LoopInstanceId::from(kernel_state.loop_instance_id.as_str()))
+    (!kernel_state.loop_instance_id.as_str().is_empty())
+        .then(|| kernel_state.loop_instance_id.clone())
 }
 
 fn frame_iteration(kernel_state: &flow_frame::State) -> Result<u64, MobError> {
@@ -1876,15 +1872,15 @@ fn frame_iteration(kernel_state: &flow_frame::State) -> Result<u64, MobError> {
 }
 
 fn loop_parent_frame_id(kernel_state: &loop_iteration::State) -> Result<FrameId, MobError> {
-    Ok(FrameId::from(kernel_state.parent_frame_id.as_str()))
+    Ok(kernel_state.parent_frame_id.clone())
 }
 
 fn loop_parent_node_id(kernel_state: &loop_iteration::State) -> Result<FlowNodeId, MobError> {
-    Ok(FlowNodeId::from(kernel_state.parent_node_id.as_str()))
+    Ok(kernel_state.parent_node_id.clone())
 }
 
 fn loop_id_from_state(kernel_state: &loop_iteration::State) -> Result<LoopId, MobError> {
-    Ok(LoopId::from(kernel_state.loop_id.as_str()))
+    Ok(kernel_state.loop_id.clone())
 }
 
 fn loop_depth(kernel_state: &loop_iteration::State) -> Result<u32, MobError> {
@@ -1900,10 +1896,7 @@ fn usize_from_u64(value: u64, context: &str) -> Result<usize, MobError> {
 }
 
 fn active_body_frame_id(kernel_state: &loop_iteration::State) -> Option<FrameId> {
-    kernel_state
-        .active_body_frame_id
-        .as_ref()
-        .map(|frame_id: &String| FrameId::from(frame_id.as_str()))
+    kernel_state.active_body_frame_id.clone()
 }
 
 fn running_node_ids(kernel_state: &flow_frame::State) -> Vec<FlowNodeId> {
@@ -1911,7 +1904,7 @@ fn running_node_ids(kernel_state: &flow_frame::State) -> Vec<FlowNodeId> {
         .node_status
         .iter()
         .filter(|(_, status)| *status == &flow_frame::NodeRunStatus::Running)
-        .map(|(id, _)| FlowNodeId::from(id.as_str()))
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -1924,7 +1917,7 @@ fn collect_frame_step_statuses(
         let FlowNodeSpec::Step(step_spec) = node_spec else {
             continue;
         };
-        let Some(status) = kernel_state.node_status.get(&node_id.to_string()) else {
+        let Some(status) = kernel_state.node_status.get(node_id) else {
             continue;
         };
         let Some(step_status) = node_terminal_step_status(status.as_str()) else {
@@ -1986,7 +1979,7 @@ fn preview_node_grant(state: &flow_run::State) -> Result<Option<PreviewedNodeGra
     match outcome {
         Ok(outcome) => Ok(outcome.effects.iter().find_map(|effect| match effect {
             flow_run::Effect::GrantNodeSlot(payload) => Some(PreviewedNodeGrant {
-                frame_id: FrameId::from(payload.frame_id.as_str()),
+                frame_id: payload.frame_id.clone(),
                 next_run_state: outcome.next_state.clone(),
             }),
             _ => None,
@@ -2006,7 +1999,7 @@ fn preview_body_frame_grant(
     match outcome {
         Ok(outcome) => Ok(outcome.effects.iter().find_map(|effect| match effect {
             flow_run::Effect::GrantBodyFrameStart(payload) => Some(PreviewedBodyFrameGrant {
-                loop_instance_id: LoopInstanceId::from(payload.loop_instance_id.as_str()),
+                loop_instance_id: payload.loop_instance_id.clone(),
                 next_run_state: outcome.next_state.clone(),
             }),
             _ => None,
@@ -2070,18 +2063,14 @@ fn has_effect_variant(effects: &[flow_frame::Effect], variant: &str) -> bool {
 
 fn effect_admit_step_node_id(effects: &[flow_frame::Effect]) -> Option<FlowNodeId> {
     effects.iter().find_map(|effect| match effect {
-        flow_frame::Effect::AdmitStepWork(payload) => {
-            Some(FlowNodeId::from(payload.node_id.as_str()))
-        }
+        flow_frame::Effect::AdmitStepWork(payload) => Some(payload.node_id.clone()),
         _ => None,
     })
 }
 
 fn effect_node_id(effects: &[flow_frame::Effect]) -> Result<Option<FlowNodeId>, MobError> {
     Ok(effects.iter().find_map(|effect| match effect {
-        flow_frame::Effect::StartLoopNode(payload) => {
-            Some(FlowNodeId::from(payload.node_id.as_str()))
-        }
+        flow_frame::Effect::StartLoopNode(payload) => Some(payload.node_id.clone()),
         _ => None,
     }))
 }
@@ -2101,11 +2090,11 @@ fn initial_loop_snapshot(
     let start = loop_transition_outcome(
         &initial,
         loop_iteration::Input::StartLoop(loop_iteration::inputs::StartLoop {
-            loop_instance_id: loop_instance_id.to_string(),
+            loop_instance_id: loop_instance_id.clone(),
             max_iterations: loop_spec.max_iterations,
-            parent_frame_id: parent_frame_id.to_string(),
-            parent_node_id: parent_node_id.to_string(),
-            loop_id: loop_spec.loop_id.to_string(),
+            parent_frame_id: parent_frame_id.clone(),
+            parent_node_id: parent_node_id.clone(),
+            loop_id: loop_spec.loop_id.clone(),
             depth,
         }),
     )?;
@@ -2147,7 +2136,7 @@ fn all_nodes_terminal(state: &flow_frame::State, spec: &FrameSpec) -> bool {
     spec.nodes.keys().all(|node_id| {
         state
             .node_status
-            .get(&node_id.to_string())
+            .get(node_id)
             .is_some_and(|status| terminal.contains(&status.as_str()))
     })
 }
@@ -2159,9 +2148,7 @@ fn register_ready_frame_if_needed(
 ) -> Result<Option<FlowFrameLoopStorePlan>, MobError> {
     if frame_state.phase != flow_frame::Phase::Running
         || !frame_ready(frame_state)
-        || run_state
-            .ready_frame_membership
-            .contains(&frame_id.to_string())
+        || run_state.ready_frame_membership.contains(frame_id)
     {
         return Ok(None);
     }
@@ -2170,7 +2157,7 @@ fn register_ready_frame_if_needed(
         next_run_state: flow_run::transition(
             run_state,
             flow_run::Input::RegisterReadyFrame(flow_run::inputs::RegisterReadyFrame {
-                frame_id: frame_id.to_string(),
+                frame_id: frame_id.clone(),
             }),
             &flow_run::EmptyContext,
         )
@@ -2188,7 +2175,7 @@ fn release_node_execution(
         next_run_state: flow_run::transition(
             run_state,
             flow_run::Input::NodeExecutionReleased(flow_run::inputs::NodeExecutionReleased {
-                frame_id: frame_id.to_string(),
+                frame_id: frame_id.clone(),
             }),
             &flow_run::EmptyContext,
         )
@@ -2237,13 +2224,11 @@ fn pending_until_obligation(
     }
     Ok(Some(
         crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation {
-            loop_instance_id: LoopInstanceId::from(
-                loop_snapshot.kernel_state.loop_instance_id.as_str(),
-            ),
+            loop_instance_id: loop_snapshot.kernel_state.loop_instance_id.clone(),
             iteration: loop_snapshot.kernel_state.last_completed_iteration,
-            parent_frame_id: FrameId::from(loop_snapshot.kernel_state.parent_frame_id.as_str()),
-            parent_node_id: FlowNodeId::from(loop_snapshot.kernel_state.parent_node_id.as_str()),
-            loop_id: LoopId::from(loop_snapshot.kernel_state.loop_id.as_str()),
+            parent_frame_id: loop_snapshot.kernel_state.parent_frame_id.clone(),
+            parent_node_id: loop_snapshot.kernel_state.parent_node_id.clone(),
+            loop_id: loop_snapshot.kernel_state.loop_id.clone(),
         },
     ))
 }
@@ -2270,20 +2255,18 @@ fn acknowledge_node_grant(
         next_run_state = run_transition_state(
             &next_run_state,
             flow_run::Input::NodeExecutionReleased(flow_run::inputs::NodeExecutionReleased {
-                frame_id: frame_id.to_string(),
+                frame_id: frame_id.clone(),
             }),
         )?;
     }
 
     if frame_ready(&next_frame.kernel_state)
-        && !next_run_state
-            .ready_frame_membership
-            .contains(&frame_id.to_string())
+        && !next_run_state.ready_frame_membership.contains(frame_id)
     {
         next_run_state = run_transition_state(
             &next_run_state,
             flow_run::Input::RegisterReadyFrame(flow_run::inputs::RegisterReadyFrame {
-                frame_id: frame_id.to_string(),
+                frame_id: frame_id.clone(),
             }),
         )?;
     }
@@ -2317,13 +2300,13 @@ fn acknowledge_node_grant(
         if state_is_awaiting_body_frame(&initial_loop.kernel_state)
             && !next_run_state
                 .pending_body_frame_loop_membership
-                .contains(&loop_instance_id.to_string())
+                .contains(&loop_instance_id)
         {
             next_run_state = run_transition_state(
                 &next_run_state,
                 flow_run::Input::RegisterPendingBodyFrame(
                     flow_run::inputs::RegisterPendingBodyFrame {
-                        loop_instance_id: loop_instance_id.to_string(),
+                        loop_instance_id: loop_instance_id.clone(),
                         depth: body_depth,
                     },
                 ),
@@ -2392,8 +2375,8 @@ fn acknowledge_body_frame_start(
     let body_frame_outcome = loop_transition_outcome(
         &loop_snapshot.kernel_state,
         loop_iteration::Input::BodyFrameStarted(loop_iteration::inputs::BodyFrameStarted {
-            loop_instance_id: grant.loop_instance_id.to_string(),
-            frame_id: frame_id.to_string(),
+            loop_instance_id: grant.loop_instance_id.clone(),
+            frame_id: frame_id.clone(),
             iteration: iteration as u32,
         }),
     )?;
@@ -2407,14 +2390,12 @@ fn acknowledge_body_frame_start(
     };
     let mut next_run_state = grant.next_run_state.clone();
     if frame_ready(&initial_frame.kernel_state)
-        && !next_run_state
-            .ready_frame_membership
-            .contains(&frame_id.to_string())
+        && !next_run_state.ready_frame_membership.contains(&frame_id)
     {
         next_run_state = run_transition_state(
             &next_run_state,
             flow_run::Input::RegisterReadyFrame(flow_run::inputs::RegisterReadyFrame {
-                frame_id: frame_id.to_string(),
+                frame_id: frame_id.clone(),
             }),
         )?;
     }
@@ -2461,7 +2442,7 @@ fn advance_body_frame_after_seal(
     let next_run_state = flow_run::transition(
         run_state,
         flow_run::Input::FrameTerminated(flow_run::inputs::FrameTerminated {
-            frame_id: body_frame_id.to_string(),
+            frame_id: body_frame_id.clone(),
         }),
         &flow_run::EmptyContext,
     )
@@ -2472,19 +2453,19 @@ fn advance_body_frame_after_seal(
         match first_variant {
             "BodyFrameCompleted" => loop_iteration::Input::BodyFrameCompleted(
                 loop_iteration::inputs::BodyFrameCompleted {
-                    loop_instance_id: loop_instance_id.to_string(),
+                    loop_instance_id: loop_instance_id.clone(),
                     iteration: iteration as u32,
                 },
             ),
             "BodyFrameFailed" => {
                 loop_iteration::Input::BodyFrameFailed(loop_iteration::inputs::BodyFrameFailed {
-                    loop_instance_id: loop_instance_id.to_string(),
+                    loop_instance_id: loop_instance_id.clone(),
                     iteration: iteration as u32,
                 })
             }
             "BodyFrameCanceled" => loop_iteration::Input::BodyFrameCanceled(
                 loop_iteration::inputs::BodyFrameCanceled {
-                    loop_instance_id: loop_instance_id.to_string(),
+                    loop_instance_id: loop_instance_id.clone(),
                     iteration: iteration as u32,
                 },
             ),
@@ -2582,13 +2563,13 @@ fn resolve_until_feedback_decision(
         let mut next_run_state = run_state.clone();
         if !run_state
             .pending_body_frame_loop_membership
-            .contains(&obligation.loop_instance_id.to_string())
+            .contains(&obligation.loop_instance_id)
         {
             next_run_state = flow_run::transition(
                 &next_run_state,
                 flow_run::Input::RegisterPendingBodyFrame(
                     flow_run::inputs::RegisterPendingBodyFrame {
-                        loop_instance_id: obligation.loop_instance_id.to_string(),
+                        loop_instance_id: obligation.loop_instance_id.clone(),
                         depth,
                     },
                 ),
@@ -2636,8 +2617,7 @@ fn recover_terminal_loop_projection(
     let Some(loop_terminal) = loop_terminal_effect(&loop_snapshot.kernel_state.phase) else {
         return Ok(None);
     };
-    let loop_instance_id =
-        LoopInstanceId::from(loop_snapshot.kernel_state.loop_instance_id.as_str());
+    let loop_instance_id = loop_snapshot.kernel_state.loop_instance_id.clone();
     let parent_frame_id = loop_parent_frame_id(&loop_snapshot.kernel_state)?;
     let parent_node_id = loop_parent_node_id(&loop_snapshot.kernel_state)?;
     Ok(Some(build_complete_loop_decision(
@@ -2666,11 +2646,10 @@ fn recover_pending_body_frame_request(
         return Ok(None);
     }
 
-    let loop_instance_id =
-        LoopInstanceId::from(loop_snapshot.kernel_state.loop_instance_id.as_str());
+    let loop_instance_id = loop_snapshot.kernel_state.loop_instance_id.clone();
     if run_state
         .pending_body_frame_loop_membership
-        .contains(&loop_instance_id.to_string())
+        .contains(&loop_instance_id)
     {
         return Ok(None);
     }
@@ -2679,7 +2658,7 @@ fn recover_pending_body_frame_request(
     let next_run_state = flow_run::transition(
         run_state,
         flow_run::Input::RegisterPendingBodyFrame(flow_run::inputs::RegisterPendingBodyFrame {
-            loop_instance_id: loop_instance_id.to_string(),
+            loop_instance_id: loop_instance_id.clone(),
             depth,
         }),
         &flow_run::EmptyContext,
@@ -2723,15 +2702,15 @@ fn build_complete_loop_decision(
     } = request;
     let parent_input = match loop_terminal {
         "LoopCompleted" => flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
-            node_id: parent_node_id.to_string(),
+            node_id: parent_node_id.clone(),
         }),
         "LoopExhausted" | "LoopFailed" => {
             flow_frame::Input::FailNode(flow_frame::inputs::FailNode {
-                node_id: parent_node_id.to_string(),
+                node_id: parent_node_id.clone(),
             })
         }
         "LoopCanceled" => flow_frame::Input::CancelNode(flow_frame::inputs::CancelNode {
-            node_id: parent_node_id.to_string(),
+            node_id: parent_node_id.clone(),
         }),
         other => {
             return Err(MobError::Internal(format!(
@@ -2751,12 +2730,12 @@ fn build_complete_loop_decision(
     if frame_ready(&next_parent_frame.kernel_state)
         && !next_run_state
             .ready_frame_membership
-            .contains(&parent_frame_id.to_string())
+            .contains(parent_frame_id)
     {
         next_run_state = flow_run::transition(
             &next_run_state,
             flow_run::Input::RegisterReadyFrame(flow_run::inputs::RegisterReadyFrame {
-                frame_id: parent_frame_id.to_string(),
+                frame_id: parent_frame_id.clone(),
             }),
             &flow_run::EmptyContext,
         )
@@ -2786,38 +2765,32 @@ fn build_frame_start_payload(
     spec: &FrameSpec,
     ordered: &[FlowNodeId],
 ) -> (
-    std::collections::BTreeSet<flow_frame::FlowNodeId>,
-    Vec<flow_frame::FlowNodeId>,
-    std::collections::BTreeMap<flow_frame::FlowNodeId, flow_frame::FlowNodeKind>,
-    std::collections::BTreeMap<flow_frame::FlowNodeId, Vec<flow_frame::FlowNodeId>>,
-    std::collections::BTreeMap<flow_frame::FlowNodeId, flow_frame::DependencyMode>,
-    std::collections::BTreeMap<flow_frame::FlowNodeId, Option<flow_frame::BranchId>>,
+    std::collections::BTreeSet<FlowNodeId>,
+    Vec<FlowNodeId>,
+    std::collections::BTreeMap<FlowNodeId, flow_frame::FlowNodeKind>,
+    std::collections::BTreeMap<FlowNodeId, Vec<FlowNodeId>>,
+    std::collections::BTreeMap<FlowNodeId, flow_frame::DependencyMode>,
+    std::collections::BTreeMap<FlowNodeId, Option<crate::ids::BranchId>>,
 ) {
-    let ordered_kv: Vec<_> = ordered.iter().map(ToString::to_string).collect();
-    let tracked: std::collections::BTreeSet<_> = ordered.iter().map(ToString::to_string).collect();
+    let ordered_kv: Vec<FlowNodeId> = ordered.to_vec();
+    let tracked: std::collections::BTreeSet<FlowNodeId> = ordered.iter().cloned().collect();
     let mut node_kind = std::collections::BTreeMap::new();
     let mut node_deps = std::collections::BTreeMap::new();
     let mut node_dep_modes = std::collections::BTreeMap::new();
     let mut node_branches = std::collections::BTreeMap::new();
 
     for (node_id, node_spec) in &spec.nodes {
-        let k = node_id.to_string();
+        let k = node_id.clone();
         match node_spec {
             FlowNodeSpec::Step(s) => {
                 node_kind.insert(k.clone(), flow_frame::FlowNodeKind::Step);
-                node_deps.insert(
-                    k.clone(),
-                    s.depends_on.iter().map(ToString::to_string).collect(),
-                );
+                node_deps.insert(k.clone(), s.depends_on.clone());
                 node_dep_modes.insert(k.clone(), dep_mode_kv(&s.depends_on_mode));
-                node_branches.insert(k.clone(), s.branch.as_ref().map(ToString::to_string));
+                node_branches.insert(k.clone(), s.branch.clone());
             }
             FlowNodeSpec::RepeatUntil(l) => {
                 node_kind.insert(k.clone(), flow_frame::FlowNodeKind::Loop);
-                node_deps.insert(
-                    k.clone(),
-                    l.depends_on.iter().map(ToString::to_string).collect(),
-                );
+                node_deps.insert(k.clone(), l.depends_on.clone());
                 node_dep_modes.insert(k.clone(), dep_mode_kv(&l.depends_on_mode));
                 node_branches.insert(k.clone(), None);
             }
@@ -2848,7 +2821,7 @@ fn build_start_root_frame_input(
         node_branches,
     ) = build_frame_start_payload(frame_id, spec, ordered);
     flow_frame::Input::StartRootFrame(flow_frame::inputs::StartRootFrame {
-        frame_id: frame_id.to_string(),
+        frame_id: frame_id.clone(),
         tracked_nodes,
         ordered_nodes,
         node_kind,
@@ -2874,8 +2847,8 @@ fn build_start_body_frame_input(
         node_branches,
     ) = build_frame_start_payload(frame_id, spec, ordered);
     flow_frame::Input::StartBodyFrame(flow_frame::inputs::StartBodyFrame {
-        frame_id: frame_id.to_string(),
-        loop_instance_id: loop_instance_id.to_string(),
+        frame_id: frame_id.clone(),
+        loop_instance_id: loop_instance_id.clone(),
         iteration: iteration as u32,
         tracked_nodes,
         ordered_nodes,

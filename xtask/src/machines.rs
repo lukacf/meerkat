@@ -205,6 +205,27 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
         )?);
     }
 
+    for machine in selected_local_flow_machine_artifacts(&root, &selection) {
+        let dir = machine_dir(&root, machine.slug);
+        let artifact_subdir = artifact_dir.as_deref().map(|base| base.join(machine.slug));
+        items.push(run_hopcroft_for_target(
+            &root,
+            HopcroftTarget {
+                kind: "machine",
+                display_name: &machine.schema.machine,
+                slug: machine.slug,
+                dir: &dir,
+                machine_schema: Some(&machine.schema),
+            },
+            args.profile,
+            workers,
+            args.observation,
+            args.audit_map,
+            args.reuse_existing_dump,
+            artifact_subdir.as_deref(),
+        )?);
+    }
+
     if selection.include_local_flow_machines {
         for machine in local_flow_machine_artifacts(&root) {
             let dir = machine_dir(&root, machine.slug);
@@ -313,11 +334,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
-    let local_flow_machines = if selection.include_local_flow_machines {
-        local_flow_machine_artifacts(root)
-    } else {
-        Vec::new()
-    };
+    let local_flow_machines = selected_local_flow_machine_artifacts(root, selection);
     prune_stale_generated_kernel_modules(root, &registry)?;
     write_generated(
         &generated_kernel_mod_path(root),
@@ -449,11 +466,7 @@ fn machine_verify_at_root(
     workers: usize,
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
-    let local_flow_machines = if selection.include_local_flow_machines {
-        local_flow_machine_artifacts(root)
-    } else {
-        Vec::new()
-    };
+    let local_flow_machines = selected_local_flow_machine_artifacts(root, selection);
 
     for machine in &selection.machines {
         println!("machine: {}", machine.schema.machine);
@@ -574,11 +587,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
     let mut mismatches = Vec::new();
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
-    let local_flow_machines = if selection.include_local_flow_machines {
-        local_flow_machine_artifacts(root)
-    } else {
-        Vec::new()
-    };
+    let local_flow_machines = selected_local_flow_machine_artifacts(root, selection);
 
     for machine in &selection.machines {
         collect_legacy_authority_mismatch(
@@ -2473,6 +2482,17 @@ fn local_flow_machine_artifacts(root: &Path) -> Vec<LocalFlowMachineArtifact> {
             banner: "Local loop-iteration kernel wrapper derived from the former compat codegen.",
         },
     ]
+}
+
+fn selected_local_flow_machine_artifacts(
+    root: &Path,
+    selection: &Selection,
+) -> Vec<LocalFlowMachineArtifact> {
+    if selection.include_local_flow_machines {
+        local_flow_machine_artifacts(root)
+    } else {
+        Vec::new()
+    }
 }
 
 fn local_flow_machine_count() -> usize {

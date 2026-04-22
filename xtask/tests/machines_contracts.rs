@@ -207,8 +207,7 @@ fn machine_verify_cli_expands_mob_machine_to_local_flow_surface() {
 
     assert!(
         output.status.success(),
-        "mob verify should succeed, got:\n{}",
-        combined
+        "mob verify should succeed, got:\n{combined}",
     );
     for expected in [
         "machine: MobMachine",
@@ -218,8 +217,7 @@ fn machine_verify_cli_expands_mob_machine_to_local_flow_surface() {
     ] {
         assert!(
             combined.contains(expected),
-            "expected mob verify output to contain `{expected}`, got:\n{}",
-            combined
+            "expected mob verify output to contain `{expected}`, got:\n{combined}",
         );
     }
 }
@@ -241,8 +239,7 @@ fn machine_verify_cli_keeps_auth_isolated() {
 
     assert!(
         output.status.success(),
-        "auth verify should succeed, got:\n{}",
-        combined
+        "auth verify should succeed, got:\n{combined}",
     );
     assert!(combined.contains("machine: AuthMachine"));
     for unexpected in [
@@ -252,8 +249,7 @@ fn machine_verify_cli_keeps_auth_isolated() {
     ] {
         assert!(
             !combined.contains(unexpected),
-            "did not expect auth verify output to contain `{unexpected}`, got:\n{}",
-            combined
+            "did not expect auth verify output to contain `{unexpected}`, got:\n{combined}",
         );
     }
 }

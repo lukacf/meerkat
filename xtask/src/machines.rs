@@ -264,7 +264,11 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
-    let local_flow_machines = local_flow_machine_artifacts(root);
+    let local_flow_machines = if selection.include_local_flow_machines {
+        local_flow_machine_artifacts(root)
+    } else {
+        Vec::new()
+    };
     prune_stale_generated_kernel_modules(root, &registry)?;
     write_generated(
         &generated_kernel_mod_path(root),
@@ -396,7 +400,11 @@ fn machine_verify_at_root(
     workers: usize,
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
-    let local_flow_machines = local_flow_machine_artifacts(root);
+    let local_flow_machines = if selection.include_local_flow_machines {
+        local_flow_machine_artifacts(root)
+    } else {
+        Vec::new()
+    };
 
     for machine in &selection.machines {
         println!("machine: {}", machine.schema.machine);
@@ -418,12 +426,17 @@ fn machine_verify_at_root(
     for machine in &local_flow_machines {
         println!("machine: {}", machine.schema.machine);
         if run_tlc {
-            let _ = maybe_run_tlc_in_dir(
+            let coverage = maybe_run_tlc_in_dir(
                 &machine_dir(root, machine.slug),
                 machine.slug,
                 profile,
                 workers,
             )?;
+            if matches!(profile, VerifyProfile::Deep)
+                && let Some(coverage) = coverage
+            {
+                ensure_machine_transition_coverage(&machine.schema, &coverage)?;
+            }
         }
     }
 
@@ -501,7 +514,11 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
     let mut mismatches = Vec::new();
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
-    let local_flow_machines = local_flow_machine_artifacts(root);
+    let local_flow_machines = if selection.include_local_flow_machines {
+        local_flow_machine_artifacts(root)
+    } else {
+        Vec::new()
+    };
 
     for machine in &selection.machines {
         collect_legacy_authority_mismatch(
@@ -1305,6 +1322,7 @@ impl CanonicalRegistry {
         Ok(Selection {
             machines,
             compositions,
+            include_local_flow_machines: args.all,
         })
     }
 }
@@ -1496,6 +1514,7 @@ fn scheduler_rule_name(rule: &SchedulerRule) -> String {
 pub struct Selection {
     pub machines: Vec<MachineEntry>,
     pub compositions: Vec<CompositionEntry>,
+    pub include_local_flow_machines: bool,
 }
 
 #[derive(Clone)]

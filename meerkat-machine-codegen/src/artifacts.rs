@@ -851,8 +851,18 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
 }
 
 pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
-    let _ = schema;
-    None
+    let driver = schema.driver.as_ref()?;
+    if schema.name == "flow_frame_loop" {
+        // The former generated flow-frame/loop driver now lives as checked-in
+        // runtime code under meerkat-mob. Keep this legacy name explicitly
+        // retired, but fail closed if any other composition driver is added
+        // without a concrete renderer.
+        return None;
+    }
+    panic!(
+        "unsupported composition driver codegen for {} @ {} ({})",
+        schema.name, driver.module_path, driver.driver_type
+    );
 }
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {

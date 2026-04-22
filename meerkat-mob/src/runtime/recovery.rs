@@ -6,7 +6,8 @@
 
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
-use meerkat_machine_kernels::KernelValue;
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
+use meerkat_machine_kernels::{KernelNamedVariant, KernelValue};
 
 /// Errors that prevent a run from being resumed.
 #[derive(Debug, thiserror::Error)]
@@ -64,28 +65,28 @@ fn check_frame_invariant(
     frame_id: &FrameId,
     snap: &FrameSnapshot,
 ) -> Result<(), RestoreIncompatible> {
-    let fields = &snap.kernel_state.fields;
-
     // Collect the set of node IDs with status == Ready.
-    let ready_by_status: std::collections::BTreeSet<String> = match fields.get("node_status") {
-        Some(KernelValue::Map(map)) => map
-            .iter()
-            .filter_map(|(k, v)| {
-                if is_ready_variant(v) {
-                    kernel_value_string(k)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        _ => std::collections::BTreeSet::new(),
-    };
+    let ready_by_status: std::collections::BTreeSet<String> =
+        match snap.kernel_state.field(&flow_frame::field::node_status()) {
+            Some(KernelValue::Map(map)) => map
+                .iter()
+                .filter_map(|(k, v)| {
+                    if is_ready_variant(v) {
+                        kernel_value_string(k)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => std::collections::BTreeSet::new(),
+        };
 
     // Collect the set of node IDs in ready_queue.
-    let in_ready_queue: std::collections::BTreeSet<String> = match fields.get("ready_queue") {
-        Some(KernelValue::Seq(seq)) => seq.iter().filter_map(kernel_value_string).collect(),
-        _ => std::collections::BTreeSet::new(),
-    };
+    let in_ready_queue: std::collections::BTreeSet<String> =
+        match snap.kernel_state.field(&flow_frame::field::ready_queue()) {
+            Some(KernelValue::Seq(seq)) => seq.iter().filter_map(kernel_value_string).collect(),
+            _ => std::collections::BTreeSet::new(),
+        };
 
     // Invariant: ready_by_status == in_ready_queue.
     if ready_by_status != in_ready_queue {
@@ -128,10 +129,12 @@ fn reconcile_ready_frames(run: &mut MobRun) {
             .collect(),
     );
 
-    run.flow_state.fields.insert("ready_frames".into(), new_seq);
     run.flow_state
         .fields
-        .insert("ready_frame_membership".into(), new_set);
+        .insert(flow_run::field::ready_frames(), new_seq);
+    run.flow_state
+        .fields
+        .insert(flow_run::field::ready_frame_membership(), new_set);
 }
 
 /// Rebuild `pending_body_frame_loops` and `pending_body_frame_loop_membership`
@@ -166,10 +169,11 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
 
     run.flow_state
         .fields
-        .insert("pending_body_frame_loops".into(), new_seq);
-    run.flow_state
-        .fields
-        .insert("pending_body_frame_loop_membership".into(), new_set);
+        .insert(flow_run::field::pending_body_frame_loops(), new_seq);
+    run.flow_state.fields.insert(
+        flow_run::field::pending_body_frame_loop_membership(),
+        new_set,
+    );
 }
 
 /// Rebuild the run-level active counters from persisted snapshots.
@@ -197,11 +201,11 @@ fn reconcile_active_counts(run: &mut MobRun) {
         .count() as u64;
 
     run.flow_state.fields.insert(
-        "active_node_count".into(),
+        flow_run::field::active_node_count(),
         KernelValue::U64(active_node_count),
     );
     run.flow_state.fields.insert(
-        "active_frame_count".into(),
+        flow_run::field::active_frame_count(),
         KernelValue::U64(active_frame_count),
     );
 }
@@ -210,45 +214,59 @@ fn reconcile_active_counts(run: &mut MobRun) {
 ///
 /// A loop is pending iff it is in Running phase, is specifically waiting for
 /// the next body frame (`stage == AwaitingBodyFrame`), and has no active body
-/// frame (`active_body_frame_id == KernelValue::None`). The `None` (field
-/// absent) arm guards against corrupt snapshots — legitimate Running loops
-/// always initialize this field; if it is missing entirely, we treat the loop
-/// as pending and emit a warning so the anomaly is visible in logs.
+/// frame (`active_body_frame_id == KernelValue::None`). We preserve a narrow
+/// compatibility fallback for a missing `stage` field, but only when the loop
+/// still has the explicit "no active body frame" sentinel. Missing
+/// `active_body_frame_id` is treated as malformed rather than as positive
+/// evidence to replay work.
 fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
-    if snap.kernel_state.phase != "Running" {
+    if !snap
+        .kernel_state
+        .phase_is(&loop_iteration::phase::running())
+    {
         return false;
     }
-    let awaiting_body_frame = match snap.kernel_state.fields.get("stage") {
-        Some(KernelValue::NamedVariant { variant, .. }) if variant == "AwaitingBodyFrame" => true,
+    let awaiting_body_frame = match snap.kernel_state.field(&loop_iteration::field::stage()) {
+        Some(value) if value.is_named_variant(&loop_stage_awaiting_body_frame()) => true,
         None => {
             tracing::warn!(
                 loop_instance_id = %loop_id,
                 "loop snapshot is missing stage field; \
-                 treating as awaiting body frame — snapshot may be corrupt"
+                 only legacy no-active-frame loops are eligible for replay"
             );
-            true
+            false
         }
         _ => false,
     };
-    if !awaiting_body_frame {
-        return false;
-    }
-    match snap.kernel_state.fields.get("active_body_frame_id") {
+    let no_active_body_frame = match snap
+        .kernel_state
+        .field(&loop_iteration::field::active_body_frame_id())
+    {
         Some(KernelValue::None) => true,
         None => {
             tracing::warn!(
                 loop_instance_id = %loop_id,
                 "loop snapshot is missing active_body_frame_id field; \
-                 treating as pending body frame — snapshot may be corrupt"
+                 refusing to replay body-frame work from malformed state"
             );
-            true
+            false
         }
         _ => false,
+    };
+    if awaiting_body_frame {
+        return no_active_body_frame;
     }
+    matches!(
+        snap.kernel_state.field(&loop_iteration::field::stage()),
+        None if no_active_body_frame
+    )
 }
 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
-    match snap.kernel_state.fields.get("active_body_frame_id") {
+    match snap
+        .kernel_state
+        .field(&loop_iteration::field::active_body_frame_id())
+    {
         Some(KernelValue::String(frame_id)) => Some(FrameId::from(frame_id.as_str())),
         Some(KernelValue::Map(entries)) => entries
             .get(&KernelValue::String("value".into()))
@@ -263,28 +281,29 @@ fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
 }
 
 fn count_running_step_nodes(snap: &FrameSnapshot) -> u64 {
-    let Some(KernelValue::Map(node_status)) = snap.kernel_state.fields.get("node_status") else {
+    let Some(KernelValue::Map(node_status)) =
+        snap.kernel_state.field(&flow_frame::field::node_status())
+    else {
         return 0;
     };
-    let Some(KernelValue::Map(node_kind)) = snap.kernel_state.fields.get("node_kind") else {
+    let Some(KernelValue::Map(node_kind)) =
+        snap.kernel_state.field(&flow_frame::field::node_kind())
+    else {
         return 0;
     };
 
     node_status
         .iter()
         .filter(|(node_id, status)| {
-            matches!(status, KernelValue::NamedVariant { variant, .. } if variant == "Running")
-                && matches!(
-                    node_kind.get(*node_id),
-                    Some(KernelValue::NamedVariant { variant, .. }) if variant == "Step"
-                )
+            status.is_named_variant(&node_run_status_running())
+                && matches!(node_kind.get(*node_id), Some(kind) if kind.is_named_variant(&flow_node_kind_step()))
         })
         .count() as u64
 }
 
 /// Return true if the frame's `ready_queue` is present and non-empty.
 fn frame_has_nonempty_ready_queue(snap: &FrameSnapshot) -> bool {
-    match snap.kernel_state.fields.get("ready_queue") {
+    match snap.kernel_state.field(&flow_frame::field::ready_queue()) {
         Some(KernelValue::Seq(seq)) => !seq.is_empty(),
         _ => false,
     }
@@ -292,7 +311,7 @@ fn frame_has_nonempty_ready_queue(snap: &FrameSnapshot) -> bool {
 
 /// Return true if a KernelValue is a `NamedVariant { variant: "Ready" }`.
 fn is_ready_variant(v: &KernelValue) -> bool {
-    matches!(v, KernelValue::NamedVariant { variant, .. } if variant == "Ready")
+    v.is_named_variant(&node_run_status_ready())
 }
 
 /// Extract the inner string from a `KernelValue::String`.
@@ -301,6 +320,22 @@ fn kernel_value_string(v: &KernelValue) -> Option<String> {
         KernelValue::String(s) => Some(s.clone()),
         _ => None,
     }
+}
+
+fn node_run_status_ready() -> KernelNamedVariant {
+    KernelNamedVariant::new_static("NodeRunStatus", "Ready")
+}
+
+fn node_run_status_running() -> KernelNamedVariant {
+    KernelNamedVariant::new_static("NodeRunStatus", "Running")
+}
+
+fn flow_node_kind_step() -> KernelNamedVariant {
+    KernelNamedVariant::new_static("FlowNodeKind", "Step")
+}
+
+fn loop_stage_awaiting_body_frame() -> KernelNamedVariant {
+    KernelNamedVariant::new_static("LoopIterationStage", "AwaitingBodyFrame")
 }
 
 #[cfg(test)]

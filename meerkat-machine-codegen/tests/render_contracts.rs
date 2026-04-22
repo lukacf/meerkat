@@ -2,9 +2,10 @@
 
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
-    render_composition_mapping_coverage, render_composition_module,
+    render_composition_driver, render_composition_mapping_coverage, render_composition_module,
     render_machine_mapping_coverage, render_machine_module,
 };
+use meerkat_machine_schema::CompositionDriverRustBinding;
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
@@ -150,4 +151,36 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     assert!(!replaced.contains("old block"));
     assert!(replaced.contains("Manual text."));
     assert!(replaced.contains("- `PrepareBindingsInitializing`"));
+}
+
+fn dummy_driver_binding() -> CompositionDriverRustBinding {
+    CompositionDriverRustBinding {
+        module_path: "meerkat-mob/src/generated/dummy_driver.rs".into(),
+        driver_type: "DummyDriver".into(),
+        store_plan_type: "DummyStorePlan".into(),
+        work_type: "DummyWork".into(),
+        decision_type: "DummyDecision".into(),
+        required_imports: vec![],
+    }
+}
+
+#[test]
+fn flow_frame_loop_driver_codegen_is_explicitly_retired() {
+    let mut schema = meerkat_mob_seam_composition();
+    schema.name = "flow_frame_loop".into();
+    schema.driver = Some(dummy_driver_binding());
+
+    assert!(
+        render_composition_driver(&schema).is_none(),
+        "legacy flow_frame_loop driver should stay retired rather than falling through to generic codegen"
+    );
+}
+
+#[test]
+#[should_panic(expected = "unsupported composition driver codegen")]
+fn non_legacy_composition_drivers_fail_closed() {
+    let mut schema = meerkat_mob_seam_composition();
+    schema.driver = Some(dummy_driver_binding());
+
+    let _ = render_composition_driver(&schema);
 }

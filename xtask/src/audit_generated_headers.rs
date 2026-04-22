@@ -1,6 +1,6 @@
-//! Strict `@generated` header truthfulness audit.
+//! Strict codegen-marker header truthfulness audit.
 //!
-//! A file earns a `@generated` header iff it is emitted by one of our
+//! A file earns the codegen marker iff it is emitted by one of our
 //! codegen passes. This module enforces both directions:
 //!
 //! * Header without matching codegen-emit path → `ForbiddenHeader` (hand-
@@ -11,6 +11,9 @@
 //! The emit-path set is computed from the same schema the protocol codegen
 //! iterates, so adding or removing a composition automatically updates the
 //! allowlist.
+//!
+//! Note: the literal marker string is assembled at runtime from two
+//! halves below so this source file does not itself match the scan.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,9 +26,15 @@ use meerkat_machine_schema::{
 
 use crate::public_contracts::repo_root;
 
-/// Marker substring every codegen-emitted file must contain on one of its
-/// first few lines.
-pub const GENERATED_MARKER: &str = "@generated";
+/// Marker substring every codegen-emitted file must contain on one of
+/// its first few lines. Assembled at runtime from two halves so this
+/// source file does not itself match the scan — otherwise the audit
+/// tool would flag its own implementation as a forbidden header.
+pub fn generated_marker() -> String {
+    let mut s = String::from("@");
+    s.push_str("generated");
+    s
+}
 
 /// Maximum number of leading lines scanned for the marker.
 const HEADER_SCAN_LINES: usize = 8;
@@ -110,13 +119,76 @@ pub fn audit_with_emit_set(
     Ok(findings)
 }
 
-/// Walk the live workspace and check both directions against the codegen
-/// schema. Returns findings; the xtask binary renders them and exits
-/// non-zero on any.
+/// Walk the live workspace via `git ls-files` and check both directions
+/// against the codegen schema. Returns findings; the xtask binary
+/// renders them and exits non-zero on any.
+///
+/// Scanning every tracked `*.rs` path (instead of a hardcoded crate
+/// roster) means a hand-editor sneaking a forbidden `@generated` marker
+/// into a file anywhere in the repo is caught — the guard is truly
+/// repo-wide rather than "inside the crates we thought to list."
 pub fn run_audit_generated_headers() -> Result<Vec<AuditFinding>> {
     let root = repo_root()?;
     let emit_paths = live_emit_paths();
-    audit_with_emit_set(&root, &emit_paths)
+    audit_via_git_ls_files(&root, &emit_paths)
+}
+
+/// Live-workspace audit using `git ls-files` for scan scope. Returns
+/// the same `Vec<AuditFinding>` shape as `audit_with_emit_set` and
+/// shares the `MissingHeader` direction for declared emit paths.
+pub fn audit_via_git_ls_files(
+    workspace_root: &Path,
+    emit_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<AuditFinding>> {
+    let mut findings = Vec::new();
+
+    // Direction 1: every emit path must have a header.
+    for rel in emit_paths {
+        let abs = workspace_root.join(rel);
+        if !abs.exists() {
+            continue;
+        }
+        let contents = fs::read_to_string(&abs)
+            .with_context(|| format!("read emit-path {}", abs.display()))?;
+        if !has_generated_marker(&contents) {
+            findings.push(AuditFinding::MissingHeader { path: rel.clone() });
+        }
+    }
+
+    // Direction 2: every tracked `.rs` file outside the emit set that
+    // carries the marker is a violation.
+    let output = std::process::Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "-z", "*.rs"])
+        .output()
+        .context("invoke git ls-files")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for chunk in output.stdout.split(|byte| *byte == 0) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let rel = PathBuf::from(std::str::from_utf8(chunk).context("non-utf8 path")?);
+        if emit_paths.contains(&rel) {
+            continue;
+        }
+        let abs = workspace_root.join(&rel);
+        if !abs.is_file() {
+            continue;
+        }
+        let contents = fs::read_to_string(&abs)
+            .with_context(|| format!("read candidate {}", abs.display()))?;
+        if has_generated_marker(&contents) {
+            findings.push(AuditFinding::ForbiddenHeader { path: rel });
+        }
+    }
+
+    findings.sort();
+    Ok(findings)
 }
 
 /// Relative workspace paths every codegen pass is expected to write.
@@ -158,7 +230,7 @@ fn has_generated_marker(contents: &str) -> bool {
     contents
         .lines()
         .take(HEADER_SCAN_LINES)
-        .any(|line| line.contains(GENERATED_MARKER))
+        .any(|line| line.contains(&generated_marker()))
 }
 
 fn visit_rs_files<F>(root: &Path, visitor: &mut F) -> Result<()>

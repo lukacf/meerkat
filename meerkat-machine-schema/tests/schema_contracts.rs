@@ -1055,4 +1055,229 @@ mod handoff_binding {
                 });
         }
     }
+
+    /// Negative: EffectExtractor with no `authority_type_path` and no
+    /// stacked `HandleBridge` must fail validation. The compat bridge
+    /// pattern relies on this gate to prevent accidental
+    /// extract-obligations-only bindings whose feedback surface has
+    /// no home.
+    #[test]
+    fn effect_extractor_without_authority_must_stack_handle_bridge() {
+        use meerkat_machine_schema::{
+            ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, CompositionSchemaError,
+            CompositionStateLimits, EffectHandoffProtocol, FeedbackFieldBinding,
+            FeedbackFieldSource, FeedbackInputRef, MachineInstance, ProtocolGenerationMode,
+            ProtocolHelperReturnShape, ProtocolRustBinding,
+        };
+
+        let composition = CompositionSchema {
+            name: "test_effect_extractor_without_authority".into(),
+            machines: vec![MachineInstance {
+                instance_id: "external_tool_surface".into(),
+                machine_name: "ExternalToolSurfaceBridgeMachine".into(),
+                actor: "external_tool_surface_authority".into(),
+            }],
+            actors: vec![
+                ActorSchema {
+                    name: "external_tool_surface_authority".into(),
+                    kind: ActorKind::Machine,
+                },
+                ActorSchema {
+                    name: "owner".into(),
+                    kind: ActorKind::Owner,
+                },
+            ],
+            handoff_protocols: vec![EffectHandoffProtocol {
+                name: "no_authority_no_handle".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "RefreshVisibleSurfaceSet".into(),
+                realizing_actor: "owner".into(),
+                correlation_fields: vec!["snapshot_epoch".into()],
+                obligation_fields: vec!["snapshot_epoch".into()],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "SnapshotAligned".into(),
+                    field_bindings: vec![FeedbackFieldBinding {
+                        input_field: "snapshot_epoch".into(),
+                        source: FeedbackFieldSource::ObligationField("snapshot_epoch".into()),
+                    }],
+                }],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: None,
+                rust: ProtocolRustBinding {
+                    module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
+                    generation_mode: ProtocolGenerationMode::EffectExtractor,
+                    required_imports: vec![],
+                    authority_type_path: None,
+                    mutator_trait_path: None,
+                    input_enum_path: None,
+                    effect_enum_path: Some(
+                        "crate::external_tool_surface_authority::ExternalToolSurfaceEffect".into(),
+                    ),
+                    transition_type_path: None,
+                    error_type_path: None,
+                    executor_trigger_input_variant: None,
+                    bridge_source_type_path: None,
+                    helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                    handle_trait_path: None,
+                    handle_method_names: BTreeMap::new(),
+                    handle_arg_accessors: BTreeMap::new(),
+                    handle_method_forwarded_fields: BTreeMap::new(),
+                    input_payload_module_path: None,
+                    additional_modes: vec![],
+                },
+            }],
+            entry_inputs: vec![],
+            routes: vec![],
+            route_target_selectors: vec![],
+            driver: None,
+            transaction_plans: vec![],
+            actor_priorities: vec![],
+            scheduler_rules: vec![],
+            invariants: vec![],
+            witnesses: vec![],
+            deep_domain_cardinality: 2,
+            deep_domain_overrides: std::collections::BTreeMap::new(),
+            witness_domain_cardinality: 2,
+            ci_limits: Some(CompositionStateLimits {
+                step_limit: 4,
+                pending_input_limit: 4,
+                pending_route_limit: 4,
+                delivered_route_limit: 0,
+                emitted_effect_limit: 0,
+                seq_limit: 0,
+                set_limit: 0,
+                map_limit: 0,
+            }),
+            closed_world: true,
+        };
+
+        let err = composition
+            .validate()
+            .expect_err("must reject EffectExtractor without authority or stacked HandleBridge");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "no_authority_no_handle");
+                assert!(
+                    detail.contains("HandleBridge"),
+                    "error detail should mention HandleBridge requirement, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compat bridge parity — guard against silent drift between a compat
+// bridge machine's mirrored effect/input shape and the runtime struct
+// it mirrors. The bridge exists only to host handoff annotations the
+// DSL macro cannot express; if canonical types evolve and the bridge
+// doesn't, composition validation keeps passing while the codegen
+// emits stale obligation/input fields.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::expect_used, clippy::panic)]
+mod compat_bridge_parity {
+    use meerkat_machine_schema::{
+        TypeRef, external_tool_surface_bridge_machine, ops_barrier_bridge_machine,
+    };
+
+    #[test]
+    fn ops_barrier_bridge_wait_all_satisfied_mirrors_runtime_struct() {
+        // The bridge's `WaitAllSatisfied` effect must name the two
+        // fields the runtime's hand-written `WaitAllSatisfied` struct
+        // in `meerkat-core/src/ops_lifecycle.rs` exposes:
+        //   pub wait_request_id: WaitRequestId,
+        //   pub operation_ids: Vec<OperationId>,
+        // Drift in either direction silently desyncs the
+        // `ops_barrier_satisfaction` handoff obligation.
+        let schema = ops_barrier_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "WaitAllSatisfied")
+            .expect("bridge must declare WaitAllSatisfied effect");
+        let field_names: std::collections::BTreeSet<&str> =
+            effect.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains("wait_request_id"),
+            "bridge lost `wait_request_id` field — runtime struct has it"
+        );
+        assert!(
+            field_names.contains("operation_ids"),
+            "bridge lost `operation_ids` field — runtime struct has it"
+        );
+        assert_eq!(
+            field_names.len(),
+            2,
+            "bridge gained extra fields not present on runtime struct — audit both"
+        );
+        // Type-shape parity: operation_ids must render as a sequence
+        // of OperationId, wait_request_id as the typed newtype.
+        let wait_request = effect.field_named("wait_request_id").expect("field");
+        assert_eq!(
+            wait_request.ty,
+            TypeRef::Named("WaitRequestId".into()),
+            "bridge wait_request_id must be `WaitRequestId` typed"
+        );
+        let operation_ids = effect.field_named("operation_ids").expect("field");
+        assert!(
+            matches!(&operation_ids.ty, TypeRef::Seq(inner) if matches!(inner.as_ref(), TypeRef::Named(name) if name == "OperationId")),
+            "bridge operation_ids must be Seq<OperationId>, got {:?}",
+            operation_ids.ty
+        );
+    }
+
+    #[test]
+    fn external_tool_surface_bridge_refresh_visible_surface_set_mirrors_runtime_struct() {
+        let schema = external_tool_surface_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "RefreshVisibleSurfaceSet")
+            .expect("bridge must declare RefreshVisibleSurfaceSet effect");
+        assert_eq!(
+            effect.fields.len(),
+            1,
+            "RefreshVisibleSurfaceSet has exactly `snapshot_epoch` — runtime parity"
+        );
+        assert_eq!(effect.fields[0].name, "snapshot_epoch");
+        assert_eq!(effect.fields[0].ty, TypeRef::U64);
+    }
+
+    #[test]
+    fn external_tool_surface_bridge_schedule_surface_completion_mirrors_runtime_struct() {
+        let schema = external_tool_surface_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "ScheduleSurfaceCompletion")
+            .expect("bridge must declare ScheduleSurfaceCompletion effect");
+        let field_names: std::collections::BTreeSet<&str> =
+            effect.fields.iter().map(|f| f.name.as_str()).collect();
+        // The runtime struct in `meerkat-mcp/src/external_tool_surface_authority.rs`
+        // exposes these five fields. Any deletion/addition on either
+        // side must sync here or fail the parity gate.
+        for required in [
+            "surface_id",
+            "operation",
+            "pending_task_sequence",
+            "staged_intent_sequence",
+            "applied_at_turn",
+        ] {
+            assert!(
+                field_names.contains(required),
+                "bridge ScheduleSurfaceCompletion lost `{required}` — runtime parity violation"
+            );
+        }
+        assert_eq!(
+            field_names.len(),
+            5,
+            "bridge ScheduleSurfaceCompletion gained extra fields not on runtime — audit both"
+        );
+    }
 }

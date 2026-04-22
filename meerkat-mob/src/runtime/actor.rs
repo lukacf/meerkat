@@ -703,7 +703,7 @@ impl MobActor {
     /// for the mob phase; external observers read the same value via
     /// `MobCommand::QueryPhase` (dogma #1, #13, #17).
     fn state(&self) -> MobState {
-        project_dsl_phase(self.dsl_state().lifecycle_phase)
+        self.with_dsl_authority(|authority| project_dsl_phase(authority.state.lifecycle_phase))
     }
 
     fn with_dsl_authority<R>(&self, f: impl FnOnce(&mob_dsl::MobMachineAuthority) -> R) -> R {
@@ -1298,7 +1298,8 @@ impl MobActor {
     fn machine_coordinator_bound(&self) -> bool {
         // Plain mobs (no orchestrator) are always considered coordinator-bound
         // for the purposes of spawn/run-flow admission checks.
-        !self.has_orchestrator || self.dsl_state().coordinator_bound
+        !self.has_orchestrator
+            || self.with_dsl_authority(|authority| authority.state.coordinator_bound)
     }
 
     /// Probe a DSL input against a clone of current state — returns

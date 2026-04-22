@@ -1240,7 +1240,7 @@ mod tests {
     fn test_flow_run_config_from_definition_missing_flow() {
         let def = sample_definition();
         let error = FlowRunConfig::from_definition(FlowId::from("missing"), &def).unwrap_err();
-        assert!(matches!(error, MobError::FlowNotFound(name) if name == FlowId::from("missing")));
+        assert!(matches!(error, MobError::FlowNotFound(name) if name == "missing"));
     }
 
     #[test]

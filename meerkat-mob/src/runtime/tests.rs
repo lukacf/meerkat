@@ -5639,7 +5639,7 @@ async fn test_list_members_returns_after_respawn_without_hanging() {
         .expect("list_members should not hang after respawn");
     let listed = members
         .into_iter()
-        .find(|entry| entry.agent_identity == AgentIdentity::from(member_id.as_str()))
+        .find(|entry| entry.agent_identity == member_id)
         .expect("respawned member remains listed");
 
     assert_eq!(listed.agent_runtime_id, receipt.agent_runtime_id);
@@ -6039,7 +6039,7 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
 
     let broken_snapshot = snapshots
         .into_iter()
-        .find(|(id, _)| *id == AgentIdentity::from(broken.as_str()))
+        .find(|(id, _)| *id == broken)
         .expect("broken member snapshot");
     assert_eq!(
         broken_snapshot.1.status,
@@ -6762,7 +6762,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
     let members = resumed.list_members().await;
     let broken = members
         .into_iter()
-        .find(|entry| entry.agent_identity == MeerkatId::from("w-1"))
+        .find(|entry| entry.agent_identity == "w-1")
         .expect("broken member should remain visible in list_members");
     assert_eq!(
         broken.status,
@@ -7256,7 +7256,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
     let members = resumed.list_members().await;
     let repaired = members
         .into_iter()
-        .find(|entry| entry.agent_identity == MeerkatId::from("w-1"))
+        .find(|entry| entry.agent_identity == "w-1")
         .expect("repaired member remains listed");
     assert_eq!(
         repaired.status,
@@ -13675,8 +13675,7 @@ async fn test_fan_in_aggregate_output_is_deterministic_array_shape() {
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "dispatch"
-                && entry.agent_identity
-                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
+                && entry.agent_identity == crate::runtime::flow_system_member_id()
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())
@@ -14752,7 +14751,7 @@ async fn test_plain_text_step_output_can_skip_json_parsing() {
 
     assert!(
         terminal.step_ledger.iter().any(|entry| {
-            entry.step_id == crate::StepId::from("start")
+            entry.step_id == "start"
                 && entry.status == StepRunStatus::Completed
                 && entry.output == Some(serde_json::Value::String("not-json".to_string()))
         }),
@@ -15139,8 +15138,7 @@ async fn test_collection_policy_all_uses_map_shape_for_single_target() {
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "collect"
-                && entry.agent_identity
-                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
+                && entry.agent_identity == crate::runtime::flow_system_member_id()
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())
@@ -19458,8 +19456,7 @@ async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
         terminal.step_ledger.iter().any(|entry| {
             entry.step_id.as_str() == "needs_lead"
                 && entry.status == StepRunStatus::Failed
-                && entry.agent_identity
-                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
+                && entry.agent_identity == crate::runtime::flow_system_member_id()
         }),
         "root-frame failure should project a failed step entry for the failed node"
     );
@@ -19625,8 +19622,7 @@ async fn test_root_frame_fan_in_persists_canonical_completed_aggregate_output() 
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "dispatch"
-                && entry.agent_identity
-                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
+                && entry.agent_identity == crate::runtime::flow_system_member_id()
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())

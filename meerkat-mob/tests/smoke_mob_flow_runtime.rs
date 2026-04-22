@@ -2520,7 +2520,7 @@ fn count_loop_iterations(run: &MobRun, loop_id: &str) -> usize {
     let loop_instance_ids: BTreeSet<_> = run
         .loops
         .iter()
-        .filter(|(_, snapshot)| snapshot.kernel_state.loop_id.as_str() == loop_id)
+        .filter(|(_, snapshot)| snapshot.kernel_state.loop_id == loop_id)
         .map(|(instance_id, _)| instance_id.clone())
         .collect();
     assert!(

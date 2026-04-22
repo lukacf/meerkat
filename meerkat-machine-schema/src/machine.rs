@@ -207,6 +207,21 @@ impl MachineSchema {
                 phase: self.state.init.phase.clone(),
             });
         }
+        for field in &self.state.fields {
+            if let TypeRef::Enum(enum_name) = &field.ty
+                && !self
+                    .state
+                    .init
+                    .fields
+                    .iter()
+                    .any(|init| init.field == field.name)
+            {
+                return Err(MachineSchemaError::MissingEnumFieldInit {
+                    field: field.name.clone(),
+                    enum_name: enum_name.clone(),
+                });
+            }
+        }
 
         for terminal in &self.state.terminal_phases {
             if !phase_names.contains(terminal) {
@@ -1626,6 +1641,10 @@ pub enum MachineSchemaError {
     UnknownField {
         field: String,
     },
+    MissingEnumFieldInit {
+        field: String,
+        enum_name: String,
+    },
     UnknownInputVariant {
         variant: String,
     },
@@ -1704,6 +1723,12 @@ impl fmt::Display for MachineSchemaError {
             Self::EmptyName(kind) => write!(f, "empty {kind} name"),
             Self::UnknownPhase { phase } => write!(f, "unknown phase `{phase}`"),
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
+            Self::MissingEnumFieldInit { field, enum_name } => {
+                write!(
+                    f,
+                    "enum field `{field}` of type `{enum_name}` requires an explicit init value"
+                )
+            }
             Self::UnknownInputVariant { variant } => {
                 write!(f, "unknown input variant `{variant}`")
             }

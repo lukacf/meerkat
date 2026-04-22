@@ -970,7 +970,7 @@ impl CompositionSchema {
                             });
                         }
 
-                        if !literal_matches_type(expr, &to_field.ty) {
+                        if !literal_matches_type(to_schema, expr, &to_field.ty) {
                             return Err(CompositionSchemaError::RouteLiteralTypeMismatch {
                                 route: route.name.clone(),
                                 to_machine: route.to.machine.clone(),
@@ -1043,7 +1043,7 @@ impl CompositionSchema {
                             field: field.field.clone(),
                         });
                     }
-                    if !literal_matches_type(&field.expr, &target_field.ty) {
+                    if !literal_matches_type(machine_schema, &field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessLiteralTypeMismatch {
                             witness: witness.name.clone(),
                             machine: preload.machine.clone(),
@@ -1120,7 +1120,7 @@ impl CompositionSchema {
                             field: field.field.clone(),
                         });
                     }
-                    if !literal_matches_type(&field.expr, &target_field.ty) {
+                    if !literal_matches_type(machine_schema, &field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessStateLiteralTypeMismatch {
                             witness: witness.name.clone(),
                             machine: state.machine.clone(),
@@ -2212,18 +2212,25 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
     }
 }
 
-fn literal_matches_type(expr: &Expr, ty: &TypeRef) -> bool {
+fn literal_matches_type(machine: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bool {
     match (expr, ty) {
         (Expr::Bool(_), TypeRef::Bool) => true,
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (Expr::String(_), TypeRef::String | TypeRef::Named(_)) => true,
-        (Expr::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) => enum_name == name,
-        (Expr::None, TypeRef::Option(_)) => true,
-        (Expr::Some(inner), TypeRef::Option(inner_ty)) => literal_matches_type(inner, inner_ty),
-        (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
-        (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => {
-            items.iter().all(|item| literal_matches_type(item, inner))
+        (Expr::NamedVariant { enum_name, variant }, TypeRef::Enum(name)) if enum_name == name => {
+            let authoritative = crate::authoritative_named_enum_variants(&machine.machine);
+            authoritative
+                .get(name)
+                .is_none_or(|allowed| allowed.contains(variant))
         }
+        (Expr::None, TypeRef::Option(_)) => true,
+        (Expr::Some(inner), TypeRef::Option(inner_ty)) => {
+            literal_matches_type(machine, inner, inner_ty)
+        }
+        (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
+        (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => items
+            .iter()
+            .all(|item| literal_matches_type(machine, item, inner)),
         _ => false,
     }
 }

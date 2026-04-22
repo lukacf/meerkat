@@ -2521,14 +2521,10 @@ fn count_loop_iterations(run: &MobRun, loop_id: &str) -> usize {
         .loops
         .iter()
         .filter_map(|(instance_id, snapshot)| {
-            match snapshot
-                .kernel_state
-                .fields
-                .get("loop_id")
-                .and_then(|value| value.as_string().ok())
-            {
-                Some(candidate) if candidate == loop_id => Some(instance_id.clone()),
-                _ => None,
+            if snapshot.kernel_state.loop_id.as_str() == loop_id {
+                Some(instance_id.clone())
+            } else {
+                None
             }
         })
         .collect();

@@ -3452,7 +3452,12 @@ impl MemberHandle {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::event::MemberRef;
     use crate::ids::Generation;
+    use crate::roster::{
+        MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, RosterEntry,
+    };
+    use std::time::SystemTime;
 
     #[test]
     fn member_projection_types_omit_bridge_session_fields_in_serialized_output() {
@@ -3581,6 +3586,50 @@ mod tests {
         assert_eq!(value["fence_token"], 9);
         assert!(value.get("session_id").is_none());
         assert!(value.get("bridge_session_id").is_none());
+    }
+
+    #[test]
+    fn kickoff_wait_treats_callback_pending_as_resolved() {
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let entry = RosterEntry {
+            agent_identity: identity.clone(),
+            generation: Generation::new(1),
+            fence_token: FenceToken::new(0),
+            agent_runtime_id: runtime_id.clone(),
+            role: ProfileName::from("lead"),
+            runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+            state: MemberState::Active,
+            wired_to: BTreeSet::new(),
+            labels: BTreeMap::new(),
+            kickoff: Some(MobMemberKickoffSnapshot {
+                phase: MobMemberKickoffPhase::CallbackPending,
+                error: None,
+                updated_at: SystemTime::now(),
+            }),
+            member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
+            peer_id: None,
+            external_peer_specs: BTreeMap::new(),
+            effective_profile_override: None,
+        };
+        let material = CanonicalMemberSnapshotMaterial {
+            member_present: true,
+            status: CanonicalMemberStatus::Active,
+            session_observation: CanonicalSessionObservation::Active,
+            error: None,
+            output_preview: None,
+            tokens_used: 0,
+            agent_runtime_id: runtime_id,
+            fence_token: FenceToken::new(0),
+            current_bridge_session_id: None,
+            peer_connectivity: None,
+            kickoff: entry.kickoff.clone(),
+        };
+
+        assert!(
+            MobHandle::kickoff_wait_is_satisfied(&entry, &material, &BTreeSet::new()),
+            "callback-pending kickoff should no longer block the kickoff barrier"
+        );
     }
 
     #[test]

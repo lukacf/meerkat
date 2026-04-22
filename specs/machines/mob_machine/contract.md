@@ -97,9 +97,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
-- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
+- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, member_id: String)
+- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, member_id: String)
+- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, member_id: String)
 - `DestroyMob`
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `MarkCompleted`
@@ -414,7 +414,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveRuntimeRetired`
 - From: `Running`
-- On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
+- On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token, member_id)
 - Guards:
   - `current_binding_matches`
 - Emits: `EmitMemberLifecycleNotice`
@@ -422,13 +422,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResetMember`
 - From: `Running`, `Stopped`
-- On: `ResetMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+- On: `ResetMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `RespawnMember`
 - From: `Running`
-- On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+- On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 

@@ -917,7 +917,6 @@ impl MobActor {
         dsl.member_kickoff_pending
             .iter()
             .chain(dsl.member_kickoff_starting.iter())
-            .chain(dsl.member_kickoff_callback_pending.iter())
             .cloned()
             .collect()
     }
@@ -1093,36 +1092,14 @@ impl MobActor {
     }
 
     async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        self.with_dsl_authority_mut(|authority| {
-            authority
-                .state
-                .member_kickoff_pending
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_starting
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_callback_pending
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_started
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_failed
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_cancelled
-                .remove(&agent_identity.to_string());
-            authority
-                .state
-                .member_kickoff_error
-                .remove(&agent_identity.to_string());
-        });
+        let _ = self
+            .apply_kickoff_input(
+                agent_identity,
+                mob_dsl::MobMachineInput::KickoffClear {
+                    member_id: agent_identity.to_string(),
+                },
+            )
+            .await;
         self.roster.write().await.set_kickoff(agent_identity, None);
     }
 
@@ -4229,7 +4206,7 @@ impl MobActor {
             .await
             .remove(agent_identity);
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            let _ = self
+            let accepted = self
                 .apply_kickoff_input(
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkPending {
@@ -4237,6 +4214,11 @@ impl MobActor {
                     },
                 )
                 .await?;
+            if !accepted {
+                return Err(MobError::Internal(format!(
+                    "KickoffMarkPending refused for autonomous member '{agent_identity}'"
+                )));
+            }
         }
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -4270,7 +4252,7 @@ impl MobActor {
 
         #[cfg(feature = "runtime-adapter")]
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            let _ = self
+            let accepted = self
                 .apply_kickoff_input(
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkStarting {
@@ -4278,6 +4260,11 @@ impl MobActor {
                     },
                 )
                 .await?;
+            if !accepted {
+                return Err(MobError::Internal(format!(
+                    "KickoffMarkStarting refused for autonomous member '{agent_identity}'"
+                )));
+            }
             if let Err(start_error) = self
                 .start_autonomous_member(agent_identity, &member_ref, prompt)
                 .await
@@ -4640,6 +4627,7 @@ impl MobActor {
 
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
             .await?;
+        self.clear_kickoff_state(agent_identity).await;
 
         Ok(())
     }

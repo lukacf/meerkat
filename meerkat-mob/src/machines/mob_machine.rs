@@ -511,9 +511,9 @@ machine! {
         signal MobMachineSignal {
             ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
-            RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
+            ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, member_id: String },
+            ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, member_id: String },
+            RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, member_id: String },
             DestroyMob,
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             MarkCompleted,
@@ -900,7 +900,7 @@ machine! {
         }
 
         transition ObserveRuntimeRetired {
-            on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
+            on signal ObserveRuntimeRetired { agent_runtime_id, fence_token, member_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
@@ -911,6 +911,13 @@ machine! {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
                 self.active_run_count = 0;
             }
             to Stopped
@@ -918,7 +925,7 @@ machine! {
         }
 
         transition ResetMember {
-            on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+            on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id }
             guard {
                 self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Stopped
@@ -937,6 +944,13 @@ machine! {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -944,7 +958,7 @@ machine! {
         }
 
         transition RespawnMember {
-            on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+            on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_run_count = 0;
@@ -960,6 +974,13 @@ machine! {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -988,6 +1009,13 @@ machine! {
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
+                self.member_kickoff_pending = EmptySet;
+                self.member_kickoff_starting = EmptySet;
+                self.member_kickoff_callback_pending = EmptySet;
+                self.member_kickoff_started = EmptySet;
+                self.member_kickoff_failed = EmptySet;
+                self.member_kickoff_cancelled = EmptySet;
+                self.member_kickoff_error = EmptyMap;
                 self.member_state_markers = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -1009,6 +1037,13 @@ machine! {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_kickoff_pending = EmptySet;
+                self.member_kickoff_starting = EmptySet;
+                self.member_kickoff_callback_pending = EmptySet;
+                self.member_kickoff_started = EmptySet;
+                self.member_kickoff_failed = EmptySet;
+                self.member_kickoff_cancelled = EmptySet;
+                self.member_kickoff_error = EmptyMap;
                 self.member_state_markers = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;

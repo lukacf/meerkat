@@ -528,7 +528,7 @@ RetireMember(agent_runtime_id, fence_token) ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
-ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
+ObserveRuntimeRetired(agent_runtime_id, fence_token, member_id) ==
     /\ phase = "Running"
     /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Stopped"
@@ -540,11 +540,18 @@ ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
     /\ member_startup_binding_requested' = (member_startup_binding_requested \ {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
     /\ member_state_markers' = MapRemove(member_state_markers, agent_runtime_id)
-    /\ UNCHANGED << pending_spawn_count, coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
-ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable) ==
+ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id) ==
     /\ phase = "Running" \/ phase = "Stopped"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -556,11 +563,18 @@ ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_
     /\ member_startup_binding_requested' = (member_startup_binding_requested \cup {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
-    /\ UNCHANGED << coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
-RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable) ==
+RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -572,8 +586,15 @@ RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, externa
     /\ member_startup_binding_requested' = (member_startup_binding_requested \cup {agent_runtime_id})
     /\ member_startup_runtime_ready' = (member_startup_runtime_ready \ {agent_runtime_id})
     /\ member_startup_ready' = (member_startup_ready \ {agent_runtime_id})
+    /\ member_kickoff_pending' = (member_kickoff_pending \ {member_id})
+    /\ member_kickoff_starting' = (member_kickoff_starting \ {member_id})
+    /\ member_kickoff_callback_pending' = (member_kickoff_callback_pending \ {member_id})
+    /\ member_kickoff_started' = (member_kickoff_started \ {member_id})
+    /\ member_kickoff_failed' = (member_kickoff_failed \ {member_id})
+    /\ member_kickoff_cancelled' = (member_kickoff_cancelled \ {member_id})
+    /\ member_kickoff_error' = MapRemove(member_kickoff_error, member_id)
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
-    /\ UNCHANGED << coordinator_bound, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 MarkCompleted ==
@@ -596,8 +617,15 @@ DestroyMob ==
     /\ member_startup_binding_requested' = {}
     /\ member_startup_runtime_ready' = {}
     /\ member_startup_ready' = {}
+    /\ member_kickoff_pending' = {}
+    /\ member_kickoff_starting' = {}
+    /\ member_kickoff_callback_pending' = {}
+    /\ member_kickoff_started' = {}
+    /\ member_kickoff_failed' = {}
+    /\ member_kickoff_cancelled' = {}
+    /\ member_kickoff_error' = [x \in {} |-> None]
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
@@ -610,8 +638,15 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
+    /\ member_kickoff_pending' = {}
+    /\ member_kickoff_starting' = {}
+    /\ member_kickoff_callback_pending' = {}
+    /\ member_kickoff_started' = {}
+    /\ member_kickoff_failed' = {}
+    /\ member_kickoff_cancelled' = {}
+    /\ member_kickoff_error' = [x \in {} |-> None]
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RecordOperatorActionProvenanceRunning ==
@@ -1305,9 +1340,9 @@ Next ==
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : \E origin \in WorkOriginValues : SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : \E origin \in WorkOriginValues : SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : RetireMember(agent_runtime_id, fence_token)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeRetired(agent_runtime_id, fence_token)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E member_id \in StringValues : ObserveRuntimeRetired(agent_runtime_id, fence_token, member_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E member_id \in StringValues : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E member_id \in StringValues : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, member_id)
     \/ MarkCompleted
     \/ DestroyMob
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeDestroyed(agent_runtime_id, fence_token)

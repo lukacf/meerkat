@@ -41,6 +41,8 @@ pub(crate) mod ids {
     string_id!(FlowNodeId);
     string_id!(BranchId);
     string_id!(StepId);
+    string_id!(ToolFilter);
+    string_id!(ToolVisibilityWitness);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     pub struct FenceToken(pub u64);

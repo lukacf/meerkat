@@ -154,11 +154,17 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
     }
 
     let workers = resolve_tlc_workers(args.workers)?;
+    let displayed_machine_count = selection.machines.len()
+        + if selection.include_local_flow_machines {
+            local_flow_machine_count()
+        } else {
+            0
+        };
     println!(
         "machine-hopcroft ({:?}, {:?}): {} machine(s), {} composition(s)",
         args.profile,
         args.observation,
-        selection.machines.len(),
+        displayed_machine_count,
         selection.compositions.len()
     );
 
@@ -197,6 +203,29 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
             args.reuse_existing_dump,
             artifact_subdir.as_deref(),
         )?);
+    }
+
+    if selection.include_local_flow_machines {
+        for machine in local_flow_machine_artifacts(&root) {
+            let dir = machine_dir(&root, machine.slug);
+            let artifact_subdir = artifact_dir.as_deref().map(|base| base.join(machine.slug));
+            items.push(run_hopcroft_for_target(
+                &root,
+                HopcroftTarget {
+                    kind: "machine",
+                    display_name: &machine.schema.machine,
+                    slug: machine.slug,
+                    dir: &dir,
+                    machine_schema: Some(&machine.schema),
+                },
+                args.profile,
+                workers,
+                args.observation,
+                args.audit_map,
+                args.reuse_existing_dump,
+                artifact_subdir.as_deref(),
+            )?);
+        }
     }
 
     for composition in &selection.compositions {
@@ -500,7 +529,7 @@ fn machine_verify_at_root(
         }
     }
 
-    if selection.include_local_flow_machines {
+    if selection.run_global_repo_checks {
         run_generated_kernel_tests(root, None)?;
     } else {
         for machine in &selection.machines {

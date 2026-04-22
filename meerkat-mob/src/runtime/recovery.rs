@@ -149,7 +149,7 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
     let mut pending_loop_ids: Vec<String> = run
         .loops
         .iter()
-        .filter(|(loop_id, snap)| loop_is_pending_body_frame(loop_id, snap))
+        .filter(|(loop_id, snap)| loop_is_pending_body_frame(run.schema_version, loop_id, snap))
         .map(|(loop_id, _)| loop_id.to_string())
         .collect();
     pending_loop_ids.sort();
@@ -215,11 +215,15 @@ fn reconcile_active_counts(run: &mut MobRun) {
 /// A loop is pending iff it is in Running phase, is specifically waiting for
 /// the next body frame (`stage == AwaitingBodyFrame`), and has no active body
 /// frame (`active_body_frame_id == KernelValue::None`). We preserve a narrow
-/// compatibility fallback for a missing `stage` field, but only when the loop
-/// still has the explicit "no active body frame" sentinel. Missing
+/// compatibility fallback for a missing `stage` field on pre-v4 snapshots, but
+/// only when the loop still has the explicit "no active body frame" sentinel. Missing
 /// `active_body_frame_id` is treated as malformed rather than as positive
 /// evidence to replay work.
-fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
+fn loop_is_pending_body_frame(
+    schema_version: u32,
+    loop_id: &LoopInstanceId,
+    snap: &LoopSnapshot,
+) -> bool {
     if !snap
         .kernel_state
         .phase_is(&loop_iteration::phase::running())
@@ -232,7 +236,7 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
             tracing::warn!(
                 loop_instance_id = %loop_id,
                 "loop snapshot is missing stage field; \
-                 only legacy no-active-frame loops are eligible for replay"
+                 only pre-v4 no-active-frame loops are eligible for replay"
             );
             false
         }
@@ -256,7 +260,8 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
     if awaiting_body_frame {
         return no_active_body_frame;
     }
-    no_active_body_frame
+    schema_version < 4
+        && no_active_body_frame
         && snap
             .kernel_state
             .field(&loop_iteration::field::stage())

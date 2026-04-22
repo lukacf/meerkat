@@ -632,25 +632,23 @@ impl MobRun {
 }
 
 fn dependency_mode_value(mode: crate::definition::DependencyMode) -> KernelValue {
-    let variant = match mode {
-        crate::definition::DependencyMode::All => "All",
-        crate::definition::DependencyMode::Any => "Any",
-    };
-    KernelValue::NamedVariant {
-        enum_name: "DependencyMode".into(),
-        variant: variant.into(),
+    match mode {
+        crate::definition::DependencyMode::All => flow_run::named_value::dependency_mode::all(),
+        crate::definition::DependencyMode::Any => flow_run::named_value::dependency_mode::any(),
     }
 }
 
 fn collection_policy_kind_value(policy: &crate::definition::CollectionPolicy) -> KernelValue {
-    let variant = match policy {
-        crate::definition::CollectionPolicy::All => "All",
-        crate::definition::CollectionPolicy::Any => "Any",
-        crate::definition::CollectionPolicy::Quorum { .. } => "Quorum",
-    };
-    KernelValue::NamedVariant {
-        enum_name: "CollectionPolicyKind".into(),
-        variant: variant.into(),
+    match policy {
+        crate::definition::CollectionPolicy::All => {
+            flow_run::named_value::collection_policy_kind::all()
+        }
+        crate::definition::CollectionPolicy::Any => {
+            flow_run::named_value::collection_policy_kind::any()
+        }
+        crate::definition::CollectionPolicy::Quorum { .. } => {
+            flow_run::named_value::collection_policy_kind::quorum()
+        }
     }
 }
 

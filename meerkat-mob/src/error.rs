@@ -79,6 +79,10 @@ pub enum MobError {
     #[error("run canceled: {0}")]
     RunCanceled(RunId),
 
+    /// Persisted run snapshot predates the supported typed schema cut.
+    #[error("unsupported run schema for {run_id}: schema_version={schema_version}")]
+    UnsupportedRunSchema { run_id: RunId, schema_version: u32 },
+
     /// Flow turn timed out while awaiting terminal transport outcome.
     #[error("flow turn timed out")]
     FlowTurnTimedOut,
@@ -202,6 +206,13 @@ impl From<crate::store::MobStoreError> for MobError {
                 mob_id,
                 expected,
                 actual,
+            },
+            crate::store::MobStoreError::UnsupportedRunSchema {
+                run_id,
+                schema_version,
+            } => Self::UnsupportedRunSchema {
+                run_id,
+                schema_version,
             },
             other => Self::StorageError(Box::new(other)),
         }
@@ -334,6 +345,10 @@ mod tests {
             },
             MobError::RunNotFound(RunId::new()),
             MobError::RunCanceled(RunId::new()),
+            MobError::UnsupportedRunSchema {
+                run_id: RunId::new(),
+                schema_version: 4,
+            },
             MobError::FlowTurnTimedOut,
             MobError::SpecRevisionConflict {
                 mob_id: MobId::from("mob"),

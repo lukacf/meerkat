@@ -65,6 +65,10 @@ pub enum MobStoreError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    /// A persisted run row predates the row-22 typed snapshot cut.
+    #[error("unsupported run schema for {run_id}: schema_version={schema_version}")]
+    UnsupportedRunSchema { run_id: RunId, schema_version: u32 },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

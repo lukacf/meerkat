@@ -22,7 +22,7 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine, runtime_local,
+    flow_frame_machine, flow_run_machine, loop_iteration_machine,
 };
 use serde::Serialize;
 
@@ -2201,11 +2201,14 @@ fn compat_machine_schemas() -> Vec<MachineSchema> {
 }
 
 fn runtime_local_machine_schemas() -> Vec<MachineSchema> {
-    vec![
-        runtime_local::flow_frame_machine(),
-        runtime_local::flow_run_machine(),
-        runtime_local::loop_iteration_machine(),
-    ]
+    compat_machine_schemas()
+        .into_iter()
+        .map(|mut schema| {
+            let slug = generated_kernel_module_slug(&schema.machine);
+            schema.rust.module = format!("runtime::flow_kernels::{slug}");
+            schema
+        })
+        .collect()
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {

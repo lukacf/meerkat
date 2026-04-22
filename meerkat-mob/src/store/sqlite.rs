@@ -107,23 +107,9 @@ fn decode_run_json(bytes: &[u8]) -> Result<MobRun, MobStoreError> {
     match decode_json::<MobRun>(bytes) {
         Ok(run) => Ok(run),
         Err(typed_error) => match decode_json::<LegacyStoredRunEnvelope>(bytes) {
-            Ok(legacy) if legacy.schema_version < 5 => Ok(MobRun {
+            Ok(legacy) if legacy.schema_version < 5 => Err(MobStoreError::UnsupportedRunSchema {
                 run_id: legacy.run_id,
-                mob_id: legacy.mob_id,
-                flow_id: legacy.flow_id,
-                status: legacy.status,
-                flow_state: flow_run::initial_state(),
-                activation_params: legacy.activation_params,
-                created_at: legacy.created_at,
-                completed_at: legacy.completed_at,
-                step_ledger: legacy.step_ledger,
-                failure_ledger: legacy.failure_ledger,
-                frames: std::collections::BTreeMap::new(),
-                loops: std::collections::BTreeMap::new(),
-                loop_iteration_ledger: legacy.loop_iteration_ledger,
                 schema_version: legacy.schema_version,
-                root_step_outputs: legacy.root_step_outputs,
-                loop_iteration_outputs: legacy.loop_iteration_outputs,
             }),
             _ => Err(typed_error),
         },
@@ -809,9 +795,11 @@ impl MobRunStore for SqliteMobRunStore {
             let mut runs = Vec::new();
             for row in rows {
                 let bytes = row.map_err(se)?;
-                let run = decode_run_json(&bytes)?;
-                if run.mob_id == mob_id && flow_id.as_ref().is_none_or(|fid| run.flow_id == *fid) {
-                    runs.push(run);
+                let header: LegacyStoredRunEnvelope = decode_json(&bytes)?;
+                if header.mob_id == mob_id
+                    && flow_id.as_ref().is_none_or(|fid| header.flow_id == *fid)
+                {
+                    runs.push(decode_run_json(&bytes)?);
                 }
             }
             Ok(runs)
@@ -1978,7 +1966,6 @@ mod tests {
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
-    use crate::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
     use crate::store::ExternalBindingOverlayStatus;
     use futures::future::join_all;
     use indexmap::IndexMap;
@@ -2125,7 +2112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sqlite_get_run_routes_legacy_rows_into_hard_cut_recovery_gate() {
+    async fn test_sqlite_get_run_rejects_active_pre_row22_rows_before_resume() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
         let run_store = stores.run_store();
@@ -2145,17 +2132,17 @@ mod tests {
             .expect("insert legacy row");
         }
 
-        let mut run = run_store
+        let error = run_store
             .get_run(&run_id)
             .await
-            .expect("get_run")
-            .expect("legacy row present");
+            .expect_err("active legacy row should be rejected");
 
-        assert_eq!(run.schema_version, 4);
-        assert_eq!(run.status, MobRunStatus::Running);
         assert!(matches!(
-            reconcile_run_state(&mut run),
-            Err(RestoreIncompatible::PreRow22Schema { schema_version: 4 })
+            error,
+            MobStoreError::UnsupportedRunSchema {
+                schema_version: 4,
+                ..
+            }
         ));
     }
 

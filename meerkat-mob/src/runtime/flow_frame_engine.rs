@@ -528,9 +528,17 @@ impl FlowFrameEngine {
                 reconciled.flow_state = next_state;
             }
             crate::runtime::recovery::reconcile_run_state(&mut reconciled).map_err(|error| {
-                MobError::Internal(format!(
-                    "scheduler state reconciliation failed for run '{run_id}': {error}"
-                ))
+                match error {
+                    crate::runtime::recovery::RestoreIncompatible::PreRow22Schema {
+                        schema_version,
+                    } => MobError::UnsupportedRunSchema {
+                        run_id: run_id.clone(),
+                        schema_version,
+                    },
+                    other => MobError::Internal(format!(
+                        "scheduler state reconciliation failed for run '{run_id}': {other}"
+                    )),
+                }
             })?;
             if reconciled.flow_state == run.flow_state {
                 return Ok(());

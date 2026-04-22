@@ -21316,6 +21316,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::FlowFailed { .. } => "flow_failed".to_string(),
         MobError::RunNotFound(_) => "run_not_found".to_string(),
         MobError::RunCanceled(_) => "run_canceled".to_string(),
+        MobError::UnsupportedRunSchema { .. } => "unsupported_run_schema".to_string(),
         MobError::FlowTurnTimedOut => "flow_turn_timed_out".to_string(),
         MobError::SpecRevisionConflict { .. } => "spec_revision_conflict".to_string(),
         MobError::SchemaValidation { .. } => "schema_validation".to_string(),

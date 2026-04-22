@@ -381,32 +381,44 @@ where
         };
 
         let result = match input {
-            // Runtime-backed turns always enter through the conversation-run
-            // path today (`ContentTurn` / `ResumePending`), so we can stage
-            // the canonical start transition at `StartConversationRun`
-            // without consulting the local shadow owner.
-            TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
-                run_id.clone(),
-                crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
-                "conversation".to_string(),
-                false,
-                false,
-                if self.config.output_schema.is_some() {
-                    u64::from(self.config.structured_output_retries)
-                } else {
-                    0
-                },
-            ),
-            TurnExecutionInput::StartImmediateAppend { .. }
+            // Runtime Start* inputs absorb primitive details that the
+            // standalone fallback receives later via PrimitiveApplied, so defer the
+            // runtime mutation until PrimitiveApplied carries the full payload.
+            TurnExecutionInput::StartConversationRun { .. }
+            | TurnExecutionInput::StartImmediateAppend { .. }
             | TurnExecutionInput::StartImmediateContext { .. } => {
                 return Ok(());
             }
             TurnExecutionInput::PrimitiveApplied {
-                run_id: _,
-                admitted_content_shape: _,
-                vision_enabled: _,
-                image_tool_results_enabled: _,
-            } => handle.primitive_applied(),
+                run_id,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+            } => match self.turn_state.primitive_kind() {
+                crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn => handle
+                    .start_conversation_run(
+                        run_id.clone(),
+                        crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+                        admitted_content_shape.0.clone(),
+                        *vision_enabled,
+                        *image_tool_results_enabled,
+                        if self.config.output_schema.is_some() {
+                            u64::from(self.config.structured_output_retries)
+                        } else {
+                            0
+                        },
+                    )
+                    .and_then(|()| handle.primitive_applied()),
+                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateAppend => handle
+                    .start_immediate_append(run_id.clone(), admitted_content_shape.0.clone())
+                    .and_then(|()| handle.primitive_applied()),
+                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateContextAppend => {
+                    handle
+                        .start_immediate_context(run_id.clone(), admitted_content_shape.0.clone())
+                        .and_then(|()| handle.primitive_applied())
+                }
+                crate::turn_execution_authority::TurnPrimitiveKind::None => return Ok(()),
+            },
             TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
                 handle.llm_returned_tool_calls(u64::from(*tool_count))
             }
@@ -473,8 +485,9 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
-        let runtime_backed =
-            self.turn_state_handle.is_some() && self.runtime_execution_kind.is_some();
+        let runtime_backed = self.turn_state_handle.is_some()
+            && self.runtime_execution_kind.is_some()
+            && self.turn_state.can_accept(&input);
         if runtime_backed {
             self.apply_turn_input_via_runtime_handle(&input)?;
         }

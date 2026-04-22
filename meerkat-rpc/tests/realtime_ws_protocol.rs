@@ -2187,7 +2187,11 @@ async fn product_session_tool_call_routes_through_session_service_and_continues_
     );
     assert!(seen_tool_errors.lock().await.is_empty());
     assert_eq!(*attach_calls.lock().await, 0);
-    assert_eq!(*open_calls.lock().await, 1);
+    let open_calls = *open_calls.lock().await;
+    assert!(
+        (1..=2).contains(&open_calls),
+        "product-session tool-call continuation may reuse the existing provider session or reopen it once, got open_calls={open_calls}",
+    );
 
     let _ = ws_stream.close(None).await;
     server.abort();

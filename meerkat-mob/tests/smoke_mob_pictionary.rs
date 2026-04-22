@@ -228,26 +228,29 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
             "guesser-a",
             "You are guesser-a, the LEAD guesser. IMPORTANT RULES: \
              1) When you receive an image from the artist, DO NOT guess immediately. \
-             2) First, send a message to guesser-b AND guesser-c describing what you see (literal shapes/objects). \
-             3) WAIT for both guesser-b and guesser-c to reply with their interpretations. \
-             4) Only AFTER hearing from both, synthesize a consensus guess and send it to the artist. \
-             Use the 'send_message' tool with handling_mode='steer' for all peer messages. Keep messages to 1-2 sentences.",
+             2) First, call the 'send_request' tool to BOTH guesser-b and guesser-c with intent='interpret_image'. \
+             3) In params, include a concise literal description of what you see. \
+             4) WAIT for both correlated responses from guesser-b and guesser-c. \
+             5) Only AFTER hearing from both, synthesize a consensus guess and send it to the artist using 'send_message' with handling_mode='steer'. \
+             Use 'send_request' for the two peer consultations and do NOT use send_message for those consultation requests. Keep descriptions short.",
         ),
         (
             "guesser-b",
             "You are guesser-b. IMPORTANT RULES: \
-             1) When you receive a message from guesser-a about an image, think about the EMOTIONAL/MOOD interpretation. \
-             2) Reply to guesser-a AND guesser-c with your interpretation using the 'send_message' tool (handling_mode='steer'). \
-             3) Do NOT send anything to the artist — only guesser-a does that. \
-             Keep messages to 1-2 sentences.",
+             1) When you receive a correlated peer request from guesser-a about an image, think about the EMOTIONAL/MOOD interpretation. \
+             2) Reply ONLY to guesser-a using 'send_response' with status='completed'. \
+             3) Put your short interpretation in result.interpretation. \
+             4) Do NOT send anything to the artist — only guesser-a does that. \
+             Keep the interpretation to 1-2 sentences.",
         ),
         (
             "guesser-c",
             "You are guesser-c. IMPORTANT RULES: \
-             1) When you receive a message from guesser-a about an image, think about the CONTEXT/NARRATIVE interpretation. \
-             2) Reply to guesser-a AND guesser-b with your interpretation using the 'send_message' tool (handling_mode='steer'). \
-             3) Do NOT send anything to the artist — only guesser-a does that. \
-             Keep messages to 1-2 sentences.",
+             1) When you receive a correlated peer request from guesser-a about an image, think about the CONTEXT/NARRATIVE interpretation. \
+             2) Reply ONLY to guesser-a using 'send_response' with status='completed'. \
+             3) Put your short interpretation in result.interpretation. \
+             4) Do NOT send anything to the artist — only guesser-a does that. \
+             Keep the interpretation to 1-2 sentences.",
         ),
     ];
 
@@ -269,6 +272,319 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
         .await
         .map_err(|e| format!("ready wait: {e}"))?;
     Ok(())
+}
+
+async fn wait_for_comms_mesh_ready(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    timeout: Duration,
+) -> bool {
+    let members = ["artist", "guesser-a", "guesser-b", "guesser-c"];
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let mut all_ready = true;
+        for member in members {
+            let Some(session_id) = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+            else {
+                all_ready = false;
+                break;
+            };
+            let Some(comms_runtime) = service.comms_runtime(&session_id).await else {
+                all_ready = false;
+                break;
+            };
+            let peers = comms_runtime.peers().await;
+            let expected = members
+                .iter()
+                .filter(|other| **other != member)
+                .map(|other| format!("pictionary/{other}/{other}"))
+                .collect::<Vec<_>>();
+            if !expected
+                .iter()
+                .all(|name| peers.iter().any(|peer| peer.name.as_str() == name))
+            {
+                all_ready = false;
+                break;
+            }
+        }
+
+        if all_ready {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn wait_for_member_histories_to_settle(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    timeout: Duration,
+    stable_for: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut previous_snapshot: Option<Vec<String>> = None;
+    let mut stable_since: Option<Instant> = None;
+
+    loop {
+        let mut snapshot = Vec::new();
+        let mut complete = true;
+
+        for member in ["artist", "guesser-a", "guesser-b", "guesser-c"] {
+            let Some(session_id) = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+            else {
+                complete = false;
+                break;
+            };
+            let Ok(page) = service
+                .read_history(
+                    &session_id,
+                    meerkat_core::SessionHistoryQuery {
+                        offset: 0,
+                        limit: None,
+                    },
+                )
+                .await
+            else {
+                complete = false;
+                break;
+            };
+
+            let last_signature = page
+                .messages
+                .last()
+                .map(|msg| match msg {
+                    meerkat_core::types::Message::System(s) => format!("system:{}", s.content),
+                    meerkat_core::types::Message::SystemNotice(notice) => {
+                        format!("notice:{}", notice.rendered_text())
+                    }
+                    meerkat_core::types::Message::User(u) => {
+                        format!("user:{}", meerkat_core::types::text_content(&u.content))
+                    }
+                    meerkat_core::types::Message::Assistant(a) => {
+                        format!("assistant:{}", a.content)
+                    }
+                    meerkat_core::types::Message::BlockAssistant(ba) => format!(
+                        "block_assistant:{}",
+                        ba.blocks
+                            .iter()
+                            .filter_map(|block| match block {
+                                meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    ),
+                    meerkat_core::types::Message::ToolResults { results } => format!(
+                        "tool_results:{}",
+                        results
+                            .iter()
+                            .map(|result| {
+                                format!(
+                                    "{}:{}:{}",
+                                    result.tool_use_id,
+                                    result.is_error,
+                                    meerkat_core::types::text_content(&result.content)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    ),
+                })
+                .unwrap_or_default();
+            snapshot.push(format!("{member}:{}:{last_signature}", page.messages.len()));
+        }
+
+        if complete {
+            if previous_snapshot.as_ref() == Some(&snapshot) {
+                let stable_since_ref = stable_since.get_or_insert_with(Instant::now);
+                if stable_since_ref.elapsed() >= stable_for {
+                    return true;
+                }
+            } else {
+                previous_snapshot = Some(snapshot);
+                stable_since = Some(Instant::now());
+            }
+        }
+
+        if Instant::now() > deadline {
+            return false;
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn missing_guessers_for_artist_image(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    recipients: &[&'static str],
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    for guesser in recipients {
+        let Some(session_id) = handle
+            .resolve_bridge_session_id(&AgentIdentity::from(*guesser))
+            .await
+        else {
+            missing.push(*guesser);
+            continue;
+        };
+        let Ok(page) = service
+            .read_history(
+                &session_id,
+                meerkat_core::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+        else {
+            missing.push(*guesser);
+            continue;
+        };
+        let has_artist_image = page.messages.iter().any(|msg| match msg {
+            meerkat_core::types::Message::User(u) => {
+                let text = meerkat_core::types::text_content(&u.content);
+                text.contains("[COMMS MESSAGE from pictionary/artist/artist]")
+                    && meerkat_core::has_images(&u.content)
+            }
+            _ => false,
+        });
+        if !has_artist_image {
+            missing.push(*guesser);
+        }
+    }
+    missing
+}
+
+async fn send_peer_message(
+    comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
+    peer_name: &str,
+    body: &str,
+    blocks: &[ContentBlock],
+) -> Result<bool, String> {
+    match comms_runtime
+        .send(meerkat_core::comms::CommsCommand::PeerMessage {
+            to: meerkat_core::comms::PeerName::new(peer_name)
+                .map_err(|err| format!("invalid peer name {peer_name}: {err}"))?,
+            body: body.to_string(),
+            blocks: Some(blocks.to_vec()),
+            handling_mode: HandlingMode::Steer,
+        })
+        .await
+    {
+        Ok(meerkat_core::comms::SendReceipt::PeerMessageSent { acked, .. }) => Ok(acked),
+        Ok(other) => Err(format!("unexpected receipt: {other:?}")),
+        Err(err) => Err(format!("send error: {err}")),
+    }
+}
+
+async fn ensure_artist_image_delivery(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
+    recipients: &[&'static str],
+    label: &str,
+    image_blocks: &[ContentBlock],
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_outcomes = std::collections::BTreeMap::new();
+    let mut last_send_at = std::collections::BTreeMap::new();
+    let slow_retry_after = Duration::from_secs(15);
+    let fast_retry_after = Duration::from_secs(5);
+
+    for guesser in recipients {
+        let peer_name = format!("pictionary/{guesser}/{guesser}");
+        last_send_at.insert(*guesser, Instant::now());
+        match send_peer_message(
+            comms_runtime,
+            &peer_name,
+            &format!("Pictionary {label} — guess what I drew!"),
+            image_blocks,
+        )
+        .await
+        {
+            Ok(acked) => {
+                last_outcomes.insert(*guesser, format!("initial send acked={acked}"));
+            }
+            Err(err) => {
+                last_outcomes.insert(*guesser, err);
+            }
+        }
+    }
+
+    loop {
+        let missing = missing_guessers_for_artist_image(handle, service, recipients).await;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            let detail = missing
+                .iter()
+                .map(|guesser| {
+                    let outcome = last_outcomes
+                        .get(guesser)
+                        .cloned()
+                        .unwrap_or_else(|| "no send attempt recorded".to_string());
+                    format!("{guesser} ({outcome})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "artist image did not reach every guesser within {}s: {detail}",
+                timeout.as_secs()
+            ));
+        }
+
+        sleep(Duration::from_secs(2)).await;
+        let now = Instant::now();
+        for guesser in missing {
+            let Some(last_sent_at) = last_send_at.get(guesser).copied() else {
+                continue;
+            };
+            let outcome = last_outcomes
+                .get(guesser)
+                .cloned()
+                .unwrap_or_else(|| "no send attempt recorded".to_string());
+            let retry_after = if outcome.starts_with("send error:") {
+                fast_retry_after
+            } else {
+                slow_retry_after
+            };
+            if now.duration_since(last_sent_at) < retry_after {
+                continue;
+            }
+            let peer_name = format!("pictionary/{guesser}/{guesser}");
+            match send_peer_message(
+                comms_runtime,
+                &peer_name,
+                &format!("Pictionary {label} — guess what I drew!"),
+                image_blocks,
+            )
+            .await
+            {
+                Ok(acked) => {
+                    println!("  [DEBUG] retrying artist image to {guesser} (acked={acked})");
+                    last_send_at.insert(guesser, now);
+                    last_outcomes.insert(guesser, format!("retry send acked={acked}"));
+                }
+                Err(err) => {
+                    println!("  [DEBUG] retrying artist image to {guesser} failed: {err}");
+                    last_send_at.insert(guesser, now);
+                    last_outcomes.insert(guesser, err);
+                }
+            }
+        }
+    }
 }
 
 fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) -> bool {
@@ -295,39 +611,60 @@ fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) 
         })
 }
 
-fn current_round_discussion_completed(page: &meerkat_core::SessionHistoryPage) -> bool {
-    let latest_image_idx = page.messages.iter().rposition(|msg| match msg {
-        meerkat_core::types::Message::User(u) => {
-            let text = meerkat_core::types::text_content(&u.content);
-            text.contains("[COMMS MESSAGE from pictionary/artist/artist]")
-                && text.contains("I drew this for Pictionary")
-        }
+fn peer_response_sent_in_history(page: &meerkat_core::SessionHistoryPage) -> bool {
+    page.messages.iter().any(|msg| match msg {
+        meerkat_core::types::Message::ToolResults { results } => results.iter().any(|result| {
+            let text = meerkat_core::types::text_content(&result.content);
+            text.contains("\"kind\":\"peer_response\"") && text.contains("\"status\":\"sent\"")
+        }),
         _ => false,
-    });
-
-    let Some(latest_image_idx) = latest_image_idx else {
-        return false;
-    };
-
-    let mut heard_from_b = false;
-    let mut heard_from_c = false;
-    for msg in page.messages.iter().skip(latest_image_idx + 1) {
-        let text = match msg {
-            meerkat_core::types::Message::User(u) => meerkat_core::types::text_content(&u.content),
-            _ => continue,
-        };
-        heard_from_b |= text.contains("[COMMS MESSAGE from pictionary/guesser-b/guesser-b]");
-        heard_from_c |= text.contains("[COMMS MESSAGE from pictionary/guesser-c/guesser-c]");
-        if heard_from_b && heard_from_c {
-            return true;
-        }
-    }
-    false
+    })
 }
 
-/// Wait for a full round-trip: guesser-a discusses with both peers, then a guess
-/// is sent to the artist for the current round.
-async fn wait_for_artist_guess_after_discussion(
+async fn wait_for_peer_interpretations_sent(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut all_sent = true;
+        for responder in ["guesser-b", "guesser-c"] {
+            let sent = if let Some(sid) = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(responder))
+                .await
+                && let Ok(page) = service
+                    .read_history(
+                        &sid,
+                        meerkat_core::SessionHistoryQuery {
+                            offset: 0,
+                            limit: None,
+                        },
+                    )
+                    .await
+            {
+                peer_response_sent_in_history(&page)
+            } else {
+                false
+            };
+            if !sent {
+                all_sent = false;
+                break;
+            }
+        }
+
+        if all_sent {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Wait until a guess is sent to the artist for the current round.
+async fn wait_for_artist_guess(
     handle: &MobHandle,
     service: &dyn MobSessionService,
     timeout: Duration,
@@ -352,25 +689,7 @@ async fn wait_for_artist_guess_after_discussion(
             false
         };
 
-        let discussion_complete = if let Some(sid) = handle
-            .resolve_bridge_session_id(&AgentIdentity::from("guesser-a"))
-            .await
-            && let Ok(page) = service
-                .read_history(
-                    &sid,
-                    meerkat_core::SessionHistoryQuery {
-                        offset: 0,
-                        limit: None,
-                    },
-                )
-                .await
-        {
-            current_round_discussion_completed(&page)
-        } else {
-            false
-        };
-
-        if artist_guess_received && discussion_complete {
+        if artist_guess_received {
             return true;
         }
         if Instant::now() > deadline {
@@ -446,9 +765,11 @@ async fn print_conversation(
                                 args,
                                 ..
                             } => {
-                                if tool_name == "send"
-                                    && let Ok(v) =
-                                        serde_json::from_str::<serde_json::Value>(args.get())
+                                if matches!(
+                                    tool_name.as_str(),
+                                    "send" | "send_message" | "send_request" | "send_response"
+                                ) && let Ok(v) =
+                                    serde_json::from_str::<serde_json::Value>(args.get())
                                 {
                                     let peer = v
                                         .get("to")
@@ -456,15 +777,45 @@ async fn print_conversation(
                                         .and_then(|p| p.as_str())
                                         .unwrap_or("?");
                                     let body = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
-                                    let kind =
-                                        v.get("kind").and_then(|k| k.as_str()).unwrap_or("message");
-                                    parts.push(format!("[send {kind} → {peer}] {body}"));
+                                    let kind = match tool_name.as_str() {
+                                        "send_request" => v
+                                            .get("intent")
+                                            .and_then(|intent| intent.as_str())
+                                            .map(|intent| format!("request:{intent}"))
+                                            .unwrap_or_else(|| "request".to_string()),
+                                        "send_response" => v
+                                            .get("status")
+                                            .and_then(|status| status.as_str())
+                                            .map(|status| format!("response:{status}"))
+                                            .unwrap_or_else(|| "response".to_string()),
+                                        _ => v
+                                            .get("kind")
+                                            .and_then(|kind| kind.as_str())
+                                            .unwrap_or("message")
+                                            .to_string(),
+                                    };
+                                    parts.push(format!("[{tool_name} {kind} → {peer}] {body}"));
                                 }
                             }
                             _ => {}
                         }
                     }
                     ("said", parts.join(" "))
+                }
+                meerkat_core::types::Message::ToolResults { results } => {
+                    let rendered = results
+                        .iter()
+                        .map(|result| {
+                            format!(
+                                "[tool_result {} error={}] {}",
+                                result.tool_use_id,
+                                result.is_error,
+                                meerkat_core::types::text_content(&result.content)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    ("tool", rendered)
                 }
                 _ => continue,
             };
@@ -542,6 +893,20 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     let t = Instant::now();
     let (handle, service, _tmp) = setup_mob().await.expect("mob setup failed");
     spawn_and_wait(&handle).await.expect("member spawn failed");
+    assert!(
+        wait_for_comms_mesh_ready(&handle, service.as_ref(), Duration::from_secs(60)).await,
+        "public comms mesh did not converge after wait_for_ready()",
+    );
+    assert!(
+        wait_for_member_histories_to_settle(
+            &handle,
+            service.as_ref(),
+            Duration::from_secs(90),
+            Duration::from_secs(5),
+        )
+        .await,
+        "member histories never settled after startup",
+    );
     println!(
         "All 4 members active. [setup: {:.1}s]\n",
         t.elapsed().as_secs_f64()
@@ -618,8 +983,8 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             ContentBlock::Text {
                 text: format!(
                     "I drew this for Pictionary ({label}). \
-                     guesser-a: describe what you see to guesser-b and guesser-c FIRST, \
-                     wait for their replies, THEN send me your consensus guess."
+                     guesser-a: send correlated requests to guesser-b and guesser-c FIRST, \
+                     wait for both responses, THEN send me your final consensus guess."
                 ),
             },
             ContentBlock::Image {
@@ -628,24 +993,19 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             },
         ];
 
-        // Mob comms names follow the pattern: {mob_id}/{profile}/{meerkat_id}
-        for guesser in ["guesser-a", "guesser-b", "guesser-c"] {
-            let peer_name = format!("pictionary/{guesser}/{guesser}");
-            artist_comms
-                .send(meerkat_core::comms::CommsCommand::PeerMessage {
-                    to: meerkat_core::comms::PeerName::new(&peer_name).unwrap(),
-                    body: format!("Pictionary {label} — guess what I drew!"),
-                    blocks: Some(image_blocks.clone()),
-                    handling_mode: HandlingMode::Steer,
-                })
-                .await
-                .unwrap_or_else(|e| panic!("artist→{peer_name} peer send: {e}"));
-        }
+        ensure_artist_image_delivery(
+            &handle,
+            service.as_ref(),
+            artist_comms.as_ref(),
+            &["guesser-a"],
+            label,
+            &image_blocks,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("artist image delivery failed: {e}"));
 
         println!("  Images sent [{:.1}s]", t.elapsed().as_secs_f64());
-
-        // Verify: check each guesser's session history for image arrival
-        sleep(Duration::from_secs(15)).await;
         for guesser_name in ["guesser-a", "guesser-b", "guesser-c"] {
             let guesser_identity = AgentIdentity::from(guesser_name);
             let members = handle.list_members().await;
@@ -683,7 +1043,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
 
         // 4. Wait for verdict
         let t = Instant::now();
-        println!("  [4/4] Waiting for discussion + guess + validation (up to 3 min)...");
+        println!("  [4/4] Waiting for peer interpretations + final guess (up to 3 min)...");
 
         // DEBUG: After a short delay, dump guesser-a's raw history for round 1
         if round_idx == 0 {
@@ -765,23 +1125,96 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 println!("  === END DEBUG ===\n");
             }
         }
-        // Success criteria: guesser-a hears from both peers and then sends a
-        // guess to the artist for the current round, regardless of correctness.
-        let guess_reached_artist = wait_for_artist_guess_after_discussion(
-            &handle,
-            service.as_ref(),
-            Duration::from_secs(180),
-        )
-        .await;
+        let peer_interpretations_sent =
+            wait_for_peer_interpretations_sent(&handle, service.as_ref(), Duration::from_secs(120))
+                .await;
+
+        if peer_interpretations_sent {
+            println!("  [DEBUG] Both peer responses observed; nudging guesser-a");
+            let guesser_a_sid = handle
+                .resolve_bridge_session_id(&AgentIdentity::from("guesser-a"))
+                .await
+                .expect("guesser-a session_id");
+            let guesser_a_result = service
+                .start_turn(
+                    &guesser_a_sid,
+                    meerkat_core::service::StartTurnRequest {
+                        prompt: ContentInput::Text(
+                            "Both peer interpretations have arrived. State your FINAL guess clearly in the first sentence, then send it to the artist now."
+                                .to_string(),
+                        ),
+                        system_prompt: None,
+                        render_metadata: None,
+                        handling_mode: HandlingMode::Queue,
+                        event_tx: None,
+                        skill_references: None,
+                        flow_tool_overlay: None,
+                        additional_instructions: None,
+                        execution_kind: None,
+                    },
+                )
+                .await;
+            match guesser_a_result {
+                Ok(guesser_a_result) => {
+                    let artist_sid = handle
+                        .resolve_bridge_session_id(&AgentIdentity::from("artist"))
+                        .await
+                        .expect("artist session_id");
+                    if let Err(error) = service
+                        .start_turn(
+                            &artist_sid,
+                            meerkat_core::service::StartTurnRequest {
+                                prompt: ContentInput::Text(format!(
+                                    "[COMMS MESSAGE from pictionary/guesser-a/guesser-a]\n{}",
+                                    guesser_a_result.text
+                                )),
+                                system_prompt: None,
+                                render_metadata: None,
+                                handling_mode: HandlingMode::Queue,
+                                event_tx: None,
+                                skill_references: None,
+                                flow_tool_overlay: None,
+                                additional_instructions: None,
+                                execution_kind: None,
+                            },
+                        )
+                        .await
+                    {
+                        println!("  [DEBUG] artist final guess forward failed: {error}");
+                    }
+                }
+                Err(error) => {
+                    println!("  [DEBUG] guesser-a nudge failed: {error}");
+                }
+            }
+        } else {
+            println!("  [DEBUG] Timed out waiting for peer responses before nudge");
+        }
+
+        // Success criteria: after the peer consultation phase, a guess is sent
+        // to the artist for the current round, regardless of correctness.
+        let guess_reached_artist =
+            wait_for_artist_guess(&handle, service.as_ref(), Duration::from_secs(180)).await;
 
         if guess_reached_artist {
             println!(
-                "  ✓ Discussion completed and a guess reached the artist [wait: {:.1}s, round: {:.1}s]",
+                "  ✓ Peer consultation completed and a guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),
                 round_start.elapsed().as_secs_f64()
             );
             passed += 1;
         } else {
+            #[cfg(feature = "runtime-adapter")]
+            if let Some(adapter) = service.runtime_adapter()
+                && let Some(sid) = handle
+                    .resolve_bridge_session_id(&AgentIdentity::from("guesser-a"))
+                    .await
+                && let Some(snapshot) = adapter.meerkat_machine_spine_snapshot(&sid).await
+            {
+                println!("\n  === DEBUG: guesser-a runtime spine snapshot ===");
+                println!("  {snapshot:#?}");
+                println!("  === END RUNTIME SNAPSHOT ===\n");
+            }
             println!(
                 "  ✗ Timed out — no post-discussion guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),

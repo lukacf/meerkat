@@ -153,6 +153,10 @@ impl LocalTurnExecutionState {
         self.fields.max_extraction_retries > 0
     }
 
+    pub(crate) fn can_accept(&self, input: &TurnExecutionInput) -> bool {
+        self.evaluate(input).is_ok()
+    }
+
     pub(crate) fn apply(
         &mut self,
         input: TurnExecutionInput,

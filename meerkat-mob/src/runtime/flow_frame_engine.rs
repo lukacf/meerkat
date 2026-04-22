@@ -2490,7 +2490,7 @@ fn advance_body_frame_after_seal(
                     ))
                 })?;
             let obligation = crate::generated::protocol_flow_loop_until_evaluation::accept_evaluate_until_condition(
-                crate::generated::protocol_flow_loop_until_evaluation::LoopUntilEvaluationRequested::from_effect(request)?,
+                crate::runtime::loop_iteration_authority::LoopUntilEvaluationRequested::from_effect(request)?,
             );
             Ok(Some(FlowFrameLoopDecision {
                 store_plan: Some(FlowFrameLoopStorePlan::CompleteBodyFrame {
@@ -2544,14 +2544,22 @@ fn resolve_until_feedback_decision(
     obligation: crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
     until_met: bool,
 ) -> Result<FlowFrameLoopDecision, MobError> {
+    // Hydrate the generated `LoopIterationAuthority` from the snapshot's
+    // kernel state, invoke the ShellBridge submitter (which mutates the
+    // authority through `apply`), and materialize the next state back
+    // into a `LoopSnapshot`.
+    let mut authority =
+        crate::runtime::loop_iteration_authority::LoopIterationAuthority::from_state(
+            loop_snapshot.kernel_state.clone(),
+        );
     let feedback = if until_met {
         crate::generated::protocol_flow_loop_until_evaluation::submit_until_condition_met(
-            &loop_snapshot.kernel_state,
+            &mut authority,
             obligation.clone(),
         )?
     } else {
         crate::generated::protocol_flow_loop_until_evaluation::submit_until_condition_failed(
-            &loop_snapshot.kernel_state,
+            &mut authority,
             obligation.clone(),
         )?
     };

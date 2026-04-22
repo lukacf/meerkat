@@ -711,7 +711,11 @@ fn generate_feedback_submitter(
         out,
         "    let transition = authority.apply({}::{})?;",
         input_enum,
-        ctor_field_list_from_bindings(target_variant, feedback)?
+        ctor_field_list_from_bindings(
+            target_variant,
+            feedback,
+            rust.input_payload_module_path.as_deref()
+        )?
     )?;
     match return_kind {
         FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
@@ -877,6 +881,7 @@ fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
 fn ctor_field_list_from_bindings(
     target_variant: &meerkat_machine_schema::VariantSchema,
     feedback: &meerkat_machine_schema::FeedbackInputRef,
+    input_payload_module_path: Option<&str>,
 ) -> Result<String> {
     if target_variant.fields.is_empty() {
         return Ok(target_variant.name.clone());
@@ -907,7 +912,16 @@ fn ctor_field_list_from_bindings(
         })
         .collect::<Result<Vec<_>>>()?
         .join(", ");
-    Ok(format!("{} {{ {} }}", target_variant.name, fields))
+    // Kernel-style input enums wrap named-field payload structs in tuple
+    // variants (`Input::VariantName(payload_module::VariantName { ... })`).
+    // DSL-emitted input enums use named-field variants directly.
+    match input_payload_module_path {
+        Some(module) => Ok(format!(
+            "{}({}::{} {{ {} }})",
+            target_variant.name, module, target_variant.name, fields
+        )),
+        None => Ok(format!("{} {{ {} }}", target_variant.name, fields)),
+    }
 }
 
 fn ctor_field_list_from_bindings_without_obligation(

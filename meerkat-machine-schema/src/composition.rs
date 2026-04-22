@@ -177,6 +177,15 @@ pub struct ProtocolRustBinding {
     /// does not accept (e.g., a correlation `wait_request_id` that the
     /// runtime handle never uses).
     pub handle_method_forwarded_fields: BTreeMap<String, Vec<String>>,
+    /// Kernel-codegen-emitted input enums wrap each variant in a named
+    /// payload struct under an `inputs` submodule
+    /// (`Input::VariantName(inputs::VariantName { ... })`). DSL-emitted
+    /// input enums use named-field variants directly
+    /// (`Input::VariantName { ... }`). When this field is set, the
+    /// codegen emits the tuple-wrapping form and qualifies the payload
+    /// struct by this module path (e.g. `inputs`). Absent → named-field
+    /// form (the canonical DSL-emitted shape).
+    pub input_payload_module_path: Option<String>,
     /// Additional generation modes stacked onto the primary mode. Each
     /// listed mode emits its own family of helpers into the same output
     /// file, letting a single protocol expose both (for example)

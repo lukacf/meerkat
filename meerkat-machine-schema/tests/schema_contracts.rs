@@ -814,6 +814,7 @@ mod handoff_binding {
             handle_method_names: methods,
             handle_arg_accessors: BTreeMap::new(),
             handle_method_forwarded_fields: BTreeMap::new(),
+            input_payload_module_path: None,
             additional_modes: vec![],
         }
     }
@@ -1018,6 +1019,7 @@ mod handoff_binding {
             handle_method_names: methods,
             handle_arg_accessors: BTreeMap::new(),
             handle_method_forwarded_fields: BTreeMap::new(),
+            input_payload_module_path: None,
             additional_modes: vec![ProtocolGenerationMode::HandleBridge],
         };
         let composition = composition_with_protocol(handle_bridge_protocol(binding));

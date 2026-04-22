@@ -382,8 +382,7 @@ fn enforce_metadata_requirements(
 mod tests {
     use super::*;
     use meerkat_core::{
-        AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, CredentialStorageSpec,
-        GoogleRouteHints, Provider,
+        AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, CredentialStorageSpec, Provider,
     };
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,

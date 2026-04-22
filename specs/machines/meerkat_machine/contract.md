@@ -83,6 +83,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DetachRealtimeBinding`
 - `RequireRealtimeReattach`
 - `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: RealtimeBindingState)
+- `OpsBarrierSatisfied`(operation_ids: Set<OperationId>)
 - `McpServerConnectPending`(server_id: McpServerId)
 - `McpServerConnected`(server_id: McpServerId)
 - `McpServerFailed`(server_id: McpServerId, error: String)
@@ -3560,6 +3561,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_id_matches_current`
   - `epoch_matches_current`
 - To: `Stopped`
+
+### `OpsBarrierSatisfiedAttached`
+- From: `Attached`
+- On: `OpsBarrierSatisfied`(operation_ids)
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `OpsBarrierSatisfiedRunning`
+- From: `Running`
+- On: `OpsBarrierSatisfied`(operation_ids)
+- Guards:
+  - `session_registered`
+- To: `Running`
 
 ## Coverage
 ### Code Anchors

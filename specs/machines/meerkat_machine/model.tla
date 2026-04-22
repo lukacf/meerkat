@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MeerkatMachine.
 
-CONSTANTS AgentRuntimeIdValues, BooleanValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputIdValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RealtimeProjectionFreshnessValues, RealtimeReconnectPolicyValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfPeerCorrelationIdValues, SetOfStringValues, StringValues, SupervisorBindingKindValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues, WorkOriginValues
+CONSTANTS AgentRuntimeIdValues, BooleanValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputIdValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OperationIdValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RealtimeProjectionFreshnessValues, RealtimeReconnectPolicyValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfStringValues, StringValues, SupervisorBindingKindValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues, WorkOriginValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -4131,6 +4131,22 @@ RevokeSupervisorStopped(peer_id, epoch) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
+OpsBarrierSatisfiedAttached(operation_ids) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch >>
+
+
+OpsBarrierSatisfiedRunning(operation_ids) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch >>
+
+
 Next ==
     \/ Initialize
     \/ \E arg_session_id \in SessionIdValues : RegisterSessionIdle(arg_session_id)
@@ -4550,6 +4566,8 @@ Next ==
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorRunning(peer_id, epoch)
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorRetired(peer_id, epoch)
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorStopped(peer_id, epoch)
+    \/ \E operation_ids \in SetOfOperationIdValues : OpsBarrierSatisfiedAttached(operation_ids)
+    \/ \E operation_ids \in SetOfOperationIdValues : OpsBarrierSatisfiedRunning(operation_ids)
     \/ TerminalStutter
 
 fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))

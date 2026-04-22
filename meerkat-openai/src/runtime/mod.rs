@@ -118,6 +118,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             not(all(not(target_arch = "wasm32"), feature = "oauth")),
             allow(unused_mut)
         )]
+        #[allow(unused_assignments)]
         let mut chatgpt_account_id: Option<String> = None;
         #[cfg_attr(
             not(all(not(target_arch = "wasm32"), feature = "oauth")),

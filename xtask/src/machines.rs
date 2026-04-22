@@ -2127,15 +2127,27 @@ fn run_local_flow_machine_tests(root: &Path, machine_slug: &str) -> Result<()> {
             .arg("--test-threads=1")
             .current_dir(root);
 
-        let status = cmd.status().with_context(|| {
+        let output = cmd.output().with_context(|| {
             format!(
                 "run local flow test {}::{}/{}",
                 spec.package, machine_slug, spec.target
             )
         })?;
-        if !status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+        if !output.status.success() {
             bail!(
-                "local flow test failed for {}::{}/{}",
+                "local flow test failed for {}::{}/{}\n{}",
+                spec.package,
+                machine_slug,
+                spec.target,
+                combined.trim()
+            );
+        }
+        if combined.contains("running 0 tests") {
+            bail!(
+                "local flow test target matched zero tests for {}::{}/{}",
                 spec.package,
                 machine_slug,
                 spec.target

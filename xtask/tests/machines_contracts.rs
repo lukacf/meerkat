@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::fs;
+use std::process::Command;
 
 use tempfile::tempdir;
 use xtask::machines::*;
@@ -187,4 +188,72 @@ fn canonical_machine_inventory_matches_docs_and_artifact_bundle() {
         mismatches.is_empty(),
         "expected canonical machine inventory to match docs and artifact bundle, got {mismatches:#?}"
     );
+}
+
+#[test]
+fn machine_verify_cli_expands_mob_machine_to_local_flow_surface() {
+    let root = repo_root().expect("repo root");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("machine-verify")
+        .arg("--machine")
+        .arg("mob_machine")
+        .arg("--skip-tlc")
+        .current_dir(&root)
+        .output()
+        .expect("run xtask machine-verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+
+    assert!(
+        output.status.success(),
+        "mob verify should succeed, got:\n{}",
+        combined
+    );
+    for expected in [
+        "machine: MobMachine",
+        "machine: FlowFrameMachine",
+        "machine: FlowRunMachine",
+        "machine: LoopIterationMachine",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "expected mob verify output to contain `{expected}`, got:\n{}",
+            combined
+        );
+    }
+}
+
+#[test]
+fn machine_verify_cli_keeps_auth_isolated() {
+    let root = repo_root().expect("repo root");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("machine-verify")
+        .arg("--machine")
+        .arg("auth")
+        .arg("--skip-tlc")
+        .current_dir(&root)
+        .output()
+        .expect("run xtask machine-verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+
+    assert!(
+        output.status.success(),
+        "auth verify should succeed, got:\n{}",
+        combined
+    );
+    assert!(combined.contains("machine: AuthMachine"));
+    for unexpected in [
+        "machine: FlowFrameMachine",
+        "machine: FlowRunMachine",
+        "machine: LoopIterationMachine",
+    ] {
+        assert!(
+            !combined.contains(unexpected),
+            "did not expect auth verify output to contain `{unexpected}`, got:\n{}",
+            combined
+        );
+    }
 }

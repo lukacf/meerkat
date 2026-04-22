@@ -4,4 +4,4 @@ error[E0609]: no field `fields` on type `meerkat_machine_kernels::generated::mee
 5 |     let _ = state.fields.get("session_id");
   |                   ^^^^^^ unknown field
   |
-  = note: available fields are: `phase`, `session_id`, `active_runtime_id`, `active_fence_token`, `current_run_id` ... and 26 others
+  = note: available fields are: `phase`, `session_id`, `active_runtime_id`

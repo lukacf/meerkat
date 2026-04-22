@@ -63,7 +63,7 @@ pub(crate) fn submit_until_condition_met(
     loop_iteration::transition(
         state,
         loop_iteration::Input::UntilConditionMet(loop_iteration::inputs::UntilConditionMet {
-            loop_instance_id: obligation.loop_instance_id.to_string(),
+            loop_instance_id: obligation.loop_instance_id.clone(),
             iteration: obligation.iteration,
         }),
         &loop_iteration::EmptyContext,
@@ -78,7 +78,7 @@ pub(crate) fn submit_until_condition_failed(
     loop_iteration::transition(
         state,
         loop_iteration::Input::UntilConditionFailed(loop_iteration::inputs::UntilConditionFailed {
-            loop_instance_id: obligation.loop_instance_id.to_string(),
+            loop_instance_id: obligation.loop_instance_id.clone(),
             iteration: obligation.iteration,
         }),
         &loop_iteration::EmptyContext,

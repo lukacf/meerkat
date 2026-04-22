@@ -3,15 +3,23 @@ pub mod generated;
 mod runtime;
 #[allow(dead_code)]
 pub(crate) mod ids {
+    use serde::{Deserialize, Serialize};
     use std::fmt;
 
     macro_rules! string_id {
         ($name:ident) => {
-            #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+            #[derive(
+                Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+            )]
             pub struct $name(pub String);
             impl<T: Into<String>> From<T> for $name {
                 fn from(value: T) -> Self {
                     Self(value.into())
+                }
+            }
+            impl $name {
+                pub fn as_str(&self) -> &str {
+                    &self.0
                 }
             }
             impl fmt::Display for $name {
@@ -24,6 +32,7 @@ pub(crate) mod ids {
 
     string_id!(AgentIdentity);
     string_id!(AgentRuntimeId);
+    string_id!(SessionId);
     string_id!(WorkRef);
     string_id!(RunId);
     string_id!(FrameId);

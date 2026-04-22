@@ -12,11 +12,8 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_run_machine()
 }
 
-pub type BranchId = String;
-pub type FrameId = String;
-pub type LoopInstanceId = String;
-pub type MeerkatId = String;
-pub type StepId = String;
+pub use crate::ids::MeerkatId;
+pub use crate::ids::{BranchId, FrameId, LoopInstanceId, StepId};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -560,8 +557,8 @@ pub fn initial_state() -> State {
         max_active_nodes: 0,
         max_active_frames: 0,
         max_frame_depth: 0,
-        last_granted_frame: String::new(),
-        last_granted_loop: String::new(),
+        last_granted_frame: FrameId::from(String::new()),
+        last_granted_loop: LoopInstanceId::from(String::new()),
     }
 }
 

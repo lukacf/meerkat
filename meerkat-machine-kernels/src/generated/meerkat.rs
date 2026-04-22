@@ -12,12 +12,46 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine()
 }
 
-pub type AgentRuntimeId = String;
+pub use crate::ids::AgentRuntimeId;
 pub type FenceToken = u64;
 pub type Generation = u64;
-pub type SessionId = String;
-pub type ToolFilter = String;
-pub type ToolVisibilityWitness = String;
+pub use crate::ids::SessionId;
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ToolFilter(pub String);
+impl<T: Into<String>> From<T> for ToolFilter {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ToolVisibilityWitness(pub String);
+impl<T: Into<String>> From<T> for ToolVisibilityWitness {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;

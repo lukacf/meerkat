@@ -379,10 +379,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::loop_iteration_machine()
 }
 
-pub type FlowNodeId = String;
-pub type FrameId = String;
-pub type LoopId = String;
-pub type LoopInstanceId = String;
+pub use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -663,10 +660,10 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Absent,
-        loop_instance_id: String::new(),
-        parent_frame_id: String::new(),
-        parent_node_id: String::new(),
-        loop_id: String::new(),
+        loop_instance_id: LoopInstanceId::from(String::new()),
+        parent_frame_id: FrameId::from(String::new()),
+        parent_node_id: FlowNodeId::from(String::new()),
+        loop_id: LoopId::from(String::new()),
         depth: 0,
         stage: LoopIterationStage::AwaitingBodyFrame,
         current_iteration: 0,
@@ -952,10 +949,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_frame_machine()
 }
 
-pub type BranchId = String;
-pub type FlowNodeId = String;
-pub type FrameId = String;
-pub type LoopInstanceId = String;
+pub use crate::ids::{BranchId, FlowNodeId, FrameId, LoopInstanceId};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1342,11 +1336,11 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Absent,
-        frame_id: String::new(),
+        frame_id: FrameId::from(String::new()),
         frame_scope: FrameScope::Root,
-        loop_instance_id: String::new(),
+        loop_instance_id: LoopInstanceId::from(String::new()),
         iteration: 0,
-        last_admitted_node: String::new(),
+        last_admitted_node: FlowNodeId::from(String::new()),
         tracked_nodes: Default::default(),
         ordered_nodes: Vec::new(),
         node_kind: Default::default(),
@@ -1542,7 +1536,7 @@ fn start_frame_state(
         frame_scope,
         loop_instance_id,
         iteration,
-        last_admitted_node: String::new(),
+        last_admitted_node: FlowNodeId::from(String::new()),
         tracked_nodes,
         ordered_nodes,
         node_kind,
@@ -1717,7 +1711,7 @@ pub fn transition<C: Context>(
                 next_state: start_frame_state(
                     payload.frame_id,
                     FrameScope::Root,
-                    String::new(),
+                    LoopInstanceId::from(String::new()),
                     0,
                     payload.tracked_nodes,
                     payload.ordered_nodes,
@@ -1805,11 +1799,8 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_run_machine()
 }
 
-pub type BranchId = String;
-pub type FrameId = String;
-pub type LoopInstanceId = String;
-pub type MeerkatId = String;
-pub type StepId = String;
+pub use crate::ids::{BranchId, FrameId, LoopInstanceId, StepId};
+pub use crate::ids::MeerkatId;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2353,8 +2344,8 @@ pub fn initial_state() -> State {
         max_active_nodes: 0,
         max_active_frames: 0,
         max_frame_depth: 0,
-        last_granted_frame: String::new(),
-        last_granted_loop: String::new(),
+        last_granted_frame: FrameId::from(String::new()),
+        last_granted_loop: LoopInstanceId::from(String::new()),
     }
 }
 
@@ -3382,12 +3373,24 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine()
 }
 
-pub type AgentRuntimeId = String;
+pub use crate::ids::AgentRuntimeId;
 pub type FenceToken = u64;
 pub type Generation = u64;
-pub type SessionId = String;
-pub type ToolFilter = String;
-pub type ToolVisibilityWitness = String;
+pub use crate::ids::SessionId;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct ToolFilter(pub String);
+impl<T: Into<String>> From<T> for ToolFilter {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct ToolVisibilityWitness(pub String);
+impl<T: Into<String>> From<T> for ToolVisibilityWitness {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -3715,7 +3718,7 @@ fn direct_default_value_expr(
         TypeRef::Named(name) if matches!(render_named_type_alias_target(name), "u64" | "u32") => {
             "0".to_string()
         }
-        TypeRef::Named(_) => "String::new()".to_string(),
+        TypeRef::Named(name) => format!("{}::from(String::new())", rust_ident(name)),
         TypeRef::Enum(name) => enum_defaults
             .get(name)
             .cloned()

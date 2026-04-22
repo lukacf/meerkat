@@ -12,10 +12,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::loop_iteration_machine()
 }
 
-pub type FlowNodeId = String;
-pub type FrameId = String;
-pub type LoopId = String;
-pub type LoopInstanceId = String;
+pub use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -296,10 +293,10 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Absent,
-        loop_instance_id: String::new(),
-        parent_frame_id: String::new(),
-        parent_node_id: String::new(),
-        loop_id: String::new(),
+        loop_instance_id: LoopInstanceId::from(String::new()),
+        parent_frame_id: FrameId::from(String::new()),
+        parent_node_id: FlowNodeId::from(String::new()),
+        loop_id: LoopId::from(String::new()),
         depth: 0,
         stage: LoopIterationStage::AwaitingBodyFrame,
         current_iteration: 0,

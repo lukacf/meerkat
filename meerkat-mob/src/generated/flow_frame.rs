@@ -12,10 +12,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_frame_machine()
 }
 
-pub type BranchId = String;
-pub type FlowNodeId = String;
-pub type FrameId = String;
-pub type LoopInstanceId = String;
+pub use crate::ids::{BranchId, FlowNodeId, FrameId, LoopInstanceId};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -402,11 +399,11 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Absent,
-        frame_id: String::new(),
+        frame_id: FrameId::from(String::new()),
         frame_scope: FrameScope::Root,
-        loop_instance_id: String::new(),
+        loop_instance_id: LoopInstanceId::from(String::new()),
         iteration: 0,
-        last_admitted_node: String::new(),
+        last_admitted_node: FlowNodeId::from(String::new()),
         tracked_nodes: Default::default(),
         ordered_nodes: Vec::new(),
         node_kind: Default::default(),
@@ -613,7 +610,7 @@ fn start_frame_state(
         frame_scope,
         loop_instance_id,
         iteration,
-        last_admitted_node: String::new(),
+        last_admitted_node: FlowNodeId::from(String::new()),
         tracked_nodes,
         ordered_nodes,
         node_kind,
@@ -799,7 +796,7 @@ pub fn transition<C: Context>(
                 next_state: start_frame_state(
                     payload.frame_id,
                     FrameScope::Root,
-                    String::new(),
+                    LoopInstanceId::from(String::new()),
                     0,
                     payload.tracked_nodes,
                     payload.ordered_nodes,

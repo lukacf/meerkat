@@ -917,6 +917,7 @@ impl MobActor {
         dsl.member_kickoff_pending
             .iter()
             .chain(dsl.member_kickoff_starting.iter())
+            .chain(dsl.member_kickoff_callback_pending.iter())
             .cloned()
             .collect()
     }
@@ -1054,7 +1055,9 @@ impl MobActor {
             crate::roster::MobMemberKickoffPhase::Pending => mob_dsl::KickoffPhase::Pending,
             crate::roster::MobMemberKickoffPhase::Starting => mob_dsl::KickoffPhase::Starting,
             crate::roster::MobMemberKickoffPhase::Started => mob_dsl::KickoffPhase::Started,
-            crate::roster::MobMemberKickoffPhase::CallbackPending => mob_dsl::KickoffPhase::Failed,
+            crate::roster::MobMemberKickoffPhase::CallbackPending => {
+                mob_dsl::KickoffPhase::CallbackPending
+            }
             crate::roster::MobMemberKickoffPhase::Failed => mob_dsl::KickoffPhase::Failed,
             crate::roster::MobMemberKickoffPhase::Cancelled => mob_dsl::KickoffPhase::Cancelled,
         }
@@ -1950,6 +1953,10 @@ impl MobActor {
         agent_identity: &MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
     ) -> Result<(), MobError> {
+        let callback_pending = matches!(
+            outcome,
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }
+        );
         if let meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } =
             &outcome
         {
@@ -1971,13 +1978,11 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                        tool_name,
-                        ..
-                    } => mob_dsl::MobMachineInput::KickoffResolveFailed {
-                        member_id: agent_identity.to_string(),
-                        error: format!("autonomous kickoff blocked on callback tool '{tool_name}'"),
-                    },
+                    meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
+                        mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
+                            member_id: agent_identity.to_string(),
+                        }
+                    }
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
@@ -1988,6 +1993,95 @@ impl MobActor {
                 },
             )
             .await?;
+        if callback_pending {
+            self.watch_callback_pending_kickoff(agent_identity).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn watch_callback_pending_kickoff(
+        &mut self,
+        agent_identity: &MeerkatId,
+    ) -> Result<(), MobError> {
+        let session_id = {
+            let roster = self.roster.read().await;
+            roster
+                .get(agent_identity)
+                .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "callback-pending kickoff for '{agent_identity}' is missing a session binding"
+                    ))
+                })?
+        };
+        let session_service = self.session_service.clone();
+        let completion_command_tx = self.command_tx.clone();
+        let log_id = agent_identity.clone();
+        let handle = tokio::spawn(async move {
+            let mut stream =
+                match crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                    &*session_service,
+                    &session_id,
+                )
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_identity = %log_id,
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to subscribe to callback-pending kickoff event stream"
+                        );
+                        return;
+                    }
+                };
+
+            let terminal_outcome = loop {
+                let Some(envelope) = stream.next().await else {
+                    break meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                        "kickoff callback stream closed before terminal resolution".to_string(),
+                    );
+                };
+                match envelope.payload {
+                    meerkat_core::event::AgentEvent::RunCompleted { .. }
+                    | meerkat_core::event::AgentEvent::InteractionComplete { .. } => {
+                        break meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult;
+                    }
+                    meerkat_core::event::AgentEvent::RunFailed { error, .. }
+                    | meerkat_core::event::AgentEvent::InteractionFailed { error, .. } => {
+                        break meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                            error,
+                        );
+                    }
+                    meerkat_core::event::AgentEvent::InteractionCallbackPending { .. } => continue,
+                    _ => continue,
+                }
+            };
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if completion_command_tx
+                .send(MobCommand::KickoffOutcomeResolved {
+                    agent_identity: log_id.clone(),
+                    outcome: terminal_outcome,
+                    ack_tx,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    agent_identity = %log_id,
+                    "mob actor dropped before callback-pending kickoff resolution could be recorded"
+                );
+            } else {
+                let _ = ack_rx.await;
+            }
+        });
+        self.autonomous_initial_turns
+            .lock()
+            .await
+            .insert(agent_identity.clone(), InitialTurnHandle { handle });
         Ok(())
     }
 

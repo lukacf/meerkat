@@ -539,6 +539,9 @@ fn machine_verify_at_root(
     for machine in &selection.machines {
         run_machine_owner_tests(root, machine)?;
     }
+    for machine in &local_flow_machines {
+        run_local_flow_machine_tests(root, machine.slug)?;
+    }
 
     Ok(())
 }
@@ -1970,6 +1973,13 @@ struct OwnerTestSpec {
     filter: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalFlowTestSpec {
+    slug: &'static str,
+    package: &'static str,
+    target: &'static str,
+}
+
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const MEERKAT: &[OwnerTestSpec] = &[
         OwnerTestSpec {
@@ -2014,6 +2024,36 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         "mob_machine" => MOB,
         _ => &[],
     }
+}
+
+fn local_flow_test_specs() -> &'static [LocalFlowTestSpec] {
+    &[
+        LocalFlowTestSpec {
+            slug: "flow_frame",
+            package: "meerkat-mob",
+            target: "flow_frame_kernel",
+        },
+        LocalFlowTestSpec {
+            slug: "flow_frame",
+            package: "meerkat-mob",
+            target: "flow_frame_cas_tests",
+        },
+        LocalFlowTestSpec {
+            slug: "flow_frame",
+            package: "meerkat-mob",
+            target: "flow_frame_recovery_tests",
+        },
+        LocalFlowTestSpec {
+            slug: "flow_run",
+            package: "meerkat-mob",
+            target: "flow_run_v2_scheduler_tests",
+        },
+        LocalFlowTestSpec {
+            slug: "loop_iteration",
+            package: "meerkat-mob",
+            target: "loop_iteration_kernel_tests",
+        },
+    ]
 }
 
 fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
@@ -2061,6 +2101,44 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
                 spec.package,
                 spec.target,
                 spec.filter
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_local_flow_machine_tests(root: &Path, machine_slug: &str) -> Result<()> {
+    for spec in local_flow_test_specs()
+        .iter()
+        .filter(|spec| spec.slug == machine_slug)
+    {
+        println!(
+            "local-flow-test: {}::{}/{}",
+            spec.package, machine_slug, spec.target
+        );
+        let mut cmd = repo_cargo_command(root);
+        cmd.arg("test")
+            .arg("-p")
+            .arg(spec.package)
+            .arg("--test")
+            .arg(spec.target)
+            .arg("--")
+            .arg("--test-threads=1")
+            .current_dir(root);
+
+        let status = cmd.status().with_context(|| {
+            format!(
+                "run local flow test {}::{}/{}",
+                spec.package, machine_slug, spec.target
+            )
+        })?;
+        if !status.success() {
+            bail!(
+                "local flow test failed for {}::{}/{}",
+                spec.package,
+                machine_slug,
+                spec.target
             );
         }
     }

@@ -30,6 +30,40 @@ fn registry_selection_accepts_canonical_machine_name_and_slug() {
 }
 
 #[test]
+fn registry_selection_expands_mob_machine_to_local_flow_surface() {
+    let registry = CanonicalRegistry::load();
+    let selection = registry
+        .select(&SelectionArgs {
+            all: false,
+            machines: vec!["mob_machine".into()],
+            compositions: vec![],
+        })
+        .expect("selection");
+
+    assert_eq!(selection.machines.len(), 1);
+    assert_eq!(selection.machines[0].schema.machine, "MobMachine");
+    assert!(selection.include_local_flow_machines);
+    assert!(!selection.run_global_repo_checks);
+}
+
+#[test]
+fn registry_selection_keeps_auth_isolated_from_local_flow_surface() {
+    let registry = CanonicalRegistry::load();
+    let selection = registry
+        .select(&SelectionArgs {
+            all: false,
+            machines: vec!["auth".into()],
+            compositions: vec![],
+        })
+        .expect("selection");
+
+    assert_eq!(selection.machines.len(), 1);
+    assert_eq!(selection.machines[0].schema.machine, "AuthMachine");
+    assert!(!selection.include_local_flow_machines);
+    assert!(!selection.run_global_repo_checks);
+}
+
+#[test]
 fn registry_selection_rejects_absorbed_machine_slugs() {
     let registry = CanonicalRegistry::load();
 

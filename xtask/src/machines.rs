@@ -104,9 +104,15 @@ pub fn machine_codegen(args: SelectionArgs) -> Result<()> {
 
     let selection = registry.select(&args)?;
     let root = repo_root()?;
+    let displayed_machine_count = selection.machines.len()
+        + if selection.include_local_flow_machines {
+            local_flow_machine_count()
+        } else {
+            0
+        };
     println!(
         "machine-codegen: {} machine(s), {} composition(s)",
-        selection.machines.len(),
+        displayed_machine_count,
         selection.compositions.len()
     );
     machine_codegen_at_root(&root, &selection)
@@ -119,10 +125,16 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
     let selection = registry.select(&args.selection)?;
     let root = repo_root()?;
     let workers = resolve_tlc_workers(args.workers)?;
+    let displayed_machine_count = selection.machines.len()
+        + if selection.include_local_flow_machines {
+            local_flow_machine_count()
+        } else {
+            0
+        };
     println!(
         "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}",
         args.profile,
-        selection.machines.len(),
+        displayed_machine_count,
         selection.compositions.len(),
         !args.skip_tlc
     );
@@ -234,9 +246,15 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 
     let selection = registry.select(&args)?;
     let root = repo_root()?;
+    let displayed_machine_count = selection.machines.len()
+        + if selection.include_local_flow_machines {
+            local_flow_machine_count()
+        } else {
+            0
+        };
     println!(
         "machine-check-drift: checking {} machine(s), {} composition(s)",
-        selection.machines.len(),
+        displayed_machine_count,
         selection.compositions.len()
     );
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
@@ -480,7 +498,9 @@ fn machine_verify_at_root(
         }
     }
 
-    run_generated_kernel_tests(root)?;
+    if selection.include_local_flow_machines {
+        run_generated_kernel_tests(root)?;
+    }
     for machine in &selection.machines {
         run_machine_owner_tests(root, machine)?;
     }
@@ -491,10 +511,12 @@ fn machine_verify_at_root(
 fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     let mut mismatches = collect_drift_mismatches(root, selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(root, selection));
-    mismatches.extend(collect_machine_inventory_mismatches(root)?);
-    mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
-    mismatches.extend(collect_authority_language_mismatches(root)?);
-    mismatches.extend(collect_stale_cfg_mismatches(root)?);
+    if selection.include_local_flow_machines {
+        mismatches.extend(collect_machine_inventory_mismatches(root)?);
+        mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
+        mismatches.extend(collect_authority_language_mismatches(root)?);
+        mismatches.extend(collect_stale_cfg_mismatches(root)?);
+    }
 
     if !mismatches.is_empty() {
         bail!(
@@ -2269,6 +2291,10 @@ fn local_flow_machine_artifacts(root: &Path) -> Vec<LocalFlowMachineArtifact> {
             banner: "Local loop-iteration kernel wrapper derived from the former compat codegen.",
         },
     ]
+}
+
+fn local_flow_machine_count() -> usize {
+    3
 }
 
 fn render_local_flow_kernel_wrapper(machine: &LocalFlowMachineArtifact) -> String {

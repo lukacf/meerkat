@@ -243,10 +243,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         run_id: &RunId,
         frame_id: &FrameId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        let input = KernelInput {
-            variant: "AdmitNextReadyNode".into(),
-            fields: BTreeMap::new(),
-        };
+        let input = flow_frame::input(
+            flow_frame::input::admit_next_ready_node(),
+            flow_frame::fields([]),
+        );
         // Map Ok(effects) → Ok(Some(effects)); errors propagate as-is.
         self.transition_frame(run_id, frame_id, input, 5)
             .await
@@ -261,7 +261,7 @@ impl FlowFrameMutator for FlowFrameKernel {
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         for _ in 0..=max_retries {
             let snap = self.require_frame(run_id, frame_id).await?;
-            let queue_empty = match snap.kernel_state.fields.get("ready_queue") {
+            let queue_empty = match snap.kernel_state.field(&flow_frame::field::ready_queue()) {
                 Some(KernelValue::Seq(seq)) => seq.is_empty(),
                 _ => true,
             };
@@ -269,10 +269,10 @@ impl FlowFrameMutator for FlowFrameKernel {
                 return Ok(None); // genuinely nothing to admit
             }
 
-            let admit_input = KernelInput {
-                variant: "AdmitNextReadyNode".into(),
-                fields: BTreeMap::new(),
-            };
+            let admit_input = flow_frame::input(
+                flow_frame::input::admit_next_ready_node(),
+                flow_frame::fields([]),
+            );
             let outcome = flow_frame::transition(&snap.kernel_state, &admit_input)
                 .map_err(|e| MobError::Internal(format!("AdmitNextReadyNode failed: {e:?}")))?;
             let next_snap = FrameSnapshot {
@@ -318,10 +318,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         } = opts;
         for attempt in 0..=max_retries {
             let snap = self.require_frame(run_id, frame_id).await?;
-            let complete_input = KernelInput {
-                variant: "CompleteNode".into(),
-                fields: BTreeMap::from([("node_id".into(), Self::node_val(node_id))]),
-            };
+            let complete_input = flow_frame::input(
+                flow_frame::input::complete_node(),
+                flow_frame::fields([(flow_frame::field::node_id(), Self::node_val(node_id))]),
+            );
             let next_outcome = flow_frame::transition(&snap.kernel_state, &complete_input)
                 .map_err(|e| MobError::Internal(format!("CompleteNode failed: {e:?}")))?;
             let next_snap = FrameSnapshot {
@@ -359,10 +359,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         frame_id: &FrameId,
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
-        let input = KernelInput {
-            variant: "CompleteNode".into(),
-            fields: BTreeMap::from([("node_id".into(), Self::node_val(node_id))]),
-        };
+        let input = flow_frame::input(
+            flow_frame::input::complete_node(),
+            flow_frame::fields([(flow_frame::field::node_id(), Self::node_val(node_id))]),
+        );
         // transition_frame now returns Err on CAS exhaustion rather than Ok(None),
         // so Ok always means the transition fired successfully.
         self.transition_frame(run_id, frame_id, input, 5)
@@ -376,10 +376,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         frame_id: &FrameId,
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
-        let input = KernelInput {
-            variant: "FailNode".into(),
-            fields: BTreeMap::from([("node_id".into(), Self::node_val(node_id))]),
-        };
+        let input = flow_frame::input(
+            flow_frame::input::fail_node(),
+            flow_frame::fields([(flow_frame::field::node_id(), Self::node_val(node_id))]),
+        );
         self.transition_frame(run_id, frame_id, input, 5)
             .await
             .map(|_| true)
@@ -391,10 +391,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         frame_id: &FrameId,
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
-        let input = KernelInput {
-            variant: "SkipNode".into(),
-            fields: BTreeMap::from([("node_id".into(), Self::node_val(node_id))]),
-        };
+        let input = flow_frame::input(
+            flow_frame::input::skip_node(),
+            flow_frame::fields([(flow_frame::field::node_id(), Self::node_val(node_id))]),
+        );
         self.transition_frame(run_id, frame_id, input, 5)
             .await
             .map(|_| true)
@@ -405,10 +405,7 @@ impl FlowFrameMutator for FlowFrameKernel {
         run_id: &RunId,
         frame_id: &FrameId,
     ) -> Result<bool, MobError> {
-        let input = KernelInput {
-            variant: "SealFrame".into(),
-            fields: BTreeMap::new(),
-        };
+        let input = flow_frame::input(flow_frame::input::seal_frame(), flow_frame::fields([]));
         self.transition_frame(run_id, frame_id, input, 5)
             .await
             .map(|_| true)
@@ -420,10 +417,10 @@ impl FlowFrameMutator for FlowFrameKernel {
         frame_id: &FrameId,
         node_id: &FlowNodeId,
     ) -> Result<bool, MobError> {
-        let input = KernelInput {
-            variant: "CancelNode".into(),
-            fields: BTreeMap::from([("node_id".into(), Self::node_val(node_id))]),
-        };
+        let input = flow_frame::input(
+            flow_frame::input::cancel_node(),
+            flow_frame::fields([(flow_frame::field::node_id(), Self::node_val(node_id))]),
+        );
         self.transition_frame(run_id, frame_id, input, 5)
             .await
             .map(|_| true)
@@ -538,10 +535,10 @@ pub(crate) fn build_start_root_frame_input(
     spec: &FrameSpec,
     ordered: &[FlowNodeId],
 ) -> KernelInput {
-    KernelInput {
-        variant: "StartRootFrame".into(),
-        fields: build_frame_start_fields(frame_id, spec, ordered),
-    }
+    flow_frame::input(
+        flow_frame::input::start_root_frame(),
+        build_frame_start_fields(frame_id, spec, ordered),
+    )
 }
 
 /// Build the `StartBodyFrame` KernelInput from a `FrameSpec` and its topological order.
@@ -554,14 +551,11 @@ pub(crate) fn build_start_body_frame_input(
 ) -> KernelInput {
     let mut fields = build_frame_start_fields(frame_id, spec, ordered);
     fields.insert(
-        "loop_instance_id".into(),
+        flow_frame::field::loop_instance_id(),
         KernelValue::String(loop_instance_id.to_string()),
     );
-    fields.insert("iteration".into(), KernelValue::U64(iteration));
-    KernelInput {
-        variant: "StartBodyFrame".into(),
-        fields,
-    }
+    fields.insert(flow_frame::field::iteration(), KernelValue::U64(iteration));
+    flow_frame::input(flow_frame::input::start_body_frame(), fields)
 }
 
 fn dep_mode_kv(mode: &DependencyMode) -> KernelValue {

@@ -19,6 +19,7 @@ use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
 use crate::runtime::flow_frame_loop_driver::FlowFrameTerminalPhase;
+use crate::runtime::flow_kernels::flow_run;
 use crate::store::{MobEventStore, MobRunStore};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -1558,13 +1559,18 @@ enum FlowRunEffectKind {
 
 impl FlowRunEffectKind {
     fn parse(effect: &KernelEffect) -> Option<Self> {
-        match effect.variant.as_str() {
-            "AdmitStepWork" => Some(Self::AdmitStepWork),
-            "EmitStepNotice" => Some(Self::EmitStepNotice),
-            "PersistStepOutput" => Some(Self::PersistStepOutput),
-            "AppendFailureLedger" => Some(Self::AppendFailureLedger),
-            "EscalateSupervisor" => Some(Self::EscalateSupervisor),
-            _ => None,
+        if effect.variant_is(&flow_run::effect::admit_step_work()) {
+            Some(Self::AdmitStepWork)
+        } else if effect.variant_is(&flow_run::effect::emit_step_notice()) {
+            Some(Self::EmitStepNotice)
+        } else if effect.variant_is(&flow_run::effect::persist_step_output()) {
+            Some(Self::PersistStepOutput)
+        } else if effect.variant_is(&flow_run::effect::append_failure_ledger()) {
+            Some(Self::AppendFailureLedger)
+        } else if effect.variant_is(&flow_run::effect::escalate_supervisor()) {
+            Some(Self::EscalateSupervisor)
+        } else {
+            None
         }
     }
 }
@@ -1626,7 +1632,7 @@ fn has_effect(
 }
 
 fn effect_step_id(effect: &KernelEffect) -> Result<Option<StepId>, MobError> {
-    let Some(value) = effect.fields.get("step_id") else {
+    let Some(value) = effect.field(&flow_run::field::step_id()) else {
         return Ok(None);
     };
     let step_id = value.as_string().map_err(|reason| {
@@ -1639,7 +1645,7 @@ fn effect_step_id(effect: &KernelEffect) -> Result<Option<StepId>, MobError> {
 }
 
 fn effect_target_id(effect: &KernelEffect) -> Result<Option<MeerkatId>, MobError> {
-    let Some(value) = effect.fields.get("target_id") else {
+    let Some(value) = effect.field(&flow_run::field::target_id()) else {
         return Ok(None);
     };
     let target_id = value.as_string().map_err(|reason| {
@@ -1652,12 +1658,14 @@ fn effect_target_id(effect: &KernelEffect) -> Result<Option<MeerkatId>, MobError
 }
 
 fn effect_step_status(effect: &KernelEffect) -> Result<StepRunStatus, MobError> {
-    let value = effect.fields.get("step_status").ok_or_else(|| {
-        MobError::Internal(format!(
-            "flow_run effect `{}` missing step_status payload",
-            effect.variant
-        ))
-    })?;
+    let value = effect
+        .field(&flow_run::field::step_status())
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "flow_run effect `{}` missing step_status payload",
+                effect.variant
+            ))
+        })?;
     StepRunStatus::parse_kernel_value(value).map_err(|reason| {
         let message = if reason.starts_with("unknown StepRunStatus variant") {
             format!("flow_run effect `{}` {reason}", effect.variant)

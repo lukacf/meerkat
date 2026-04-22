@@ -1,7 +1,7 @@
 use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
 use std::collections::BTreeMap;
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
@@ -986,6 +986,22 @@ impl CompositionSchema {
                     }
                 }
             }
+
+            let bound_fields = route
+                .bindings
+                .iter()
+                .map(|binding| binding.to_field.as_str())
+                .collect::<BTreeSet<_>>();
+            for target_field in &to_variant.fields {
+                if !bound_fields.contains(target_field.name.as_str()) {
+                    return Err(CompositionSchemaError::MissingRouteBinding {
+                        route: route.name.clone(),
+                        to_machine: route.to.machine.clone(),
+                        input_variant: route.to.input_variant.clone(),
+                        to_field: target_field.name.clone(),
+                    });
+                }
+            }
         }
 
         for entry_input in &self.entry_inputs {
@@ -1670,6 +1686,12 @@ pub enum CompositionSchemaError {
         to_machine: String,
         to_field: String,
     },
+    MissingRouteBinding {
+        route: String,
+        to_machine: String,
+        input_variant: String,
+        to_field: String,
+    },
     MissingWitnessField {
         witness: String,
         machine: String,
@@ -1960,6 +1982,15 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "route `{route}` uses unsupported literal binding for {to_machine}.{to_field}"
+            ),
+            Self::MissingRouteBinding {
+                route,
+                to_machine,
+                input_variant,
+                to_field,
+            } => write!(
+                f,
+                "route `{route}` is missing required payload field {to_machine}.{input_variant}.{to_field}"
             ),
             Self::MissingWitnessField {
                 witness,

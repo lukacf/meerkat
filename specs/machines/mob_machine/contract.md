@@ -97,7 +97,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, member_id: String)
+- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, member_id: String)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, member_id: String)
 - `DestroyMob`
@@ -414,7 +414,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveRuntimeRetired`
 - From: `Running`
-- On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token, member_id)
+- On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
 - Emits: `EmitMemberLifecycleNotice`

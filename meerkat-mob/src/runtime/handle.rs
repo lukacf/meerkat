@@ -3589,7 +3589,7 @@ mod tests {
     }
 
     #[test]
-    fn kickoff_wait_treats_callback_pending_as_resolved() {
+    fn kickoff_wait_treats_callback_pending_as_unresolved() {
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
         let entry = RosterEntry {
@@ -3625,10 +3625,11 @@ mod tests {
             peer_connectivity: None,
             kickoff: entry.kickoff.clone(),
         };
+        let pending = BTreeSet::from([identity.to_string()]);
 
         assert!(
-            MobHandle::kickoff_wait_is_satisfied(&entry, &material, &BTreeSet::new()),
-            "callback-pending kickoff should no longer block the kickoff barrier"
+            !MobHandle::kickoff_wait_is_satisfied(&entry, &material, &pending),
+            "callback-pending kickoff must keep blocking the kickoff barrier"
         );
     }
 

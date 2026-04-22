@@ -1,6 +1,6 @@
 use crate::{
     ActorKind, ActorSchema, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionTransactionPlan, CompositionWitness, EntryInput,
+    CompositionStateLimits, CompositionTransactionPlan, CompositionWitness, EntryInput, Expr,
     MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget,
     RouteTargetKind,
 };
@@ -33,7 +33,10 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
             "occurrence",
             RouteTargetKind::Input,
             "Supersede",
-            &[bind("superseded_by_revision", "superseding_revision")],
+            &[
+                bind("superseded_by_revision", "superseding_revision"),
+                bind_literal("at_utc_ms", Expr::U64(0)),
+            ],
         )],
         route_target_selectors: vec![],
         driver: None,
@@ -361,6 +364,13 @@ fn bind(to_field: &str, from_field: &str) -> RouteFieldBinding {
             from_field: from_field.into(),
             allow_named_alias: false,
         },
+    }
+}
+
+fn bind_literal(to_field: &str, expr: Expr) -> RouteFieldBinding {
+    RouteFieldBinding {
+        to_field: to_field.into(),
+        source: RouteBindingSource::Literal(expr),
     }
 }
 

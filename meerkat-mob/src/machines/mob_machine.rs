@@ -511,7 +511,7 @@ machine! {
         signal MobMachineSignal {
             ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, member_id: String },
+            ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, member_id: String },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, member_id: String },
             DestroyMob,
@@ -900,7 +900,7 @@ machine! {
         }
 
         transition ObserveRuntimeRetired {
-            on signal ObserveRuntimeRetired { agent_runtime_id, fence_token, member_id }
+            on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
@@ -911,13 +911,6 @@ machine! {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
-                self.member_kickoff_pending.remove(member_id);
-                self.member_kickoff_starting.remove(member_id);
-                self.member_kickoff_callback_pending.remove(member_id);
-                self.member_kickoff_started.remove(member_id);
-                self.member_kickoff_failed.remove(member_id);
-                self.member_kickoff_cancelled.remove(member_id);
-                self.member_kickoff_error.remove(member_id);
                 self.active_run_count = 0;
             }
             to Stopped

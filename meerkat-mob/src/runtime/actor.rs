@@ -917,6 +917,7 @@ impl MobActor {
         dsl.member_kickoff_pending
             .iter()
             .chain(dsl.member_kickoff_starting.iter())
+            .chain(dsl.member_kickoff_callback_pending.iter())
             .cloned()
             .collect()
     }
@@ -1972,11 +1973,13 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
-                        mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
-                            member_id: agent_identity.to_string(),
-                        }
-                    }
+                    meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                        tool_name,
+                        ..
+                    } => mob_dsl::MobMachineInput::KickoffResolveFailed {
+                        member_id: agent_identity.to_string(),
+                        error: format!("autonomous kickoff blocked on callback tool '{tool_name}'"),
+                    },
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {

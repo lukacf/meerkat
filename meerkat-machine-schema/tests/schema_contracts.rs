@@ -129,6 +129,31 @@ fn kernel_seam_rejects_type_mismatched_route_binding() {
 }
 
 #[test]
+fn kernel_seam_rejects_under_bound_route_payloads() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let route_idx = composition
+        .routes
+        .iter()
+        .position(|route| route.name == "runtime_retired_reaches_mob");
+    assert!(route_idx.is_some(), "runtime retired route");
+    let Some(route_idx) = route_idx else {
+        return;
+    };
+    let route = &mut composition.routes[route_idx];
+    route
+        .bindings
+        .retain(|binding| binding.to_field != "fence_token");
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(matches!(
+        result,
+        Err(CompositionSchemaError::MissingRouteBinding { .. })
+    ));
+}
+
+#[test]
 fn kernel_seam_rejects_zero_named_domain_override() {
     let mut composition = meerkat_mob_seam_composition();
     composition.deep_domain_overrides = BTreeMap::from([("WorkIdValues".into(), 0)]);

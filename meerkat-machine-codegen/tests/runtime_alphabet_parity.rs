@@ -108,6 +108,13 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "ClassifyRealtimeClientInputSubmitted",
         "ClassifyRealtimeMidTurnActivity",
         "ClassifyRealtimeTurnTerminated",
+        // Round-5 Track-A (PR #336): ops-barrier satisfaction is
+        // driven via `TurnStateHandle::ops_barrier_satisfied`
+        // (meerkat-core/src/handles.rs) from the agent's state-loop
+        // `WaitingForOps` branch via the
+        // `protocol_ops_barrier_satisfaction` handoff helper, not
+        // through `MeerkatMachineCommand`.
+        "OpsBarrierSatisfied",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()

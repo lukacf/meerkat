@@ -227,7 +227,11 @@ fn option_some(value: KernelValue) -> KernelValue {
     )]))
 }
 
-fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
+fn option_map_matches_inner(
+    schema: &MachineSchema,
+    value: &KernelValue,
+    inner_ty: &TypeRef,
+) -> bool {
     let KernelValue::Map(entries) = value else {
         return false;
     };
@@ -237,7 +241,7 @@ fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
     let Some(inner) = entries.get(&KernelValue::String("value".to_string())) else {
         return false;
     };
-    value_matches_type(inner, inner_ty)
+    value_matches_type(schema, inner, inner_ty)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,7 +476,7 @@ impl GeneratedMachineKernel {
                     },
                 });
             };
-            if !value_matches_type(value, &field.ty) {
+            if !value_matches_type(&self.schema, value, &field.ty) {
                 return Err(match trigger_kind {
                     TriggerKind::Input => TransitionRefusal::InvalidInputPayload {
                         machine: self.schema.machine.clone(),
@@ -622,7 +626,7 @@ impl GeneratedMachineKernel {
                     reason: format!("missing helper arg `{}`", param.name),
                 });
             };
-            if !value_matches_type(value, &param.ty) {
+            if !value_matches_type(&self.schema, value, &param.ty) {
                 return Err(TransitionRefusal::EvaluationError {
                     machine: self.schema.machine.clone(),
                     transition: "<helper>".to_string(),
@@ -1347,34 +1351,192 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
     }
 }
 
-fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
+fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef) -> bool {
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
         (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name) => true,
         (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name) => true,
-        (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name))
+        (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Enum(name))
             if enum_name.as_str() == name =>
         {
-            true
+            let known_variants = schema_enum_variants(schema, name);
+            known_variants.is_empty() || known_variants.contains(variant.as_str())
         }
         (KernelValue::None, TypeRef::Option(_)) => true,
         (inner, TypeRef::Option(inner_ty)) => {
-            value_matches_type(inner, inner_ty) || option_map_matches_inner(inner, inner_ty)
+            value_matches_type(schema, inner, inner_ty)
+                || option_map_matches_inner(schema, inner, inner_ty)
         }
         (KernelValue::Set(values), TypeRef::Set(inner_ty)) => values
             .iter()
-            .all(|value| value_matches_type(value, inner_ty)),
+            .all(|value| value_matches_type(schema, value, inner_ty)),
         (KernelValue::Seq(values), TypeRef::Seq(inner_ty)) => values
             .iter()
-            .all(|value| value_matches_type(value, inner_ty)),
+            .all(|value| value_matches_type(schema, value, inner_ty)),
         (KernelValue::Map(values), TypeRef::Map(key_ty, value_ty)) => {
             values.iter().all(|(key, value)| {
-                value_matches_type(key, key_ty) && value_matches_type(value, value_ty)
+                value_matches_type(schema, key, key_ty)
+                    && value_matches_type(schema, value, value_ty)
             })
         }
         _ => false,
+    }
+}
+
+fn schema_enum_variants(schema: &MachineSchema, enum_name: &str) -> BTreeSet<String> {
+    let mut variants = BTreeSet::new();
+
+    for init in &schema.state.init.fields {
+        collect_named_variants_from_expr(&init.expr, enum_name, &mut variants);
+    }
+
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        collect_named_variants_from_expr(&helper.body, enum_name, &mut variants);
+    }
+
+    for invariant in &schema.invariants {
+        collect_named_variants_from_expr(&invariant.expr, enum_name, &mut variants);
+    }
+
+    for transition in &schema.transitions {
+        for guard in &transition.guards {
+            collect_named_variants_from_expr(&guard.expr, enum_name, &mut variants);
+        }
+        for update in &transition.updates {
+            collect_named_variants_from_update(update, enum_name, &mut variants);
+        }
+        for effect in &transition.emit {
+            for expr in effect.fields.values() {
+                collect_named_variants_from_expr(expr, enum_name, &mut variants);
+            }
+        }
+    }
+
+    variants
+}
+
+fn collect_named_variants_from_update(
+    update: &Update,
+    enum_name: &str,
+    variants: &mut BTreeSet<String>,
+) {
+    match update {
+        Update::Assign { expr, .. } => collect_named_variants_from_expr(expr, enum_name, variants),
+        Update::MapInsert { key, value, .. } => {
+            collect_named_variants_from_expr(key, enum_name, variants);
+            collect_named_variants_from_expr(value, enum_name, variants);
+        }
+        Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. }
+        | Update::MapRemove { key, .. } => {
+            collect_named_variants_from_expr(key, enum_name, variants);
+        }
+        Update::SetInsert { value, .. }
+        | Update::SetRemove { value, .. }
+        | Update::SeqAppend { value, .. }
+        | Update::SeqRemoveValue { value, .. } => {
+            collect_named_variants_from_expr(value, enum_name, variants);
+        }
+        Update::SeqPrepend { values, .. } | Update::SeqRemoveAll { values, .. } => {
+            collect_named_variants_from_expr(values, enum_name, variants);
+        }
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            collect_named_variants_from_expr(condition, enum_name, variants);
+            for update in then_updates {
+                collect_named_variants_from_update(update, enum_name, variants);
+            }
+            for update in else_updates {
+                collect_named_variants_from_update(update, enum_name, variants);
+            }
+        }
+        Update::ForEach { over, updates, .. } => {
+            collect_named_variants_from_expr(over, enum_name, variants);
+            for update in updates {
+                collect_named_variants_from_update(update, enum_name, variants);
+            }
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+    }
+}
+
+fn collect_named_variants_from_expr(expr: &Expr, enum_name: &str, variants: &mut BTreeSet<String>) {
+    match expr {
+        Expr::NamedVariant {
+            enum_name: candidate,
+            variant,
+        } if candidate == enum_name => {
+            variants.insert(variant.clone());
+        }
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_named_variants_from_expr(item, enum_name, variants);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_named_variants_from_expr(condition, enum_name, variants);
+            collect_named_variants_from_expr(then_expr, enum_name, variants);
+            collect_named_variants_from_expr(else_expr, enum_name, variants);
+        }
+        Expr::Not(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::SeqElements(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner) => collect_named_variants_from_expr(inner, enum_name, variants),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            collect_named_variants_from_expr(left, enum_name, variants);
+            collect_named_variants_from_expr(right, enum_name, variants);
+        }
+        Expr::Contains { collection, value }
+        | Expr::SeqStartsWith {
+            seq: collection,
+            prefix: value,
+        } => {
+            collect_named_variants_from_expr(collection, enum_name, variants);
+            collect_named_variants_from_expr(value, enum_name, variants);
+        }
+        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
+            collect_named_variants_from_expr(map, enum_name, variants);
+            collect_named_variants_from_expr(key, enum_name, variants);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_named_variants_from_expr(arg, enum_name, variants);
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_named_variants_from_expr(over, enum_name, variants);
+            collect_named_variants_from_expr(body, enum_name, variants);
+        }
+        Expr::NamedVariant { .. }
+        | Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
     }
 }
 

@@ -129,14 +129,37 @@ fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::p
     root.join(&protocol.rust.module_path)
 }
 
+/// Public entry point used by the drift test. Renders the full helper
+/// source for one protocol against its producer machine schema.
+/// The internal `generate_protocol_helpers` path (which accepts
+/// `Option<&MachineSchema>` for convenience in the codegen driver)
+/// delegates to this.
+pub fn render_protocol_helpers(
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<String> {
+    generate_protocol_helpers_impl(protocol, producer_machine, composition, machine_by_name)
+}
+
 fn generate_protocol_helpers(
     protocol: &EffectHandoffProtocol,
     producer_machine: Option<&MachineSchema>,
     composition: &CompositionSchema,
     machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
 ) -> Result<String> {
-    let mut out = String::new();
     let producer_machine = producer_machine.context("producer machine missing")?;
+    generate_protocol_helpers_impl(protocol, producer_machine, composition, machine_by_name)
+}
+
+fn generate_protocol_helpers_impl(
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<String> {
+    let mut out = String::new();
 
     writeln!(
         &mut out,

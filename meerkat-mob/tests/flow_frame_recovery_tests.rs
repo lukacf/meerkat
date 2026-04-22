@@ -391,6 +391,7 @@ fn test_recovery_does_not_requeue_awaiting_until_loop() {
 #[test]
 fn test_recovery_requeues_loop_when_stage_is_missing() {
     let mut run = minimal_run_with_schema_v2();
+    run.schema_version = 3;
 
     let loop_snap = LoopSnapshot {
         kernel_state: KernelState {

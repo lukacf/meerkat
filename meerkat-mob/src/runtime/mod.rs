@@ -76,12 +76,9 @@ mod event_router;
 mod events;
 mod flow;
 pub mod flow_frame_engine;
-pub mod flow_frame_kernel;
-mod flow_run_kernel;
 mod handle;
 #[cfg(feature = "runtime-adapter")]
 pub mod local_bridge;
-pub(crate) mod loop_iteration_authority;
 mod mob_member_lifecycle_authority;
 mod mob_runtime_bridge_authority;
 mod mob_wiring_authority;
@@ -123,8 +120,7 @@ use tools::compose_external_tools_for_profile;
 pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
-pub use flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator};
-pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
+pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,

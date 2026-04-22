@@ -68,6 +68,10 @@ pub(crate) fn gen_type(ty: &TypeDef) -> TokenStream {
             let inner_ty = gen_type(inner);
             quote! { Option<#inner_ty> }
         }
+        TypeDef::Seq(inner) => {
+            let inner_ty = gen_type(inner);
+            quote! { Vec<#inner_ty> }
+        }
         TypeDef::Set(inner) => {
             let inner_ty = gen_type(inner);
             quote! { std::collections::BTreeSet<#inner_ty> }
@@ -93,6 +97,7 @@ fn gen_init_value(expr: &crate::ast::ExprDef) -> TokenStream {
             let inner_val = gen_init_value(inner);
             quote! { Some(#inner_val) }
         }
+        ExprDef::EmptySeq => quote! { Vec::new() },
         ExprDef::EmptySet => quote! { std::collections::BTreeSet::new() },
         ExprDef::EmptyMap => quote! { std::collections::BTreeMap::new() },
         ExprDef::NamedVariant { enum_name, variant } => quote! { #enum_name::#variant },

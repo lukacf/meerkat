@@ -331,6 +331,7 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let e = gen_expr(inner, prefix);
             quote! { Some(#e) }
         }
+        ExprDef::EmptySeq => quote! { Vec::new() },
         ExprDef::EmptySet => quote! { std::collections::BTreeSet::new() },
         ExprDef::EmptyMap => quote! { std::collections::BTreeMap::new() },
         ExprDef::Field(name) => match prefix {

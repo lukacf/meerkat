@@ -184,6 +184,12 @@ fn parse_type_def(input: ParseStream) -> Result<TypeDef> {
             let _: Token![>] = input.parse()?;
             Ok(TypeDef::Option(Box::new(inner)))
         }
+        "Seq" => {
+            let _: Token![<] = input.parse()?;
+            let inner = parse_type_def(input)?;
+            let _: Token![>] = input.parse()?;
+            Ok(TypeDef::Seq(Box::new(inner)))
+        }
         "Set" => {
             let _: Token![<] = input.parse()?;
             let inner = parse_type_def(input)?;
@@ -783,6 +789,7 @@ fn parse_primary_expr(input: ParseStream) -> Result<ExprDef> {
             let inner = parse_expr(&paren)?;
             Ok(ExprDef::Some(Box::new(inner)))
         }
+        "EmptySeq" => Ok(ExprDef::EmptySeq),
         "EmptySet" => Ok(ExprDef::EmptySet),
         "EmptyMap" => Ok(ExprDef::EmptyMap),
         "Phase" => {

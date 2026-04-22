@@ -222,11 +222,6 @@ impl GeneratedMachineKernel {
         Self { schema }
     }
 
-    #[must_use]
-    pub fn schema(&self) -> &MachineSchema {
-        &self.schema
-    }
-
     pub fn initial_state(&self) -> Result<KernelState, TransitionRefusal> {
         let mut state = KernelState {
             phase: self.schema.state.init.phase.clone(),

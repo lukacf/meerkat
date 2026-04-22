@@ -1629,8 +1629,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &meerkat_machine_kernels::generated::flow_run::State,
-        next: &meerkat_machine_kernels::generated::flow_run::State,
+        expected: &crate::generated::flow_run::State,
+        next: &crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner.cas_flow_state(run_id, expected, next).await
     }
@@ -1639,9 +1639,9 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &meerkat_machine_kernels::generated::flow_run::State,
+        expected_flow_state: &crate::generated::flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &meerkat_machine_kernels::generated::flow_run::State,
+        next_flow_state: &crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.snapshot_cas_history.write().await.push((
             run_id.clone(),
@@ -1719,8 +1719,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1764,8 +1764,8 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1791,8 +1791,8 @@ impl MobRunStore for RecordingRunStore {
         loop_instance_id: &crate::ids::LoopInstanceId,
         expected_loop: &crate::run::LoopSnapshot,
         next_loop: crate::run::LoopSnapshot,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_loop_request_body_frame(
@@ -1815,8 +1815,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         initial_frame: crate::run::FrameSnapshot,
         ledger_entry: crate::run::LoopIterationLedgerEntry,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_grant_body_frame_start(
@@ -1842,8 +1842,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_body_frame(
@@ -1869,8 +1869,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &meerkat_machine_kernels::generated::flow_run::State,
-        next_run_state: meerkat_machine_kernels::generated::flow_run::State,
+        expected_run_state: &crate::generated::flow_run::State,
+        next_run_state: crate::generated::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_loop(
@@ -18647,7 +18647,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_machine_kernels::generated::flow_run::initial_state(),
+        crate::generated::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -18690,7 +18690,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let executor = Arc::new(ScriptedExecutor {
         outputs: scripted_outputs,
     });
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, None, 0, 0);
     let context = FlowContext {
         run_id: run_id.clone(),
         activation_params: serde_json::json!({}),
@@ -18730,7 +18730,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
     assert_eq!(
         frame_snap.kernel_state.phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Completed,
+        crate::generated::flow_frame::Phase::Completed,
         "frame should be in Completed phase"
     );
 }
@@ -19056,8 +19056,8 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
     use crate::ids::{FlowNodeId, FrameId, LoopId};
     use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::FlowFrameMutator;
     use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor, FrameStepResult};
-    use crate::runtime::flow_frame_kernel::FlowFrameMutator;
 
     struct ScriptedExecutor;
 
@@ -19081,7 +19081,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_machine_kernels::generated::flow_run::initial_state(),
+        crate::generated::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19117,7 +19117,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
         FrameSpec { nodes }
     };
 
-    let frame_kernel = crate::runtime::flow_frame_kernel::FlowFrameKernel::new(store.clone());
+    let frame_kernel = crate::runtime::flow_frame_engine::FlowFrameKernel::new(store.clone());
     let frame_id = FrameId::from(format!("{run_id}-root").as_str());
     frame_kernel
         .start_frame(&run_id, &frame_id, &root_spec)
@@ -19136,8 +19136,8 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: meerkat_machine_kernels::generated::loop_iteration::State {
-                    phase: meerkat_machine_kernels::generated::loop_iteration::Phase::Running,
+                kernel_state: crate::generated::loop_iteration::State {
+                    phase: crate::generated::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.to_string(),
                     parent_frame_id: frame_id.to_string(),
                     parent_node_id: "loop-node".into(),
@@ -19155,7 +19155,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
         .await
         .expect("seed running loop snapshot");
 
-    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), None, 0, 0);
     let context = FlowContext {
         run_id: run_id.clone(),
         activation_params: serde_json::json!({}),
@@ -19182,7 +19182,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     assert!(
         matches!(
             node_status.get("loop-node"),
-            Some(variant) if variant == "Completed"
+            Some(variant) if *variant == crate::generated::flow_frame::NodeRunStatus::Completed
         ),
         "running loop node should resume to completion instead of being failed on restart"
     );
@@ -19193,8 +19193,8 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
     use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
     use crate::ids::{FlowNodeId, FrameId, LoopId};
     use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::FlowFrameMutator;
     use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor, FrameStepResult};
-    use crate::runtime::flow_frame_kernel::FlowFrameMutator;
 
     struct ScriptedExecutor;
 
@@ -19218,7 +19218,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_machine_kernels::generated::flow_run::initial_state(),
+        crate::generated::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19254,7 +19254,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         FrameSpec { nodes }
     };
 
-    let frame_kernel = crate::runtime::flow_frame_kernel::FlowFrameKernel::new(store.clone());
+    let frame_kernel = crate::runtime::flow_frame_engine::FlowFrameKernel::new(store.clone());
     let frame_id = FrameId::from(format!("{run_id}-root").as_str());
     frame_kernel
         .start_frame(&run_id, &frame_id, &root_spec)
@@ -19274,8 +19274,8 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: meerkat_machine_kernels::generated::loop_iteration::State {
-                    phase: meerkat_machine_kernels::generated::loop_iteration::Phase::Running,
+                kernel_state: crate::generated::loop_iteration::State {
+                    phase: crate::generated::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.to_string(),
                     parent_frame_id: frame_id.to_string(),
                     parent_node_id: "loop-node".into(),
@@ -19312,7 +19312,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         "body frame scope update should succeed"
     );
 
-    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), None, 0, 0);
     let context = FlowContext {
         run_id: run_id.clone(),
         activation_params: serde_json::json!({}),
@@ -19415,7 +19415,7 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         .get("start-node")
         .expect("start node status");
     assert!(
-        start_status == "Failed",
+        *start_status == crate::generated::flow_frame::NodeRunStatus::Failed,
         "timed-out root-frame step should not remain Running after terminalization: {start_status:?}"
     );
 }
@@ -19596,7 +19596,7 @@ async fn test_root_frame_cancel_cleans_up_inflight_node() {
         .get("start-node")
         .expect("start node status");
     assert!(
-        start_status != "Running",
+        *start_status != crate::generated::flow_frame::NodeRunStatus::Running,
         "canceled root-frame step should not remain Running after terminalization: {start_status:?}"
     );
 }

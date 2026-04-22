@@ -200,7 +200,7 @@ fn build_run() -> (RunId, MobRun) {
     let run = MobRun::pending(
         MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_machine_kernels::generated::flow_run::initial_state(),
+        meerkat_mob::generated::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -213,7 +213,7 @@ async fn setup_engine(
     let (run_id, run) = build_run();
     let store = Arc::new(InMemoryMobRunStore::new());
     store.create_run(run).await.expect("create_run");
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, None, 0, 0);
     (run_id, store, engine)
 }
 
@@ -968,7 +968,7 @@ async fn test_empty_frame_terminalize() {
     let frame_snap = run.frames.get(&frame_id).expect("frame persisted");
     assert_eq!(
         frame_snap.kernel_state.phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Completed,
+        meerkat_mob::generated::flow_frame::Phase::Completed,
         "empty frame must terminalize to Completed in the store"
     );
 }
@@ -1026,14 +1026,14 @@ async fn test_empty_loop_body_frame_does_not_stall() {
     let root_frame = run.frames.get(&frame_id).expect("root frame");
     assert_eq!(
         root_frame.kernel_state.phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Completed,
+        meerkat_mob::generated::flow_frame::Phase::Completed,
         "root frame should complete after empty loop body processing"
     );
     let loop_instance_id = meerkat_mob::ids::LoopInstanceId::from("empty-loop-root::loop-node");
     let loop_snapshot = run.loops.get(&loop_instance_id).expect("loop snapshot");
     assert_eq!(
         loop_snapshot.kernel_state.phase,
-        meerkat_machine_kernels::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::generated::loop_iteration::Phase::Completed,
         "empty loop body should still advance the loop lifecycle to Completed"
     );
 }
@@ -1046,7 +1046,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
     let (run_id, run) = build_run();
     let store = Arc::new(InMemoryMobRunStore::new());
     store.create_run(run).await.expect("create_run");
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, None, 0, 0);
     let kernel = FlowFrameKernel::new(store.clone());
 
     let frame_id = FrameId::from("resume-root");
@@ -1086,7 +1086,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
     assert!(
         effects.iter().any(|effect| matches!(
             effect,
-            meerkat_machine_kernels::generated::flow_frame::Effect::StartLoopNode(_)
+            meerkat_mob::generated::flow_frame::Effect::StartLoopNode(_)
         )),
         "admitting the loop node should emit StartLoopNode"
     );
@@ -1097,8 +1097,8 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
             &run_id,
             &loop_instance_id,
             LoopSnapshot {
-                kernel_state: meerkat_machine_kernels::generated::loop_iteration::State {
-                    phase: meerkat_machine_kernels::generated::loop_iteration::Phase::Completed,
+                kernel_state: meerkat_mob::generated::loop_iteration::State {
+                    phase: meerkat_mob::generated::loop_iteration::Phase::Completed,
                     loop_instance_id: loop_instance_id.to_string(),
                     parent_frame_id: frame_id.to_string(),
                     parent_node_id: loop_node_id.to_string(),
@@ -1135,7 +1135,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
     let root_frame = run.frames.get(&frame_id).expect("root frame");
     assert_eq!(
         root_frame.kernel_state.phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Completed,
+        meerkat_mob::generated::flow_frame::Phase::Completed,
         "parent frame should complete after projecting terminal loop snapshot"
     );
     assert_eq!(
@@ -1143,7 +1143,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
             .kernel_state
             .node_status
             .get(loop_node_id.as_str()),
-        Some(&"Completed".to_string()),
+        Some(&meerkat_mob::generated::flow_frame::NodeRunStatus::Completed),
         "loop node should be completed on resume"
     );
 }
@@ -1155,7 +1155,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
     let (run_id, run) = build_run();
     let store = Arc::new(InMemoryMobRunStore::new());
     store.create_run(run).await.expect("create_run");
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, None, 0, 0);
     let kernel = FlowFrameKernel::new(store.clone());
 
     let frame_id = FrameId::from("resume-body-root");
@@ -1234,8 +1234,8 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             &run_id,
             &loop_instance_id,
             LoopSnapshot {
-                kernel_state: meerkat_machine_kernels::generated::loop_iteration::State {
-                    phase: meerkat_machine_kernels::generated::loop_iteration::Phase::Running,
+                kernel_state: meerkat_mob::generated::loop_iteration::State {
+                    phase: meerkat_mob::generated::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.to_string(),
                     parent_frame_id: frame_id.to_string(),
                     parent_node_id: loop_node_id.to_string(),
@@ -1275,7 +1275,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             .expect("loop snapshot")
             .kernel_state
             .phase,
-        meerkat_machine_kernels::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::generated::loop_iteration::Phase::Completed,
         "completed body frame should advance the loop to Completed on resume"
     );
     assert_eq!(
@@ -1284,7 +1284,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             .expect("root frame")
             .kernel_state
             .phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Completed,
+        meerkat_mob::generated::flow_frame::Phase::Completed,
         "root frame should complete after resuming the terminal body frame"
     );
 }
@@ -1302,7 +1302,7 @@ async fn test_max_frame_depth_enforced_for_nested_loops() {
         let run = MobRun::pending(
             meerkat_mob::MobId::from("depth-test"),
             meerkat_mob::FlowId::from("depth-flow"),
-            meerkat_machine_kernels::generated::flow_run::initial_state(),
+            meerkat_mob::generated::flow_run::initial_state(),
             serde_json::json!({}),
         );
         let id = run.run_id.clone();
@@ -1310,7 +1310,7 @@ async fn test_max_frame_depth_enforced_for_nested_loops() {
     };
     store.create_run(run2).await.expect("create_run");
 
-    let engine = FlowFrameEngine::new(store.clone(), executor, 1, 0); // max_frame_depth=1
+    let engine = FlowFrameEngine::new(store.clone(), executor, None, 1, 0); // max_frame_depth=1
 
     // Root frame (depth=0) contains a loop; body (depth=1) also contains a loop.
     // Body-of-body (depth=2) exceeds max_frame_depth=1.
@@ -1424,8 +1424,8 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
     // Inject a pre-existing frame snapshot where node-a is Running (orphaned)
     // and ready_queue is empty — simulating a crash mid-step.
     let orphaned_snapshot = FrameSnapshot {
-        kernel_state: meerkat_machine_kernels::generated::flow_frame::State {
-            phase: meerkat_machine_kernels::generated::flow_frame::Phase::Running,
+        kernel_state: meerkat_mob::generated::flow_frame::State {
+            phase: meerkat_mob::generated::flow_frame::Phase::Running,
             frame_id: frame_id.to_string(),
             frame_scope: "Root".into(),
             loop_instance_id: String::new(),
@@ -1453,8 +1453,14 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
             ]),
             branch_winners: Default::default(),
             node_status: std::collections::BTreeMap::from([
-                ("node-a".into(), "Running".into()),
-                ("node-b".into(), "Pending".into()),
+                (
+                    "node-a".into(),
+                    meerkat_mob::generated::flow_frame::NodeRunStatus::Running,
+                ),
+                (
+                    "node-b".into(),
+                    meerkat_mob::generated::flow_frame::NodeRunStatus::Pending,
+                ),
             ]),
             ready_queue: vec![],
             output_recorded: Default::default(),
@@ -1495,7 +1501,7 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
     let snap = run.frames.get(&frame_id).expect("frame persisted");
     assert_eq!(
         snap.kernel_state.phase,
-        meerkat_machine_kernels::generated::flow_frame::Phase::Failed,
+        meerkat_mob::generated::flow_frame::Phase::Failed,
         "frame must be Failed after handling orphaned Running node"
     );
 }
@@ -1570,7 +1576,7 @@ async fn test_completed_loop_persisted_as_completed_not_running() {
         .expect("loop snapshot must be persisted");
     assert_eq!(
         loop_snap.kernel_state.phase,
-        meerkat_machine_kernels::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::generated::loop_iteration::Phase::Completed,
         "loop must be persisted as Completed after condition is met"
     );
 
@@ -1632,7 +1638,7 @@ async fn test_frame_outputs_seeded_from_persisted_state_on_resume() {
 
     // Simulate a resume by creating a new engine (empty executor — no new steps run).
     let resume_executor = Arc::new(ScriptedStepExecutor::new(vec![]));
-    let resume_engine = FlowFrameEngine::new(store.clone(), resume_executor, 0, 0);
+    let resume_engine = FlowFrameEngine::new(store.clone(), resume_executor, None, 0, 0);
 
     // Re-execute the frame (frame is already Completed in the store — it terminalized).
     // The resumed execute_frame should see the Completed phase and return the

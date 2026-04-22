@@ -18,6 +18,7 @@ pub use sqlite::{
 
 use crate::definition::MobDefinition;
 use crate::event::{MemberRef, MobEvent, NewMobEvent};
+use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -28,7 +29,6 @@ use crate::run::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
-use meerkat_machine_kernels::generated::flow_run;
 use serde::{Deserialize, Serialize};
 
 /// Errors from mob storage operations.

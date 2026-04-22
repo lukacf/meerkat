@@ -64,6 +64,7 @@ pub enum TypeDef {
     U64,
     String,
     Option(Box<TypeDef>),
+    Seq(Box<TypeDef>),
     Set(Box<TypeDef>),
     Map(Box<TypeDef>, Box<TypeDef>),
     Named(Ident),
@@ -226,6 +227,7 @@ pub enum ExprDef {
     StringLit(String),
     None,
     Some(Box<ExprDef>),
+    EmptySeq,
     EmptySet,
     EmptyMap,
 

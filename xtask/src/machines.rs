@@ -260,11 +260,10 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
-    let kernel_export_schemas = generated_kernel_export_schemas(&registry);
     prune_stale_generated_kernel_modules(root, &registry)?;
     write_generated(
         &generated_kernel_mod_path(root),
-        &render_generated_kernel_mod(&kernel_export_schemas),
+        &render_generated_kernel_mod(&registry.machines),
     )?;
 
     for machine in &selection.machines {
@@ -314,12 +313,12 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
     for compat in compat_generated_kernel_schemas() {
         let generated_slug = generated_kernel_module_slug(&compat.machine);
         write_generated(
-            &generated_kernel_module_path(root, &generated_slug),
+            &mob_generated_machine_module_path(root, &generated_slug),
             &render_machine_kernel_module(&compat),
         )?;
         println!(
             "generated {}",
-            generated_kernel_module_path(root, &generated_slug).display()
+            mob_generated_machine_module_path(root, &generated_slug).display()
         );
     }
 
@@ -519,6 +518,14 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         &render_generated_kernel_mod(&kernel_export_schemas),
         &mut mismatches,
     )?;
+    for compat in compat_generated_kernel_schemas() {
+        let generated_slug = generated_kernel_module_slug(&compat.machine);
+        compare_generated(
+            &mob_generated_machine_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&compat),
+            &mut mismatches,
+        )?;
+    }
 
     for composition in &selection.compositions {
         collect_legacy_authority_mismatch(
@@ -1797,8 +1804,8 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     ];
     const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
-        target: "flow_run_kernel",
-        filter: "flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify",
+        target: "lib",
+        filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
     }];
 
     match slug {
@@ -1815,13 +1822,13 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
             machine.schema.machine, spec.package, spec.target, spec.filter
         );
         let mut cmd = repo_cargo_command(root);
-        cmd.arg("test")
-            .arg("-p")
-            .arg(spec.package)
-            .arg("--test")
-            .arg(spec.target)
-            .arg(spec.filter)
-            .arg("--")
+        cmd.arg("test").arg("-p").arg(spec.package).arg(spec.filter);
+        if spec.target == "lib" {
+            cmd.arg("--lib");
+        } else {
+            cmd.arg("--test").arg(spec.target);
+        }
+        cmd.arg("--")
             .arg("--exact")
             .arg("--test-threads=1")
             .current_dir(root);
@@ -2126,11 +2133,7 @@ fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Resul
 }
 
 fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineSchema> {
-    let mut schemas = registry.machines.clone();
-    schemas.extend(compat_generated_kernel_schemas());
-    schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
-    schemas.dedup_by(|a, b| a.machine == b.machine);
-    schemas
+    registry.machines.clone()
 }
 
 fn compat_generated_kernel_schemas() -> Vec<MachineSchema> {
@@ -2142,15 +2145,15 @@ fn compat_generated_kernel_schemas() -> Vec<MachineSchema> {
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
-    let mut expected = registry
+    registry
         .machines
         .iter()
         .map(|schema| generated_kernel_module_slug(&schema.machine))
-        .collect::<BTreeSet<_>>();
-    for compat in ["flow_frame", "flow_run", "loop_iteration"] {
-        expected.insert(compat.to_string());
-    }
-    expected
+        .collect::<BTreeSet<_>>()
+}
+
+fn mob_generated_machine_module_path(root: &Path, slug: &str) -> PathBuf {
+    root.join(format!("meerkat-mob/src/generated/{slug}.rs"))
 }
 
 fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistry) -> Result<()> {

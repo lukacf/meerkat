@@ -261,7 +261,6 @@ pub(super) struct MobActor {
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) flow_engine: FlowEngine,
-    pub(super) flow_kernel: FlowRunKernel,
     /// Whether this mob's definition declares an orchestrator.
     /// Gates orchestrator-specific transitions and notification fan-out.
     pub(super) has_orchestrator: bool,
@@ -2371,6 +2370,10 @@ impl MobActor {
                         .get_run(&run_id)
                         .await
                         .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ProjectMachineInput { input, reply_tx } => {
+                    let result = self.apply_dsl_input(*input, "project_machine_input");
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::FlowFinished { run_id } => {
@@ -7078,9 +7081,29 @@ impl MobActor {
             .await?;
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_id = self
-            .flow_kernel
             .create_pending_run(&config, activation_params.clone())
             .await?;
+        let create_run_seed = MobRun::create_run_seed_input(&run_id, &config)?;
+        if let Err(error) = self.apply_dsl_input(create_run_seed, "create_run_seed") {
+            if let Err(terminalize_error) = self
+                .flow_engine
+                .terminalize_failed(
+                    run_id.clone(),
+                    config.flow_id.clone(),
+                    format!(
+                        "canonical CreateRunSeed transition failed during flow admission: {error}"
+                    ),
+                )
+                .await
+            {
+                return Err(MobError::Internal(format!(
+                    "canonical CreateRunSeed transition failed during flow admission: {error}; additionally failed to terminalize pending run: {terminalize_error}"
+                )));
+            }
+            return Err(MobError::Internal(format!(
+                "canonical CreateRunSeed transition failed during flow admission: {error}"
+            )));
+        }
         if self.has_orchestrator
             && let Err(error) =
                 self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartFlow, "start_flow")
@@ -7088,7 +7111,7 @@ impl MobActor {
             let reason =
                 format!("orchestrator StartFlow transition failed during flow admission: {error}");
             if let Err(terminalize_error) = self
-                .flow_kernel
+                .flow_engine
                 .terminalize_failed(run_id.clone(), config.flow_id.clone(), reason.clone())
                 .await
             {
@@ -7112,7 +7135,7 @@ impl MobActor {
                 ));
             }
             if let Err(terminalize_error) = self
-                .flow_kernel
+                .flow_engine
                 .terminalize_failed(
                     run_id.clone(),
                     config.flow_id.clone(),
@@ -7148,7 +7171,7 @@ impl MobActor {
 
         let engine = self.flow_engine.clone();
         let cleanup_tx = self.command_tx.clone();
-        let flow_kernel = self.flow_kernel.clone();
+        let flow_engine = self.flow_engine.clone();
         let flow_run_id = run_id.clone();
         let flow_id_for_task = config.flow_id.clone();
         let cleanup_run_id = run_id.clone();
@@ -7164,7 +7187,7 @@ impl MobActor {
                     error = %error,
                     "flow task execution failed; delegating terminalization to flow-run kernel"
                 );
-                if let Err(finalize_error) = flow_kernel
+                if let Err(finalize_error) = flow_engine
                     .terminalize_failed(flow_run_id.clone(), flow_id_for_task, error.to_string())
                     .await
                 {
@@ -7192,6 +7215,23 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_run_flow completion")
             .await?;
 
+        Ok(run_id)
+    }
+
+    async fn create_pending_run(
+        &self,
+        config: &FlowRunConfig,
+        activation_params: serde_json::Value,
+    ) -> Result<RunId, MobError> {
+        let flow_state = MobRun::flow_state_for_config(config)?;
+        let run = MobRun::pending(
+            self.definition.id.clone(),
+            config.flow_id.clone(),
+            flow_state,
+            activation_params,
+        );
+        let run_id = run.run_id.clone();
+        self.run_store.create_run(run).await?;
         Ok(run_id)
     }
 
@@ -7271,8 +7311,8 @@ impl MobActor {
         cancel_token.cancel();
 
         let Some(mut handle) = self.run_tasks.remove(&run_id) else {
-            self.flow_kernel.cancel_dispatched_steps(&run_id).await?;
-            self.flow_kernel
+            self.flow_engine.cancel_dispatched_steps(&run_id).await?;
+            self.flow_engine
                 .terminalize_canceled(run_id.clone(), flow_id)
                 .await?;
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_flow_no_handle")
@@ -7293,7 +7333,7 @@ impl MobActor {
             return Ok(());
         };
 
-        let flow_kernel = self.flow_kernel.clone();
+        let flow_engine = self.flow_engine.clone();
         let cleanup_tx = self.command_tx.clone();
         let cancel_grace_timeout = self
             .definition
@@ -7328,13 +7368,13 @@ impl MobActor {
             }
 
             handle.abort();
-            if let Err(error) = flow_kernel.cancel_dispatched_steps(&run_id).await {
+            if let Err(error) = flow_engine.cancel_dispatched_steps(&run_id).await {
                 tracing::error!(
                     error = %error,
                     "failed to settle dispatched steps before flow cancellation terminalization"
                 );
             }
-            if let Err(error) = flow_kernel.terminalize_canceled(run_id, flow_id).await {
+            if let Err(error) = flow_engine.terminalize_canceled(run_id, flow_id).await {
                 tracing::error!(
                     error = %error,
                     "failed flow-run kernel cancellation terminalization"
@@ -7380,8 +7420,8 @@ impl MobActor {
             }
             self.flow_streams.lock().await.remove(&run_id);
 
-            self.flow_kernel.cancel_dispatched_steps(&run_id).await?;
-            self.flow_kernel
+            self.flow_engine.cancel_dispatched_steps(&run_id).await?;
+            self.flow_engine
                 .terminalize_canceled(run_id.clone(), flow_id.clone())
                 .await?;
 

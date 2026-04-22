@@ -380,6 +380,7 @@ fn validate_expr(
         | ExprDef::U64(_)
         | ExprDef::StringLit(_)
         | ExprDef::None
+        | ExprDef::EmptySeq
         | ExprDef::EmptySet
         | ExprDef::EmptyMap
         | ExprDef::CurrentPhase

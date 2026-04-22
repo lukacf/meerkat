@@ -12,9 +12,7 @@ use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
     meerkat_mob_seam_composition,
 };
-use meerkat_machine_schema::{
-    canonical_machine_schemas, flow_frame_machine, flow_run_machine, loop_iteration_machine,
-};
+use meerkat_machine_schema::{canonical_machine_schemas, flow_run_machine};
 
 #[test]
 fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
@@ -252,12 +250,7 @@ fn typed_compat_kernel_module_contract_rejects_legacy_kernel_surface() {
 
 #[test]
 fn generated_kernel_inventory_contract_lists_all_typed_machine_modules() {
-    let mut schemas = canonical_machine_schemas();
-    schemas.extend([
-        flow_run_machine(),
-        flow_frame_machine(),
-        loop_iteration_machine(),
-    ]);
+    let schemas = canonical_machine_schemas();
     let rendered = render_generated_kernel_mod(&schemas);
 
     for slug in [
@@ -266,13 +259,17 @@ fn generated_kernel_inventory_contract_lists_all_typed_machine_modules() {
         "schedule_lifecycle",
         "occurrence_lifecycle",
         "auth",
-        "flow_run",
-        "flow_frame",
-        "loop_iteration",
     ] {
         assert!(
             rendered.contains(&format!("pub mod {slug};")),
             "expected generated inventory to include `{slug}`:\n{rendered}"
+        );
+    }
+
+    for hidden_slug in ["flow_run", "flow_frame", "loop_iteration"] {
+        assert!(
+            !rendered.contains(&format!("pub mod {hidden_slug};")),
+            "canonical generated kernel inventory should not export hidden compat module `{hidden_slug}`:\n{rendered}"
         );
     }
 

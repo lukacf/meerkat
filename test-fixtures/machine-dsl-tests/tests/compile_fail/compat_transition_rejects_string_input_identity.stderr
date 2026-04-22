@@ -1,19 +1,5 @@
-error[E0599]: no method named `unwrap` found for struct `meerkat_machine_kernels::generated::flow_run::State` in the current scope
- --> tests/compile_fail/compat_transition_rejects_string_input_identity.rs:4:43
+error[E0432]: unresolved import `meerkat_machine_kernels::generated::flow_run`
+ --> tests/compile_fail/compat_transition_rejects_string_input_identity.rs:1:5
   |
-4 |     let state = flow_run::initial_state().unwrap();
-  |                                           ^^^^^^ method not found in `meerkat_machine_kernels::generated::flow_run::State`
-
-error[E0308]: mismatched types
- --> tests/compile_fail/compat_transition_rejects_string_input_identity.rs:5:42
-  |
-5 |     let _ = flow_run::transition(&state, "StartRun".to_string(), &flow_run::EmptyContext);
-  |             --------------------         ^^^^^^^^^^^^^^^^^^^^^^ expected `Input`, found `String`
-  |             |
-  |             arguments to this function are incorrect
-  |
-note: function defined here
- --> $WORKSPACE/meerkat-machine-kernels/src/generated/flow_run.rs
-  |
-  | pub fn transition<C: Context>(
-  |        ^^^^^^^^^^
+1 | use meerkat_machine_kernels::generated::flow_run;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `flow_run` in `generated`

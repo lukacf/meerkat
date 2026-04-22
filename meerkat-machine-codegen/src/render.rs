@@ -319,6 +319,7 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     };
     let has_signals = !schema.signals.variants.is_empty();
     let named_type_aliases = collect_machine_named_types(schema);
+    let enum_type_defs = collect_machine_enum_types(schema);
 
     pushln!(
         &mut out,
@@ -343,17 +344,106 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(
         &mut out,
-        "use crate::runtime::{{evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema, transition_signal_from_schema, RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue}};"
+        "use {}::{{evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema, transition_signal_from_schema, RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue}};",
+        if schema.rust.crate_name == "meerkat-mob" {
+            "crate::generated::compat_runtime"
+        } else {
+            "crate::runtime"
+        }
     );
     pushln!(&mut out);
+    let generated_enum_names: std::collections::BTreeSet<String> = enum_type_defs
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     if !named_type_aliases.is_empty() {
         for alias in named_type_aliases {
+            if generated_enum_names.contains(&rust_ident(&alias)) {
+                continue;
+            }
             pushln!(
                 &mut out,
                 "pub type {} = {};",
                 rust_ident(&alias),
                 render_named_type_alias_target(&alias)
             );
+        }
+        pushln!(&mut out);
+    }
+    if !enum_type_defs.is_empty() {
+        for (enum_name, variants) in enum_type_defs {
+            pushln!(&mut out, "#[allow(non_camel_case_types)]");
+            pushln!(
+                &mut out,
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(&mut out, "pub enum {} {{", enum_name);
+            for variant in &variants {
+                pushln!(&mut out, "    {},", rust_ident(variant));
+            }
+            pushln!(&mut out, "}}");
+            pushln!(&mut out, "impl {} {{", enum_name);
+            pushln!(&mut out, "    pub fn as_str(&self) -> &'static str {{");
+            pushln!(&mut out, "        match self {{");
+            for variant in &variants {
+                pushln!(
+                    &mut out,
+                    "            Self::{} => \"{}\",",
+                    rust_ident(variant),
+                    variant
+                );
+            }
+            pushln!(&mut out, "        }}");
+            pushln!(&mut out, "    }}");
+            pushln!(&mut out, "}}");
+            pushln!(&mut out, "impl std::fmt::Display for {} {{", enum_name);
+            pushln!(
+                &mut out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+            );
+            pushln!(&mut out, "        f.write_str(self.as_str())");
+            pushln!(&mut out, "    }}");
+            pushln!(&mut out, "}}");
+            pushln!(&mut out, "impl From<&str> for {} {{", enum_name);
+            pushln!(&mut out, "    fn from(value: &str) -> Self {{");
+            pushln!(&mut out, "        match value {{");
+            for variant in &variants {
+                pushln!(
+                    &mut out,
+                    "            \"{}\" => Self::{},",
+                    variant,
+                    rust_ident(variant)
+                );
+            }
+            let fallback_variant = variants
+                .first()
+                .map(std::string::String::as_str)
+                .unwrap_or("Unknown");
+            pushln!(&mut out, "            other => {{");
+            pushln!(
+                &mut out,
+                "                debug_assert!(false, \"unknown {} variant: {{other}}\");",
+                enum_name
+            );
+            pushln!(
+                &mut out,
+                "                Self::{}",
+                rust_ident(fallback_variant)
+            );
+            pushln!(&mut out, "            }},");
+            pushln!(&mut out, "        }}");
+            pushln!(&mut out, "    }}");
+            pushln!(&mut out, "}}");
+            pushln!(&mut out, "impl From<String> for {} {{", enum_name);
+            pushln!(&mut out, "    fn from(value: String) -> Self {{");
+            pushln!(&mut out, "        Self::from(value.as_str())");
+            pushln!(&mut out, "    }}");
+            pushln!(&mut out, "}}");
+            pushln!(&mut out, "impl PartialEq<&str> for {} {{", enum_name);
+            pushln!(&mut out, "    fn eq(&self, other: &&str) -> bool {{");
+            pushln!(&mut out, "        self.as_str() == *other");
+            pushln!(&mut out, "    }}");
+            pushln!(&mut out, "}}");
         }
         pushln!(&mut out);
     }
@@ -1105,11 +1195,6 @@ pub fn render_generated_kernel_mod(schemas: &[MachineSchema]) -> String {
         .iter()
         .map(|schema| machine_slug(&schema.machine))
         .collect();
-    for compatibility_slug in ["flow_frame", "flow_run", "loop_iteration"] {
-        if !module_slugs.iter().any(|slug| slug == compatibility_slug) {
-            module_slugs.push(compatibility_slug.to_string());
-        }
-    }
     module_slugs.sort();
     for slug in module_slugs {
         pushln!(&mut out, "pub mod {slug};");
@@ -1617,6 +1702,64 @@ fn collect_named_types_from_type_ref(ty: &TypeRef, names: &mut std::collections:
 }
 
 #[cfg(not(test))]
+fn collect_machine_enum_types(schema: &MachineSchema) -> Vec<(String, Vec<String>)> {
+    if !matches!(
+        schema.machine.as_str(),
+        "FlowRunMachine" | "FlowFrameMachine" | "LoopIterationMachine"
+    ) {
+        return Vec::new();
+    }
+    let mut enums: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    enums.insert(schema.state.phase.name.clone());
+    for field in &schema.state.fields {
+        collect_enum_types_from_type_ref(&field.ty, &mut enums);
+    }
+    for variant in &schema.inputs.variants {
+        for field in &variant.fields {
+            collect_enum_types_from_type_ref(&field.ty, &mut enums);
+        }
+    }
+    for variant in &schema.signals.variants {
+        for field in &variant.fields {
+            collect_enum_types_from_type_ref(&field.ty, &mut enums);
+        }
+    }
+    for variant in &schema.effects.variants {
+        for field in &variant.fields {
+            collect_enum_types_from_type_ref(&field.ty, &mut enums);
+        }
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        for field in &helper.params {
+            collect_enum_types_from_type_ref(&field.ty, &mut enums);
+        }
+        collect_enum_types_from_type_ref(&helper.returns, &mut enums);
+    }
+
+    enums
+        .into_iter()
+        .filter_map(|name| known_enum_variants(&name).map(|variants| (rust_ident(&name), variants)))
+        .collect()
+}
+
+#[cfg(not(test))]
+fn collect_enum_types_from_type_ref(ty: &TypeRef, enums: &mut std::collections::BTreeSet<String>) {
+    match ty {
+        TypeRef::Enum(name) => {
+            enums.insert(name.clone());
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            collect_enum_types_from_type_ref(inner, enums);
+        }
+        TypeRef::Map(key, value) => {
+            collect_enum_types_from_type_ref(key, enums);
+            collect_enum_types_from_type_ref(value, enums);
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
+    }
+}
+
+#[cfg(not(test))]
 fn render_named_type_alias_target(name: &str) -> &'static str {
     match name {
         "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation" => "u64",
@@ -1634,10 +1777,30 @@ fn render_to_raw_expr(expr: &str, ty: &TypeRef) -> String {
             format!("RawValue::U64(({expr}).to_owned() as u64)")
         }
         TypeRef::Named(_) => format!("RawValue::String(({expr}).to_owned())"),
-        TypeRef::Enum(name) => format!(
-            "RawValue::NamedVariant {{ enum_name: \"{}\".into(), variant: ({expr}).to_owned() }}",
-            name
-        ),
+        TypeRef::Enum(name) => {
+            if let Some(variants) = known_enum_variants(name) {
+                let enum_name = rust_ident(name);
+                let arms = variants
+                    .iter()
+                    .map(|variant| {
+                        format!(
+                            "{enum_name}::{} => \"{variant}\".into()",
+                            rust_ident(variant)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "RawValue::NamedVariant {{ enum_name: \"{}\".into(), variant: match {expr} {{ {} }} }}",
+                    name, arms
+                )
+            } else {
+                format!(
+                    "RawValue::NamedVariant {{ enum_name: \"{}\".into(), variant: ({expr}).to_owned() }}",
+                    name
+                )
+            }
+        }
         TypeRef::Option(inner) => {
             let inner_expr = render_to_raw_expr("value", inner);
             format!(
@@ -1683,10 +1846,27 @@ fn render_from_raw_expr(expr: &str, ty: &TypeRef) -> String {
         TypeRef::Named(_) => format!(
             "match {expr} {{ RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
         ),
-        TypeRef::Enum(name) => format!(
-            "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => variant.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-            name, name
-        ),
+        TypeRef::Enum(name) => {
+            if let Some(variants) = known_enum_variants(name) {
+                let enum_name = rust_ident(name);
+                let arms = variants
+                    .iter()
+                    .map(|variant| {
+                        format!("\"{variant}\" => {enum_name}::{},", rust_ident(variant))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
+                    name, arms, name, name
+                )
+            } else {
+                format!(
+                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => variant.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
+                    name, name
+                )
+            }
+        }
         TypeRef::Option(inner) => {
             let inner_expr = render_from_raw_expr("value", inner);
             format!(
@@ -1732,10 +1912,27 @@ fn render_try_from_raw_expr(expr: &str, ty: &TypeRef) -> String {
         TypeRef::Named(_) => format!(
             "match {expr} {{ RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
         ),
-        TypeRef::Enum(name) => format!(
-            "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => Ok(variant.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-            name, name
-        ),
+        TypeRef::Enum(name) => {
+            if let Some(variants) = known_enum_variants(name) {
+                let enum_name = rust_ident(name);
+                let arms = variants
+                    .iter()
+                    .map(|variant| {
+                        format!("\"{variant}\" => Ok({enum_name}::{}),", rust_ident(variant))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
+                    name, arms, name, name
+                )
+            } else {
+                format!(
+                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => Ok(variant.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
+                    name, name
+                )
+            }
+        }
         TypeRef::Option(inner) => {
             let inner_expr = render_try_from_raw_expr("value", inner);
             format!(
@@ -1781,10 +1978,21 @@ fn render_try_from_owned_raw_expr(expr: &str, ty: &TypeRef) -> String {
         TypeRef::Named(_) => format!(
             "match {expr} {{ RawValue::String(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
         ),
-        TypeRef::Enum(name) => format!(
-            "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => Ok(variant), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-            name, name
-        ),
+        TypeRef::Enum(name) => {
+            let enum_name = rust_ident(name);
+            let variants = known_enum_variants(name).unwrap_or_default();
+            let arms = variants
+                .iter()
+                .map(|variant| {
+                    format!("\"{variant}\" => Ok({enum_name}::{}),", rust_ident(variant))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
+                name, arms, name, name
+            )
+        }
         TypeRef::Option(inner) => {
             let inner_expr = render_try_from_raw_expr("value", inner);
             format!(
@@ -1814,6 +2022,41 @@ fn rust_ident(value: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
+}
+
+#[cfg(not(test))]
+fn known_enum_variants(name: &str) -> Option<Vec<String>> {
+    Some(
+        match name {
+            "FlowRunStatus" => vec![
+                "Absent",
+                "Pending",
+                "Running",
+                "Completed",
+                "Failed",
+                "Canceled",
+            ],
+            "DependencyMode" => vec!["All", "Any"],
+            "CollectionPolicyKind" => vec!["All", "Any", "Quorum"],
+            "StepRunStatus" => vec!["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],
+            "FrameScope" => vec!["Root", "Body"],
+            "FlowNodeKind" => vec!["Step", "Loop"],
+            "NodeRunStatus" => vec![
+                "Pending",
+                "Ready",
+                "Running",
+                "Completed",
+                "Failed",
+                "Skipped",
+                "Canceled",
+            ],
+            "LoopIterationStage" => vec!["AwaitingBodyFrame", "BodyFrameActive", "AwaitingUntil"],
+            _ => return None,
+        }
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    )
 }
 
 #[cfg(not(test))]

@@ -83,6 +83,86 @@ impl<T: Into<String>> From<T> for WorkId {
     }
 }
 
+/// Bridging type for flow run identity. Maps to `crate::ids::RunId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RunId(pub String);
+
+impl<T: Into<String>> From<T> for RunId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for frame identity. Maps to `crate::ids::FrameId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct FrameId(pub String);
+
+impl<T: Into<String>> From<T> for FrameId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for loop instance identity. Maps to `crate::ids::LoopInstanceId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct LoopInstanceId(pub String);
+
+impl<T: Into<String>> From<T> for LoopInstanceId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for loop definition identity. Maps to `crate::ids::LoopId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct LoopId(pub String);
+
+impl<T: Into<String>> From<T> for LoopId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for flow-node identity. Maps to `crate::ids::FlowNodeId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct FlowNodeId(pub String);
+
+impl<T: Into<String>> From<T> for FlowNodeId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for branch identity. Maps to `crate::ids::BranchId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct BranchId(pub String);
+
+impl<T: Into<String>> From<T> for BranchId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for step identity. Maps to `crate::ids::StepId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct StepId(pub String);
+
+impl<T: Into<String>> From<T> for StepId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Composite key for run-scoped step state projected into MobMachine.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RunStepKey(pub String);
+
+impl<T: Into<String>> From<T> for RunStepKey {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
 /// Bridging type for bridge session id. Maps to
 /// `meerkat_core::session::SessionId` — the bridge session a mob member is
 /// attached to for the current runtime generation. The DSL only needs the
@@ -193,6 +273,105 @@ pub enum TaskStatus {
     InProgress,
     Completed,
     Cancelled,
+}
+
+/// Dependency satisfaction mode for a step or frame node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DependencyMode {
+    #[default]
+    All,
+    Any,
+}
+
+/// Collection policy for a step's fan-out execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CollectionPolicyKind {
+    #[default]
+    All,
+    Any,
+    Quorum,
+}
+
+/// Canonical flow-run lifecycle state once run-local semantics are absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FlowRunStatus {
+    #[default]
+    Absent,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Canonical frame lifecycle state once frame-local semantics are absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FrameStatus {
+    #[default]
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Canonical loop lifecycle state once loop-local semantics are absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LoopStatus {
+    #[default]
+    Running,
+    Completed,
+    Exhausted,
+    Failed,
+    Canceled,
+}
+
+/// Canonical step execution status once run-local semantics are absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum StepRunStatus {
+    #[default]
+    Dispatched,
+    Completed,
+    Failed,
+    Skipped,
+    Canceled,
+}
+
+/// Root-vs-body frame scope for a frame snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FrameScope {
+    #[default]
+    Root,
+    Body,
+}
+
+/// Flow node kind inside a frame DAG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FlowNodeKind {
+    #[default]
+    Step,
+    Loop,
+}
+
+/// Per-node execution status within a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum NodeRunStatus {
+    Pending,
+    #[default]
+    Ready,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+    Canceled,
+}
+
+/// Loop-body/evaluate lifecycle stage for an active repeat-until node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LoopIterationStage {
+    #[default]
+    AwaitingBodyFrame,
+    BodyFrameActive,
+    AwaitingUntilEvaluation,
 }
 
 /// Opaque task payload carried through the DSL. The full domain type is
@@ -364,6 +543,60 @@ machine! {
             externally_addressable_runtime_ids: Set<AgentRuntimeId>,
             runtime_fence_tokens: Map<AgentRuntimeId, FenceToken>,
             active_run_count: u64,
+            run_status: Map<RunId, Enum<FlowRunStatus>>,
+            run_ordered_steps: Map<RunId, Seq<StepId>>,
+            run_tracked_steps: Map<RunId, Set<StepId>>,
+            run_step_status: Map<RunId, Map<StepId, Option<Enum<StepRunStatus>>>>,
+            run_step_status_flat: Map<RunStepKey, Enum<StepRunStatus>>,
+            run_output_recorded: Map<RunId, Map<StepId, bool>>,
+            run_step_condition_results: Map<RunId, Map<StepId, Option<bool>>>,
+            run_step_has_conditions: Map<RunId, Map<StepId, bool>>,
+            run_step_dependencies: Map<RunId, Map<StepId, Seq<StepId>>>,
+            run_step_dependency_modes: Map<RunId, Map<StepId, Enum<DependencyMode>>>,
+            run_step_branches: Map<RunId, Map<StepId, Option<BranchId>>>,
+            run_step_collection_policies: Map<RunId, Map<StepId, Enum<CollectionPolicyKind>>>,
+            run_step_quorum_thresholds: Map<RunId, Map<StepId, u32>>,
+            run_step_target_counts: Map<RunId, Map<StepId, u32>>,
+            run_step_target_success_counts: Map<RunId, Map<StepId, u32>>,
+            run_step_target_terminal_failure_counts: Map<RunId, Map<StepId, u32>>,
+            run_output_recorded_flat: Map<RunStepKey, bool>,
+            run_target_retry_counts: Map<RunId, Map<String, u32>>,
+            run_escalation_threshold: Map<RunId, u32>,
+            run_max_step_retries: Map<RunId, u32>,
+            run_ready_frames: Map<RunId, Seq<FrameId>>,
+            run_ready_frame_membership: Map<RunId, Set<FrameId>>,
+            run_pending_body_frame_loops: Map<RunId, Seq<LoopInstanceId>>,
+            run_pending_body_frame_loop_membership: Map<RunId, Set<LoopInstanceId>>,
+            run_max_active_nodes: Map<RunId, u32>,
+            run_max_active_frames: Map<RunId, u32>,
+            run_max_frame_depth: Map<RunId, u32>,
+            frame_scope: Map<FrameId, Enum<FrameScope>>,
+            frame_phase: Map<FrameId, Enum<FrameStatus>>,
+            frame_run: Map<FrameId, RunId>,
+            frame_parent_loop: Map<FrameId, Option<LoopInstanceId>>,
+            frame_iteration: Map<FrameId, u32>,
+            frame_tracked_nodes: Map<FrameId, Set<FlowNodeId>>,
+            frame_ordered_nodes: Map<FrameId, Seq<FlowNodeId>>,
+            frame_node_kind: Map<FrameId, Map<FlowNodeId, Enum<FlowNodeKind>>>,
+            frame_node_dependencies: Map<FrameId, Map<FlowNodeId, Seq<FlowNodeId>>>,
+            frame_node_dependency_modes: Map<FrameId, Map<FlowNodeId, Enum<DependencyMode>>>,
+            frame_node_step_ids: Map<FrameId, Map<FlowNodeId, StepId>>,
+            frame_node_loop_ids: Map<FrameId, Map<FlowNodeId, LoopId>>,
+            frame_node_status: Map<FrameId, Map<FlowNodeId, Enum<NodeRunStatus>>>,
+            frame_ready_queue: Map<FrameId, Seq<FlowNodeId>>,
+            frame_output_recorded: Map<FrameId, Map<FlowNodeId, bool>>,
+            frame_node_condition_results: Map<FrameId, Map<FlowNodeId, Option<bool>>>,
+            frame_node_branches: Map<FrameId, Map<FlowNodeId, Option<BranchId>>>,
+            loop_phase: Map<LoopInstanceId, Enum<LoopStatus>>,
+            loop_parent_frame: Map<LoopInstanceId, FrameId>,
+            loop_parent_node: Map<LoopInstanceId, FlowNodeId>,
+            loop_definition: Map<LoopInstanceId, LoopId>,
+            loop_depth: Map<LoopInstanceId, u32>,
+            loop_stage: Map<LoopInstanceId, Enum<LoopIterationStage>>,
+            loop_current_iteration: Map<LoopInstanceId, u32>,
+            loop_last_completed_iteration: Map<LoopInstanceId, u32>,
+            loop_max_iterations: Map<LoopInstanceId, u32>,
+            loop_active_body_frame: Map<LoopInstanceId, Option<FrameId>>,
             pending_spawn_count: u64,
             coordinator_bound: bool,
             member_startup_binding_requested: Set<AgentRuntimeId>,
@@ -413,6 +646,60 @@ machine! {
             externally_addressable_runtime_ids = EmptySet,
             runtime_fence_tokens = EmptyMap,
             active_run_count = 0,
+            run_status = EmptyMap,
+            run_ordered_steps = EmptyMap,
+            run_tracked_steps = EmptyMap,
+            run_step_status = EmptyMap,
+            run_step_status_flat = EmptyMap,
+            run_output_recorded = EmptyMap,
+            run_step_condition_results = EmptyMap,
+            run_step_has_conditions = EmptyMap,
+            run_step_dependencies = EmptyMap,
+            run_step_dependency_modes = EmptyMap,
+            run_step_branches = EmptyMap,
+            run_step_collection_policies = EmptyMap,
+            run_step_quorum_thresholds = EmptyMap,
+            run_step_target_counts = EmptyMap,
+            run_step_target_success_counts = EmptyMap,
+            run_step_target_terminal_failure_counts = EmptyMap,
+            run_output_recorded_flat = EmptyMap,
+            run_target_retry_counts = EmptyMap,
+            run_escalation_threshold = EmptyMap,
+            run_max_step_retries = EmptyMap,
+            run_ready_frames = EmptyMap,
+            run_ready_frame_membership = EmptyMap,
+            run_pending_body_frame_loops = EmptyMap,
+            run_pending_body_frame_loop_membership = EmptyMap,
+            run_max_active_nodes = EmptyMap,
+            run_max_active_frames = EmptyMap,
+            run_max_frame_depth = EmptyMap,
+            frame_scope = EmptyMap,
+            frame_phase = EmptyMap,
+            frame_run = EmptyMap,
+            frame_parent_loop = EmptyMap,
+            frame_iteration = EmptyMap,
+            frame_tracked_nodes = EmptyMap,
+            frame_ordered_nodes = EmptyMap,
+            frame_node_kind = EmptyMap,
+            frame_node_dependencies = EmptyMap,
+            frame_node_dependency_modes = EmptyMap,
+            frame_node_step_ids = EmptyMap,
+            frame_node_loop_ids = EmptyMap,
+            frame_node_status = EmptyMap,
+            frame_ready_queue = EmptyMap,
+            frame_output_recorded = EmptyMap,
+            frame_node_condition_results = EmptyMap,
+            frame_node_branches = EmptyMap,
+            loop_phase = EmptyMap,
+            loop_parent_frame = EmptyMap,
+            loop_parent_node = EmptyMap,
+            loop_definition = EmptyMap,
+            loop_depth = EmptyMap,
+            loop_stage = EmptyMap,
+            loop_current_iteration = EmptyMap,
+            loop_last_completed_iteration = EmptyMap,
+            loop_max_iterations = EmptyMap,
+            loop_active_body_frame = EmptyMap,
             pending_spawn_count = 0,
             coordinator_bound = true,
             member_startup_binding_requested = EmptySet,
@@ -445,6 +732,62 @@ machine! {
 
         input MobMachineInput {
             RunFlow,
+            CreateRunSeed {
+                run_id: RunId,
+                step_ids: Set<StepId>,
+                ordered_steps: Seq<StepId>,
+                step_has_conditions: Map<StepId, bool>,
+                step_dependencies: Map<StepId, Seq<StepId>>,
+                step_dependency_modes: Map<StepId, Enum<DependencyMode>>,
+                step_branches: Map<StepId, Option<BranchId>>,
+                step_collection_policies: Map<StepId, Enum<CollectionPolicyKind>>,
+                step_quorum_thresholds: Map<StepId, u32>,
+                escalation_threshold: u32,
+                max_step_retries: u32,
+                max_active_nodes: u32,
+                max_active_frames: u32,
+                max_frame_depth: u32,
+            },
+            CreateFrameSeed {
+                run_id: RunId,
+                frame_id: FrameId,
+                frame_scope: Enum<FrameScope>,
+                loop_instance_id: Option<LoopInstanceId>,
+                iteration: u32,
+                tracked_nodes: Set<FlowNodeId>,
+                ordered_nodes: Seq<FlowNodeId>,
+                node_kind: Map<FlowNodeId, Enum<FlowNodeKind>>,
+                node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>,
+                node_dependency_modes: Map<FlowNodeId, Enum<DependencyMode>>,
+                node_branches: Map<FlowNodeId, Option<BranchId>>,
+            },
+            CreateLoopSeed {
+                loop_instance_id: LoopInstanceId,
+                parent_frame_id: FrameId,
+                parent_node_id: FlowNodeId,
+                loop_id: LoopId,
+                depth: u32,
+                max_iterations: u32,
+            },
+            ProjectRunStatus {
+                run_id: RunId,
+                status: Enum<FlowRunStatus>,
+            },
+            ProjectRunStepStatus {
+                run_step: RunStepKey,
+                status: Enum<StepRunStatus>,
+                output_recorded: bool,
+            },
+            ProjectFramePhase {
+                frame_id: FrameId,
+                phase: Enum<FrameStatus>,
+            },
+            ProjectLoopState {
+                loop_instance_id: LoopInstanceId,
+                phase: Enum<LoopStatus>,
+                stage: Enum<LoopIterationStage>,
+                active_body_frame_id: Option<FrameId>,
+            },
             CancelFlow,
             FlowStatus,
             Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
@@ -1551,6 +1894,124 @@ machine! {
             emit EmitFlowRunNotice
         }
 
+        transition CreateRunSeedRunning {
+            on input CreateRunSeed { run_id, step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.run_status.insert(run_id, FlowRunStatus::Pending);
+                self.run_tracked_steps.insert(run_id, step_ids);
+                self.run_ordered_steps.insert(run_id, ordered_steps);
+                self.run_step_status.insert(run_id, EmptyMap);
+                self.run_output_recorded.insert(run_id, EmptyMap);
+                self.run_step_condition_results.insert(run_id, EmptyMap);
+                self.run_step_has_conditions.insert(run_id, step_has_conditions);
+                self.run_step_dependencies.insert(run_id, step_dependencies);
+                self.run_step_dependency_modes.insert(run_id, step_dependency_modes);
+                self.run_step_branches.insert(run_id, step_branches);
+                self.run_step_collection_policies.insert(run_id, step_collection_policies);
+                self.run_step_quorum_thresholds.insert(run_id, step_quorum_thresholds);
+                self.run_step_target_counts.insert(run_id, EmptyMap);
+                self.run_step_target_success_counts.insert(run_id, EmptyMap);
+                self.run_step_target_terminal_failure_counts.insert(run_id, EmptyMap);
+                self.run_target_retry_counts.insert(run_id, EmptyMap);
+                self.run_escalation_threshold.insert(run_id, escalation_threshold);
+                self.run_max_step_retries.insert(run_id, max_step_retries);
+                self.run_ready_frames.insert(run_id, EmptySeq);
+                self.run_ready_frame_membership.insert(run_id, EmptySet);
+                self.run_pending_body_frame_loops.insert(run_id, EmptySeq);
+                self.run_pending_body_frame_loop_membership.insert(run_id, EmptySet);
+                self.run_max_active_nodes.insert(run_id, max_active_nodes);
+                self.run_max_active_frames.insert(run_id, max_active_frames);
+                self.run_max_frame_depth.insert(run_id, max_frame_depth);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition CreateFrameSeedRunning {
+            on input CreateFrameSeed { run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.frame_scope.insert(frame_id, frame_scope);
+                self.frame_phase.insert(frame_id, FrameStatus::Running);
+                self.frame_run.insert(frame_id, run_id);
+                self.frame_parent_loop.insert(frame_id, loop_instance_id);
+                self.frame_iteration.insert(frame_id, iteration);
+                self.frame_tracked_nodes.insert(frame_id, tracked_nodes);
+                self.frame_ordered_nodes.insert(frame_id, ordered_nodes);
+                self.frame_node_kind.insert(frame_id, node_kind);
+                self.frame_node_dependencies.insert(frame_id, node_dependencies);
+                self.frame_node_dependency_modes.insert(frame_id, node_dependency_modes);
+                self.frame_node_branches.insert(frame_id, node_branches);
+                self.frame_node_status.insert(frame_id, EmptyMap);
+                self.frame_ready_queue.insert(frame_id, EmptySeq);
+                self.frame_output_recorded.insert(frame_id, EmptyMap);
+                self.frame_node_condition_results.insert(frame_id, EmptyMap);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition CreateLoopSeedRunning {
+            on input CreateLoopSeed { loop_instance_id, parent_frame_id, parent_node_id, loop_id, depth, max_iterations }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.loop_phase.insert(loop_instance_id, LoopStatus::Running);
+                self.loop_parent_frame.insert(loop_instance_id, parent_frame_id);
+                self.loop_parent_node.insert(loop_instance_id, parent_node_id);
+                self.loop_definition.insert(loop_instance_id, loop_id);
+                self.loop_depth.insert(loop_instance_id, depth);
+                self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                self.loop_max_iterations.insert(loop_instance_id, max_iterations);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition ProjectRunStatusRunning {
+            on input ProjectRunStatus { run_id, status }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            update {
+                self.run_status.insert(run_id, status);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition ProjectRunStepStatusRunning {
+            on input ProjectRunStepStatus { run_step, status, output_recorded }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            update {
+                self.run_step_status_flat.insert(run_step, status);
+                self.run_output_recorded_flat.insert(run_step, output_recorded);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition ProjectFramePhaseRunning {
+            on input ProjectFramePhase { frame_id, phase }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            update {
+                self.frame_phase.insert(frame_id, phase);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition ProjectLoopStateRunning {
+            on input ProjectLoopState { loop_instance_id, phase, stage, active_body_frame_id }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            update {
+                self.loop_phase.insert(loop_instance_id, phase);
+                self.loop_stage.insert(loop_instance_id, stage);
+                self.loop_active_body_frame.insert(loop_instance_id, active_body_frame_id);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
         transition StartFlowRunning {
             on signal StartFlow
             guard { self.lifecycle_phase == Phase::Running }
@@ -1853,5 +2314,153 @@ machine! {
             emit FlowTerminalized
         }
 
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_run_seed_populates_canonical_run_maps() {
+        let mut authority = MobMachineAuthority::new();
+        let run_id = RunId::from("run-1");
+        let step_id = StepId::from("step-a");
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CreateRunSeed {
+                run_id: run_id.clone(),
+                step_ids: [step_id.clone()].into_iter().collect(),
+                ordered_steps: vec![step_id.clone()],
+                step_has_conditions: [(step_id.clone(), false)].into_iter().collect(),
+                step_dependencies: [(step_id.clone(), Vec::new())].into_iter().collect(),
+                step_dependency_modes: [(step_id.clone(), DependencyMode::All)]
+                    .into_iter()
+                    .collect(),
+                step_branches: [(step_id.clone(), None)].into_iter().collect(),
+                step_collection_policies: [(step_id.clone(), CollectionPolicyKind::All)]
+                    .into_iter()
+                    .collect(),
+                step_quorum_thresholds: [(step_id.clone(), 0)].into_iter().collect(),
+                escalation_threshold: 0,
+                max_step_retries: 0,
+                max_active_nodes: 2,
+                max_active_frames: 3,
+                max_frame_depth: 4,
+            },
+        )
+        .expect("CreateRunSeed should be accepted");
+
+        assert_eq!(transition.to_phase, MobPhase::Running);
+        assert_eq!(
+            authority.state.run_status.get(&run_id),
+            Some(&FlowRunStatus::Pending)
+        );
+        assert_eq!(
+            authority.state.run_ordered_steps.get(&run_id),
+            Some(&vec![step_id.clone()])
+        );
+        assert_eq!(
+            authority
+                .state
+                .run_step_dependency_modes
+                .get(&run_id)
+                .and_then(|map| map.get(&step_id)),
+            Some(&DependencyMode::All)
+        );
+        assert_eq!(authority.state.run_max_active_nodes.get(&run_id), Some(&2));
+        assert_eq!(
+            authority.state.run_ready_frames.get(&run_id),
+            Some(&Vec::new())
+        );
+    }
+
+    #[test]
+    fn create_frame_seed_populates_canonical_frame_maps() {
+        let mut authority = MobMachineAuthority::new();
+        let run_id = RunId::from("run-1");
+        let frame_id = FrameId::from("frame-root");
+        let node_id = FlowNodeId::from("node-a");
+
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CreateFrameSeed {
+                run_id: run_id.clone(),
+                frame_id: frame_id.clone(),
+                frame_scope: FrameScope::Root,
+                loop_instance_id: None,
+                iteration: 0,
+                tracked_nodes: [node_id.clone()].into_iter().collect(),
+                ordered_nodes: vec![node_id.clone()],
+                node_kind: [(node_id.clone(), FlowNodeKind::Step)]
+                    .into_iter()
+                    .collect(),
+                node_dependencies: [(node_id.clone(), Vec::new())].into_iter().collect(),
+                node_dependency_modes: [(node_id.clone(), DependencyMode::All)]
+                    .into_iter()
+                    .collect(),
+                node_branches: [(node_id.clone(), None)].into_iter().collect(),
+            },
+        )
+        .expect("CreateFrameSeed should be accepted");
+
+        assert_eq!(transition.to_phase, MobPhase::Running);
+        assert_eq!(
+            authority.state.frame_scope.get(&frame_id),
+            Some(&FrameScope::Root)
+        );
+        assert_eq!(authority.state.frame_run.get(&frame_id), Some(&run_id));
+        assert_eq!(
+            authority.state.frame_ordered_nodes.get(&frame_id),
+            Some(&vec![node_id.clone()])
+        );
+        assert_eq!(
+            authority
+                .state
+                .frame_node_kind
+                .get(&frame_id)
+                .and_then(|map| map.get(&node_id)),
+            Some(&FlowNodeKind::Step)
+        );
+    }
+
+    #[test]
+    fn create_loop_seed_populates_canonical_loop_maps() {
+        let mut authority = MobMachineAuthority::new();
+        let loop_instance_id = LoopInstanceId::from("loop-1");
+        let frame_id = FrameId::from("frame-root");
+        let node_id = FlowNodeId::from("loop-node");
+        let loop_id = LoopId::from("repeat");
+
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CreateLoopSeed {
+                loop_instance_id: loop_instance_id.clone(),
+                parent_frame_id: frame_id.clone(),
+                parent_node_id: node_id.clone(),
+                loop_id: loop_id.clone(),
+                depth: 2,
+                max_iterations: 5,
+            },
+        )
+        .expect("CreateLoopSeed should be accepted");
+
+        assert_eq!(transition.to_phase, MobPhase::Running);
+        assert_eq!(
+            authority.state.loop_parent_frame.get(&loop_instance_id),
+            Some(&frame_id)
+        );
+        assert_eq!(
+            authority.state.loop_parent_node.get(&loop_instance_id),
+            Some(&node_id)
+        );
+        assert_eq!(
+            authority.state.loop_definition.get(&loop_instance_id),
+            Some(&loop_id)
+        );
+        assert_eq!(
+            authority.state.loop_stage.get(&loop_instance_id),
+            Some(&LoopIterationStage::AwaitingBodyFrame)
+        );
     }
 }

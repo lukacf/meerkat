@@ -19,20 +19,196 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_frame_machine()
 }
 
-use crate::runtime::{
+use crate::generated::compat_runtime::{
     RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
     evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
     transition_signal_from_schema,
 };
 
 pub type BranchId = String;
-pub type DependencyMode = String;
 pub type FlowNodeId = String;
-pub type FlowNodeKind = String;
 pub type FrameId = String;
-pub type FrameScope = String;
 pub type LoopInstanceId = String;
-pub type NodeRunStatus = String;
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DependencyMode {
+    All,
+    Any,
+}
+impl DependencyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Any => "Any",
+        }
+    }
+}
+impl std::fmt::Display for DependencyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for DependencyMode {
+    fn from(value: &str) -> Self {
+        match value {
+            "All" => Self::All,
+            "Any" => Self::Any,
+            other => {
+                debug_assert!(false, "unknown DependencyMode variant: {other}");
+                Self::All
+            }
+        }
+    }
+}
+impl From<String> for DependencyMode {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for DependencyMode {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FlowNodeKind {
+    Step,
+    Loop,
+}
+impl FlowNodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Step => "Step",
+            Self::Loop => "Loop",
+        }
+    }
+}
+impl std::fmt::Display for FlowNodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for FlowNodeKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "Step" => Self::Step,
+            "Loop" => Self::Loop,
+            other => {
+                debug_assert!(false, "unknown FlowNodeKind variant: {other}");
+                Self::Step
+            }
+        }
+    }
+}
+impl From<String> for FlowNodeKind {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for FlowNodeKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FrameScope {
+    Root,
+    Body,
+}
+impl FrameScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Root => "Root",
+            Self::Body => "Body",
+        }
+    }
+}
+impl std::fmt::Display for FrameScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for FrameScope {
+    fn from(value: &str) -> Self {
+        match value {
+            "Root" => Self::Root,
+            "Body" => Self::Body,
+            other => {
+                debug_assert!(false, "unknown FrameScope variant: {other}");
+                Self::Root
+            }
+        }
+    }
+}
+impl From<String> for FrameScope {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for FrameScope {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeRunStatus {
+    Pending,
+    Ready,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+    Canceled,
+}
+impl NodeRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Ready => "Ready",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Skipped => "Skipped",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::fmt::Display for NodeRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for NodeRunStatus {
+    fn from(value: &str) -> Self {
+        match value {
+            "Pending" => Self::Pending,
+            "Ready" => Self::Ready,
+            "Running" => Self::Running,
+            "Completed" => Self::Completed,
+            "Failed" => Self::Failed,
+            "Skipped" => Self::Skipped,
+            "Canceled" => Self::Canceled,
+            other => {
+                debug_assert!(false, "unknown NodeRunStatus variant: {other}");
+                Self::Pending
+            }
+        }
+    }
+}
+impl From<String> for NodeRunStatus {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for NodeRunStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -109,7 +285,15 @@ fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
             }
         })? {
             RawValue::NamedVariant { enum_name, variant } if enum_name == "FrameScope" => {
-                variant.clone()
+                match variant.as_str() {
+                    "Root" => FrameScope::Root,
+                    "Body" => FrameScope::Body,
+                    other => {
+                        return Err(KernelError::CodegenInvariant {
+                            detail: format!("expected enum FrameScope variant, found {other}"),
+                        });
+                    }
+                }
             }
             other => {
                 return Err(KernelError::CodegenInvariant {
@@ -216,7 +400,15 @@ fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
                             RawValue::NamedVariant { enum_name, variant }
                                 if enum_name == "FlowNodeKind" =>
                             {
-                                Ok(variant.clone())
+                                match variant.as_str() {
+                                    "Step" => Ok(FlowNodeKind::Step),
+                                    "Loop" => Ok(FlowNodeKind::Loop),
+                                    other => Err(KernelError::CodegenInvariant {
+                                        detail: format!(
+                                            "expected enum FlowNodeKind variant, found {other}"
+                                        ),
+                                    }),
+                                }
                             }
                             other => Err(KernelError::CodegenInvariant {
                                 detail: format!("expected enum FlowNodeKind, found {other:?}"),
@@ -290,7 +482,15 @@ fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
                             RawValue::NamedVariant { enum_name, variant }
                                 if enum_name == "DependencyMode" =>
                             {
-                                Ok(variant.clone())
+                                match variant.as_str() {
+                                    "All" => Ok(DependencyMode::All),
+                                    "Any" => Ok(DependencyMode::Any),
+                                    other => Err(KernelError::CodegenInvariant {
+                                        detail: format!(
+                                            "expected enum DependencyMode variant, found {other}"
+                                        ),
+                                    }),
+                                }
                             }
                             other => Err(KernelError::CodegenInvariant {
                                 detail: format!("expected enum DependencyMode, found {other:?}"),
@@ -387,7 +587,20 @@ fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
                             RawValue::NamedVariant { enum_name, variant }
                                 if enum_name == "NodeRunStatus" =>
                             {
-                                Ok(variant.clone())
+                                match variant.as_str() {
+                                    "Pending" => Ok(NodeRunStatus::Pending),
+                                    "Ready" => Ok(NodeRunStatus::Ready),
+                                    "Running" => Ok(NodeRunStatus::Running),
+                                    "Completed" => Ok(NodeRunStatus::Completed),
+                                    "Failed" => Ok(NodeRunStatus::Failed),
+                                    "Skipped" => Ok(NodeRunStatus::Skipped),
+                                    "Canceled" => Ok(NodeRunStatus::Canceled),
+                                    other => Err(KernelError::CodegenInvariant {
+                                        detail: format!(
+                                            "expected enum NodeRunStatus variant, found {other}"
+                                        ),
+                                    }),
+                                }
                             }
                             other => Err(KernelError::CodegenInvariant {
                                 detail: format!("expected enum NodeRunStatus, found {other:?}"),
@@ -506,7 +719,10 @@ fn state_to_raw(state: &State) -> RawState {
         "frame_scope".into(),
         RawValue::NamedVariant {
             enum_name: "FrameScope".into(),
-            variant: (state.frame_scope).to_owned(),
+            variant: match state.frame_scope {
+                FrameScope::Root => "Root".into(),
+                FrameScope::Body => "Body".into(),
+            },
         },
     );
     fields.insert(
@@ -552,7 +768,10 @@ fn state_to_raw(state: &State) -> RawState {
                         RawValue::String((key).to_owned()),
                         RawValue::NamedVariant {
                             enum_name: "FlowNodeKind".into(),
-                            variant: (value).to_owned(),
+                            variant: match value {
+                                FlowNodeKind::Step => "Step".into(),
+                                FlowNodeKind::Loop => "Loop".into(),
+                            },
                         },
                     )
                 })
@@ -590,7 +809,10 @@ fn state_to_raw(state: &State) -> RawState {
                         RawValue::String((key).to_owned()),
                         RawValue::NamedVariant {
                             enum_name: "DependencyMode".into(),
-                            variant: (value).to_owned(),
+                            variant: match value {
+                                DependencyMode::All => "All".into(),
+                                DependencyMode::Any => "Any".into(),
+                            },
                         },
                     )
                 })
@@ -639,7 +861,15 @@ fn state_to_raw(state: &State) -> RawState {
                         RawValue::String((key).to_owned()),
                         RawValue::NamedVariant {
                             enum_name: "NodeRunStatus".into(),
-                            variant: (value).to_owned(),
+                            variant: match value {
+                                NodeRunStatus::Pending => "Pending".into(),
+                                NodeRunStatus::Ready => "Ready".into(),
+                                NodeRunStatus::Running => "Running".into(),
+                                NodeRunStatus::Completed => "Completed".into(),
+                                NodeRunStatus::Failed => "Failed".into(),
+                                NodeRunStatus::Skipped => "Skipped".into(),
+                                NodeRunStatus::Canceled => "Canceled".into(),
+                            },
                         },
                     )
                 })
@@ -834,7 +1064,10 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "FlowNodeKind".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            FlowNodeKind::Step => "Step".into(),
+                                            FlowNodeKind::Loop => "Loop".into(),
+                                        },
                                     },
                                 )
                             })
@@ -872,7 +1105,10 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "DependencyMode".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            DependencyMode::All => "All".into(),
+                                            DependencyMode::Any => "Any".into(),
+                                        },
                                     },
                                 )
                             })
@@ -952,7 +1188,10 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "FlowNodeKind".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            FlowNodeKind::Step => "Step".into(),
+                                            FlowNodeKind::Loop => "Loop".into(),
+                                        },
                                     },
                                 )
                             })
@@ -990,7 +1229,10 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "DependencyMode".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            DependencyMode::All => "All".into(),
+                                            DependencyMode::Any => "Any".into(),
+                                        },
                                     },
                                 )
                             })

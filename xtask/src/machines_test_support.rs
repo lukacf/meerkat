@@ -309,8 +309,8 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     ];
     const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
-        target: "flow_run_kernel",
-        filter: "flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify",
+        target: "lib",
+        filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
     }];
 
     match slug {

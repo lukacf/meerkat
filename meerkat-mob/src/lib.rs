@@ -39,7 +39,8 @@ mod build;
 pub mod definition;
 pub mod error;
 pub mod event;
-mod generated;
+#[doc(hidden)]
+pub mod generated;
 pub mod ids;
 pub mod launch;
 #[doc(hidden)]

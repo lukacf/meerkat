@@ -11,6 +11,7 @@ use super::{
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event};
+use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -21,7 +22,6 @@ use crate::run::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_machine_kernels::generated::flow_run;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};

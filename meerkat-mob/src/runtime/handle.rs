@@ -3358,6 +3358,17 @@ impl MobHandle {
 
         Ok(helper_material.to_helper_result())
     }
+
+    pub(crate) async fn project_machine_input(
+        &self,
+        input: crate::machines::mob_machine::MobMachineInput,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ProjectMachineInput {
+            input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
 }
 
 impl MemberHandle {

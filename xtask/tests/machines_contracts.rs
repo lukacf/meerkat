@@ -167,3 +167,53 @@ fn row22_kernel_public_api_contract_rejects_legacy_exports() {
         kernel_lib.display()
     );
 }
+
+#[test]
+fn kernel_generated_inventory_is_canonical_five_only() {
+    let root = repo_root().expect("repo root");
+    let generated_mod = root.join("meerkat-machine-kernels/src/generated/mod.rs");
+    let contents = fs::read_to_string(&generated_mod).expect("read generated mod");
+
+    for required in [
+        "auth",
+        "meerkat",
+        "mob",
+        "occurrence_lifecycle",
+        "schedule_lifecycle",
+    ] {
+        assert!(
+            contents.contains(&format!("pub mod {required};")),
+            "canonical kernel inventory must include `{required}` in {}:\n{contents}",
+            generated_mod.display()
+        );
+    }
+
+    for forbidden in ["flow_run", "flow_frame", "loop_iteration"] {
+        assert!(
+            !contents.contains(&format!("pub mod {forbidden};")),
+            "canonical kernel inventory must not export compat module `{forbidden}` from {}:\n{contents}",
+            generated_mod.display()
+        );
+    }
+}
+
+#[test]
+fn compat_kernel_modules_and_flow_runtime_mini_machines_are_deleted() {
+    let root = repo_root().expect("repo root");
+    for forbidden in [
+        "meerkat-machine-kernels/src/compat_generated.rs",
+        "meerkat-machine-kernels/src/generated/flow_run.rs",
+        "meerkat-machine-kernels/src/generated/flow_frame.rs",
+        "meerkat-machine-kernels/src/generated/loop_iteration.rs",
+        "meerkat-mob/src/runtime/flow_run_kernel.rs",
+        "meerkat-mob/src/runtime/flow_frame_kernel.rs",
+        "meerkat-mob/src/runtime/loop_iteration_authority.rs",
+        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+    ] {
+        let path = root.join(forbidden);
+        assert!(
+            !path.exists(),
+            "strict row-22 end-state requires deleting {forbidden}, but it still exists"
+        );
+    }
+}

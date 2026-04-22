@@ -4,9 +4,9 @@
 //! scheduler's `ready_frames` and `pending_body_frame_loops` fields are
 //! consistent with the per-frame and per-loop kernel snapshots.
 
+use crate::generated::{flow_frame, loop_iteration};
 use crate::ids::{FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
-use meerkat_machine_kernels::generated::loop_iteration;
 
 /// Errors that prevent a run from being resumed.
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +68,7 @@ fn check_frame_invariant(
         .kernel_state
         .node_status
         .iter()
-        .filter(|(_, status)| *status == "Ready")
+        .filter(|(_, status)| *status == &crate::generated::flow_frame::NodeRunStatus::Ready)
         .map(|(node_id, _)| node_id.clone())
         .collect();
 
@@ -179,12 +179,12 @@ fn count_running_step_nodes(snap: &FrameSnapshot) -> u32 {
         .node_status
         .iter()
         .filter(|(node_id, status)| {
-            *status == "Running"
+            *status == &crate::generated::flow_frame::NodeRunStatus::Running
                 && matches!(
                     snap.kernel_state
                         .node_kind
                         .get(*node_id)
-                        .map(String::as_str),
+                        .map(flow_frame::FlowNodeKind::as_str),
                     Some("Step")
                 )
         })
@@ -204,7 +204,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use meerkat_machine_kernels::generated::flow_run;
+        use crate::generated::flow_run;
         let flow_state = flow_run::initial_state();
         MobRun {
             run_id: RunId::new(),
@@ -231,8 +231,8 @@ mod tests {
         ready_nodes: Vec<&str>,
         all_nodes_ready: bool,
     ) -> FrameSnapshot {
-        let mut state = meerkat_machine_kernels::generated::flow_frame::initial_state();
-        state.phase = meerkat_machine_kernels::generated::flow_frame::Phase::Running;
+        let mut state = crate::generated::flow_frame::initial_state();
+        state.phase = crate::generated::flow_frame::Phase::Running;
         state.ready_queue = ready_nodes
             .iter()
             .map(std::string::ToString::to_string)
@@ -244,7 +244,12 @@ mod tests {
         if all_nodes_ready {
             state.node_status = ready_nodes
                 .iter()
-                .map(|s| (s.to_string(), "Ready".to_string()))
+                .map(|s| {
+                    (
+                        s.to_string(),
+                        crate::generated::flow_frame::NodeRunStatus::from("Ready"),
+                    )
+                })
                 .collect();
         }
         FrameSnapshot {
@@ -281,24 +286,36 @@ mod tests {
     #[test]
     fn test_active_counts_reconcile_from_frames_and_loops() {
         let mut run = minimal_v2_run_running();
-        let mut root = meerkat_machine_kernels::generated::flow_frame::initial_state();
-        root.phase = meerkat_machine_kernels::generated::flow_frame::Phase::Running;
-        root.node_status = BTreeMap::from([("loop-node".into(), "Running".into())]);
-        root.node_kind = BTreeMap::from([("loop-node".into(), "Loop".into())]);
+        let mut root = crate::generated::flow_frame::initial_state();
+        root.phase = crate::generated::flow_frame::Phase::Running;
+        root.node_status = BTreeMap::from([(
+            "loop-node".into(),
+            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+        )]);
+        root.node_kind = BTreeMap::from([(
+            "loop-node".into(),
+            crate::generated::flow_frame::FlowNodeKind::from("Loop"),
+        )]);
         run.frames
             .insert(FrameId::from("root"), FrameSnapshot { kernel_state: root });
 
-        let mut body = meerkat_machine_kernels::generated::flow_frame::initial_state();
-        body.phase = meerkat_machine_kernels::generated::flow_frame::Phase::Running;
-        body.node_status = BTreeMap::from([("body-step".into(), "Running".into())]);
-        body.node_kind = BTreeMap::from([("body-step".into(), "Step".into())]);
+        let mut body = crate::generated::flow_frame::initial_state();
+        body.phase = crate::generated::flow_frame::Phase::Running;
+        body.node_status = BTreeMap::from([(
+            "body-step".into(),
+            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+        )]);
+        body.node_kind = BTreeMap::from([(
+            "body-step".into(),
+            crate::generated::flow_frame::FlowNodeKind::from("Step"),
+        )]);
         run.frames.insert(
             FrameId::from("body-frame"),
             FrameSnapshot { kernel_state: body },
         );
 
-        let mut loop_state = meerkat_machine_kernels::generated::loop_iteration::initial_state();
-        loop_state.phase = meerkat_machine_kernels::generated::loop_iteration::Phase::Running;
+        let mut loop_state = crate::generated::loop_iteration::initial_state();
+        loop_state.phase = crate::generated::loop_iteration::Phase::Running;
         loop_state.active_body_frame_id = Some("body-frame".into());
         run.loops.insert(
             LoopInstanceId::from("loop-1"),
@@ -315,9 +332,12 @@ mod tests {
     #[test]
     fn test_frame_invariant_valid_empty_queue() {
         let frame_id = crate::FrameId::from("f1");
-        let mut state = meerkat_machine_kernels::generated::flow_frame::initial_state();
-        state.phase = meerkat_machine_kernels::generated::flow_frame::Phase::Running;
-        state.node_status = BTreeMap::from([("node-a".into(), "Running".into())]);
+        let mut state = crate::generated::flow_frame::initial_state();
+        state.phase = crate::generated::flow_frame::Phase::Running;
+        state.node_status = BTreeMap::from([(
+            "node-a".into(),
+            crate::generated::flow_frame::NodeRunStatus::from("Running"),
+        )]);
         let snap = FrameSnapshot {
             kernel_state: state,
         };
@@ -327,9 +347,12 @@ mod tests {
     #[test]
     fn test_frame_invariant_violation_ready_not_in_queue() {
         let frame_id = crate::FrameId::from("f-bad");
-        let mut state = meerkat_machine_kernels::generated::flow_frame::initial_state();
-        state.phase = meerkat_machine_kernels::generated::flow_frame::Phase::Running;
-        state.node_status = BTreeMap::from([("node-a".into(), "Ready".into())]);
+        let mut state = crate::generated::flow_frame::initial_state();
+        state.phase = crate::generated::flow_frame::Phase::Running;
+        state.node_status = BTreeMap::from([(
+            "node-a".into(),
+            crate::generated::flow_frame::NodeRunStatus::from("Ready"),
+        )]);
         let snap = FrameSnapshot {
             kernel_state: state,
         };

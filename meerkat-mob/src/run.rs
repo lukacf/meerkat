@@ -1,14 +1,17 @@
 //! Flow run data model.
 
-use crate::definition::{DependencyMode, FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
-use crate::error::MobError;
-use crate::ids::{
-    AgentIdentity, BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MobId, ProfileName, RunId,
-    StepId,
+use crate::definition::{
+    DependencyMode, FlowNodeSpec, FlowSpec, FrameSpec, LimitsSpec, SupervisorSpec, TopologySpec,
 };
+use crate::error::MobError;
+use crate::generated::{flow_frame, flow_run, loop_iteration};
+use crate::ids::{
+    AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MobId,
+    ProfileName, RunId, StepId,
+};
+use crate::machines::mob_machine as mob_dsl;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::{flow_frame, flow_run, loop_iteration};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -124,8 +127,8 @@ impl MobRun {
                     "Any" => DependencyMode::Any,
                     _ => {
                         return Err(MobError::Internal(format!(
-                            "flow_run step_dependency_modes unknown DependencyMode variant `{mode}` for {} step '{}'",
-                            self.run_id, step_id
+                            "flow_run step_dependency_modes unknown DependencyMode variant `{:?}` for {} step '{}'",
+                            mode, self.run_id, step_id
                         )));
                     }
                 };
@@ -173,8 +176,8 @@ impl MobRun {
                     "Quorum" => RunCollectionPolicyKind::Quorum,
                     _ => {
                         return Err(MobError::Internal(format!(
-                            "flow_run step_collection_policies unknown CollectionPolicyKind variant `{policy}` for {} step '{}'",
-                            self.run_id, step_id
+                            "flow_run step_collection_policies unknown CollectionPolicyKind variant `{:?}` for {} step '{}'",
+                            policy, self.run_id, step_id
                         )));
                     }
                 };
@@ -202,7 +205,7 @@ impl MobRun {
             };
             statuses.insert(
                 StepId::from(step_key.clone()),
-                StepRunStatus::from_flow_run_status(value, &self.run_id)?,
+                StepRunStatus::from_flow_run_status(value.as_str(), &self.run_id)?,
             );
         }
 
@@ -372,6 +375,271 @@ impl MobRun {
         Ok(outcome.next_state)
     }
 
+    pub(crate) fn create_run_seed_input(
+        run_id: &RunId,
+        config: &FlowRunConfig,
+    ) -> Result<mob_dsl::MobMachineInput, MobError> {
+        let ordered_steps = topological_steps(&config.flow_spec)?;
+        Ok(mob_dsl::MobMachineInput::CreateRunSeed {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            step_ids: config
+                .flow_spec
+                .steps
+                .keys()
+                .map(|step_id| mob_dsl::StepId::from(step_id.to_string()))
+                .collect(),
+            ordered_steps: ordered_steps
+                .into_iter()
+                .map(|step_id| mob_dsl::StepId::from(step_id.to_string()))
+                .collect(),
+            step_has_conditions: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    (
+                        mob_dsl::StepId::from(step_id.to_string()),
+                        step.condition.is_some(),
+                    )
+                })
+                .collect(),
+            step_dependencies: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    (
+                        mob_dsl::StepId::from(step_id.to_string()),
+                        step.depends_on
+                            .iter()
+                            .map(|dep| mob_dsl::StepId::from(dep.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            step_dependency_modes: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    (
+                        mob_dsl::StepId::from(step_id.to_string()),
+                        dependency_mode_seed_value(step.depends_on_mode.clone()),
+                    )
+                })
+                .collect(),
+            step_branches: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    (
+                        mob_dsl::StepId::from(step_id.to_string()),
+                        step.branch
+                            .as_ref()
+                            .map(|branch| mob_dsl::BranchId::from(branch.to_string())),
+                    )
+                })
+                .collect(),
+            step_collection_policies: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    (
+                        mob_dsl::StepId::from(step_id.to_string()),
+                        collection_policy_seed_value(&step.collection_policy),
+                    )
+                })
+                .collect(),
+            step_quorum_thresholds: config
+                .flow_spec
+                .steps
+                .iter()
+                .map(|(step_id, step)| {
+                    let threshold = match step.collection_policy {
+                        crate::definition::CollectionPolicy::Quorum { n } => u32::from(n),
+                        _ => 0,
+                    };
+                    (mob_dsl::StepId::from(step_id.to_string()), threshold)
+                })
+                .collect(),
+            escalation_threshold: config
+                .supervisor
+                .as_ref()
+                .map_or(0, |supervisor| supervisor.escalation_threshold),
+            max_step_retries: config
+                .limits
+                .as_ref()
+                .and_then(|limits| limits.max_step_retries)
+                .unwrap_or(0),
+            max_active_nodes: config
+                .limits
+                .as_ref()
+                .and_then(|l| l.max_active_nodes)
+                .unwrap_or(0)
+                .try_into()
+                .map_err(|_| MobError::Internal("max_active_nodes exceeds u32".to_string()))?,
+            max_active_frames: config
+                .limits
+                .as_ref()
+                .and_then(|l| l.max_active_frames)
+                .unwrap_or(0)
+                .try_into()
+                .map_err(|_| MobError::Internal("max_active_frames exceeds u32".to_string()))?,
+            max_frame_depth: config
+                .limits
+                .as_ref()
+                .and_then(|l| l.max_frame_depth)
+                .unwrap_or(0)
+                .try_into()
+                .map_err(|_| MobError::Internal("max_frame_depth exceeds u32".to_string()))?,
+        })
+    }
+
+    pub(crate) fn create_frame_seed_input(
+        run_id: &RunId,
+        frame_id: &FrameId,
+        loop_instance_id: Option<&LoopInstanceId>,
+        iteration: u32,
+        frame_scope: mob_dsl::FrameScope,
+        spec: &FrameSpec,
+        ordered: &[FlowNodeId],
+    ) -> Result<mob_dsl::MobMachineInput, MobError> {
+        let tracked_nodes = ordered
+            .iter()
+            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.to_string()))
+            .collect();
+        let ordered_nodes = ordered
+            .iter()
+            .map(|node_id| mob_dsl::FlowNodeId::from(node_id.to_string()))
+            .collect();
+        let mut node_kind = BTreeMap::new();
+        let mut node_dependencies = BTreeMap::new();
+        let mut node_dependency_modes = BTreeMap::new();
+        let mut node_branches = BTreeMap::new();
+
+        for (node_id, node_spec) in &spec.nodes {
+            let key = mob_dsl::FlowNodeId::from(node_id.to_string());
+            match node_spec {
+                FlowNodeSpec::Step(step) => {
+                    node_kind.insert(key.clone(), mob_dsl::FlowNodeKind::Step);
+                    node_dependencies.insert(
+                        key.clone(),
+                        step.depends_on
+                            .iter()
+                            .map(|dep| mob_dsl::FlowNodeId::from(dep.to_string()))
+                            .collect(),
+                    );
+                    node_dependency_modes.insert(
+                        key.clone(),
+                        dependency_mode_seed_value(step.depends_on_mode.clone()),
+                    );
+                    node_branches.insert(
+                        key,
+                        step.branch
+                            .as_ref()
+                            .map(|branch| mob_dsl::BranchId::from(branch.to_string())),
+                    );
+                }
+                FlowNodeSpec::RepeatUntil(loop_spec) => {
+                    node_kind.insert(key.clone(), mob_dsl::FlowNodeKind::Loop);
+                    node_dependencies.insert(
+                        key.clone(),
+                        loop_spec
+                            .depends_on
+                            .iter()
+                            .map(|dep| mob_dsl::FlowNodeId::from(dep.to_string()))
+                            .collect(),
+                    );
+                    node_dependency_modes.insert(
+                        key.clone(),
+                        dependency_mode_seed_value(loop_spec.depends_on_mode.clone()),
+                    );
+                    node_branches.insert(key, None);
+                }
+            }
+        }
+
+        Ok(mob_dsl::MobMachineInput::CreateFrameSeed {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            frame_id: mob_dsl::FrameId::from(frame_id.to_string()),
+            frame_scope,
+            loop_instance_id: loop_instance_id
+                .map(|id| mob_dsl::LoopInstanceId::from(id.to_string())),
+            iteration,
+            tracked_nodes,
+            ordered_nodes,
+            node_kind,
+            node_dependencies,
+            node_dependency_modes,
+            node_branches,
+        })
+    }
+
+    pub(crate) fn create_loop_seed_input(
+        snapshot: &LoopSnapshot,
+    ) -> Result<mob_dsl::MobMachineInput, MobError> {
+        Ok(mob_dsl::MobMachineInput::CreateLoopSeed {
+            loop_instance_id: mob_dsl::LoopInstanceId::from(
+                snapshot.kernel_state.loop_instance_id.clone(),
+            ),
+            parent_frame_id: mob_dsl::FrameId::from(snapshot.kernel_state.parent_frame_id.clone()),
+            parent_node_id: mob_dsl::FlowNodeId::from(snapshot.kernel_state.parent_node_id.clone()),
+            loop_id: mob_dsl::LoopId::from(snapshot.kernel_state.loop_id.clone()),
+            depth: snapshot.kernel_state.depth,
+            max_iterations: snapshot.kernel_state.max_iterations,
+        })
+    }
+
+    pub(crate) fn create_run_status_input(
+        run_id: &RunId,
+        status: mob_dsl::FlowRunStatus,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::ProjectRunStatus {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            status,
+        }
+    }
+
+    pub(crate) fn create_run_step_status_input(
+        run_id: &RunId,
+        step_id: &StepId,
+        status: mob_dsl::StepRunStatus,
+        output_recorded: bool,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::ProjectRunStepStatus {
+            run_step: mob_dsl::RunStepKey::from(format!("{run_id}::{step_id}")),
+            status,
+            output_recorded,
+        }
+    }
+
+    pub(crate) fn create_frame_phase_input(
+        frame_id: &FrameId,
+        phase: mob_dsl::FrameStatus,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::ProjectFramePhase {
+            frame_id: mob_dsl::FrameId::from(frame_id.to_string()),
+            phase,
+        }
+    }
+
+    pub(crate) fn create_loop_state_input(
+        loop_instance_id: &LoopInstanceId,
+        phase: mob_dsl::LoopStatus,
+        stage: mob_dsl::LoopIterationStage,
+        active_body_frame_id: Option<&FrameId>,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::ProjectLoopState {
+            loop_instance_id: mob_dsl::LoopInstanceId::from(loop_instance_id.to_string()),
+            phase,
+            stage,
+            active_body_frame_id: active_body_frame_id
+                .map(|frame_id| mob_dsl::FrameId::from(frame_id.to_string())),
+        }
+    }
+
     pub fn flow_state_for_steps<I>(step_ids: I) -> Result<flow_run::State, MobError>
     where
         I: IntoIterator<Item = StepId>,
@@ -418,6 +686,14 @@ fn dependency_mode_value(mode: crate::definition::DependencyMode) -> flow_run::D
         crate::definition::DependencyMode::Any => "Any",
     }
     .to_string()
+    .into()
+}
+
+fn dependency_mode_seed_value(mode: crate::definition::DependencyMode) -> mob_dsl::DependencyMode {
+    match mode {
+        crate::definition::DependencyMode::All => mob_dsl::DependencyMode::All,
+        crate::definition::DependencyMode::Any => mob_dsl::DependencyMode::Any,
+    }
 }
 
 fn collection_policy_kind_value(
@@ -429,6 +705,17 @@ fn collection_policy_kind_value(
         crate::definition::CollectionPolicy::Quorum { .. } => "Quorum",
     }
     .to_string()
+    .into()
+}
+
+fn collection_policy_seed_value(
+    policy: &crate::definition::CollectionPolicy,
+) -> mob_dsl::CollectionPolicyKind {
+    match policy {
+        crate::definition::CollectionPolicy::All => mob_dsl::CollectionPolicyKind::All,
+        crate::definition::CollectionPolicy::Any => mob_dsl::CollectionPolicyKind::Any,
+        crate::definition::CollectionPolicy::Quorum { .. } => mob_dsl::CollectionPolicyKind::Quorum,
+    }
 }
 
 fn topological_steps(flow_spec: &FlowSpec) -> Result<Vec<StepId>, MobError> {
@@ -797,7 +1084,10 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_status = BTreeMap::from([
-            ("step-a".to_string(), Some("Completed".to_string())),
+            (
+                "step-a".to_string(),
+                Some(flow_run::StepRunStatus::from("Completed")),
+            ),
             ("step-b".to_string(), None),
         ]);
         run.flow_state.failure_count = 3;
@@ -859,20 +1149,20 @@ mod tests {
     }
 
     #[test]
-    fn test_mob_run_step_status_snapshot_rejects_unknown_variant() {
+    fn test_mob_run_step_status_snapshot_accepts_typed_variant() {
         let mut run = MobRun::pending(
             MobId::from("mob"),
             FlowId::from("flow-a"),
             MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
             serde_json::json!({}),
         );
-        run.flow_state.step_status =
-            BTreeMap::from([("step-a".to_string(), Some("Broken".to_string()))]);
-
-        let error = run.step_status_snapshot().unwrap_err();
-        assert!(
-            matches!(error, MobError::Internal(ref message) if message.contains("unknown StepRunStatus variant `Broken`")),
-            "expected explicit step status parse failure, got {error:?}"
+        run.flow_state.step_status = BTreeMap::from([(
+            "step-a".to_string(),
+            Some(flow_run::StepRunStatus::from("Completed")),
+        )]);
+        assert_eq!(
+            run.step_status_snapshot().unwrap(),
+            BTreeMap::from([(StepId::from("step-a"), StepRunStatus::Completed)])
         );
     }
 
@@ -884,8 +1174,10 @@ mod tests {
             MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
             serde_json::json!({}),
         );
-        run.flow_state.step_status =
-            BTreeMap::from([("step-a".to_string(), Some("Completed".to_string()))]);
+        run.flow_state.step_status = BTreeMap::from([(
+            "step-a".to_string(),
+            Some(flow_run::StepRunStatus::from("Completed")),
+        )]);
 
         assert_eq!(
             run.step_status_snapshot().unwrap(),
@@ -909,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mob_run_step_dependency_modes_reject_unknown_variant() {
+    fn test_mob_run_step_dependency_modes_accept_typed_variant() {
         let mut run = MobRun::pending(
             MobId::from("mob"),
             FlowId::from("flow-a"),
@@ -917,30 +1209,30 @@ mod tests {
             serde_json::json!({}),
         );
         run.flow_state.step_dependency_modes =
-            BTreeMap::from([("step-a".to_string(), "Broken".to_string())]);
+            BTreeMap::from([("step-a".to_string(), flow_run::DependencyMode::from("All"))]);
 
-        let error = run.step_dependency_modes().unwrap_err();
-        assert!(
-            matches!(error, MobError::Internal(ref message) if message.contains("unknown DependencyMode variant `Broken`")),
-            "expected explicit dependency mode parse failure, got {error:?}"
+        assert_eq!(
+            run.step_dependency_modes().unwrap(),
+            BTreeMap::from([(StepId::from("step-a"), DependencyMode::All)])
         );
     }
 
     #[test]
-    fn test_mob_run_step_collection_policy_kinds_reject_unknown_variant() {
+    fn test_mob_run_step_collection_policy_kinds_accept_typed_variant() {
         let mut run = MobRun::pending(
             MobId::from("mob"),
             FlowId::from("flow-a"),
             MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
             serde_json::json!({}),
         );
-        run.flow_state.step_collection_policies =
-            BTreeMap::from([("step-a".to_string(), "Broken".to_string())]);
+        run.flow_state.step_collection_policies = BTreeMap::from([(
+            "step-a".to_string(),
+            flow_run::CollectionPolicyKind::from("All"),
+        )]);
 
-        let error = run.step_collection_policy_kinds().unwrap_err();
-        assert!(
-            matches!(error, MobError::Internal(ref message) if message.contains("unknown CollectionPolicyKind variant `Broken`")),
-            "expected explicit collection policy parse failure, got {error:?}"
+        assert_eq!(
+            run.step_collection_policy_kinds().unwrap(),
+            BTreeMap::from([(StepId::from("step-a"), RunCollectionPolicyKind::All)])
         );
     }
 

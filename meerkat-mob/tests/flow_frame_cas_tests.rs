@@ -6,7 +6,7 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_machine_kernels::generated::{flow_frame, flow_run};
+use meerkat_mob::generated::{flow_frame, flow_run};
 use meerkat_mob::ids::FrameId;
 use meerkat_mob::run::{FrameSnapshot, MobRun};
 use meerkat_mob::store::MobRunStore;
@@ -437,7 +437,7 @@ async fn test_loop_instance_id_separator_is_colon_colon() {
     let executor = Arc::new(RecordingExecutor {
         frame_ids: Mutex::new(vec![]),
     });
-    let engine = FlowFrameEngine::new(store, executor.clone(), 0, 0);
+    let engine = FlowFrameEngine::new(store, executor.clone(), None, 0, 0);
 
     // A frame with one loop node. The loop body has one step, and the until
     // condition is always true (single iteration).

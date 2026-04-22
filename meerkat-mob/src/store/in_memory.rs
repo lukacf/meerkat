@@ -7,6 +7,7 @@ use super::{
 };
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
+use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -20,7 +21,6 @@ use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_run;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

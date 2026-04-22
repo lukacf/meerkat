@@ -2,7 +2,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::{flow_frame, flow_run, loop_iteration};
+use meerkat_mob::generated::{flow_frame, flow_run, loop_iteration};
 use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
     FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
@@ -48,7 +48,7 @@ fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> Fra
         .collect();
     state.node_status = ready_nodes
         .iter()
-        .map(|s| (s.to_string(), "Ready".to_string()))
+        .map(|s| (s.to_string(), flow_frame::NodeRunStatus::Ready))
         .collect();
     FrameSnapshot {
         kernel_state: state,
@@ -204,7 +204,7 @@ fn test_recovery_invalid_frame_invariant() {
         kernel_state: flow_frame::State {
             phase: flow_frame::Phase::Running,
             tracked_nodes: ["node-a".to_string()].into_iter().collect(),
-            node_status: BTreeMap::from([("node-a".to_string(), "Ready".to_string())]),
+            node_status: BTreeMap::from([("node-a".to_string(), flow_frame::NodeRunStatus::Ready)]),
             ..flow_frame::initial_state()
         },
     };

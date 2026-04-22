@@ -139,6 +139,10 @@ fn gen_type_ref(ty: &crate::ast::TypeDef) -> TokenStream {
             let inner_ref = gen_type_ref(inner);
             quote! { TypeRef::Option(Box::new(#inner_ref)) }
         }
+        crate::ast::TypeDef::Seq(inner) => {
+            let inner_ref = gen_type_ref(inner);
+            quote! { TypeRef::Seq(Box::new(#inner_ref)) }
+        }
         crate::ast::TypeDef::Set(inner) => {
             let inner_ref = gen_type_ref(inner);
             quote! { TypeRef::Set(Box::new(#inner_ref)) }
@@ -257,6 +261,7 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Some(Box::new(#inner_e)) }
         }
+        ExprDef::EmptySeq => quote! { Expr::SeqLiteral(vec![]) },
         ExprDef::EmptySet => quote! { Expr::EmptySet },
         ExprDef::EmptyMap => quote! { Expr::EmptyMap },
         ExprDef::Field(name) => {

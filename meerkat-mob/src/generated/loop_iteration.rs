@@ -19,7 +19,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::loop_iteration_machine()
 }
 
-use crate::runtime::{
+use crate::generated::compat_runtime::{
     RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
     evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
     transition_signal_from_schema,
@@ -29,7 +29,51 @@ pub type FlowNodeId = String;
 pub type FrameId = String;
 pub type LoopId = String;
 pub type LoopInstanceId = String;
-pub type LoopIterationStage = String;
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LoopIterationStage {
+    AwaitingBodyFrame,
+    BodyFrameActive,
+    AwaitingUntil,
+}
+impl LoopIterationStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AwaitingBodyFrame => "AwaitingBodyFrame",
+            Self::BodyFrameActive => "BodyFrameActive",
+            Self::AwaitingUntil => "AwaitingUntil",
+        }
+    }
+}
+impl std::fmt::Display for LoopIterationStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for LoopIterationStage {
+    fn from(value: &str) -> Self {
+        match value {
+            "AwaitingBodyFrame" => Self::AwaitingBodyFrame,
+            "BodyFrameActive" => Self::BodyFrameActive,
+            "AwaitingUntil" => Self::AwaitingUntil,
+            other => {
+                debug_assert!(false, "unknown LoopIterationStage variant: {other}");
+                Self::AwaitingBodyFrame
+            }
+        }
+    }
+}
+impl From<String> for LoopIterationStage {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for LoopIterationStage {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -156,7 +200,18 @@ fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
                 detail: "missing field stage".into(),
             })? {
             RawValue::NamedVariant { enum_name, variant } if enum_name == "LoopIterationStage" => {
-                variant.clone()
+                match variant.as_str() {
+                    "AwaitingBodyFrame" => LoopIterationStage::AwaitingBodyFrame,
+                    "BodyFrameActive" => LoopIterationStage::BodyFrameActive,
+                    "AwaitingUntil" => LoopIterationStage::AwaitingUntil,
+                    other => {
+                        return Err(KernelError::CodegenInvariant {
+                            detail: format!(
+                                "expected enum LoopIterationStage variant, found {other}"
+                            ),
+                        });
+                    }
+                }
             }
             other => {
                 return Err(KernelError::CodegenInvariant {
@@ -264,7 +319,11 @@ fn state_to_raw(state: &State) -> RawState {
         "stage".into(),
         RawValue::NamedVariant {
             enum_name: "LoopIterationStage".into(),
-            variant: (state.stage).to_owned(),
+            variant: match state.stage {
+                LoopIterationStage::AwaitingBodyFrame => "AwaitingBodyFrame".into(),
+                LoopIterationStage::BodyFrameActive => "BodyFrameActive".into(),
+                LoopIterationStage::AwaitingUntil => "AwaitingUntil".into(),
+            },
         },
     );
     fields.insert(

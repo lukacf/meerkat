@@ -1428,18 +1428,12 @@ impl MobBuilder {
         if has_orchestrator && initial_phase == MobState::Running {
             topology_service.bind_coordinator();
         }
-        let flow_kernel = super::flow_run_kernel::FlowRunKernel::new(
-            handle.mob_id().clone(),
-            run_store.clone(),
-            events.clone(),
-        );
         let flow_engine = FlowEngine::new(
             flow_executor,
             handle.clone(),
             run_store.clone(),
             events.clone(),
             topology_service,
-            flow_kernel.clone(),
         );
         let task_board_service = crate::tasks::MobTaskBoardService::new(
             definition.id.clone(),
@@ -1456,7 +1450,6 @@ impl MobBuilder {
             run_store,
             provisioner,
             flow_engine,
-            flow_kernel,
             has_orchestrator,
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),

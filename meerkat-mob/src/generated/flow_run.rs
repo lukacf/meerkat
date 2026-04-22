@@ -19,21 +19,206 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::flow_run_machine()
 }
 
-use crate::runtime::{
+use crate::generated::compat_runtime::{
     RawEffect, RawInput, RawOutcome, RawRefusal, RawSignal, RawState, RawValue,
     evaluate_helper_from_schema, initial_state_from_schema, transition_from_schema,
     transition_signal_from_schema,
 };
 
 pub type BranchId = String;
-pub type CollectionPolicyKind = String;
-pub type DependencyMode = String;
-pub type FlowRunStatus = String;
 pub type FrameId = String;
 pub type LoopInstanceId = String;
 pub type MeerkatId = String;
 pub type StepId = String;
-pub type StepRunStatus = String;
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CollectionPolicyKind {
+    All,
+    Any,
+    Quorum,
+}
+impl CollectionPolicyKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Any => "Any",
+            Self::Quorum => "Quorum",
+        }
+    }
+}
+impl std::fmt::Display for CollectionPolicyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for CollectionPolicyKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "All" => Self::All,
+            "Any" => Self::Any,
+            "Quorum" => Self::Quorum,
+            other => {
+                debug_assert!(false, "unknown CollectionPolicyKind variant: {other}");
+                Self::All
+            }
+        }
+    }
+}
+impl From<String> for CollectionPolicyKind {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for CollectionPolicyKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DependencyMode {
+    All,
+    Any,
+}
+impl DependencyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Any => "Any",
+        }
+    }
+}
+impl std::fmt::Display for DependencyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for DependencyMode {
+    fn from(value: &str) -> Self {
+        match value {
+            "All" => Self::All,
+            "Any" => Self::Any,
+            other => {
+                debug_assert!(false, "unknown DependencyMode variant: {other}");
+                Self::All
+            }
+        }
+    }
+}
+impl From<String> for DependencyMode {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for DependencyMode {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FlowRunStatus {
+    Absent,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+impl FlowRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::fmt::Display for FlowRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for FlowRunStatus {
+    fn from(value: &str) -> Self {
+        match value {
+            "Absent" => Self::Absent,
+            "Pending" => Self::Pending,
+            "Running" => Self::Running,
+            "Completed" => Self::Completed,
+            "Failed" => Self::Failed,
+            "Canceled" => Self::Canceled,
+            other => {
+                debug_assert!(false, "unknown FlowRunStatus variant: {other}");
+                Self::Absent
+            }
+        }
+    }
+}
+impl From<String> for FlowRunStatus {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for FlowRunStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StepRunStatus {
+    Dispatched,
+    Completed,
+    Failed,
+    Skipped,
+    Canceled,
+}
+impl StepRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dispatched => "Dispatched",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Skipped => "Skipped",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::fmt::Display for StepRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl From<&str> for StepRunStatus {
+    fn from(value: &str) -> Self {
+        match value {
+            "Dispatched" => Self::Dispatched,
+            "Completed" => Self::Completed,
+            "Failed" => Self::Failed,
+            "Skipped" => Self::Skipped,
+            "Canceled" => Self::Canceled,
+            other => {
+                debug_assert!(false, "unknown StepRunStatus variant: {other}");
+                Self::Dispatched
+            }
+        }
+    }
+}
+impl From<String> for StepRunStatus {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+impl PartialEq<&str> for StepRunStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -107,767 +292,36 @@ fn phase_from_raw(raw: &str) -> Result<Phase, KernelError> {
 fn state_from_raw(raw: &RawState) -> Result<State, KernelError> {
     Ok(State {
         phase: phase_from_raw(&raw.phase)?,
-        tracked_steps: match raw.fields.get("tracked_steps").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field tracked_steps".into(),
-            }
-        })? {
-            RawValue::Set(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected set, found {other:?}"),
-                });
-            }
-        },
-        ordered_steps: match raw.fields.get("ordered_steps").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field ordered_steps".into(),
-            }
-        })? {
-            RawValue::Seq(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected seq, found {other:?}"),
-                });
-            }
-        },
-        step_status: match raw.fields.get("step_status").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_status".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::None => Ok(None),
-                            RawValue::Map(entries) => {
-                                match entries.get(&RawValue::String("value".into())) {
-                                    Some(value) => Ok(Some(match value {
-                                        RawValue::NamedVariant { enum_name, variant }
-                                            if enum_name == "StepRunStatus" =>
-                                        {
-                                            Ok(variant.clone())
-                                        }
-                                        other => Err(KernelError::CodegenInvariant {
-                                            detail: format!(
-                                                "expected enum StepRunStatus, found {other:?}"
-                                            ),
-                                        }),
-                                    }?)),
-                                    None => Ok(None),
-                                }
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected option, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        output_recorded: match raw.fields.get("output_recorded").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field output_recorded".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::Bool(value) => Ok(*value),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected bool, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_condition_results: match raw.fields.get("step_condition_results").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_condition_results".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::None => Ok(None),
-                            RawValue::Map(entries) => {
-                                match entries.get(&RawValue::String("value".into())) {
-                                    Some(value) => Ok(Some(match value {
-                                        RawValue::Bool(value) => Ok(*value),
-                                        other => Err(KernelError::CodegenInvariant {
-                                            detail: format!("expected bool, found {other:?}"),
-                                        }),
-                                    }?)),
-                                    None => Ok(None),
-                                }
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected option, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_has_conditions: match raw.fields.get("step_has_conditions").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_has_conditions".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::Bool(value) => Ok(*value),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected bool, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_dependencies: match raw.fields.get("step_dependencies").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_dependencies".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::Seq(values) => values
-                                .iter()
-                                .map(|value| match value {
-                                    RawValue::String(value) => Ok(value.clone()),
-                                    other => Err(KernelError::CodegenInvariant {
-                                        detail: format!(
-                                            "expected named string value, found {other:?}"
-                                        ),
-                                    }),
-                                })
-                                .collect::<Result<Vec<_>, _>>(),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected seq, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_dependency_modes: match raw.fields.get("step_dependency_modes").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_dependency_modes".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::NamedVariant { enum_name, variant }
-                                if enum_name == "DependencyMode" =>
-                            {
-                                Ok(variant.clone())
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected enum DependencyMode, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_branches: match raw.fields.get("step_branches").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_branches".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::None => Ok(None),
-                            RawValue::Map(entries) => {
-                                match entries.get(&RawValue::String("value".into())) {
-                                    Some(value) => Ok(Some(match value {
-                                        RawValue::String(value) => Ok(value.clone()),
-                                        other => Err(KernelError::CodegenInvariant {
-                                            detail: format!(
-                                                "expected named string value, found {other:?}"
-                                            ),
-                                        }),
-                                    }?)),
-                                    None => Ok(None),
-                                }
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected option, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_collection_policies: match raw.fields.get("step_collection_policies").ok_or_else(
-            || KernelError::CodegenInvariant {
-                detail: "missing field step_collection_policies".into(),
-            },
-        )? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::NamedVariant { enum_name, variant }
-                                if enum_name == "CollectionPolicyKind" =>
-                            {
-                                Ok(variant.clone())
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!(
-                                    "expected enum CollectionPolicyKind, found {other:?}"
-                                ),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_quorum_thresholds: match raw.fields.get("step_quorum_thresholds").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_quorum_thresholds".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::U64(value) => {
-                                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                                    detail: format!("u64 {value} does not fit u32"),
-                                })
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected u64, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_target_counts: match raw.fields.get("step_target_counts").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field step_target_counts".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::U64(value) => {
-                                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                                    detail: format!("u64 {value} does not fit u32"),
-                                })
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected u64, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_target_success_counts: match raw.fields.get("step_target_success_counts").ok_or_else(
-            || KernelError::CodegenInvariant {
-                detail: "missing field step_target_success_counts".into(),
-            },
-        )? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::U64(value) => {
-                                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                                    detail: format!("u64 {value} does not fit u32"),
-                                })
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected u64, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        step_target_terminal_failure_counts: match raw
-            .fields
-            .get("step_target_terminal_failure_counts")
-            .ok_or_else(|| KernelError::CodegenInvariant {
-                detail: "missing field step_target_terminal_failure_counts".into(),
-            })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected named string value, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::U64(value) => {
-                                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                                    detail: format!("u64 {value} does not fit u32"),
-                                })
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected u64, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        target_retry_counts: match raw.fields.get("target_retry_counts").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field target_retry_counts".into(),
-            }
-        })? {
-            RawValue::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        (match key {
-                            RawValue::String(value) => Ok(value.clone()),
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected string, found {other:?}"),
-                            }),
-                        })?,
-                        (match value {
-                            RawValue::U64(value) => {
-                                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                                    detail: format!("u64 {value} does not fit u32"),
-                                })
-                            }
-                            other => Err(KernelError::CodegenInvariant {
-                                detail: format!("expected u64, found {other:?}"),
-                            }),
-                        })?,
-                    ))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected map, found {other:?}"),
-                });
-            }
-        },
-        failure_count: match raw.fields.get("failure_count").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field failure_count".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        consecutive_failure_count: match raw.fields.get("consecutive_failure_count").ok_or_else(
-            || KernelError::CodegenInvariant {
-                detail: "missing field consecutive_failure_count".into(),
-            },
-        )? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        escalation_threshold: match raw.fields.get("escalation_threshold").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field escalation_threshold".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        max_step_retries: match raw.fields.get("max_step_retries").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field max_step_retries".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        ready_frames: match raw.fields.get("ready_frames").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field ready_frames".into(),
-            }
-        })? {
-            RawValue::Seq(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected seq, found {other:?}"),
-                });
-            }
-        },
-        ready_frame_membership: match raw.fields.get("ready_frame_membership").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field ready_frame_membership".into(),
-            }
-        })? {
-            RawValue::Set(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected set, found {other:?}"),
-                });
-            }
-        },
-        pending_body_frame_loops: match raw.fields.get("pending_body_frame_loops").ok_or_else(
-            || KernelError::CodegenInvariant {
-                detail: "missing field pending_body_frame_loops".into(),
-            },
-        )? {
-            RawValue::Seq(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected seq, found {other:?}"),
-                });
-            }
-        },
-        pending_body_frame_loop_membership: match raw
-            .fields
-            .get("pending_body_frame_loop_membership")
-            .ok_or_else(|| KernelError::CodegenInvariant {
-                detail: "missing field pending_body_frame_loop_membership".into(),
-            })? {
-            RawValue::Set(values) => values
-                .iter()
-                .map(|value| match value {
-                    RawValue::String(value) => Ok(value.clone()),
-                    other => Err(KernelError::CodegenInvariant {
-                        detail: format!("expected named string value, found {other:?}"),
-                    }),
-                })
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()?,
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected set, found {other:?}"),
-                });
-            }
-        },
-        active_node_count: match raw.fields.get("active_node_count").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field active_node_count".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        active_frame_count: match raw.fields.get("active_frame_count").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field active_frame_count".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        max_active_nodes: match raw.fields.get("max_active_nodes").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field max_active_nodes".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        max_active_frames: match raw.fields.get("max_active_frames").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field max_active_frames".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        max_frame_depth: match raw.fields.get("max_frame_depth").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field max_frame_depth".into(),
-            }
-        })? {
-            RawValue::U64(value) => {
-                u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {
-                    detail: format!("u64 {value} does not fit u32"),
-                })?
-            }
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected u64, found {other:?}"),
-                });
-            }
-        },
-        last_granted_frame: match raw.fields.get("last_granted_frame").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field last_granted_frame".into(),
-            }
-        })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
-        last_granted_loop: match raw.fields.get("last_granted_loop").ok_or_else(|| {
-            KernelError::CodegenInvariant {
-                detail: "missing field last_granted_loop".into(),
-            }
-        })? {
-            RawValue::String(value) => value.clone(),
-            other => {
-                return Err(KernelError::CodegenInvariant {
-                    detail: format!("expected named string value, found {other:?}"),
-                });
-            }
-        },
+        tracked_steps: match raw.fields.get("tracked_steps").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field tracked_steps".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
+        ordered_steps: match raw.fields.get("ordered_steps").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ordered_steps".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
+        step_status: match raw.fields.get("step_status").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_status".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "StepRunStatus" => match variant.as_str() { "Dispatched" => Ok(StepRunStatus::Dispatched), "Completed" => Ok(StepRunStatus::Completed), "Failed" => Ok(StepRunStatus::Failed), "Skipped" => Ok(StepRunStatus::Skipped), "Canceled" => Ok(StepRunStatus::Canceled), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum StepRunStatus variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum StepRunStatus, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        output_recorded: match raw.fields.get("output_recorded").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field output_recorded".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_condition_results: match raw.fields.get("step_condition_results").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_condition_results".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_has_conditions: match raw.fields.get("step_has_conditions").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_has_conditions".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant { detail: format!("expected bool, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_dependencies: match raw.fields.get("step_dependencies").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_dependencies".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>(), other => Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_dependency_modes: match raw.fields.get("step_dependency_modes").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_dependency_modes".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "DependencyMode" => match variant.as_str() { "All" => Ok(DependencyMode::All), "Any" => Ok(DependencyMode::Any), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum DependencyMode variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum DependencyMode, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_branches: match raw.fields.get("step_branches").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_branches".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String("value".into())) { Some(value) => Ok(Some(match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }?)), None => Ok(None) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected option, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_collection_policies: match raw.fields.get("step_collection_policies").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_collection_policies".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::NamedVariant { enum_name, variant } if enum_name == "CollectionPolicyKind" => match variant.as_str() { "All" => Ok(CollectionPolicyKind::All), "Any" => Ok(CollectionPolicyKind::Any), "Quorum" => Ok(CollectionPolicyKind::Quorum), other => Err(KernelError::CodegenInvariant { detail: format!("expected enum CollectionPolicyKind variant, found {other}") }) }, other => Err(KernelError::CodegenInvariant { detail: format!("expected enum CollectionPolicyKind, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_quorum_thresholds: match raw.fields.get("step_quorum_thresholds").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_quorum_thresholds".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_target_counts: match raw.fields.get("step_target_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_target_success_counts: match raw.fields.get("step_target_success_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_success_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        step_target_terminal_failure_counts: match raw.fields.get("step_target_terminal_failure_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field step_target_terminal_failure_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        target_retry_counts: match raw.fields.get("target_retry_counts").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field target_retry_counts".into() })? { RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(((match key { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected string, found {other:?}") }) })?, (match value { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") }), other => Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) })?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected map, found {other:?}") }) },
+        failure_count: match raw.fields.get("failure_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field failure_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        consecutive_failure_count: match raw.fields.get("consecutive_failure_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field consecutive_failure_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        escalation_threshold: match raw.fields.get("escalation_threshold").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field escalation_threshold".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        max_step_retries: match raw.fields.get("max_step_retries").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_step_retries".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        ready_frames: match raw.fields.get("ready_frames").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ready_frames".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
+        ready_frame_membership: match raw.fields.get("ready_frame_membership").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field ready_frame_membership".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
+        pending_body_frame_loops: match raw.fields.get("pending_body_frame_loops").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field pending_body_frame_loops".into() })? { RawValue::Seq(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected seq, found {other:?}") }) },
+        pending_body_frame_loop_membership: match raw.fields.get("pending_body_frame_loop_membership").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field pending_body_frame_loop_membership".into() })? { RawValue::Set(values) => values.iter().map(|value| match value { RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) }).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected set, found {other:?}") }) },
+        active_node_count: match raw.fields.get("active_node_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field active_node_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        active_frame_count: match raw.fields.get("active_frame_count").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field active_frame_count".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        max_active_nodes: match raw.fields.get("max_active_nodes").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_active_nodes".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        max_active_frames: match raw.fields.get("max_active_frames").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_active_frames".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        max_frame_depth: match raw.fields.get("max_frame_depth").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field max_frame_depth".into() })? { RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant { detail: format!("u64 {value} does not fit u32") })?, other => return Err(KernelError::CodegenInvariant { detail: format!("expected u64, found {other:?}") }) },
+        last_granted_frame: match raw.fields.get("last_granted_frame").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field last_granted_frame".into() })? { RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) },
+        last_granted_loop: match raw.fields.get("last_granted_loop").ok_or_else(|| KernelError::CodegenInvariant { detail: "missing field last_granted_loop".into() })? { RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant { detail: format!("expected named string value, found {other:?}") }) },
     })
 }
 
@@ -907,7 +361,13 @@ fn state_to_raw(state: &State) -> RawState {
                                 RawValue::String("value".into()),
                                 RawValue::NamedVariant {
                                     enum_name: "StepRunStatus".into(),
-                                    variant: (value).to_owned(),
+                                    variant: match value {
+                                        StepRunStatus::Dispatched => "Dispatched".into(),
+                                        StepRunStatus::Completed => "Completed".into(),
+                                        StepRunStatus::Failed => "Failed".into(),
+                                        StepRunStatus::Skipped => "Skipped".into(),
+                                        StepRunStatus::Canceled => "Canceled".into(),
+                                    },
                                 },
                             )])),
                             None => RawValue::None,
@@ -999,7 +459,10 @@ fn state_to_raw(state: &State) -> RawState {
                         RawValue::String((key).to_owned()),
                         RawValue::NamedVariant {
                             enum_name: "DependencyMode".into(),
-                            variant: (value).to_owned(),
+                            variant: match value {
+                                DependencyMode::All => "All".into(),
+                                DependencyMode::Any => "Any".into(),
+                            },
                         },
                     )
                 })
@@ -1038,7 +501,11 @@ fn state_to_raw(state: &State) -> RawState {
                         RawValue::String((key).to_owned()),
                         RawValue::NamedVariant {
                             enum_name: "CollectionPolicyKind".into(),
-                            variant: (value).to_owned(),
+                            variant: match value {
+                                CollectionPolicyKind::All => "All".into(),
+                                CollectionPolicyKind::Any => "Any".into(),
+                                CollectionPolicyKind::Quorum => "Quorum".into(),
+                            },
                         },
                     )
                 })
@@ -1488,7 +955,10 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "DependencyMode".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            DependencyMode::All => "All".into(),
+                                            DependencyMode::Any => "Any".into(),
+                                        },
                                     },
                                 )
                             })
@@ -1529,7 +999,11 @@ fn input_to_raw(input: Input) -> RawInput {
                                     RawValue::String((key).to_owned()),
                                     RawValue::NamedVariant {
                                         enum_name: "CollectionPolicyKind".into(),
-                                        variant: (value).to_owned(),
+                                        variant: match value {
+                                            CollectionPolicyKind::All => "All".into(),
+                                            CollectionPolicyKind::Any => "Any".into(),
+                                            CollectionPolicyKind::Quorum => "Quorum".into(),
+                                        },
                                     },
                                 )
                             })
@@ -1670,7 +1144,13 @@ fn input_to_raw(input: Input) -> RawInput {
                     "step_status".into(),
                     RawValue::NamedVariant {
                         enum_name: "StepRunStatus".into(),
-                        variant: (payload.step_status).to_owned(),
+                        variant: match payload.step_status {
+                            StepRunStatus::Dispatched => "Dispatched".into(),
+                            StepRunStatus::Completed => "Completed".into(),
+                            StepRunStatus::Failed => "Failed".into(),
+                            StepRunStatus::Skipped => "Skipped".into(),
+                            StepRunStatus::Canceled => "Canceled".into(),
+                        },
                     },
                 );
                 fields.insert(
@@ -1948,7 +1428,21 @@ fn effect_from_raw(raw: &RawEffect) -> Result<Effect, KernelError> {
                 }
             })? {
                 RawValue::NamedVariant { enum_name, variant } if enum_name == "FlowRunStatus" => {
-                    variant.clone()
+                    match variant.as_str() {
+                        "Absent" => FlowRunStatus::Absent,
+                        "Pending" => FlowRunStatus::Pending,
+                        "Running" => FlowRunStatus::Running,
+                        "Completed" => FlowRunStatus::Completed,
+                        "Failed" => FlowRunStatus::Failed,
+                        "Canceled" => FlowRunStatus::Canceled,
+                        other => {
+                            return Err(KernelError::CodegenInvariant {
+                                detail: format!(
+                                    "expected enum FlowRunStatus variant, found {other}"
+                                ),
+                            });
+                        }
+                    }
                 }
                 other => {
                     return Err(KernelError::CodegenInvariant {
@@ -1976,7 +1470,20 @@ fn effect_from_raw(raw: &RawEffect) -> Result<Effect, KernelError> {
                 }
             })? {
                 RawValue::NamedVariant { enum_name, variant } if enum_name == "StepRunStatus" => {
-                    variant.clone()
+                    match variant.as_str() {
+                        "Dispatched" => StepRunStatus::Dispatched,
+                        "Completed" => StepRunStatus::Completed,
+                        "Failed" => StepRunStatus::Failed,
+                        "Skipped" => StepRunStatus::Skipped,
+                        "Canceled" => StepRunStatus::Canceled,
+                        other => {
+                            return Err(KernelError::CodegenInvariant {
+                                detail: format!(
+                                    "expected enum StepRunStatus variant, found {other}"
+                                ),
+                            });
+                        }
+                    }
                 }
                 other => {
                     return Err(KernelError::CodegenInvariant {
@@ -2034,7 +1541,21 @@ fn effect_from_raw(raw: &RawEffect) -> Result<Effect, KernelError> {
                 }
             })? {
                 RawValue::NamedVariant { enum_name, variant } if enum_name == "FlowRunStatus" => {
-                    variant.clone()
+                    match variant.as_str() {
+                        "Absent" => FlowRunStatus::Absent,
+                        "Pending" => FlowRunStatus::Pending,
+                        "Running" => FlowRunStatus::Running,
+                        "Completed" => FlowRunStatus::Completed,
+                        "Failed" => FlowRunStatus::Failed,
+                        "Canceled" => FlowRunStatus::Canceled,
+                        other => {
+                            return Err(KernelError::CodegenInvariant {
+                                detail: format!(
+                                    "expected enum FlowRunStatus variant, found {other}"
+                                ),
+                            });
+                        }
+                    }
                 }
                 other => {
                     return Err(KernelError::CodegenInvariant {
@@ -2522,7 +2043,13 @@ pub mod helpers {
             "expected_status".into(),
             RawValue::NamedVariant {
                 enum_name: "StepRunStatus".into(),
-                variant: (expected_status).to_owned(),
+                variant: match expected_status {
+                    StepRunStatus::Dispatched => "Dispatched".into(),
+                    StepRunStatus::Completed => "Completed".into(),
+                    StepRunStatus::Failed => "Failed".into(),
+                    StepRunStatus::Skipped => "Skipped".into(),
+                    StepRunStatus::Canceled => "Canceled".into(),
+                },
             },
         );
         let raw = evaluate_helper_from_schema(schema(), &raw_state, "StepStatusIs", &args)
@@ -2633,7 +2160,13 @@ pub mod helpers {
                             RawValue::String("value".into()),
                             RawValue::NamedVariant {
                                 enum_name: "StepRunStatus".into(),
-                                variant: (value).to_owned(),
+                                variant: match value {
+                                    StepRunStatus::Dispatched => "Dispatched".into(),
+                                    StepRunStatus::Completed => "Completed".into(),
+                                    StepRunStatus::Failed => "Failed".into(),
+                                    StepRunStatus::Skipped => "Skipped".into(),
+                                    StepRunStatus::Canceled => "Canceled".into(),
+                                },
                             },
                         )])),
                         None => RawValue::None,
@@ -2670,7 +2203,13 @@ pub mod helpers {
             "status".into(),
             RawValue::NamedVariant {
                 enum_name: "StepRunStatus".into(),
-                variant: (status).to_owned(),
+                variant: match status {
+                    StepRunStatus::Dispatched => "Dispatched".into(),
+                    StepRunStatus::Completed => "Completed".into(),
+                    StepRunStatus::Failed => "Failed".into(),
+                    StepRunStatus::Skipped => "Skipped".into(),
+                    StepRunStatus::Canceled => "Canceled".into(),
+                },
             },
         );
         let raw = evaluate_helper_from_schema(schema(), &raw_state, "NoTrackedStepInStatus", &args)
@@ -2697,7 +2236,13 @@ pub mod helpers {
             "status".into(),
             RawValue::NamedVariant {
                 enum_name: "StepRunStatus".into(),
-                variant: (status).to_owned(),
+                variant: match status {
+                    StepRunStatus::Dispatched => "Dispatched".into(),
+                    StepRunStatus::Completed => "Completed".into(),
+                    StepRunStatus::Failed => "Failed".into(),
+                    StepRunStatus::Skipped => "Skipped".into(),
+                    StepRunStatus::Canceled => "Canceled".into(),
+                },
             },
         );
         let raw =

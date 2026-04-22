@@ -1,4 +1,5 @@
 use super::*;
+use crate::machines::mob_machine as mob_dsl;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -262,6 +263,10 @@ pub(super) enum MobCommand {
     FlowStatus {
         run_id: RunId,
         reply_tx: oneshot::Sender<Result<Option<MobRun>, MobError>>,
+    },
+    ProjectMachineInput {
+        input: Box<mob_dsl::MobMachineInput>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     FlowFinished {
         run_id: RunId,

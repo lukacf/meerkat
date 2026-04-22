@@ -2646,9 +2646,9 @@ fn schema_constructor_path(schema: &MachineSchema) -> String {
         "OccurrenceLifecycleMachine" => {
             "meerkat_machine_schema::catalog::dsl::dsl_occurrence_lifecycle_machine".into()
         }
-        "FlowRunMachine" => "meerkat_machine_schema::flow_run_machine".into(),
-        "FlowFrameMachine" => "meerkat_machine_schema::flow_frame_machine".into(),
-        "LoopIterationMachine" => "meerkat_machine_schema::loop_iteration_machine".into(),
+        "FlowRunMachine" => "meerkat_machine_schema::compat::flow_run_machine".into(),
+        "FlowFrameMachine" => "meerkat_machine_schema::compat::flow_frame_machine".into(),
+        "LoopIterationMachine" => "meerkat_machine_schema::compat::loop_iteration_machine".into(),
         other => {
             let slug = dsl_machine_slug(other);
             format!("meerkat_machine_schema::catalog::dsl::dsl_{slug}")

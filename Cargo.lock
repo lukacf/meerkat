@@ -3463,6 +3463,7 @@ name = "meerkat-machine-schema"
 version = "0.6.0"
 dependencies = [
  "indexmap",
+ "meerkat-core",
  "meerkat-machine-dsl",
  "serde",
  "serde_json",

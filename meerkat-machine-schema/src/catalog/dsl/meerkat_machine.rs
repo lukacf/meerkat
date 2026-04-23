@@ -3163,11 +3163,28 @@ impl PeerEndpoint {
     }
 }
 
+/// Schema-side twin of `meerkat-runtime/src/meerkat_machine/dsl.rs`'s
+/// `From<&TrustedPeerDescriptor> for PeerEndpoint`. Keeps the
+/// conversion available to consumers that see only the schema crate
+/// (codegen, kernels, schema-facing callers) without forcing them to
+/// re-route through the runtime DSL. Mirrors the runtime side
+/// field-for-field — the `peer_endpoint_structural_equivalence`
+/// tripwire fails if either copy drifts.
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+        Self {
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+        }
+    }
+}
+
 /// Schema-local newtype for a peer display name. Mirrors the shape
 /// that `meerkat_core::comms::PeerName` exposes across the core seam;
-/// the schema catalog keeps a DSL-local copy so validation can see a
-/// consistent opaque-struct shape without taking a dependency on
-/// `meerkat-core`.
+/// the schema catalog keeps a DSL-local copy so `MachineSchema`
+/// validation sees a consistent opaque-struct shape regardless of the
+/// typed core form.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerName(pub String);
 
@@ -3204,8 +3221,8 @@ impl PeerId {
 }
 
 /// Schema-local newtype for a peer transport endpoint URL. Mirrors the
-/// shape of `meerkat_core::comms::PeerAddress` at the core seam; keeps
-/// the DSL-local schema free of a meerkat-core dependency.
+/// shape of `meerkat_core::comms::PeerAddress` at the core seam; kept
+/// DSL-local so `MachineSchema` validation sees a stable opaque shape.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerAddress(pub String);
 

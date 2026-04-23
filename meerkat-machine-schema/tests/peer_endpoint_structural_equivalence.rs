@@ -1,28 +1,25 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
 
-//! Tripwire for wave-c (Section 1.5 #3). Flipped green by **C-6r**
-//! (meerkat-runtime retype — PeerEndpoint twin carries typed newtypes).
+//! Structural-equivalence tripwire for the two `PeerEndpoint` twins.
 //!
-//! Invariant: both `PeerEndpoint` copies (the runtime DSL at
-//! `meerkat-runtime/src/meerkat_machine/dsl.rs` and the schema catalog
-//! at `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`) must
-//! carry typed fields — `PeerId`, `PeerAddress`, `PeerName` — not bare
-//! `String`. The two copies are required to stay structurally
-//! equivalent (per the comments in both files); if C-6r only retypes
-//! one side, this tripwire catches the drift.
+//! Invariant: the schema catalog twin at
+//! `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` and the
+//! runtime-side twin at `meerkat-runtime/src/meerkat_machine/dsl.rs`
+//! must stay in lockstep — identical field set with identical typed
+//! shapes (`PeerName`, `PeerId`, `PeerAddress`) — and both must expose
+//! `From<&meerkat_core::comms::TrustedPeerDescriptor>` so the
+//! runtime/comms seam can project trusted-peer descriptors into either
+//! DSL without per-site coercion. Renames / additions / deletions on
+//! one side fail this tripwire loudly.
 //!
-//! Predicted failure today: both copies use `String` for
-//! `name` / `peer_id` / `address`. This test asserts the files contain
-//! the typed-field signatures and fails with a clear diff if they are
-//! still `String`.
-//!
-//! We do the check at the source-text level because `meerkat-runtime`
-//! is not a dependency of `meerkat-machine-schema` (and wiring one
-//! just for this test would inject a large coupling). Text scan is
-//! equivalent in intent: if the typed newtypes appear at the named
-//! struct sites, the types are typed; if `: String` appears, they are
-//! not.
+//! The structural check is done at source-text level because the two
+//! crates sit on opposite sides of the dep DAG — pulling runtime into
+//! the schema crate's test just for symbol introspection would invert
+//! the dependency direction and is not justified for a structural
+//! assertion. Text extraction is equivalent in intent: we read each
+//! `pub struct PeerEndpoint` body, parse its field list, and compare.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,9 +27,6 @@ const RUNTIME_DSL: &str = "meerkat-runtime/src/meerkat_machine/dsl.rs";
 const SCHEMA_CATALOG: &str = "meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs";
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR for a test target is the crate root. Walk up
-    // until we see a workspace-level `Cargo.toml` containing
-    // `[workspace]`.
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         let toml = p.join("Cargo.toml");
@@ -46,56 +40,148 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-fn read_peer_endpoint_block(root: &Path, relative: &str) -> String {
+fn read_source(root: &Path, relative: &str) -> String {
     let path = root.join(relative);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()))
 }
 
-fn assert_typed_peer_endpoint(label: &str, body: &str) {
-    // Find the PeerEndpoint struct definition and read a generous
-    // window around it.
-    let Some(idx) = body.find("pub struct PeerEndpoint") else {
-        panic!(
-            "{label}: `pub struct PeerEndpoint` not found — expected \
-             twin copies per Section 1.5 #3"
-        );
+/// Extract the `{ ... }` body of `pub struct PeerEndpoint` and parse
+/// its fields into a `name -> type` map. Panics with a diagnostic if
+/// the struct is not present.
+fn peer_endpoint_fields(label: &str, body: &str) -> BTreeMap<String, String> {
+    let Some(head) = body.find("pub struct PeerEndpoint") else {
+        panic!("{label}: `pub struct PeerEndpoint` not found — expected twin to exist");
     };
-    let window_end = body
-        .get(idx..)
-        .and_then(|rest| rest.find("\n}\n").map(|e| idx + e + 3))
-        .unwrap_or(body.len());
-    let block = &body[idx..window_end];
+    let open = body[head..]
+        .find('{')
+        .unwrap_or_else(|| panic!("{label}: PeerEndpoint has no opening brace"))
+        + head;
+    let close_rel = body[open..]
+        .find("\n}")
+        .unwrap_or_else(|| panic!("{label}: PeerEndpoint has no terminating `\\n}}`"));
+    let inner = &body[open + 1..open + close_rel];
 
-    // Today (c.0): these assertions should FAIL because fields are
-    // String. After C-6r: they must pass.
-    let typed_fields = [
-        ("name", "PeerName"),
-        ("peer_id", "PeerId"),
-        ("address", "PeerAddress"),
-    ];
-
-    let mut violations = Vec::new();
-    for (field, ty) in typed_fields {
-        // Look for `pub {field}: {ty}` — the typed form.
-        let typed_needle = format!("pub {field}: {ty}");
-        if !block.contains(&typed_needle) {
-            violations.push(format!("expected `{typed_needle}` in {label}"));
+    let mut fields = BTreeMap::new();
+    for raw in inner.split(',') {
+        let line = raw
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
+        let Some(rest) = line.strip_prefix("pub ") else {
+            panic!("{label}: PeerEndpoint field is not `pub`: `{line}`");
+        };
+        let Some((name, ty)) = rest.split_once(':') else {
+            panic!("{label}: malformed PeerEndpoint field: `{line}`");
+        };
+        let name = name.trim().to_owned();
+        let ty = ty.trim().to_owned();
+        assert!(
+            fields.insert(name.clone(), ty.clone()).is_none(),
+            "{label}: duplicate field `{name}` in PeerEndpoint"
+        );
     }
-
-    assert!(
-        violations.is_empty(),
-        "{label} PeerEndpoint is not fully typed (flipped green by C-6r). \
-         Violations:\n  - {}\n\n---- block ----\n{block}\n---- end ----",
-        violations.join("\n  - ")
-    );
+    fields
 }
 
 #[test]
-fn peer_endpoint_runtime_and_schema_both_carry_typed_fields() {
+fn peer_endpoint_schema_and_runtime_fields_are_identical() {
     let root = workspace_root();
-    let runtime_body = read_peer_endpoint_block(&root, RUNTIME_DSL);
-    let schema_body = read_peer_endpoint_block(&root, SCHEMA_CATALOG);
-    assert_typed_peer_endpoint("runtime DSL", &runtime_body);
-    assert_typed_peer_endpoint("schema catalog", &schema_body);
+    let runtime_body = read_source(&root, RUNTIME_DSL);
+    let schema_body = read_source(&root, SCHEMA_CATALOG);
+    let runtime_fields = peer_endpoint_fields("runtime DSL", &runtime_body);
+    let schema_fields = peer_endpoint_fields("schema catalog", &schema_body);
+
+    // Identical field names.
+    let runtime_names: Vec<&String> = runtime_fields.keys().collect();
+    let schema_names: Vec<&String> = schema_fields.keys().collect();
+    assert_eq!(
+        runtime_names, schema_names,
+        "PeerEndpoint field sets drifted between schema and runtime.\n\
+         runtime: {runtime_names:?}\nschema: {schema_names:?}"
+    );
+
+    // Identical typed shapes — name=>type must match across both sides.
+    assert_eq!(
+        runtime_fields, schema_fields,
+        "PeerEndpoint field types drifted between schema and runtime.\n\
+         runtime: {runtime_fields:#?}\nschema: {schema_fields:#?}"
+    );
+
+    // Guard against silent destringification regressions — both sides
+    // must carry the typed newtypes (not `String`) at the known
+    // canonical field names.
+    for (field, expected_ty) in [
+        ("name", "PeerName"),
+        ("peer_id", "PeerId"),
+        ("address", "PeerAddress"),
+    ] {
+        let actual = schema_fields
+            .get(field)
+            .unwrap_or_else(|| panic!("schema PeerEndpoint missing field `{field}`"));
+        assert_eq!(
+            actual, expected_ty,
+            "schema PeerEndpoint.{field}: expected `{expected_ty}`, got `{actual}`"
+        );
+    }
+}
+
+#[test]
+fn peer_endpoint_both_sides_have_trusted_peer_descriptor_from_impl() {
+    let root = workspace_root();
+    let runtime_body = read_source(&root, RUNTIME_DSL);
+    let schema_body = read_source(&root, SCHEMA_CATALOG);
+
+    let runtime_needle = "impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint";
+    assert!(
+        runtime_body.contains(runtime_needle),
+        "runtime DSL missing `{runtime_needle}`"
+    );
+    assert!(
+        schema_body.contains(runtime_needle),
+        "schema catalog missing `{runtime_needle}` \
+         — wave-d D-e requires the schema-side twin to expose the \
+         same `From<&TrustedPeerDescriptor>` conversion as the \
+         runtime side"
+    );
+}
+
+/// Runtime check that the schema-side `From<&TrustedPeerDescriptor>`
+/// impl actually wires every identity atom through to the correct
+/// `PeerEndpoint` field. Text scans catch signatures; this catches
+/// body bugs (e.g. swapping `name` and `address` inside the impl).
+#[test]
+fn peer_endpoint_schema_from_trusted_peer_descriptor_round_trip() {
+    use meerkat_core::comms::TrustedPeerDescriptor;
+    use meerkat_machine_schema::catalog::dsl::meerkat_machine::PeerEndpoint;
+
+    let descriptor = TrustedPeerDescriptor::test_only_unsigned(
+        "alice",
+        "11111111-2222-5333-8444-555555555555",
+        "inproc://alice",
+    )
+    .expect("synthesize a valid trusted peer descriptor");
+
+    let endpoint = PeerEndpoint::from(&descriptor);
+
+    assert_eq!(
+        endpoint.name.as_str(),
+        descriptor.name.as_str(),
+        "schema PeerEndpoint.name must mirror descriptor.name"
+    );
+    assert_eq!(
+        endpoint.peer_id.as_str(),
+        descriptor.peer_id.to_string().as_str(),
+        "schema PeerEndpoint.peer_id must mirror descriptor.peer_id"
+    );
+    assert_eq!(
+        endpoint.address.as_str(),
+        descriptor.address.to_string().as_str(),
+        "schema PeerEndpoint.address must mirror descriptor.address"
+    );
 }

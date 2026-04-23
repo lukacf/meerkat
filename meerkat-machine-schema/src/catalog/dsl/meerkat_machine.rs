@@ -297,6 +297,12 @@ machine! {
             DetachRealtimeBinding,
             RequireRealtimeReattach,
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            // Ops-barrier satisfaction feedback input (wired to the
+            // `ops_barrier_satisfaction` handoff protocol on the compat
+            // `mob_bundle` composition). Carries the exact operation ids
+            // whose completion released the outstanding barrier so the
+            // turn-state authority can observe barrier closure.
+            OpsBarrierSatisfied { operation_ids: Set<OperationId> },
             // MCP server lifecycle inputs. The shell translates MCP connection
             // events into these inputs so the DSL owns authoritative per-server
             // state; tool availability and the `[MCP_PENDING]` notice are then
@@ -502,6 +508,12 @@ machine! {
             RetainTerminalRecord,
             EvictCompletedRecord,
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
+            // Wait-all barrier satisfaction. The handoff protocol's
+            // obligation payload (wait_request_id + operation_ids) lives
+            // on the compat `OpsBarrierBridgeMachine`'s mirror effect so
+            // the DSL-macro-constrained canonical effect can stay
+            // fieldless without expanding the DSL syntax. See
+            // `meerkat-machine-schema/src/compat/ops_barrier_bridge.rs`.
             WaitAllSatisfied,
             CollectCompletedResult,
             EnqueueClassifiedEntry,
@@ -2622,6 +2634,37 @@ machine! {
                 self.supervisor_bound_epoch = None;
             }
             to Idle
+        }
+
+        // =====================================================================
+        // Ops-barrier satisfaction (handoff feedback input)
+        // =====================================================================
+        //
+        // Delivered by the `ops_barrier_satisfaction` handoff protocol's
+        // submit helper once the realizing owner observes that every
+        // `operation_id` in the outstanding barrier has completed. The
+        // transition is a phase-preserving self-loop: the barrier is a
+        // correlation fact, not a phase mutation, and the runtime
+        // turn-state authority consumes the feedback through its own
+        // reducer via `TurnStateHandle::ops_barrier_satisfied(...)`.
+        //
+        // Keeping the transition present (rather than marking the input
+        // `surface_only`) lets the schema enforce the input-vs-transition
+        // coverage contract and gives TLC something concrete to cover.
+
+        transition OpsBarrierSatisfiedAttached {
+            on input OpsBarrierSatisfied { operation_ids }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+        }
+        transition OpsBarrierSatisfiedRunning {
+            on input OpsBarrierSatisfied { operation_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
         }
 
         // =====================================================================

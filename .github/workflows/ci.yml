@@ -156,6 +156,15 @@ jobs:
       - name: Machine verification
         run: cargo xtask machine-verify --all
 
+      - name: Protocol codegen
+        run: cargo xtask protocol-codegen
+
+      - name: Protocol codegen stays clean
+        run: git diff --exit-code
+
+      - name: Audit @generated header truthfulness
+        run: cargo xtask audit-generated-headers
+
   test-unit:
     name: Unit tests
     runs-on: ubuntu-latest

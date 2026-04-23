@@ -84,6 +84,17 @@ pub enum ProtocolGenerationMode {
     /// Wraps authority-derived data into an obligation token for cross-machine handoff.
     /// Helper lives in the consuming machine's crate.
     ShellBridge,
+    /// Forwards obligation data through a typed handle trait (e.g.
+    /// `ExternalToolSurfaceHandle`) rather than invoking `authority.apply`
+    /// directly. Used when the consuming actor speaks to the authority
+    /// through a trait object to support both standalone and runtime-backed
+    /// deployments.
+    ///
+    /// Stackable alongside `EffectExtractor` via
+    /// `ProtocolRustBinding::additional_modes` — a protocol that needs both
+    /// effect extraction and handle-driven submitters declares the primary
+    /// mode + `HandleBridge` as additional.
+    HandleBridge,
 }
 
 /// References a specific machine input that the owner may submit as feedback.
@@ -142,6 +153,46 @@ pub struct ProtocolRustBinding {
     pub bridge_source_type_path: Option<String>,
     /// Shape of the primary generated helper return value.
     pub helper_return_shape: ProtocolHelperReturnShape,
+    /// Handle trait path used by `HandleBridge` helpers. Required when
+    /// `generation_mode` or `additional_modes` contains `HandleBridge`.
+    pub handle_trait_path: Option<String>,
+    /// Handle trait method name per feedback input. Keys are
+    /// `FeedbackInputRef::input_variant`, values are the snake_case method
+    /// on `handle_trait_path`. Required for each feedback entry emitted
+    /// through the `HandleBridge` mode.
+    pub handle_method_names: BTreeMap<String, String>,
+    /// Per-call suffix applied to `obligation.<field>` references when
+    /// constructing handle-method arguments. Keys are
+    /// `"{input_variant}.{obligation_field}"`; values are suffixes like
+    /// `.0`, `.clone()`, `.into()`. Absent entries emit bare
+    /// `obligation.<field>`. Lets the schema declare a single newtype
+    /// unwrap without ceding typed-field correctness.
+    pub handle_arg_accessors: BTreeMap<String, String>,
+    /// Per-feedback list of obligation field names (in positional order)
+    /// that get forwarded to the handle method. Keys are
+    /// `FeedbackInputRef::input_variant`. Absent entries fall back to
+    /// "every obligation-sourced field in binding order," which works
+    /// when the handle-method signature mirrors the feedback input. Set
+    /// this when the feedback input carries fields the handle method
+    /// does not accept (e.g., a correlation `wait_request_id` that the
+    /// runtime handle never uses).
+    pub handle_method_forwarded_fields: BTreeMap<String, Vec<String>>,
+    /// Kernel-codegen-emitted input enums wrap each variant in a named
+    /// payload struct under an `inputs` submodule
+    /// (`Input::VariantName(inputs::VariantName { ... })`). DSL-emitted
+    /// input enums use named-field variants directly
+    /// (`Input::VariantName { ... }`). When this field is set, the
+    /// codegen emits the tuple-wrapping form and qualifies the payload
+    /// struct by this module path (e.g. `inputs`). Absent → named-field
+    /// form (the canonical DSL-emitted shape).
+    pub input_payload_module_path: Option<String>,
+    /// Additional generation modes stacked onto the primary mode. Each
+    /// listed mode emits its own family of helpers into the same output
+    /// file, letting a single protocol expose both (for example)
+    /// `extract_obligations` and handle-driven submitters.
+    ///
+    /// Must not include the primary `generation_mode` — no duplicates.
+    pub additional_modes: Vec<ProtocolGenerationMode>,
 }
 
 /// Declares the primary generated helper return contract.
@@ -470,56 +521,24 @@ impl CompositionSchema {
                     detail: "module_path must not be empty".into(),
                 });
             }
-            match protocol.rust.generation_mode {
-                ProtocolGenerationMode::Executor => {
-                    if protocol.rust.authority_type_path.is_none()
-                        || protocol.rust.mutator_trait_path.is_none()
-                        || protocol.rust.input_enum_path.is_none()
-                        || protocol.rust.effect_enum_path.is_none()
-                        || protocol.rust.transition_type_path.is_none()
-                        || protocol.rust.error_type_path.is_none()
-                        || protocol.rust.executor_trigger_input_variant.is_none()
-                    {
-                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                            protocol: protocol.name.clone(),
-                            detail:
-                                "Executor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, error_type_path, and executor_trigger_input_variant"
-                                    .into(),
-                        });
-                    }
+            validate_generation_mode_binding(protocol, &protocol.rust.generation_mode)?;
+            // Stacked modes must be distinct and not repeat the primary.
+            for (idx, extra) in protocol.rust.additional_modes.iter().enumerate() {
+                if *extra == protocol.rust.generation_mode {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail: format!(
+                            "additional_modes[{idx}] duplicates the primary generation_mode ({extra:?})"
+                        ),
+                    });
                 }
-                ProtocolGenerationMode::EffectExtractor => {
-                    if protocol.rust.authority_type_path.is_none()
-                        || protocol.rust.mutator_trait_path.is_none()
-                        || protocol.rust.input_enum_path.is_none()
-                        || protocol.rust.effect_enum_path.is_none()
-                        || protocol.rust.transition_type_path.is_none()
-                        || protocol.rust.error_type_path.is_none()
-                    {
-                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                            protocol: protocol.name.clone(),
-                            detail:
-                                "EffectExtractor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, and error_type_path"
-                                    .into(),
-                        });
-                    }
+                if protocol.rust.additional_modes[..idx].contains(extra) {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail: format!("additional_modes contains {extra:?} more than once"),
+                    });
                 }
-                ProtocolGenerationMode::ShellBridge => {
-                    if protocol.rust.authority_type_path.is_none()
-                        || protocol.rust.mutator_trait_path.is_none()
-                        || protocol.rust.input_enum_path.is_none()
-                        || protocol.rust.transition_type_path.is_none()
-                        || protocol.rust.error_type_path.is_none()
-                        || protocol.rust.bridge_source_type_path.is_none()
-                    {
-                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                            protocol: protocol.name.clone(),
-                            detail:
-                                "ShellBridge protocols require authority_type_path, mutator_trait_path, input_enum_path, transition_type_path, error_type_path, and bridge_source_type_path"
-                                    .into(),
-                        });
-                    }
-                }
+                validate_generation_mode_binding(protocol, extra)?;
             }
             for feedback in &protocol.allowed_feedback_inputs {
                 if !machine_ids.contains(feedback.machine_instance.as_str()) {
@@ -1717,6 +1736,118 @@ impl CompositionInvariantKind {
     pub fn is_behavioral(&self) -> bool {
         !self.is_structural()
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_generation_mode_binding(
+    protocol: &EffectHandoffProtocol,
+    mode: &ProtocolGenerationMode,
+) -> Result<(), CompositionSchemaError> {
+    let rust = &protocol.rust;
+    match mode {
+        ProtocolGenerationMode::Executor => {
+            if rust.authority_type_path.is_none()
+                || rust.mutator_trait_path.is_none()
+                || rust.input_enum_path.is_none()
+                || rust.effect_enum_path.is_none()
+                || rust.transition_type_path.is_none()
+                || rust.error_type_path.is_none()
+                || rust.executor_trigger_input_variant.is_none()
+            {
+                return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                    protocol: protocol.name.clone(),
+                    detail:
+                        "Executor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, error_type_path, and executor_trigger_input_variant"
+                            .into(),
+                });
+            }
+        }
+        ProtocolGenerationMode::EffectExtractor => {
+            if rust.effect_enum_path.is_none() {
+                return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                    protocol: protocol.name.clone(),
+                    detail: "EffectExtractor protocols require effect_enum_path".into(),
+                });
+            }
+            // Authority paths are optional. When present, EffectExtractor
+            // emits `submit_*` helpers that call `authority.apply(...)`
+            // for each feedback input. When absent, only
+            // `extract_obligations` is emitted; feedback flows through a
+            // stacked `HandleBridge` mode. Validator only requires full
+            // authority plumbing when the codegen is actually going to
+            // invoke it — honor partial bindings.
+            let authority_present = rust.authority_type_path.is_some();
+            if authority_present {
+                if rust.mutator_trait_path.is_none()
+                    || rust.input_enum_path.is_none()
+                    || rust.transition_type_path.is_none()
+                    || rust.error_type_path.is_none()
+                {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail:
+                            "EffectExtractor with authority_type_path set also requires mutator_trait_path, input_enum_path, transition_type_path, and error_type_path"
+                                .into(),
+                    });
+                }
+            } else if !protocol.allowed_feedback_inputs.is_empty() {
+                // No authority → feedback must flow through HandleBridge.
+                let has_handle_bridge = rust.generation_mode
+                    == ProtocolGenerationMode::HandleBridge
+                    || rust
+                        .additional_modes
+                        .contains(&ProtocolGenerationMode::HandleBridge);
+                if !has_handle_bridge {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail:
+                            "EffectExtractor without authority_type_path must stack HandleBridge (or declare no feedback inputs)"
+                                .into(),
+                    });
+                }
+            }
+        }
+        ProtocolGenerationMode::ShellBridge => {
+            if rust.authority_type_path.is_none()
+                || rust.mutator_trait_path.is_none()
+                || rust.input_enum_path.is_none()
+                || rust.transition_type_path.is_none()
+                || rust.error_type_path.is_none()
+                || rust.bridge_source_type_path.is_none()
+            {
+                return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                    protocol: protocol.name.clone(),
+                    detail:
+                        "ShellBridge protocols require authority_type_path, mutator_trait_path, input_enum_path, transition_type_path, error_type_path, and bridge_source_type_path"
+                            .into(),
+                });
+            }
+        }
+        ProtocolGenerationMode::HandleBridge => {
+            if rust.handle_trait_path.is_none() {
+                return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                    protocol: protocol.name.clone(),
+                    detail: "HandleBridge protocols require handle_trait_path".into(),
+                });
+            }
+            // Every feedback input must have a handle method mapping.
+            for feedback in &protocol.allowed_feedback_inputs {
+                if !rust
+                    .handle_method_names
+                    .contains_key(&feedback.input_variant)
+                {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail: format!(
+                            "HandleBridge protocol missing handle_method_names entry for feedback input `{}`",
+                            feedback.input_variant
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]

@@ -4,9 +4,7 @@
 // Liveness: eventual feedback under surface connection liveness
 
 use crate::external_tool_surface_authority::{
-    ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError,
-    ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition,
-    SurfaceDeltaOperation, SurfaceId, TurnNumber,
+    ExternalToolSurfaceEffect, SurfaceDeltaOperation, SurfaceId, TurnNumber,
 };
 use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceHandle};
 
@@ -44,34 +42,6 @@ pub fn extract_obligations(
 }
 
 pub fn submit_pending_succeeded(
-    authority: &mut ExternalToolSurfaceAuthority,
-    obligation: SurfaceCompletionObligation,
-) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
-    let transition = authority.apply(ExternalToolSurfaceInput::PendingSucceeded {
-        surface_id: obligation.surface_id,
-        operation: obligation.operation,
-        pending_task_sequence: obligation.pending_task_sequence,
-        staged_intent_sequence: obligation.staged_intent_sequence,
-        applied_at_turn: obligation.applied_at_turn,
-    })?;
-    Ok(transition)
-}
-
-pub fn submit_pending_failed(
-    authority: &mut ExternalToolSurfaceAuthority,
-    obligation: SurfaceCompletionObligation,
-) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
-    let transition = authority.apply(ExternalToolSurfaceInput::PendingFailed {
-        surface_id: obligation.surface_id,
-        operation: obligation.operation,
-        pending_task_sequence: obligation.pending_task_sequence,
-        staged_intent_sequence: obligation.staged_intent_sequence,
-        applied_at_turn: obligation.applied_at_turn,
-    })?;
-    Ok(transition)
-}
-
-pub fn submit_pending_succeeded_handle(
     handle: &(impl ExternalToolSurfaceHandle + ?Sized),
     obligation: SurfaceCompletionObligation,
 ) -> Result<(), DslTransitionError> {
@@ -82,7 +52,7 @@ pub fn submit_pending_succeeded_handle(
     )
 }
 
-pub fn submit_pending_failed_handle(
+pub fn submit_pending_failed(
     handle: &(impl ExternalToolSurfaceHandle + ?Sized),
     obligation: SurfaceCompletionObligation,
     reason: impl Into<String>,

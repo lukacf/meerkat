@@ -1,3 +1,4 @@
+pub mod audit_generated_headers;
 #[cfg(feature = "machine-authority")]
 pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
@@ -10,7 +11,7 @@ pub mod rmat_audit;
 pub mod rmat_policy;
 pub mod seam_inventory;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "machine-authority")]
@@ -46,6 +47,10 @@ enum Commands {
     RmatAudit(RmatAuditArgs),
     #[command(name = "ownership-ledger")]
     OwnershipLedger(OwnershipLedgerArgs),
+    /// Verify every `@generated` header corresponds to a codegen-emit path
+    /// and every codegen-emit path carries `@generated`. Errors on mismatch.
+    #[command(name = "audit-generated-headers")]
+    AuditGeneratedHeaders,
 }
 
 pub fn run() -> Result<()> {
@@ -59,5 +64,23 @@ pub fn run() -> Result<()> {
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
         Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
+        Commands::AuditGeneratedHeaders => run_audit_generated_headers_command(),
     }
+}
+
+fn run_audit_generated_headers_command() -> Result<()> {
+    let findings = audit_generated_headers::run_audit_generated_headers()?;
+    if findings.is_empty() {
+        println!(
+            "audit-generated-headers: {} path(s) checked; all `@generated` markers honest",
+            audit_generated_headers::live_emit_paths().len()
+        );
+        return Ok(());
+    }
+    let rendered = audit_generated_headers::render_findings(&findings);
+    eprint!("{rendered}");
+    bail!(
+        "audit-generated-headers: {} violation(s) detected",
+        findings.len()
+    );
 }

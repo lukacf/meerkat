@@ -83,6 +83,16 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+  # On push: strict @generated header truthfulness guard
+  - repo: local
+    hooks:
+      - id: audit-generated-headers
+        name: audit-generated-headers (every @generated is codegen-emitted)
+        entry: scripts/pre-push-audit-generated-headers.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-push]
+
   # On push: W2-F bridge-classifier gate (no ResponseStatus matches in bridge files)
   - repo: local
     hooks:

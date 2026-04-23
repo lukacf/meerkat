@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use meerkat_machine_schema::{
     ClosurePolicy, CompositionSchema, EffectHandoffProtocol, FeedbackFieldSource, MachineSchema,
     ProtocolGenerationMode, TypeRef, canonical_composition_schemas, canonical_machine_schemas,
+    compat_composition_schemas,
 };
 
 use crate::public_contracts::repo_root;
@@ -16,8 +17,19 @@ use crate::public_contracts::repo_root;
 /// for each declared `EffectHandoffProtocol`, plus the terminal surface mapping.
 pub fn run_protocol_codegen() -> Result<()> {
     let root = repo_root()?;
-    let compositions = canonical_composition_schemas();
-    let machines = canonical_machine_schemas();
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+    let mut machines = canonical_machine_schemas();
+    // Compat machines host handoff declarations for effects whose canonical
+    // absorption is still in flight. They must be discoverable by the same
+    // producer-lookup path as canonical machines.
+    machines.extend([
+        meerkat_machine_schema::flow_frame_machine(),
+        meerkat_machine_schema::flow_run_machine(),
+        meerkat_machine_schema::loop_iteration_machine(),
+        meerkat_machine_schema::ops_barrier_bridge_machine(),
+        meerkat_machine_schema::external_tool_surface_bridge_machine(),
+    ]);
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();
 
@@ -117,14 +129,37 @@ fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::p
     root.join(&protocol.rust.module_path)
 }
 
+/// Public entry point used by the drift test. Renders the full helper
+/// source for one protocol against its producer machine schema.
+/// The internal `generate_protocol_helpers` path (which accepts
+/// `Option<&MachineSchema>` for convenience in the codegen driver)
+/// delegates to this.
+pub fn render_protocol_helpers(
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<String> {
+    generate_protocol_helpers_impl(protocol, producer_machine, composition, machine_by_name)
+}
+
 fn generate_protocol_helpers(
     protocol: &EffectHandoffProtocol,
     producer_machine: Option<&MachineSchema>,
     composition: &CompositionSchema,
     machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
 ) -> Result<String> {
-    let mut out = String::new();
     let producer_machine = producer_machine.context("producer machine missing")?;
+    generate_protocol_helpers_impl(protocol, producer_machine, composition, machine_by_name)
+}
+
+fn generate_protocol_helpers_impl(
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<String> {
+    let mut out = String::new();
 
     writeln!(
         &mut out,
@@ -155,28 +190,66 @@ fn generate_protocol_helpers(
 
     let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
 
-    match protocol.rust.generation_mode {
-        ProtocolGenerationMode::Executor => {
-            generate_executor_helpers(&mut out, protocol, producer_machine, &obligation_type)?;
-        }
-        ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
+    // Primary mode first, then each declared additional mode. Stacking order
+    // is deterministic: primary block leads, additional modes follow in the
+    // order declared on the binding. The composition validator guarantees no
+    // duplicates.
+    emit_mode(
+        &mut out,
+        protocol,
+        producer_machine,
+        composition,
+        machine_by_name,
+        &obligation_type,
+        &protocol.rust.generation_mode,
+    )?;
+    for extra in &protocol.rust.additional_modes {
+        emit_mode(
             &mut out,
             protocol,
             producer_machine,
             composition,
             machine_by_name,
             &obligation_type,
-        )?,
-        ProtocolGenerationMode::ShellBridge => generate_shell_bridge_helpers(
-            &mut out,
-            protocol,
-            composition,
-            machine_by_name,
-            &obligation_type,
-        )?,
+            extra,
+        )?;
     }
 
     Ok(out)
+}
+
+fn emit_mode(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+    obligation_type: &str,
+    mode: &ProtocolGenerationMode,
+) -> Result<()> {
+    match mode {
+        ProtocolGenerationMode::Executor => {
+            generate_executor_helpers(out, protocol, producer_machine, obligation_type)
+        }
+        ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
+            out,
+            protocol,
+            producer_machine,
+            composition,
+            machine_by_name,
+            obligation_type,
+        ),
+        ProtocolGenerationMode::ShellBridge => generate_shell_bridge_helpers(
+            out,
+            protocol,
+            composition,
+            machine_by_name,
+            obligation_type,
+        ),
+        ProtocolGenerationMode::HandleBridge => {
+            generate_handle_bridge_helpers(out, protocol, obligation_type)
+        }
+    }
 }
 
 fn generate_obligation_struct(
@@ -369,6 +442,13 @@ fn generate_effect_extractor_helpers(
     writeln!(out, "}}")?;
     writeln!(out)?;
 
+    // Only emit `submit_*` (authority.apply) helpers when the binding
+    // declares an authority. Without one, feedback flows through a
+    // stacked `HandleBridge` submitter (see composition validator).
+    if rust.authority_type_path.is_none() {
+        return Ok(());
+    }
+
     for feedback in &protocol.allowed_feedback_inputs {
         let target_machine =
             machine_for_instance(composition, machine_by_name, &feedback.machine_instance)?;
@@ -387,21 +467,157 @@ fn generate_effect_extractor_helpers(
     Ok(())
 }
 
-fn generate_shell_bridge_helpers(
+/// Emit one `submit_*` helper per feedback input that forwards the
+/// obligation through a handle trait method instead of calling
+/// `authority.apply` directly.
+///
+/// The handle-method mapping is declared on `ProtocolRustBinding`:
+/// `handle_trait_path` names the trait; `handle_method_names` maps each
+/// feedback's `input_variant` to a method on that trait;
+/// `handle_arg_accessors` optionally rewrites obligation-field access
+/// paths (e.g., `surface_id` → `surface_id.0`).
+///
+/// The generator renders positional arguments in field-bindings-declared
+/// order: obligation-sourced fields first, owner-context fields next.
+/// The return type is always `Result<(), DslTransitionError>` — the
+/// canonical shape of the handle trait.
+fn generate_handle_bridge_helpers(
     out: &mut String,
     protocol: &EffectHandoffProtocol,
-    composition: &CompositionSchema,
-    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
     obligation_type: &str,
 ) -> Result<()> {
     let rust = &protocol.rust;
-    let bridge_source = short_type(
-        rust.bridge_source_type_path
+    let handle_trait = short_type(
+        rust.handle_trait_path
             .as_deref()
-            .context("shell bridge source type missing")?,
+            .context("HandleBridge handle_trait_path missing")?,
     );
-    let accept_name = format!("accept_{}", to_snake_case(&protocol.effect_variant));
 
+    // Use the unqualified `DslTransitionError` symbol and rely on the
+    // composition's `required_imports` to bring it into scope. This
+    // works for both in-crate (`use crate::handles::DslTransitionError;`)
+    // and cross-crate (`use meerkat_core::handles::DslTransitionError;`)
+    // emit paths, matching what the hand-authored protocol files did.
+    let handle_error_path = "DslTransitionError";
+
+    // When HandleBridge is the primary mode AND a bridge source type is
+    // declared, emit the `accept_<effect>` helper that wraps the shell-
+    // owned source struct into the obligation token. This is exactly the
+    // shape ShellBridge would emit; reusing it lets HandleBridge stand
+    // alone for protocols whose consumers speak only through the handle
+    // trait (no authority.apply target).
+    if rust.generation_mode == ProtocolGenerationMode::HandleBridge
+        && let Some(bridge_source_path) = rust.bridge_source_type_path.as_deref()
+    {
+        let bridge_source = short_type(bridge_source_path);
+        emit_accept_helper(out, protocol, obligation_type, bridge_source)?;
+    }
+
+    // Stable ordering: feedback entries as declared, which matches the
+    // primary-mode output for dual-mode protocols (bit-for-bit parity).
+    for feedback in &protocol.allowed_feedback_inputs {
+        let method_name = rust
+            .handle_method_names
+            .get(&feedback.input_variant)
+            .with_context(|| {
+                format!(
+                    "HandleBridge missing handle_method_names entry for `{}`",
+                    feedback.input_variant
+                )
+            })?;
+
+        // Dual-mode suffix rule: when HandleBridge is stacked with another
+        // mode that *actually* emits an authority-backed `submit_<input>`
+        // (i.e., `ShellBridge` or `EffectExtractor` with
+        // `authority_type_path` set), append `_handle` to avoid symbol
+        // collision. When the stacked mode skips its authority submitter
+        // (EffectExtractor with no authority), the bare `submit_*` name
+        // is used — no collision to avoid.
+        let another_mode_emits_submit = match rust.generation_mode {
+            ProtocolGenerationMode::HandleBridge => false,
+            ProtocolGenerationMode::ShellBridge => true,
+            ProtocolGenerationMode::EffectExtractor => rust.authority_type_path.is_some(),
+            ProtocolGenerationMode::Executor => true,
+        };
+        let fn_name = if another_mode_emits_submit {
+            format!("submit_{}_handle", to_snake_case(&feedback.input_variant))
+        } else {
+            format!("submit_{}", to_snake_case(&feedback.input_variant))
+        };
+
+        // When `handle_method_forwarded_fields` is declared for this
+        // feedback input, treat it as the authoritative positional
+        // argument list — obligation fields not in the list are dropped
+        // (they are correlation-only and never reach the handle).
+        // Otherwise every obligation-sourced binding is forwarded in
+        // declaration order.
+        let forwarded: Option<&Vec<String>> = rust
+            .handle_method_forwarded_fields
+            .get(&feedback.input_variant);
+        let mut owner_params: Vec<String> = Vec::new();
+        let mut call_args: Vec<String> = Vec::new();
+        for binding in &feedback.field_bindings {
+            match &binding.source {
+                FeedbackFieldSource::ObligationField(field) => {
+                    if let Some(allowed) = forwarded
+                        && !allowed
+                            .iter()
+                            .any(|f| to_snake_case(f) == to_snake_case(field))
+                    {
+                        continue;
+                    }
+                    let accessor_key =
+                        format!("{}.{}", feedback.input_variant, to_snake_case(field));
+                    let suffix = rust
+                        .handle_arg_accessors
+                        .get(&accessor_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    call_args.push(format!("obligation.{}{suffix}", to_snake_case(field)));
+                }
+                FeedbackFieldSource::OwnerContext(name) => {
+                    let snake = to_snake_case(name);
+                    owner_params.push(format!("{snake}: impl Into<String>"));
+                    call_args.push(format!("{snake}.into()"));
+                }
+            }
+        }
+
+        writeln!(
+            out,
+            "pub fn {fn_name}(handle: &(impl {handle_trait} + ?Sized), obligation: {obligation_type}{}{}) -> Result<(), {handle_error_path}> {{",
+            if owner_params.is_empty() { "" } else { ", " },
+            owner_params.join(", ")
+        )?;
+        if call_args.is_empty() {
+            writeln!(out, "    handle.{method_name}()")?;
+        } else if call_args.len() == 1 {
+            writeln!(out, "    handle.{method_name}({})", call_args[0])?;
+        } else {
+            writeln!(out, "    handle.{method_name}(")?;
+            for (idx, arg) in call_args.iter().enumerate() {
+                let comma = if idx + 1 == call_args.len() { "" } else { "," };
+                writeln!(out, "        {arg}{comma}")?;
+            }
+            writeln!(out, "    )")?;
+        }
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// Emit the `accept_<effect>` helper that wraps a shell-owned source
+/// struct into the obligation token. Used by `ShellBridge` primary
+/// mode and, when a `bridge_source_type_path` is declared, by
+/// `HandleBridge` primary mode too.
+fn emit_accept_helper(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    obligation_type: &str,
+    bridge_source: &str,
+) -> Result<()> {
+    let accept_name = format!("accept_{}", to_snake_case(&protocol.effect_variant));
     writeln!(
         out,
         "pub fn {accept_name}(source: {bridge_source}) -> {obligation_type} {{"
@@ -418,6 +634,23 @@ fn generate_shell_bridge_helpers(
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
+    Ok(())
+}
+
+fn generate_shell_bridge_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let bridge_source = short_type(
+        rust.bridge_source_type_path
+            .as_deref()
+            .context("shell bridge source type missing")?,
+    );
+    emit_accept_helper(out, protocol, obligation_type, bridge_source)?;
 
     for feedback in &protocol.allowed_feedback_inputs {
         let target_machine =
@@ -501,7 +734,11 @@ fn generate_feedback_submitter(
         out,
         "    let transition = authority.apply({}::{})?;",
         input_enum,
-        ctor_field_list_from_bindings(target_variant, feedback)?
+        ctor_field_list_from_bindings(
+            target_variant,
+            feedback,
+            rust.input_payload_module_path.as_deref()
+        )?
     )?;
     match return_kind {
         FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
@@ -667,8 +904,21 @@ fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
 fn ctor_field_list_from_bindings(
     target_variant: &meerkat_machine_schema::VariantSchema,
     feedback: &meerkat_machine_schema::FeedbackInputRef,
+    input_payload_module_path: Option<&str>,
 ) -> Result<String> {
     if target_variant.fields.is_empty() {
+        // Tuple-wrapping input enums (kernel-codegen style) require a
+        // payload struct literal even for zero-field variants
+        // (`Input::Foo(payload::Foo {})`). DSL-emitted input enums use
+        // unit variants for zero-field cases (`Input::Foo`). Fail
+        // explicitly rather than emit `Input::Foo` and let rustc
+        // complain with a distant error message.
+        if let Some(module) = input_payload_module_path {
+            bail!(
+                "zero-field feedback input variant `{}` cannot be emitted through input_payload_module_path `{module}` (kernel-style tuple wrapping requires at least one field, or remove the payload module path to emit a unit variant)",
+                target_variant.name
+            );
+        }
         return Ok(target_variant.name.clone());
     }
 
@@ -697,7 +947,16 @@ fn ctor_field_list_from_bindings(
         })
         .collect::<Result<Vec<_>>>()?
         .join(", ");
-    Ok(format!("{} {{ {} }}", target_variant.name, fields))
+    // Kernel-style input enums wrap named-field payload structs in tuple
+    // variants (`Input::VariantName(payload_module::VariantName { ... })`).
+    // DSL-emitted input enums use named-field variants directly.
+    match input_payload_module_path {
+        Some(module) => Ok(format!(
+            "{}({}::{} {{ {} }})",
+            target_variant.name, module, target_variant.name, fields
+        )),
+        None => Ok(format!("{} {{ {} }}", target_variant.name, fields)),
+    }
 }
 
 fn ctor_field_list_from_bindings_without_obligation(
@@ -791,6 +1050,14 @@ fn is_known_copy_named_type(name: &str) -> bool {
 }
 
 /// Generate a standalone terminal surface mapping module for MeerkatMachine.
+///
+/// Public for the drift test — ensures the codegen-emit path covers this
+/// file alongside the per-protocol helpers, closing the gap the review
+/// flagged in the original drift-test implementation.
+pub fn render_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
+    generate_terminal_surface_mapping(machine)
+}
+
 fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
     let mut out = String::new();
 

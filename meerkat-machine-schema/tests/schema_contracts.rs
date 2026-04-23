@@ -973,3 +973,506 @@ fn every_canonical_input_variant_has_transition_coverage() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Handoff protocol binding contracts — HandleBridge + additional_modes
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::expect_used, clippy::panic)]
+mod handoff_binding {
+    use std::collections::BTreeMap;
+
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, CompositionSchemaError,
+        CompositionStateLimits, EffectHandoffProtocol, FeedbackFieldBinding, FeedbackFieldSource,
+        FeedbackInputRef, MachineInstance, ProtocolGenerationMode, ProtocolHelperReturnShape,
+        ProtocolRustBinding, canonical_machine_schemas, compat_composition_schemas,
+    };
+
+    fn ok_handle_binding() -> ProtocolRustBinding {
+        let mut methods = BTreeMap::new();
+        methods.insert("Ack".into(), "acknowledge".into());
+        ProtocolRustBinding {
+            module_path: "crate-x/src/generated/proto.rs".into(),
+            generation_mode: ProtocolGenerationMode::HandleBridge,
+            required_imports: vec![],
+            authority_type_path: None,
+            mutator_trait_path: None,
+            input_enum_path: None,
+            effect_enum_path: None,
+            transition_type_path: None,
+            error_type_path: None,
+            executor_trigger_input_variant: None,
+            bridge_source_type_path: None,
+            helper_return_shape: ProtocolHelperReturnShape::Effects,
+            handle_trait_path: Some("crate::SomeHandle".into()),
+            handle_method_names: methods,
+            handle_arg_accessors: BTreeMap::new(),
+            handle_method_forwarded_fields: BTreeMap::new(),
+            input_payload_module_path: None,
+            additional_modes: vec![],
+        }
+    }
+
+    fn composition_with_protocol(protocol: EffectHandoffProtocol) -> CompositionSchema {
+        CompositionSchema {
+            name: "test_bundle".into(),
+            machines: vec![MachineInstance {
+                instance_id: "meerkat".into(),
+                machine_name: "MeerkatMachine".into(),
+                actor: "meerkat_authority".into(),
+            }],
+            actors: vec![
+                ActorSchema {
+                    name: "meerkat_authority".into(),
+                    kind: ActorKind::Machine,
+                },
+                ActorSchema {
+                    name: "surface_owner".into(),
+                    kind: ActorKind::Owner,
+                },
+            ],
+            handoff_protocols: vec![protocol],
+            entry_inputs: vec![],
+            routes: vec![],
+            route_target_selectors: vec![],
+            driver: None,
+            transaction_plans: vec![],
+            actor_priorities: vec![],
+            scheduler_rules: vec![],
+            invariants: vec![],
+            witnesses: vec![],
+            deep_domain_cardinality: 2,
+            deep_domain_overrides: std::collections::BTreeMap::new(),
+            witness_domain_cardinality: 2,
+            ci_limits: Some(CompositionStateLimits {
+                step_limit: 4,
+                pending_input_limit: 4,
+                pending_route_limit: 4,
+                delivered_route_limit: 0,
+                emitted_effect_limit: 0,
+                seq_limit: 0,
+                set_limit: 0,
+                map_limit: 0,
+            }),
+            closed_world: true,
+        }
+    }
+
+    fn handle_bridge_protocol(rust: ProtocolRustBinding) -> EffectHandoffProtocol {
+        EffectHandoffProtocol {
+            name: "test_handoff".into(),
+            producer_instance: "meerkat".into(),
+            effect_variant: "RefreshVisibleSurfaceSet".into(),
+            realizing_actor: "surface_owner".into(),
+            correlation_fields: vec![],
+            obligation_fields: vec![],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "meerkat".into(),
+                input_variant: "Ack".into(),
+                field_bindings: vec![FeedbackFieldBinding {
+                    input_field: "epoch".into(),
+                    source: FeedbackFieldSource::OwnerContext("epoch".into()),
+                }],
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+            rust,
+        }
+    }
+
+    #[test]
+    fn handle_bridge_requires_handle_trait_path() {
+        let mut binding = ok_handle_binding();
+        binding.handle_trait_path = None;
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+
+        let err = composition
+            .validate()
+            .expect_err("must reject missing handle_trait_path");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("handle_trait_path"),
+                    "error detail should mention handle_trait_path, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_bridge_requires_method_for_every_feedback_input() {
+        let mut binding = ok_handle_binding();
+        binding.handle_method_names = BTreeMap::new();
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+
+        let err = composition
+            .validate()
+            .expect_err("must reject missing method map");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("handle_method_names"),
+                    "error detail should mention handle_method_names, got {detail}"
+                );
+                assert!(
+                    detail.contains("Ack"),
+                    "error detail should name the missing feedback input, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_bridge_minimum_binding_validates_clean() {
+        let binding = ok_handle_binding();
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+        composition
+            .validate()
+            .expect("minimum handle-bridge binding should validate");
+    }
+
+    #[test]
+    fn additional_modes_rejects_duplicating_primary_mode() {
+        let mut binding = ok_handle_binding();
+        binding.additional_modes = vec![ProtocolGenerationMode::HandleBridge];
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+
+        let err = composition
+            .validate()
+            .expect_err("must reject duplicate primary mode");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("duplicates the primary"),
+                    "error detail should mention duplication, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn additional_modes_rejects_repeat_within_list() {
+        let mut binding = ok_handle_binding();
+        // Switch primary to EffectExtractor so HandleBridge can appear in
+        // additional_modes; then make it appear twice.
+        binding.generation_mode = ProtocolGenerationMode::EffectExtractor;
+        // Fill required EffectExtractor fields.
+        binding.authority_type_path = Some("crate::A".into());
+        binding.mutator_trait_path = Some("crate::AM".into());
+        binding.input_enum_path = Some("crate::AI".into());
+        binding.effect_enum_path = Some("crate::AE".into());
+        binding.transition_type_path = Some("crate::AT".into());
+        binding.error_type_path = Some("crate::AErr".into());
+        binding.additional_modes = vec![
+            ProtocolGenerationMode::HandleBridge,
+            ProtocolGenerationMode::HandleBridge,
+        ];
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+
+        let err = composition
+            .validate()
+            .expect_err("must reject repeat within additional_modes");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("more than once"),
+                    "error detail should mention repetition, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dual_mode_effect_extractor_plus_handle_bridge_validates() {
+        // Minimum valid stacked binding: EffectExtractor primary +
+        // HandleBridge secondary, with all required fields for both.
+        let mut methods = BTreeMap::new();
+        methods.insert("Ack".into(), "acknowledge".into());
+        let binding = ProtocolRustBinding {
+            module_path: "crate-x/src/generated/proto.rs".into(),
+            generation_mode: ProtocolGenerationMode::EffectExtractor,
+            required_imports: vec![],
+            authority_type_path: Some("crate::A".into()),
+            mutator_trait_path: Some("crate::AM".into()),
+            input_enum_path: Some("crate::AI".into()),
+            effect_enum_path: Some("crate::AE".into()),
+            transition_type_path: Some("crate::AT".into()),
+            error_type_path: Some("crate::AErr".into()),
+            executor_trigger_input_variant: None,
+            bridge_source_type_path: None,
+            helper_return_shape: ProtocolHelperReturnShape::Effects,
+            handle_trait_path: Some("crate::SomeHandle".into()),
+            handle_method_names: methods,
+            handle_arg_accessors: BTreeMap::new(),
+            handle_method_forwarded_fields: BTreeMap::new(),
+            input_payload_module_path: None,
+            additional_modes: vec![ProtocolGenerationMode::HandleBridge],
+        };
+        let composition = composition_with_protocol(handle_bridge_protocol(binding));
+        composition
+            .validate()
+            .expect("dual-mode binding should validate");
+    }
+
+    #[test]
+    fn compat_composition_schemas_is_accessible_and_validates_each_returned_entry() {
+        // `compat_composition_schemas()` is invoked by the codegen iteration
+        // alongside canonical. Every entry it returns must validate against
+        // the canonical + compat machine registries together, since compat
+        // compositions can reference either catalog.
+        let compositions = compat_composition_schemas();
+        let mut machines = canonical_machine_schemas();
+        machines.extend([
+            meerkat_machine_schema::flow_frame_machine(),
+            meerkat_machine_schema::flow_run_machine(),
+            meerkat_machine_schema::loop_iteration_machine(),
+            meerkat_machine_schema::ops_barrier_bridge_machine(),
+            meerkat_machine_schema::external_tool_surface_bridge_machine(),
+        ]);
+        let machine_refs: Vec<_> = machines.iter().collect();
+        for composition in &compositions {
+            composition
+                .validate_against(&machine_refs)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "compat composition `{}` failed validation: {err:?}",
+                        composition.name
+                    )
+                });
+        }
+    }
+
+    /// Negative: EffectExtractor with no `authority_type_path` and no
+    /// stacked `HandleBridge` must fail validation. The compat bridge
+    /// pattern relies on this gate to prevent accidental
+    /// extract-obligations-only bindings whose feedback surface has
+    /// no home.
+    #[test]
+    fn effect_extractor_without_authority_must_stack_handle_bridge() {
+        use meerkat_machine_schema::{
+            ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, CompositionSchemaError,
+            CompositionStateLimits, EffectHandoffProtocol, FeedbackFieldBinding,
+            FeedbackFieldSource, FeedbackInputRef, MachineInstance, ProtocolGenerationMode,
+            ProtocolHelperReturnShape, ProtocolRustBinding,
+        };
+
+        let composition = CompositionSchema {
+            name: "test_effect_extractor_without_authority".into(),
+            machines: vec![MachineInstance {
+                instance_id: "external_tool_surface".into(),
+                machine_name: "ExternalToolSurfaceBridgeMachine".into(),
+                actor: "external_tool_surface_authority".into(),
+            }],
+            actors: vec![
+                ActorSchema {
+                    name: "external_tool_surface_authority".into(),
+                    kind: ActorKind::Machine,
+                },
+                ActorSchema {
+                    name: "owner".into(),
+                    kind: ActorKind::Owner,
+                },
+            ],
+            handoff_protocols: vec![EffectHandoffProtocol {
+                name: "no_authority_no_handle".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "RefreshVisibleSurfaceSet".into(),
+                realizing_actor: "owner".into(),
+                correlation_fields: vec!["snapshot_epoch".into()],
+                obligation_fields: vec!["snapshot_epoch".into()],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "SnapshotAligned".into(),
+                    field_bindings: vec![FeedbackFieldBinding {
+                        input_field: "snapshot_epoch".into(),
+                        source: FeedbackFieldSource::ObligationField("snapshot_epoch".into()),
+                    }],
+                }],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: None,
+                rust: ProtocolRustBinding {
+                    module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
+                    generation_mode: ProtocolGenerationMode::EffectExtractor,
+                    required_imports: vec![],
+                    authority_type_path: None,
+                    mutator_trait_path: None,
+                    input_enum_path: None,
+                    effect_enum_path: Some(
+                        "crate::external_tool_surface_authority::ExternalToolSurfaceEffect".into(),
+                    ),
+                    transition_type_path: None,
+                    error_type_path: None,
+                    executor_trigger_input_variant: None,
+                    bridge_source_type_path: None,
+                    helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                    handle_trait_path: None,
+                    handle_method_names: BTreeMap::new(),
+                    handle_arg_accessors: BTreeMap::new(),
+                    handle_method_forwarded_fields: BTreeMap::new(),
+                    input_payload_module_path: None,
+                    additional_modes: vec![],
+                },
+            }],
+            entry_inputs: vec![],
+            routes: vec![],
+            route_target_selectors: vec![],
+            driver: None,
+            transaction_plans: vec![],
+            actor_priorities: vec![],
+            scheduler_rules: vec![],
+            invariants: vec![],
+            witnesses: vec![],
+            deep_domain_cardinality: 2,
+            deep_domain_overrides: std::collections::BTreeMap::new(),
+            witness_domain_cardinality: 2,
+            ci_limits: Some(CompositionStateLimits {
+                step_limit: 4,
+                pending_input_limit: 4,
+                pending_route_limit: 4,
+                delivered_route_limit: 0,
+                emitted_effect_limit: 0,
+                seq_limit: 0,
+                set_limit: 0,
+                map_limit: 0,
+            }),
+            closed_world: true,
+        };
+
+        let err = composition
+            .validate()
+            .expect_err("must reject EffectExtractor without authority or stacked HandleBridge");
+        match err {
+            CompositionSchemaError::InvalidHandoffRustBinding { protocol, detail } => {
+                assert_eq!(protocol, "no_authority_no_handle");
+                assert!(
+                    detail.contains("HandleBridge"),
+                    "error detail should mention HandleBridge requirement, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffRustBinding, got {other:?}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compat bridge parity — guard against silent drift between a compat
+// bridge machine's mirrored effect/input shape and the runtime struct
+// it mirrors. The bridge exists only to host handoff annotations the
+// DSL macro cannot express; if canonical types evolve and the bridge
+// doesn't, composition validation keeps passing while the codegen
+// emits stale obligation/input fields.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::expect_used, clippy::panic)]
+mod compat_bridge_parity {
+    use meerkat_machine_schema::{
+        TypeRef, external_tool_surface_bridge_machine, ops_barrier_bridge_machine,
+    };
+
+    #[test]
+    fn ops_barrier_bridge_wait_all_satisfied_mirrors_runtime_struct() {
+        // The bridge's `WaitAllSatisfied` effect must name the two
+        // fields the runtime's hand-written `WaitAllSatisfied` struct
+        // in `meerkat-core/src/ops_lifecycle.rs` exposes:
+        //   pub wait_request_id: WaitRequestId,
+        //   pub operation_ids: Vec<OperationId>,
+        // Drift in either direction silently desyncs the
+        // `ops_barrier_satisfaction` handoff obligation.
+        let schema = ops_barrier_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "WaitAllSatisfied")
+            .expect("bridge must declare WaitAllSatisfied effect");
+        let field_names: std::collections::BTreeSet<&str> =
+            effect.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains("wait_request_id"),
+            "bridge lost `wait_request_id` field — runtime struct has it"
+        );
+        assert!(
+            field_names.contains("operation_ids"),
+            "bridge lost `operation_ids` field — runtime struct has it"
+        );
+        assert_eq!(
+            field_names.len(),
+            2,
+            "bridge gained extra fields not present on runtime struct — audit both"
+        );
+        // Type-shape parity: operation_ids must render as a sequence
+        // of OperationId, wait_request_id as the typed newtype.
+        let wait_request = effect.field_named("wait_request_id").expect("field");
+        assert_eq!(
+            wait_request.ty,
+            TypeRef::Named("WaitRequestId".into()),
+            "bridge wait_request_id must be `WaitRequestId` typed"
+        );
+        let operation_ids = effect.field_named("operation_ids").expect("field");
+        assert!(
+            matches!(&operation_ids.ty, TypeRef::Seq(inner) if matches!(inner.as_ref(), TypeRef::Named(name) if name == "OperationId")),
+            "bridge operation_ids must be Seq<OperationId>, got {:?}",
+            operation_ids.ty
+        );
+    }
+
+    #[test]
+    fn external_tool_surface_bridge_refresh_visible_surface_set_mirrors_runtime_struct() {
+        let schema = external_tool_surface_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "RefreshVisibleSurfaceSet")
+            .expect("bridge must declare RefreshVisibleSurfaceSet effect");
+        assert_eq!(
+            effect.fields.len(),
+            1,
+            "RefreshVisibleSurfaceSet has exactly `snapshot_epoch` — runtime parity"
+        );
+        assert_eq!(effect.fields[0].name, "snapshot_epoch");
+        assert_eq!(effect.fields[0].ty, TypeRef::U64);
+    }
+
+    #[test]
+    fn external_tool_surface_bridge_schedule_surface_completion_mirrors_runtime_struct() {
+        let schema = external_tool_surface_bridge_machine();
+        let effect = schema
+            .effects
+            .variants
+            .iter()
+            .find(|v| v.name == "ScheduleSurfaceCompletion")
+            .expect("bridge must declare ScheduleSurfaceCompletion effect");
+        let field_names: std::collections::BTreeSet<&str> =
+            effect.fields.iter().map(|f| f.name.as_str()).collect();
+        // The runtime struct in `meerkat-mcp/src/external_tool_surface_authority.rs`
+        // exposes these five fields. Any deletion/addition on either
+        // side must sync here or fail the parity gate.
+        for required in [
+            "surface_id",
+            "operation",
+            "pending_task_sequence",
+            "staged_intent_sequence",
+            "applied_at_turn",
+        ] {
+            assert!(
+                field_names.contains(required),
+                "bridge ScheduleSurfaceCompletion lost `{required}` — runtime parity violation"
+            );
+        }
+        assert_eq!(
+            field_names.len(),
+            5,
+            "bridge ScheduleSurfaceCompletion gained extra fields not on runtime — audit both"
+        );
+    }
+}

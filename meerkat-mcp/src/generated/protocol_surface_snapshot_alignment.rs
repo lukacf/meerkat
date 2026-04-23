@@ -28,7 +28,7 @@ pub fn extract_obligations(
 }
 
 pub fn submit_snapshot_aligned(
-    handle: &dyn ExternalToolSurfaceHandle,
+    handle: &(impl ExternalToolSurfaceHandle + ?Sized),
     obligation: SurfaceSnapshotAlignmentObligation,
 ) -> Result<(), DslTransitionError> {
     handle.snapshot_aligned(obligation.snapshot_epoch)

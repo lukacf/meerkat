@@ -324,7 +324,7 @@ impl SurfaceOwner {
                 applied_at_turn,
             } => {
                 let before = handle.diagnostic_snapshot();
-                protocol_surface_completion::submit_pending_succeeded_handle(
+                protocol_surface_completion::submit_pending_succeeded(
                     handle,
                     SurfaceCompletionObligation {
                         surface_id: surface_id.clone(),
@@ -369,7 +369,7 @@ impl SurfaceOwner {
                 staged_intent_sequence,
                 applied_at_turn,
             } => {
-                protocol_surface_completion::submit_pending_failed_handle(
+                protocol_surface_completion::submit_pending_failed(
                     handle,
                     SurfaceCompletionObligation {
                         surface_id: surface_id.clone(),

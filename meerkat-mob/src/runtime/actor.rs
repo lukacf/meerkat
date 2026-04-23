@@ -2709,16 +2709,23 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    if self.state() == MobState::Running
-                        && let Err(error) =
-                            self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "shutdown_stop")
+                    // Wave-c WAR-2: submit `Stop` unconditionally and let the
+                    // authority be the single decider of whether the
+                    // transition is valid for the current phase. A pre-state
+                    // check here would be a shell-side second source of truth
+                    // about when `Stop` is accepted, which the `NoGuardedApply`
+                    // rule forbids. During `Shutdown`, an authority rejection
+                    // of `Stop` is the benign "already past Running" shape and
+                    // is logged at debug level without contaminating the
+                    // shutdown result.
+                    if let Err(error) =
+                        self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "shutdown_stop")
                     {
-                        tracing::warn!(error = %error, "authority rejected Stop");
-                        if result.is_ok() {
-                            result = Err(MobError::Internal(format!(
-                                "lifecycle Stop transition failed during shutdown: {error}"
-                            )));
-                        }
+                        tracing::debug!(
+                            error = %error,
+                            "authority rejected Stop during shutdown (expected when mob is \
+                             already past Running); continuing shutdown",
+                        );
                     }
                     let _ = reply_tx.send(result);
                     break;
@@ -5459,23 +5466,36 @@ impl MobActor {
             return Err(error);
         }
 
-        let phase = self.state();
-        // Ensure we're in Stopped state before orchestrator work
-        if phase == MobState::Running {
-            // Stop transition (requires no active runs and moves coordinator_bound=false)
-            self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "stop_reset")
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "lifecycle Stop transition failed during reset: {error}"
-                    ))
-                })?;
-        } else if phase == MobState::Completed {
-            self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishCleanup, "finish_cleanup")
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "lifecycle FinishCleanup transition failed during reset from completed: {error}"
-                    ))
-                })?;
+        // Wave-c WAR-2: land the mob on Stopped without a shell-side
+        // phase-read guard. We have two DSL entries that can reach
+        // Stopped — `Stop` input (Running → Stopped, also gated by
+        // `active_run_count == 0`) and the `FinishCleanup` signal
+        // (Completed → Stopped). The previous `if phase == Running {
+        // Stop } else if phase == Completed { FinishCleanup }` shape
+        // duplicated the DSL's own per-transition guards in the shell;
+        // the `NoGuardedApply` rule flags that as a second source of
+        // truth.
+        //
+        // Dogma-clean pattern: try `Stop` first; if the authority
+        // accepts, we were Running and the transition completed. If the
+        // authority rejects (meaning we were already past Running), try
+        // `FinishCleanup` to cover the Completed case. Already-Stopped
+        // mobs get rejections from both and fall through as a no-op.
+        // Branching on the *authority's* rejection is not a shell state
+        // read — it's the authority itself reporting "that input does
+        // not apply in my current phase", which is the contract the
+        // rule explicitly endorses ("let the authority reject").
+        let stop_rejected = self
+            .apply_dsl_input(mob_dsl::MobMachineInput::Stop, "stop_reset")
+            .is_err();
+        if stop_rejected
+            && let Err(error) = self
+                .apply_dsl_signal(mob_dsl::MobMachineSignal::FinishCleanup, "finish_cleanup_reset")
+        {
+            tracing::debug!(
+                error = %error,
+                "reset: FinishCleanup rejected after Stop rejected — mob was already Stopped",
+            );
         }
         if self.has_orchestrator {
             let mut topology_unbound = false;

@@ -90,8 +90,8 @@ pub use input_state::{
 };
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatMachine, PeerIngressOwner,
-    RuntimeBindingsError,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatConsumerSurface, MeerkatMachine,
+    PeerIngressOwner, RuntimeBindingsError,
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, RealtimeAttachmentSignalAuthority, RealtimeAttachmentStatus,

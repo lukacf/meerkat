@@ -38,6 +38,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         image_tool_results_enabled: bool,
         max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartConversationRun {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -56,6 +57,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         run_id: RunId,
         admitted_content_shape: String,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateAppend {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -70,6 +72,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         run_id: RunId,
         admitted_content_shape: String,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateContext {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -80,6 +83,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::PrimitiveApplied,
             "TurnStateHandle::primitive_applied",
@@ -87,6 +91,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::LlmReturnedToolCalls { tool_count },
             "TurnStateHandle::llm_returned_tool_calls",
@@ -94,6 +99,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn llm_returned_terminal(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::LlmReturnedTerminal,
             "TurnStateHandle::llm_returned_terminal",
@@ -105,6 +111,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         op_refs: BTreeSet<String>,
         barrier_operation_ids: BTreeSet<String>,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RegisterPendingOps {
                 op_refs,
@@ -115,6 +122,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn tool_calls_resolved(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::ToolCallsResolved,
             "TurnStateHandle::tool_calls_resolved",
@@ -125,6 +133,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         &self,
         operation_ids: BTreeSet<String>,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::OpsBarrierSatisfied { operation_ids },
             "TurnStateHandle::ops_barrier_satisfied",
@@ -132,6 +141,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn boundary_continue(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::BoundaryContinue,
             "TurnStateHandle::boundary_continue",
@@ -139,6 +149,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn boundary_complete(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::BoundaryComplete,
             "TurnStateHandle::boundary_complete",
@@ -146,6 +157,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn enter_extraction(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::EnterExtraction,
             "TurnStateHandle::enter_extraction",
@@ -153,6 +165,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn extraction_start(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::ExtractionStart,
             "TurnStateHandle::extraction_start",
@@ -160,6 +173,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn extraction_validation_passed(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::ExtractionValidationPassed,
             "TurnStateHandle::extraction_validation_passed",
@@ -167,6 +181,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::ExtractionValidationFailed { error },
             "TurnStateHandle::extraction_validation_failed",
@@ -174,6 +189,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn recoverable_failure(&self, error: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RecoverableFailure { error },
             "TurnStateHandle::recoverable_failure",
@@ -181,6 +197,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::FatalFailure { error },
             "TurnStateHandle::fatal_failure",
@@ -188,6 +205,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn retry_requested(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RetryRequested,
             "TurnStateHandle::retry_requested",
@@ -195,6 +213,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn cancel_now(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::CancelNow,
             "TurnStateHandle::cancel_now",
@@ -202,6 +221,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RequestCancelAfterBoundary,
             "TurnStateHandle::request_cancel_after_boundary",
@@ -209,6 +229,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn cancellation_observed(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::CancellationObserved,
             "TurnStateHandle::cancellation_observed",
@@ -216,6 +237,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn acknowledge_terminal(&self, outcome: TurnTerminalOutcome) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::AcknowledgeTerminal {
                 outcome: mm_dsl::TurnTerminalOutcome::from(outcome),
@@ -225,6 +247,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn turn_limit_reached(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::TurnLimitReached,
             "TurnStateHandle::turn_limit_reached",
@@ -232,6 +255,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn budget_exhausted(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::BudgetExhausted,
             "TurnStateHandle::budget_exhausted",
@@ -239,6 +263,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn time_budget_exceeded(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::TimeBudgetExceeded,
             "TurnStateHandle::time_budget_exceeded",
@@ -246,6 +271,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::ForceCancelNoRun,
             "TurnStateHandle::force_cancel_no_run",
@@ -253,6 +279,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunCompleted {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -262,6 +289,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn run_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunFailed {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -272,6 +300,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunCancelled {
                 run_id: mm_dsl::RunId::from_domain(&run_id),

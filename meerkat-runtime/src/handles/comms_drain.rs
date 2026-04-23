@@ -44,6 +44,7 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
             DrainMode::AttachedSession => mm_dsl::DrainMode::AttachedSession,
             DrainMode::PersistentHost => mm_dsl::DrainMode::PersistentHost,
         };
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SpawnDrain { mode },
             "CommsDrainHandle::spawn_drain",
@@ -51,6 +52,7 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn stop_drain(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StopDrain,
             "CommsDrainHandle::stop_drain",
@@ -58,6 +60,7 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn drain_exited_clean(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::DrainExitedClean,
             "CommsDrainHandle::drain_exited_clean",
@@ -65,6 +68,7 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::DrainExitedRespawnable,
             "CommsDrainHandle::drain_exited_respawnable",
@@ -72,6 +76,7 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::NotifyDrainExited {
                 reason: mm_dsl::DrainExitReason::from(reason),

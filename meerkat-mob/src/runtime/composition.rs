@@ -262,6 +262,44 @@ pub fn lift_routed_effect(effect: &mob_dsl::MobMachineEffect) -> Option<MobSeamE
     Some(MobSeamEffect::Mob(body))
 }
 
+/// Wave-c C-6c — build a production [`MobCompositionBinding`] that
+/// routes mob-emitted routed effects into the meerkat consumer surface
+/// installed on `runtime_adapter`.
+///
+/// This is the single constructor site that flips mob assembly from
+/// `CompositionBinding::Standalone` (the default that returned
+/// [`DispatchRefusal::UnwiredConsumer`] on every dispatch during
+/// wave-c's intermediate state) to `CompositionBinding::Wired(_)` with
+/// a [`meerkat_runtime::composition::CatalogCompositionDispatcher`]
+/// carrying the typed `meerkat_mob_seam`
+/// [`meerkat_runtime::composition::RouteTable`] and the runtime-side
+/// consumer surface. The builder helper below is feature-gated on
+/// `runtime-adapter` and returns `None` on the no-adapter build so
+/// callers can fall through to `CompositionBinding::Standalone`.
+#[cfg(feature = "runtime-adapter")]
+pub fn wired_binding_from_runtime_adapter(
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+) -> MobCompositionBinding {
+    use meerkat_runtime::composition::{
+        CatalogCompositionDispatcher, CompositionBinding, RouteTable,
+    };
+    let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+    // The schema is hand-authored and compile-time-fixed; a failure to
+    // build the route table is a schema bug, not a runtime condition.
+    // `expect` mirrors the pattern used by the dispatcher's own test
+    // helpers in `meerkat-runtime/src/composition/route_table.rs`.
+    let table = RouteTable::from_schema(&schema)
+        .expect("meerkat_mob_seam schema is well-formed by construction");
+    let consumer = Arc::new(
+        meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::new(Arc::clone(
+            runtime_adapter,
+        )),
+    );
+    let dispatcher: CatalogCompositionDispatcher<MobSeamEffect> =
+        CatalogCompositionDispatcher::new(schema.name.clone(), table).with_consumer(consumer);
+    CompositionBinding::Wired(Arc::new(dispatcher))
+}
+
 /// Dispatch a single routed seam effect through the mob's composition
 /// binding.
 ///

@@ -1424,6 +1424,19 @@ impl MobBuilder {
         );
         let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::new());
 
+        // Wave-c C-6c — flip the composition binding from `Standalone`
+        // to `Wired(_)` whenever a runtime adapter is present, wiring
+        // the mob producer into the `MeerkatConsumerSurface` on
+        // `MeerkatMachine`. Builds without `runtime-adapter` keep the
+        // standalone path (no consumer exists by construction).
+        #[cfg(feature = "runtime-adapter")]
+        let composition_binding = match &runtime_adapter {
+            Some(adapter) => super::composition::wired_binding_from_runtime_adapter(adapter),
+            None => meerkat_runtime::composition::CompositionBinding::Standalone,
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
+
         let actor = MobActor {
             definition,
             roster,
@@ -1459,15 +1472,7 @@ impl MobBuilder {
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,
-            // Wave-c C-6p — default to the standalone composition
-            // binding. Production assembly paths (builder configuration
-            // methods that opt into composition dispatch) swap this for
-            // `CompositionBinding::Wired(...)` once the consumer surface
-            // on `MeerkatMachine` is live (C-6c). Standalone is the
-            // correct default for tests / single-machine runs; routed
-            // effects still drain through the queue but have no
-            // consumer to dispatch to by construction.
-            composition_binding: meerkat_runtime::composition::CompositionBinding::Standalone,
+            composition_binding,
             pending_routed_effects: Vec::new(),
         };
         tokio::spawn(actor.run(command_rx));

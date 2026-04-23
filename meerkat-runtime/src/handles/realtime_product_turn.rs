@@ -71,6 +71,8 @@ impl RuntimeRealtimeProductTurnHandle {
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<bool, DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable
+        // (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         match self.dsl.apply_input(input, context) {
             Ok(()) => Ok(true),
             Err(err) if err.is_guard_rejected() => Ok(false),

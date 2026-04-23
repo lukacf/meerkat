@@ -81,6 +81,7 @@ pub(crate) use driver::{
 pub(crate) mod driver;
 
 mod comms_drain;
+pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
 mod dispatch_ingress;
@@ -94,6 +95,8 @@ mod runtime_control;
 mod session_management;
 mod traits;
 mod visibility;
+
+pub use composition::MeerkatConsumerSurface;
 
 pub use comms_drain::{
     CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerIngressOwner, SupervisorBinding,
@@ -486,6 +489,39 @@ impl MeerkatMachine {
     /// machine instance so tests / parallel runtimes do not collide.
     pub fn session_claim_handle(&self) -> Arc<dyn meerkat_core::handles::SessionClaimHandle> {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
+    }
+
+    /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
+    /// composition dispatcher against the session's shared DSL authority.
+    ///
+    /// The caller is
+    /// [`crate::meerkat_machine::composition::MeerkatConsumerSurface::apply_routed_input`];
+    /// it has already projected producer fields into the typed
+    /// [`dsl::MeerkatMachineInput`] shape. This method performs the
+    /// session lookup + DSL-lock-scoped apply. A typed transition error
+    /// from the kernel is surfaced as a `String` so the dispatcher can
+    /// map it onto `DispatchRefusal::ConsumerRefused`.
+    pub async fn apply_routed_meerkat_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+    ) -> Result<(), String> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            format!(
+                "session `{session_id}` is not registered with this MeerkatMachine; \
+                 cannot deliver routed input"
+            )
+        })?;
+        let authority = Arc::clone(&entry.dsl_authority);
+        drop(sessions);
+
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map(|_transition| ())
+            .map_err(|err| format!("{err}"))
     }
 
     #[cfg(test)]

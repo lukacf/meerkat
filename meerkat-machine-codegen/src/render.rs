@@ -2989,11 +2989,12 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
             if generated_enum_names.contains(&rust_ident(&alias)) {
                 continue;
             }
+            let atom = lookup_named_type_atom(schema, &alias);
             pushln!(
                 &mut out,
                 "pub type {} = {};",
                 rust_ident(&alias),
-                render_named_type_alias_target(&alias)
+                render_rust_type_atom(atom)
             );
         }
         pushln!(&mut out);
@@ -3345,7 +3346,7 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
             &mut out,
             "        {}: {},",
             rust_field_ident(&field.name),
-            direct_default_value_expr(&field.ty, &enum_defaults)
+            direct_default_value_expr(schema, &field.ty, &enum_defaults)
         );
     }
     pushln!(&mut out, "    }}");
@@ -3712,6 +3713,7 @@ pub fn transition<C: Context>(
 
 #[cfg(not(test))]
 fn direct_default_value_expr(
+    schema: &MachineSchema,
     ty: &TypeRef,
     enum_defaults: &std::collections::BTreeMap<String, String>,
 ) -> String {
@@ -3719,14 +3721,14 @@ fn direct_default_value_expr(
         TypeRef::Bool => "false".to_string(),
         TypeRef::U32 | TypeRef::U64 => "0".to_string(),
         TypeRef::String => "String::new()".to_string(),
-        TypeRef::Named(name) if matches!(render_named_type_alias_target(name), "u64" | "u32") => {
+        TypeRef::Named(name) if named_type_lowers_to_u64(schema, name.as_str()) => {
             "0".to_string()
         }
-        TypeRef::Named(name) => format!("{}::from(String::new())", rust_ident(name)),
+        TypeRef::Named(name) => format!("{}::from(String::new())", rust_ident(name.as_str())),
         TypeRef::Enum(name) => enum_defaults
-            .get(name)
+            .get(name.as_str())
             .cloned()
-            .unwrap_or_else(|| format!("{}::default()", rust_ident(name))),
+            .unwrap_or_else(|| format!("{}::default()", rust_ident(name.as_str()))),
         TypeRef::Option(_) => "None".to_string(),
         TypeRef::Set(_) => "Default::default()".to_string(),
         TypeRef::Seq(_) => "Vec::new()".to_string(),
@@ -4309,265 +4311,58 @@ fn collect_enum_types_from_type_ref(ty: &TypeRef, enums: &mut std::collections::
     }
 }
 
+/// Render the Rust-code text for a [`RustTypeAtom`] — what appears on the
+/// right-hand side of a `pub type Alias = ...;` declaration or the
+/// return position of a default-value helper.
 #[cfg(not(test))]
-fn render_named_type_alias_target(name: &str) -> &'static str {
-    match name {
-        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation" => "u64",
-        _ => "String",
+fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+    match atom {
+        RustTypeAtom::U8 => "u8".to_string(),
+        RustTypeAtom::U16 => "u16".to_string(),
+        RustTypeAtom::U32 => "u32".to_string(),
+        RustTypeAtom::U64 => "u64".to_string(),
+        RustTypeAtom::Bool => "bool".to_string(),
+        RustTypeAtom::String => "String".to_string(),
+        RustTypeAtom::TypePath(path) => path.clone(),
     }
 }
 
+/// Look up the authoritative Rust atom for a `TypeRef::Named` slug.
+///
+/// Panics when the schema is missing a binding for a named type it
+/// references — `MachineSchema::validate()` rejects such schemas at
+/// construction, so reaching codegen in that state is a bug, not a
+/// user-correctable error.
 #[cfg(not(test))]
-#[allow(dead_code)]
-fn render_to_raw_expr(expr: &str, ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Bool => format!("RawValue::Bool(({expr}).to_owned())"),
-        TypeRef::U32 | TypeRef::U64 => format!("RawValue::U64(({expr}).to_owned() as u64)"),
-        TypeRef::String => format!("RawValue::String(({expr}).to_owned())"),
-        TypeRef::Named(name) if render_named_type_alias_target(&rust_ident(name)) == "u64" => {
-            format!("RawValue::U64(({expr}).to_owned() as u64)")
-        }
-        TypeRef::Named(_) => format!("RawValue::String(({expr}).to_owned())"),
-        TypeRef::Enum(name) => {
-            if let Some(variants) = known_enum_variants(name) {
-                let enum_name = rust_ident(name);
-                let arms = variants
-                    .iter()
-                    .map(|variant| {
-                        format!(
-                            "{enum_name}::{} => \"{variant}\".into()",
-                            rust_ident(variant)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "RawValue::NamedVariant {{ enum_name: \"{}\".into(), variant: match {expr} {{ {} }} }}",
-                    name, arms
-                )
-            } else {
-                format!(
-                    "RawValue::NamedVariant {{ enum_name: \"{}\".into(), variant: ({expr}).to_owned() }}",
-                    name
-                )
-            }
-        }
-        TypeRef::Option(inner) => {
-            let inner_expr = render_to_raw_expr("value", inner);
-            format!(
-                "match {expr}.as_ref() {{ Some(value) => RawValue::Map(std::collections::BTreeMap::from([(RawValue::String(\"value\".into()), {inner_expr})])), None => RawValue::None }}"
+fn lookup_named_type_atom<'a>(
+    schema: &'a MachineSchema,
+    name: &str,
+) -> &'a meerkat_machine_schema::RustTypeAtom {
+    schema
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == name)
+        .map(|binding| &binding.rust)
+        .unwrap_or_else(|| {
+            panic!(
+                "codegen: named type `{name}` on machine `{}` has no NamedTypeBinding — \
+                 MachineSchema::validate() must be run before rendering",
+                schema.machine
             )
-        }
-        TypeRef::Set(inner) => format!(
-            "RawValue::Set({expr}.iter().map(|value| {}).collect())",
-            render_to_raw_expr("value", inner)
-        ),
-        TypeRef::Seq(inner) => format!(
-            "RawValue::Seq({expr}.iter().map(|value| {}).collect())",
-            render_to_raw_expr("value", inner)
-        ),
-        TypeRef::Map(key, value) => format!(
-            "RawValue::Map({expr}.iter().map(|(key, value)| ({}, {})).collect())",
-            render_to_raw_expr("key", key),
-            render_to_raw_expr("value", value)
-        ),
-    }
+        })
 }
 
+/// Named-type slugs whose authoritative binding resolves to `u64`.
+/// Convenience predicate consumed by the default-value and RawValue
+/// helpers.
 #[cfg(not(test))]
-#[allow(dead_code)]
-fn render_from_raw_expr(expr: &str, ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Bool => format!(
-            "match {expr} {{ RawValue::Bool(value) => *value, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected bool, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U32 => format!(
-            "match {expr} {{ RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {{ detail: format!(\"u64 {{value}} does not fit u32\") }})?, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U64 => format!(
-            "match {expr} {{ RawValue::U64(value) => *value, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::String => format!(
-            "match {expr} {{ RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected string, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Named(name) if render_named_type_alias_target(&rust_ident(name)) == "u64" => {
-            format!(
-                "match {expr} {{ RawValue::U64(value) => *value, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected numeric named value, found {{other:?}}\") }}) }}"
-            )
-        }
-        TypeRef::Named(_) => format!(
-            "match {expr} {{ RawValue::String(value) => value.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Enum(name) => {
-            if let Some(variants) = known_enum_variants(name) {
-                let enum_name = rust_ident(name);
-                let arms = variants
-                    .iter()
-                    .map(|variant| {
-                        format!("\"{variant}\" => {enum_name}::{},", rust_ident(variant))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!(
-                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-                    name, arms, name, name
-                )
-            } else {
-                format!(
-                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => variant.clone(), other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-                    name, name
-                )
-            }
-        }
-        TypeRef::Option(inner) => {
-            let inner_expr = render_from_raw_expr("value", inner);
-            format!(
-                "match {expr} {{ RawValue::None => None, RawValue::Map(entries) => match entries.get(&RawValue::String(\"value\".into())) {{ Some(value) => Some({inner_expr}), None => None }}, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected option, found {{other:?}}\") }}) }}"
-            )
-        }
-        TypeRef::Set(inner) => format!(
-            "match {expr} {{ RawValue::Set(values) => values.iter().map(|value| {}).collect::<Result<std::collections::BTreeSet<_>, _>>()?, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected set, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Seq(inner) => format!(
-            "match {expr} {{ RawValue::Seq(values) => values.iter().map(|value| {}).collect::<Result<Vec<_>, _>>()?, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected seq, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Map(key, value) => format!(
-            "match {expr} {{ RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok((({})?, ({})?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>()?, other => return Err(KernelError::CodegenInvariant {{ detail: format!(\"expected map, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("key", key),
-            render_try_from_raw_expr("value", value)
-        ),
-    }
-}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn render_try_from_raw_expr(expr: &str, ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Bool => format!(
-            "match {expr} {{ RawValue::Bool(value) => Ok(*value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected bool, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U32 => format!(
-            "match {expr} {{ RawValue::U64(value) => u32::try_from(*value).map_err(|_| KernelError::CodegenInvariant {{ detail: format!(\"u64 {{value}} does not fit u32\") }}), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U64 => format!(
-            "match {expr} {{ RawValue::U64(value) => Ok(*value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::String => format!(
-            "match {expr} {{ RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected string, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Named(name) if render_named_type_alias_target(&rust_ident(name)) == "u64" => {
-            format!(
-                "match {expr} {{ RawValue::U64(value) => Ok(*value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected numeric named value, found {{other:?}}\") }}) }}"
-            )
-        }
-        TypeRef::Named(_) => format!(
-            "match {expr} {{ RawValue::String(value) => Ok(value.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Enum(name) => {
-            if let Some(variants) = known_enum_variants(name) {
-                let enum_name = rust_ident(name);
-                let arms = variants
-                    .iter()
-                    .map(|variant| {
-                        format!("\"{variant}\" => Ok({enum_name}::{}),", rust_ident(variant))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!(
-                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-                    name, arms, name, name
-                )
-            } else {
-                format!(
-                    "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => Ok(variant.clone()), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-                    name, name
-                )
-            }
-        }
-        TypeRef::Option(inner) => {
-            let inner_expr = render_try_from_raw_expr("value", inner);
-            format!(
-                "match {expr} {{ RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String(\"value\".into())) {{ Some(value) => Ok(Some({inner_expr}?)), None => Ok(None) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected option, found {{other:?}}\") }}) }}"
-            )
-        }
-        TypeRef::Set(inner) => format!(
-            "match {expr} {{ RawValue::Set(values) => values.iter().map(|value| {}).collect::<Result<std::collections::BTreeSet<_>, _>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected set, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Seq(inner) => format!(
-            "match {expr} {{ RawValue::Seq(values) => values.iter().map(|value| {}).collect::<Result<Vec<_>, _>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected seq, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Map(key, value) => format!(
-            "match {expr} {{ RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok(({}, {}))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected map, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("key", key),
-            render_try_from_raw_expr("value", value)
-        ),
-    }
-}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn render_try_from_owned_raw_expr(expr: &str, ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Bool => format!(
-            "match {expr} {{ RawValue::Bool(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected bool, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U32 => format!(
-            "match {expr} {{ RawValue::U64(value) => u32::try_from(value).map_err(|_| KernelError::CodegenInvariant {{ detail: format!(\"u64 {{value}} does not fit u32\") }}), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::U64 => format!(
-            "match {expr} {{ RawValue::U64(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected u64, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::String => format!(
-            "match {expr} {{ RawValue::String(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected string, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Named(name) if render_named_type_alias_target(&rust_ident(name)) == "u64" => {
-            format!(
-                "match {expr} {{ RawValue::U64(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected numeric named value, found {{other:?}}\") }}) }}"
-            )
-        }
-        TypeRef::Named(_) => format!(
-            "match {expr} {{ RawValue::String(value) => Ok(value), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected named string value, found {{other:?}}\") }}) }}"
-        ),
-        TypeRef::Enum(name) => {
-            let enum_name = rust_ident(name);
-            let variants = known_enum_variants(name).unwrap_or_default();
-            let arms = variants
-                .iter()
-                .map(|variant| {
-                    format!("\"{variant}\" => Ok({enum_name}::{}),", rust_ident(variant))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!(
-                "match {expr} {{ RawValue::NamedVariant {{ enum_name, variant }} if enum_name == \"{}\" => match variant.as_str() {{ {} other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {} variant, found {{other}}\") }}) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected enum {}, found {{other:?}}\") }}) }}",
-                name, arms, name, name
-            )
-        }
-        TypeRef::Option(inner) => {
-            let inner_expr = render_try_from_raw_expr("value", inner);
-            format!(
-                "match {expr} {{ RawValue::None => Ok(None), RawValue::Map(entries) => match entries.get(&RawValue::String(\"value\".into())) {{ Some(value) => Ok(Some(({})?)), None => Ok(None) }}, other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected option, found {{other:?}}\") }}) }}",
-                inner_expr
-            )
-        }
-        TypeRef::Set(inner) => format!(
-            "match {expr} {{ RawValue::Set(values) => values.iter().map(|value| {}).collect::<Result<std::collections::BTreeSet<_>, _>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected set, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Seq(inner) => format!(
-            "match {expr} {{ RawValue::Seq(values) => values.iter().map(|value| {}).collect::<Result<Vec<_>, _>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected seq, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("value", inner)
-        ),
-        TypeRef::Map(key, value) => format!(
-            "match {expr} {{ RawValue::Map(entries) => entries.iter().map(|(key, value)| Ok((({})?, ({})?))).collect::<Result<std::collections::BTreeMap<_, _>, KernelError>>(), other => Err(KernelError::CodegenInvariant {{ detail: format!(\"expected map, found {{other:?}}\") }}) }}",
-            render_try_from_raw_expr("key", key),
-            render_try_from_raw_expr("value", value)
-        ),
-    }
+fn named_type_lowers_to_u64(schema: &MachineSchema, name: &str) -> bool {
+    use meerkat_machine_schema::RustTypeAtom;
+    matches!(
+        lookup_named_type_atom(schema, name),
+        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8
+    )
 }
 
 #[cfg(not(test))]

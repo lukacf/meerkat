@@ -489,6 +489,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let mut out = String::new();
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
+    let named_bindings = collect_machine_named_bindings(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() {
@@ -508,6 +509,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
                     &ty,
                     default_sample_cardinality(deep),
                     &named_samples,
+                    &named_bindings,
                     false,
                 )
             )
@@ -554,6 +556,8 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         .collect::<BTreeMap<_, _>>();
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples = collect_composition_named_type_samples(schema, &machine_by_instance);
+    let named_bindings =
+        collect_composition_named_bindings(machine_by_instance.values().copied());
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
@@ -595,7 +599,13 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
                 &mut out,
                 "  {} = {}",
                 name,
-                render_default_domain_assignment(&ty, cardinality, &named_samples, false)
+                render_default_domain_assignment(
+                    &ty,
+                    cardinality,
+                    &named_samples,
+                    &named_bindings,
+                    false,
+                )
             )
             .expect("write to string");
         }
@@ -655,6 +665,8 @@ pub fn render_composition_witness_cfg(
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples =
         collect_composition_witness_named_type_samples(schema, witness, &machine_by_instance);
+    let named_bindings =
+        collect_composition_named_bindings(machine_by_instance.values().copied());
     let witness_sample_cardinality = schema
         .witness_domain_cardinality
         .max(max_named_sample_cardinality(&named_samples));
@@ -699,6 +711,7 @@ pub fn render_composition_witness_cfg(
                     &ty,
                     witness_sample_cardinality,
                     &named_samples,
+                    &named_bindings,
                     true,
                 )
             )
@@ -2118,6 +2131,7 @@ fn render_default_domain_assignment(
     ty: &TypeRef,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     include_string_samples: bool,
 ) -> String {
     match ty {
@@ -2141,14 +2155,18 @@ fn render_default_domain_assignment(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeRef::Named(name) | TypeRef::Enum(name) => {
-            render_named_domain_assignment(name, sample_cardinality, named_samples)
-        }
+        TypeRef::Named(name) | TypeRef::Enum(name) => render_named_domain_assignment(
+            name,
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
         TypeRef::Seq(inner) => {
             let samples = sample_values(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             );
             if samples.len() >= 2 {
@@ -2167,6 +2185,7 @@ fn render_default_domain_assignment(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             );
             if samples.len() >= 2 {
@@ -2185,6 +2204,7 @@ fn render_default_domain_assignment(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             )
             .into_iter()
@@ -2213,8 +2233,9 @@ fn render_named_domain_assignment(
     name: &str,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> String {
-    if named_type_uses_nat_domain(name) {
+    if named_type_uses_nat_domain(named_bindings, name) {
         return if sample_cardinality > 1 {
             "{1, 2}".into()
         } else {
@@ -2257,6 +2278,7 @@ fn sample_values(
     ty: &TypeRef,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     include_string_samples: bool,
 ) -> Vec<String> {
     match ty {
@@ -2274,7 +2296,9 @@ fn sample_values(
                 .map(|sample| tla_string(&sample))
                 .collect()
         }
-        TypeRef::Named(name) | TypeRef::Enum(name) if named_type_uses_nat_domain(name) => {
+        TypeRef::Named(name) | TypeRef::Enum(name)
+            if named_type_uses_nat_domain(named_bindings, name) =>
+        {
             if sample_cardinality > 1 {
                 vec!["1".into(), "2".into()]
             } else {
@@ -2308,6 +2332,7 @@ fn sample_values(
                     inner,
                     sample_cardinality,
                     named_samples,
+                    named_bindings,
                     include_string_samples,
                 )
                 .into_iter()
@@ -2319,23 +2344,66 @@ fn sample_values(
             inner,
             sample_cardinality,
             named_samples,
+            named_bindings,
             include_string_samples,
         ),
         TypeRef::Set(inner) => sample_values(
             inner,
             sample_cardinality,
             named_samples,
+            named_bindings,
             include_string_samples,
         ),
         TypeRef::Map(_, _) => vec![],
     }
 }
 
-fn named_type_uses_nat_domain(name: &str) -> bool {
+/// Consult the schema's named-type binding table to decide whether a
+/// named type's TLA domain is `Nat` (numeric) rather than string-like.
+///
+/// A named type resolves to a `Nat` TLA domain when its Rust atom lowers
+/// to an unsigned integer width — the TLA projection mirrors the Rust
+/// atom. Schemas reach codegen only after validation, so every
+/// referenced named type has a binding; an unbound name here is a
+/// codegen invariant violation.
+fn named_type_uses_nat_domain(
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> bool {
+    use meerkat_machine_schema::RustTypeAtom;
     matches!(
-        name,
-        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+        bindings.get(name),
+        Some(RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8)
     )
+}
+
+/// Collect the `NamedTypeId → RustTypeAtom` map for a single machine.
+fn collect_machine_named_bindings(
+    schema: &MachineSchema,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    schema
+        .named_types
+        .iter()
+        .map(|binding| (binding.name.as_str().to_owned(), binding.rust.clone()))
+        .collect()
+}
+
+/// Merge every machine's named-type bindings into one map for
+/// composition-level TLA rendering. Duplicate names must agree on Rust
+/// atom across machines (validation enforces this by construction).
+fn collect_composition_named_bindings<'a>(
+    machines_by_instance: impl IntoIterator<Item = &'a MachineSchema>,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    let mut merged = BTreeMap::new();
+    for machine in machines_by_instance {
+        for binding in &machine.named_types {
+            let slug = binding.name.as_str().to_owned();
+            merged
+                .entry(slug)
+                .or_insert_with(|| binding.rust.clone());
+        }
+    }
+    merged
 }
 
 fn render_sequence_domain_definition(inner: &TypeRef) -> String {

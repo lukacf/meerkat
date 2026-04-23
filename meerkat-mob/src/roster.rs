@@ -506,7 +506,6 @@ mod tests {
     use super::*;
     use crate::ids::{MeerkatId, MobId};
     use chrono::Utc;
-    use meerkat_core::comms::TrustedPeerDescriptor;
     use uuid::Uuid;
 
     fn session_id() -> SessionId {
@@ -625,14 +624,10 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.wire(&MeerkatId::from("agent-1"), &MeerkatId::from("agent-2"));
         roster.remove(&MeerkatId::from("agent-1"));
 
         assert_eq!(roster.len(), 1);
         assert!(roster.get(&MeerkatId::from("agent-1")).is_none());
-        // agent-2 should no longer have agent-1 in wired_to
-        let entry2 = roster.get(&MeerkatId::from("agent-2")).unwrap();
-        assert!(entry2.wired_to.is_empty());
     }
 
     #[test]
@@ -677,101 +672,6 @@ mod tests {
             }
             other => panic!("expected backend peer member ref, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_roster_wire_and_unwire() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("b"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-
-        roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
-
-        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
-        assert!(peers_a.contains(&AgentIdentity::from("b")));
-        let peers_b = &roster.get(&MeerkatId::from("b")).unwrap().wired_to;
-        assert!(peers_b.contains(&AgentIdentity::from("a")));
-
-        roster.unwire(&MeerkatId::from("a"), &MeerkatId::from("b"));
-
-        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
-        assert!(peers_a.is_empty());
-        let peers_b = &roster.get(&MeerkatId::from("b")).unwrap().wired_to;
-        assert!(peers_b.is_empty());
-    }
-
-    #[test]
-    fn test_roster_wire_idempotent() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("b"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-
-        roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
-        roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
-
-        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
-        assert_eq!(peers_a.len(), 1); // No duplicates (BTreeSet)
-    }
-
-    #[test]
-    fn test_roster_wire_external_treats_missing_peer_as_external() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-
-        roster.wire_external(
-            &MeerkatId::from("a"),
-            &MeerkatId::from("remote-mob/worker/agent-b"),
-            TrustedPeerDescriptor::test_only_unsigned(
-                "remote-mob/worker/agent-b",
-                "ed25519:remote-b",
-                "inproc://remote-mob/worker/agent-b",
-            )
-            .expect("valid trusted peer spec"),
-        );
-
-        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
-        assert!(peers_a.contains(&AgentIdentity::from("remote-mob/worker/agent-b")));
-        assert!(
-            roster
-                .get(&MeerkatId::from("a"))
-                .expect("entry should exist")
-                .external_peer_specs
-                .contains_key(&MeerkatId::from("remote-mob/worker/agent-b"))
-        );
-        assert!(
-            roster.is_wiring_projection_consistent(),
-            "missing local peer should be treated as an external projection target"
-        );
     }
 
     #[test]

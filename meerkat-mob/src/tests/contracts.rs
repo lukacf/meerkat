@@ -44,7 +44,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     // Establish bidirectional trust
     let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
         &receiver_name,
-        receiver.public_key().to_peer_id(),
+        receiver.public_key().to_peer_id().to_string(),
         format!("inproc://{receiver_name}"),
     )
     .expect("valid peer spec");
@@ -54,7 +54,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 
     let reverse_spec = TrustedPeerDescriptor::test_only_unsigned(
         &sender_name,
-        sender.public_key().to_peer_id(),
+        sender.public_key().to_peer_id().to_string(),
         format!("inproc://{sender_name}"),
     )
     .expect("valid reverse spec");
@@ -205,7 +205,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
         sender.as_ref(),
         TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
-            receiver.public_key().to_peer_id(),
+            receiver.public_key().to_peer_id().to_string(),
             format!("inproc://{receiver_name}"),
         )
         .unwrap(),
@@ -216,7 +216,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
         &receiver,
         TrustedPeerDescriptor::test_only_unsigned(
             &sender_name,
-            sender.public_key().to_peer_id(),
+            sender.public_key().to_peer_id().to_string(),
             format!("inproc://{sender_name}"),
         )
         .unwrap(),
@@ -339,7 +339,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
         sender.as_ref(),
         TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
-            receiver.public_key().to_peer_id(),
+            receiver.public_key().to_peer_id().to_string(),
             format!("inproc://{receiver_name}"),
         )
         .unwrap(),
@@ -352,7 +352,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
         &receiver,
         TrustedPeerDescriptor::test_only_unsigned(
             &sender_name,
-            sender.public_key().to_peer_id(),
+            sender.public_key().to_peer_id().to_string(),
             format!("inproc://{sender_name}"),
         )
         .unwrap(),
@@ -454,7 +454,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
         responder.as_ref(),
         TrustedPeerDescriptor::test_only_unsigned(
             &originator_name,
-            originator.public_key().to_peer_id(),
+            originator.public_key().to_peer_id().to_string(),
             format!("inproc://{originator_name}"),
         )
         .unwrap(),
@@ -470,7 +470,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
         &originator,
         TrustedPeerDescriptor::test_only_unsigned(
             &responder_name,
-            responder.public_key().to_peer_id(),
+            responder.public_key().to_peer_id().to_string(),
             format!("inproc://{responder_name}"),
         )
         .unwrap(),
@@ -568,7 +568,7 @@ async fn contract_mob_003_inproc_namespace_isolation() {
     // Now add alpha_b as trusted peer of alpha_a (within the same namespace)
     let spec = TrustedPeerDescriptor::test_only_unsigned(
         &alpha_b_name,
-        alpha_b.public_key().to_peer_id(),
+        alpha_b.public_key().to_peer_id().to_string(),
         format!("inproc://{alpha_b_name}"),
     )
     .expect("valid spec");
@@ -608,7 +608,7 @@ async fn contract_mob_004_add_trusted_peer_is_idempotent() {
     let make_spec = || {
         TrustedPeerDescriptor::test_only_unsigned(
             &peer_name,
-            peer.public_key().to_peer_id(),
+            peer.public_key().to_peer_id().to_string(),
             format!("inproc://{peer_name}"),
         )
         .expect("valid spec")
@@ -652,7 +652,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     // Establish trust
     let spec = TrustedPeerDescriptor::test_only_unsigned(
         &receiver_name,
-        receiver.public_key().to_peer_id(),
+        receiver.public_key().to_peer_id().to_string(),
         format!("inproc://{receiver_name}"),
     )
     .expect("valid spec");
@@ -666,7 +666,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     // Mutual trust matches what real deployments set up.
     let reverse_spec = TrustedPeerDescriptor::test_only_unsigned(
         &sender_name,
-        sender.public_key().to_peer_id(),
+        sender.public_key().to_peer_id().to_string(),
         format!("inproc://{sender_name}"),
     )
     .expect("valid spec");
@@ -691,7 +691,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let _ = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
 
     // Remove trusted peer
-    let peer_id = receiver.public_key().to_peer_id();
+    let peer_id = receiver.public_key().to_peer_id().to_string();
     let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
         .await
         .expect("remove should succeed");
@@ -730,7 +730,7 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
 
     let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
     let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
-    let peer_id = peer.public_key().to_peer_id();
+    let peer_id = peer.public_key().to_peer_id().to_string();
     let backend_address = format!("https://backend.example.invalid/mesh/{peer_name}");
 
     let spec = TrustedPeerDescriptor::test_only_unsigned(
@@ -1055,7 +1055,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
     // Trust both sides so peer requests can flow.
     let a_to_b = TrustedPeerDescriptor::test_only_unsigned(
         &b_name,
-        comms_b.public_key().to_peer_id(),
+        comms_b.public_key().to_peer_id().to_string(),
         format!("inproc://{b_name}"),
     )
     .expect("valid trusted peer spec a->b");
@@ -1065,7 +1065,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
 
     let b_to_a = TrustedPeerDescriptor::test_only_unsigned(
         &a_name,
-        comms_a.public_key().to_peer_id(),
+        comms_a.public_key().to_peer_id().to_string(),
         format!("inproc://{a_name}"),
     )
     .expect("valid trusted peer spec b->a");

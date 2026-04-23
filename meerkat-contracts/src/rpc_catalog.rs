@@ -279,30 +279,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "RuntimeRealtimeAttachmentStatusParams",
                 "RuntimeRealtimeAttachmentStatusResult",
             ),
-            RpcMethodDescriptor::typed(
-                "session/retire",
-                "Retire a session runtime",
-                "RuntimeRetireParams",
-                "RuntimeRetireResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/reset",
-                "Reset a session runtime",
-                "RuntimeResetParams",
-                "RuntimeResetResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/submission",
-                "Get the state of a specific input on a session",
-                "InputStateParams",
-                "InputStateResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/submissions",
-                "List active inputs for a session",
-                "InputListParams",
-                "InputListResult",
-            ),
+            // `session/retire`, `session/reset`, `session/submission`,
+            // `session/submissions` were deleted in wave-b; their
+            // `Runtime{Retire,Reset}{Params,Result}` and
+            // `Input{State,List}{Params,Result}` wire types are gone with
+            // them. Do not re-introduce.
         ]);
     }
 

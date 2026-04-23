@@ -315,7 +315,12 @@ pub enum WireToolResultContent {
 }
 
 /// Transcript block inside a block-assistant message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// Not `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through
+/// fidelity (core invariant — opaque from provider to dispatcher), and
+/// `RawValue` does not derive equality. Equivalence checks should
+/// round-trip through serialization and compare the serialized bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "block_type", content = "data", rename_all = "snake_case")]
 pub enum WireAssistantBlock {
@@ -333,7 +338,12 @@ pub enum WireAssistantBlock {
     ToolUse {
         id: String,
         name: String,
-        args: Value,
+        /// Wire-projected tool-call args. Carries the opaque JSON payload
+        /// as `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`
+        /// invariant ("tool-call args pass through un-parsed from provider
+        /// to dispatcher") — see `CLAUDE.md` Rust design principles §3.
+        /// Allow-listed by dogma-blind-spots §7.
+        args: Box<serde_json::value::RawValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
@@ -359,7 +369,11 @@ impl From<AssistantBlock> for WireAssistantBlock {
             } => Self::ToolUse {
                 id,
                 name,
-                args: serde_json::from_str(args.get()).unwrap_or(Value::Null),
+                // Pass-through: no re-parse, no silent `Value::Null`
+                // downgrade on malformed bytes. Core invariant — tool-call
+                // args are opaque from provider to dispatcher and this
+                // wire type preserves that invariant.
+                args,
                 meta: meta.map(|m| (*m).into()),
             },
             _ => Self::Unknown,
@@ -394,12 +408,17 @@ impl From<StopReason> for WireStopReason {
 }
 
 /// Legacy assistant tool call payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// Not `PartialEq`: `args` rides as `Box<RawValue>` for pass-through
+/// fidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —
+/// opaque from provider to dispatcher, never re-parsed on the wire.
+/// Equivalence checks should round-trip through serialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireToolCall {
     pub id: String,
     pub name: String,
-    pub args: Value,
+    pub args: Box<serde_json::value::RawValue>,
 }
 
 /// Tool result payload in a transcript.
@@ -413,7 +432,11 @@ pub struct WireToolResult {
 }
 
 /// Canonical transcript message for public wire surfaces.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// Not `PartialEq`: the `BlockAssistant.blocks` variant carries
+/// `WireAssistantBlock`s which hold opaque tool-call args as
+/// `Box<RawValue>`. See `WireAssistantBlock` doc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum WireSessionMessage {
@@ -472,7 +495,13 @@ impl From<Message> for WireSessionMessage {
                     .map(|tool_call| WireToolCall {
                         id: tool_call.id,
                         name: tool_call.name,
-                        args: tool_call.args,
+                        // Core's legacy `ToolCall.args: Value` → opaque
+                        // `Box<RawValue>` for the wire. `to_string` on a
+                        // `Value` produces canonical JSON bytes; the
+                        // RawValue constructor only fails on invalid
+                        // JSON, which `Value::to_string` cannot emit.
+                        args: serde_json::value::RawValue::from_string(tool_call.args.to_string())
+                            .expect("serde_json::Value serializes to valid JSON"),
                     })
                     .collect(),
                 stop_reason: message.stop_reason.into(),
@@ -507,7 +536,11 @@ impl From<Message> for WireSessionMessage {
 }
 
 /// Full session history in canonical wire format.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// Not `PartialEq`: `messages` carries `WireSessionMessage` which
+/// transitively holds opaque tool-call args; compare via serialization
+/// round-trip rather than field equality.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireSessionHistory {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
@@ -695,7 +728,8 @@ mod tests {
                     tool_calls: vec![WireToolCall {
                         id: "tool-1".to_string(),
                         name: "search".to_string(),
-                        args: serde_json::json!({"q":"rust"}),
+                        args: serde_json::value::RawValue::from_string(r#"{"q":"rust"}"#.to_string())
+                            .expect("fixture args literal is valid JSON"),
                     }],
                     stop_reason: WireStopReason::ToolUse,
                 },
@@ -723,7 +757,11 @@ mod tests {
         };
         let json = serde_json::to_string(&history).unwrap();
         let parsed: WireSessionHistory = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, history);
+        // `WireSessionHistory` is not `PartialEq` post-C-2 because
+        // tool-call args ride as `Box<RawValue>`. Round-trip via JSON
+        // string equivalence is the canonical wire comparison.
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(reserialized, json);
     }
 
     #[test]

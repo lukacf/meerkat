@@ -73,8 +73,11 @@ pub use result::WireRunResult;
 pub use runtime::{
     PeerResponseTerminalStatusWire, RuntimeAcceptOutcomeType, RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
-    SessionExternalEventEnvelope, SessionPeerResponseTerminalParams, WireInputLifecycleState,
-    WireInputState, WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
+    SessionExternalEventEnvelope, SessionPeerResponseTerminalParams,
+    // Re-export of the `StructuredProviderExtension` core relocation
+    // from C-1 — external callers can still import via the wire path.
+    StructuredProviderExtension, WireInputLifecycleState, WireInputState,
+    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
 };
 pub use schedule::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,

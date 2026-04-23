@@ -349,7 +349,11 @@ impl EnumSchema {
         Ok(names)
     }
 
-    pub fn variant_named(&self, name: &str) -> Result<&VariantSchema, MachineSchemaError> {
+    pub fn variant_named(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<&VariantSchema, MachineSchemaError> {
+        let name = name.as_ref();
         self.variants
             .iter()
             .find(|variant| variant.name.as_str() == name)
@@ -366,7 +370,11 @@ pub struct VariantSchema {
 }
 
 impl VariantSchema {
-    pub fn field_named(&self, name: &str) -> Result<&FieldSchema, MachineSchemaError> {
+    pub fn field_named(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<&FieldSchema, MachineSchemaError> {
+        let name = name.as_ref();
         self.fields
             .iter()
             .find(|field| field.name.as_str() == name)

@@ -1694,6 +1694,18 @@ impl RouteVariantId {
     }
 }
 
+impl std::fmt::Display for RouteVariantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for RouteVariantId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteFieldBinding {
     pub to_field: FieldId,

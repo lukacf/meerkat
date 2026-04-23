@@ -3794,7 +3794,8 @@ fn render_semantic_mapping_section(
 }
 
 #[cfg(not(test))]
-fn machine_slug(machine_name: &str) -> String {
+fn machine_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
 }
@@ -3921,8 +3922,14 @@ fn render_transition(out: &mut String, transition: &TransitionSchema) {
     pushln!(
         out,
         "    on = {}({})",
-        transition.on.variant,
-        transition.on.bindings.join(", ")
+        transition.on.variant_str(),
+        transition
+            .on
+            .bindings()
+            .iter()
+            .map(|b| b.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if !transition.guards.is_empty() {
         pushln!(out, "    guards =");
@@ -4061,7 +4068,7 @@ fn render_update(update: &Update) -> String {
 
 fn render_effect_emit(effect: &EffectEmit) -> String {
     if effect.fields.is_empty() {
-        effect.variant.clone()
+        effect.variant.as_str().to_owned()
     } else {
         let fields = effect
             .fields
@@ -4087,7 +4094,7 @@ fn render_expr(expr: &Expr) -> String {
         ),
         Expr::CurrentPhase => "phase".to_owned(),
         Expr::Phase(value) => tla_string(value),
-        Expr::Field(name) => name.clone(),
+        Expr::Field(name) => name.as_str().to_owned(),
         Expr::Binding(name) => name.clone(),
         Expr::Variant(name) => name.clone(),
         Expr::None => "None".to_owned(),
@@ -4170,7 +4177,8 @@ fn render_type_ref(ty: &TypeRef) -> String {
         TypeRef::U32 => "Nat".to_owned(),
         TypeRef::U64 => "Nat".to_owned(),
         TypeRef::String => "String".to_owned(),
-        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
         TypeRef::Option(inner) => format!("Option({})", render_type_ref(inner)),
         TypeRef::Set(inner) => format!("Set({})", render_type_ref(inner)),
         TypeRef::Seq(inner) => format!("Seq({})", render_type_ref(inner)),
@@ -4187,7 +4195,8 @@ fn render_rust_type_ref(ty: &TypeRef) -> String {
         TypeRef::U32 => "u32".to_owned(),
         TypeRef::U64 => "u64".to_owned(),
         TypeRef::String => "String".to_owned(),
-        TypeRef::Named(name) | TypeRef::Enum(name) => rust_ident(name),
+        TypeRef::Named(name) => rust_ident(name),
+        TypeRef::Enum(name) => rust_ident(name),
         TypeRef::Option(inner) => format!("Option<{}>", render_rust_type_ref(inner)),
         TypeRef::Set(inner) => {
             format!(
@@ -4239,7 +4248,10 @@ fn collect_machine_named_types(schema: &MachineSchema) -> Vec<String> {
 #[cfg(not(test))]
 fn collect_named_types_from_type_ref(ty: &TypeRef, names: &mut std::collections::BTreeSet<String>) {
     match ty {
-        TypeRef::Named(name) | TypeRef::Enum(name) => {
+        TypeRef::Named(name) => {
+            names.insert(rust_ident(name));
+        }
+        TypeRef::Enum(name) => {
             names.insert(rust_ident(name));
         }
         TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
@@ -4298,7 +4310,7 @@ fn collect_machine_enum_types(schema: &MachineSchema) -> Vec<(String, Vec<String
 fn collect_enum_types_from_type_ref(ty: &TypeRef, enums: &mut std::collections::BTreeSet<String>) {
     match ty {
         TypeRef::Enum(name) => {
-            enums.insert(name.clone());
+            enums.insert(name.as_str().to_owned());
         }
         TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
             collect_enum_types_from_type_ref(inner, enums);
@@ -4366,8 +4378,9 @@ fn named_type_lowers_to_u64(schema: &MachineSchema, name: &str) -> bool {
 }
 
 #[cfg(not(test))]
-fn rust_ident(value: &str) -> String {
+fn rust_ident(value: impl AsRef<str>) -> String {
     value
+        .as_ref()
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
@@ -4409,7 +4422,7 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
 }
 
 #[cfg(not(test))]
-fn rust_field_ident(value: &str) -> String {
+fn rust_field_ident(value: impl AsRef<str>) -> String {
     rust_ident(value)
 }
 
@@ -4448,7 +4461,7 @@ fn render_enum_variants_inline(schema: &EnumSchema) -> String {
     format!("{{{variants}}}")
 }
 
-fn render_string_list(items: &[String]) -> String {
+fn render_string_list<S: AsRef<str>>(items: &[S]) -> String {
     let rendered = items
         .iter()
         .map(|item| tla_string(item))
@@ -4563,15 +4576,16 @@ fn render_composition_invariant_kind(kind: &CompositionInvariantKind) -> String 
     }
 }
 
-fn tla_ident(value: &str) -> String {
+fn tla_ident(value: impl AsRef<str>) -> String {
     value
+        .as_ref()
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
 }
 
-fn tla_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\\\""))
+fn tla_string(value: impl AsRef<str>) -> String {
+    format!("\"{}\"", value.as_ref().replace('"', "\\\""))
 }
 
 #[cfg(test)]

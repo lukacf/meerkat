@@ -788,18 +788,6 @@ impl MobActor {
             .collect()
     }
 
-    /// Re-project the DSL's `member_state_markers` onto the shell's
-    /// [`Roster::state`] field. Called by callers who have just applied
-    /// a DSL transition that mutated the marker map (Retire /
-    /// RetireMember / ObserveRuntimeRetired / DestroyMob /
-    /// ObserveRuntimeDestroyed). See `MemberState` docs for the
-    /// projection contract.
-    async fn sync_retiring_projection_into_roster(&self) {
-        let retiring = self.retiring_runtime_ids_from_dsl();
-        let mut roster = self.roster.write().await;
-        roster.sync_retiring_projection(&retiring);
-    }
-
     fn mob_handle_for_tools(&self) -> MobHandle {
         MobHandle {
             command_tx: self.command_tx.clone(),

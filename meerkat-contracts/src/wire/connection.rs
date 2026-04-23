@@ -15,18 +15,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Wire projection of [`meerkat_core::ConnectionRef`].
+///
+/// Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
+/// `parse` and `Display` on both the core type and the wire projection so
+/// the colon-joined form cannot travel across wire boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireConnectionRef {
-    pub realm_id: String,
-    pub binding_id: String,
+    pub realm: meerkat_core::connection::RealmId,
+    pub binding: meerkat_core::connection::BindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<meerkat_core::connection::ProfileId>,
 }
 
 impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
     fn from(value: meerkat_core::ConnectionRef) -> Self {
         Self {
-            realm_id: value.realm_id,
-            binding_id: value.binding_id,
+            realm: value.realm,
+            binding: value.binding,
+            profile: value.profile,
         }
     }
 }
@@ -34,28 +41,10 @@ impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
 impl From<WireConnectionRef> for meerkat_core::ConnectionRef {
     fn from(value: WireConnectionRef) -> Self {
         Self {
-            realm_id: value.realm_id,
-            binding_id: value.binding_id,
+            realm: value.realm,
+            binding: value.binding,
+            profile: value.profile,
         }
-    }
-}
-
-impl WireConnectionRef {
-    pub fn parse(raw: &str) -> Option<Self> {
-        let (realm, binding) = raw.split_once(':')?;
-        if realm.is_empty() || binding.is_empty() {
-            return None;
-        }
-        Some(Self {
-            realm_id: realm.to_string(),
-            binding_id: binding.to_string(),
-        })
-    }
-}
-
-impl std::fmt::Display for WireConnectionRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.realm_id, self.binding_id)
     }
 }
 
@@ -266,25 +255,31 @@ mod tests {
     #[test]
     fn connection_ref_roundtrip() {
         let r = meerkat_core::ConnectionRef {
-            realm_id: "dev".into(),
-            binding_id: "default_openai".into(),
+            realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
+            profile: None,
         };
         let w: WireConnectionRef = r.clone().into();
-        assert_eq!(w.realm_id, "dev");
-        assert_eq!(w.binding_id, "default_openai");
+        assert_eq!(w.realm.as_str(), "dev");
+        assert_eq!(w.binding.as_str(), "default_openai");
+        assert!(w.profile.is_none());
         let back: meerkat_core::ConnectionRef = w.into();
         assert_eq!(back, r);
     }
 
     #[test]
-    fn connection_ref_parse_and_display() {
-        let w = WireConnectionRef::parse("dev:default_openai").unwrap();
-        assert_eq!(w.realm_id, "dev");
-        assert_eq!(w.binding_id, "default_openai");
-        assert_eq!(w.to_string(), "dev:default_openai");
-        assert!(WireConnectionRef::parse("no-colon").is_none());
-        assert!(WireConnectionRef::parse(":empty-realm").is_none());
-        assert!(WireConnectionRef::parse("empty-binding:").is_none());
+    fn connection_ref_wire_json_has_no_string_form() {
+        let w = WireConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("openai_main").unwrap(),
+            profile: Some(meerkat_core::connection::ProfileId::parse("ci").unwrap()),
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("\"realm\":\"prod\""));
+        assert!(json.contains("\"binding\":\"openai_main\""));
+        assert!(json.contains("\"profile\":\"ci\""));
+        // No colon-joined form anywhere.
+        assert!(!json.contains("prod:openai_main"));
     }
 
     #[test]

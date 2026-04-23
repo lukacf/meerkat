@@ -340,11 +340,14 @@ impl EphemeralRuntimeDriver {
     fn absorb_dsl_effects(&mut self, effects: &[mm_dsl::MeerkatMachineEffect]) {
         for effect in effects {
             if let mm_dsl::MeerkatMachineEffect::PostAdmissionSignal { signal } = effect {
-                let new_signal = match signal.as_str() {
-                    "WakeLoop" => PostAdmissionSignal::WakeLoop,
-                    "InterruptYielding" => PostAdmissionSignal::InterruptYielding,
-                    "RequestImmediateProcessing" => PostAdmissionSignal::RequestImmediateProcessing,
-                    _ => continue,
+                let new_signal = match signal {
+                    mm_dsl::PostAdmissionSignalKind::WakeLoop => PostAdmissionSignal::WakeLoop,
+                    mm_dsl::PostAdmissionSignalKind::InterruptYielding => {
+                        PostAdmissionSignal::InterruptYielding
+                    }
+                    mm_dsl::PostAdmissionSignalKind::RequestImmediateProcessing => {
+                        PostAdmissionSignal::RequestImmediateProcessing
+                    }
                 };
                 if new_signal > self.post_admission_signal {
                     self.post_admission_signal = new_signal;

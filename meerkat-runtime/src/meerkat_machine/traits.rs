@@ -221,15 +221,16 @@ impl MeerkatMachine {
             .find_map(|effect| match effect {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::PostAdmissionSignal {
                     signal,
-                } => Some(match signal.as_str() {
-                    "WakeLoop" => crate::driver::ephemeral::PostAdmissionSignal::WakeLoop,
-                    "InterruptYielding" => {
+                } => Some(match signal {
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::WakeLoop => {
+                        crate::driver::ephemeral::PostAdmissionSignal::WakeLoop
+                    }
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::InterruptYielding => {
                         crate::driver::ephemeral::PostAdmissionSignal::InterruptYielding
                     }
-                    "RequestImmediateProcessing" => {
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::RequestImmediateProcessing => {
                         crate::driver::ephemeral::PostAdmissionSignal::RequestImmediateProcessing
                     }
-                    _ => crate::driver::ephemeral::PostAdmissionSignal::None,
                 }),
                 _ => None,
             })

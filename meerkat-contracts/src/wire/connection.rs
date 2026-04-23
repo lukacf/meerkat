@@ -247,6 +247,162 @@ pub struct WireAuthStatus {
     pub last_error: Option<WireAuthError>,
 }
 
+// --- Auth REST response envelopes ------------------------------------
+
+/// Identifies a binding inside a realm on the wire. Shared by every
+/// auth REST response that returns a `{realm_id, binding_id, connection_ref}`
+/// trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
+/// fields always agree; the `realm_id`/`binding_id` strings carry the
+/// slug form for wire consumers that key by string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireBindingIdentity {
+    pub realm_id: String,
+    pub binding_id: String,
+    pub connection_ref: WireConnectionRef,
+}
+
+impl From<&meerkat_core::ConnectionRef> for WireBindingIdentity {
+    fn from(cref: &meerkat_core::ConnectionRef) -> Self {
+        Self {
+            realm_id: cref.realm.to_string(),
+            binding_id: cref.binding.to_string(),
+            connection_ref: WireConnectionRef::from(cref.clone()),
+        }
+    }
+}
+
+/// `POST /auth/profiles` (create) success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileCreated {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    pub auth_method: String,
+    pub stored: bool,
+}
+
+/// `GET /auth/profiles/:binding_id` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileDetail {
+    pub connection_ref: WireConnectionRef,
+    pub binding_id: String,
+    pub profile_id: String,
+    pub auth_profile: WireAuthProfile,
+}
+
+/// `DELETE /auth/profiles/:binding_id` / `POST /auth/logout` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileCleared {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub cleared: bool,
+}
+
+/// `POST /auth/login/start` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLoginStart {
+    pub authorize_url: String,
+    pub state: String,
+    pub pkce_verifier: String,
+    pub pkce_challenge: String,
+    pub redirect_uri: String,
+    pub provider: String,
+}
+
+/// `POST /auth/login/complete` / ready leg of device-code success body.
+///
+/// The optional `state` field distinguishes the flat `POST
+/// /auth/login/complete` response (no `state` set) from the device-code
+/// ready leg (`state = "ready"`) which is part of the pending/slow_down/
+/// access_denied/expired/ready tagged protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLoginReady {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub has_refresh_token: bool,
+    pub scopes: Vec<String>,
+}
+
+/// `POST /auth/login/device/start` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDeviceStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    pub interval: u64,
+    pub provider: String,
+}
+
+/// Realm summary entry returned by `GET /realms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRealmSummary {
+    pub realm_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_binding: Option<String>,
+    pub backend_count: usize,
+    pub auth_profile_count: usize,
+    pub binding_count: usize,
+}
+
+/// `GET /realms` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRealmList {
+    pub realms: Vec<WireRealmSummary>,
+}
+
+/// `GET /auth/profiles` success body — realm-scoped lists of backend,
+/// auth, and binding profiles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfilesList {
+    pub realm_id: String,
+    pub auth_profiles: Vec<WireAuthProfile>,
+    pub backend_profiles: Vec<WireBackendProfile>,
+    pub bindings: Vec<WireProviderBinding>,
+}
+
+/// `GET /auth/status/:binding_id` success body. Richer than
+/// [`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
+/// `connection_ref` / `has_refresh_token` so the caller can key by
+/// binding directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthStatusDetail {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    pub auth_method: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub has_refresh_token: bool,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

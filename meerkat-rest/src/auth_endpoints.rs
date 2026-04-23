@@ -19,8 +19,12 @@ use axum::response::IntoResponse;
 
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
-    WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
+    WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail,
+    WireAuthProfilesList, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
+    WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding, WireRealmConnectionSet,
+    WireRealmList, WireRealmSummary,
 };
+use meerkat_core::connection::{BindingId, RealmId};
 use meerkat_core::{ConnectionRef, RealmConnectionSet};
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -48,14 +52,14 @@ async fn load_config(state: &AppState) -> Result<meerkat_core::Config, (StatusCo
 
 async fn resolve_realm(
     state: &AppState,
-    realm_id: &str,
+    realm_id: &RealmId,
 ) -> Result<RealmConnectionSet, (StatusCode, String)> {
     let config = load_config(state).await?;
     let section = config
         .realm
-        .get(realm_id)
+        .get(realm_id.as_str())
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Unknown realm: {realm_id}")))?;
-    RealmConnectionSet::from_config(realm_id, section).map_err(|e| {
+    RealmConnectionSet::from_config(realm_id.as_str(), section).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Realm config invalid: {e}"),
@@ -72,10 +76,15 @@ fn default_oauth_binding(mode: PersistedAuthMode) -> &'static str {
     }
 }
 
+fn default_oauth_binding_id(mode: PersistedAuthMode) -> BindingId {
+    BindingId::parse(default_oauth_binding(mode))
+        .expect("default oauth binding slug is a valid BindingId")
+}
+
 async fn resolve_binding_identity(
     state: &AppState,
-    realm_id: &str,
-    binding_id: &str,
+    realm_id: &RealmId,
+    binding_id: &BindingId,
 ) -> Result<
     (
         ConnectionRef,
@@ -85,17 +94,26 @@ async fn resolve_binding_identity(
     (StatusCode, String),
 > {
     let realm = resolve_realm(state, realm_id).await?;
-    let resolved_realm_id = realm.realm_id.clone();
-    let (binding, _, auth_profile) = realm.lookup_binding(binding_id).map_err(|e| {
+    let (binding, _, auth_profile) = realm.lookup_binding(binding_id.as_str()).map_err(|e| {
         (
             StatusCode::NOT_FOUND,
             format!("Unknown binding {realm_id}:{binding_id}: {e}"),
         )
     })?;
+    let binding_atom = BindingId::parse(&binding.id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Binding id '{}' from config is not a valid slug: {e}",
+                binding.id
+            ),
+        )
+    })?;
     Ok((
         ConnectionRef {
-            realm_id: resolved_realm_id,
-            binding_id: binding.id.clone(),
+            realm: realm_id.clone(),
+            binding: binding_atom,
+            profile: None,
         },
         binding.clone(),
         auth_profile.clone(),
@@ -107,24 +125,18 @@ async fn resolve_binding_identity(
 pub async fn list_realms(State(state): State<AppState>) -> impl IntoResponse {
     match load_config(&state).await {
         Ok(config) => {
-            let realms: Vec<serde_json::Value> = config
+            let realms: Vec<WireRealmSummary> = config
                 .realm
                 .iter()
-                .map(|(realm_id, section)| {
-                    serde_json::json!({
-                        "realm_id": realm_id,
-                        "default_binding": section.default_binding,
-                        "backend_count": section.backend.len(),
-                        "auth_profile_count": section.auth.len(),
-                        "binding_count": section.binding.len(),
-                    })
+                .map(|(realm_id, section)| WireRealmSummary {
+                    realm_id: realm_id.clone(),
+                    default_binding: section.default_binding.clone(),
+                    backend_count: section.backend.len(),
+                    auth_profile_count: section.auth.len(),
+                    binding_count: section.binding.len(),
                 })
                 .collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "realms": realms })),
-            )
-                .into_response()
+            (StatusCode::OK, Json(WireRealmList { realms })).into_response()
         }
         Err((status, msg)) => (status, Json(serde_json::json!({ "error": msg }))).into_response(),
     }
@@ -132,7 +144,7 @@ pub async fn list_realms(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn get_realm(
     State(state): State<AppState>,
-    Path(realm_id): Path<String>,
+    Path(realm_id): Path<RealmId>,
 ) -> impl IntoResponse {
     match resolve_realm(&state, &realm_id).await {
         Ok(realm) => {
@@ -147,7 +159,7 @@ pub async fn get_realm(
 
 #[derive(serde::Deserialize)]
 pub struct RealmQuery {
-    pub realm_id: String,
+    pub realm_id: RealmId,
 }
 
 pub async fn list_auth_profiles(
@@ -173,12 +185,12 @@ pub async fn list_auth_profiles(
                 .collect();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "realm_id": realm.realm_id,
-                    "auth_profiles": profiles,
-                    "backend_profiles": backends,
-                    "bindings": bindings,
-                })),
+                Json(WireAuthProfilesList {
+                    realm_id: realm.realm_id,
+                    auth_profiles: profiles,
+                    backend_profiles: backends,
+                    bindings,
+                }),
             )
                 .into_response()
         }
@@ -188,8 +200,8 @@ pub async fn list_auth_profiles(
 
 #[derive(serde::Deserialize)]
 pub struct CreateAuthProfileBody {
-    pub realm_id: String,
-    pub binding_id: String,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
     pub provider: String,
     pub auth_method: String,
     pub secret: String,
@@ -270,15 +282,12 @@ pub async fn create_auth_profile(
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    let key = TokenKey::new(
-        connection_ref.realm_id.clone(),
-        connection_ref.binding_id.clone(),
-    );
+    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
     match state.token_store.save(&key, &tokens).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %connection_ref,
+                binding_key = ?connection_ref,
                 action = "create_profile",
                 provider = %auth_profile.provider.as_str(),
                 auth_method = %auth_profile.auth_method,
@@ -286,15 +295,13 @@ pub async fn create_auth_profile(
             );
             (
                 StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "realm_id": &connection_ref.realm_id,
-                    "binding_id": &connection_ref.binding_id,
-                    "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
-                    "provider": auth_profile.provider.as_str(),
-                    "auth_method": &auth_profile.auth_method,
-                    "stored": true,
-                })),
+                Json(WireAuthProfileCreated {
+                    identity: WireBindingIdentity::from(&connection_ref),
+                    profile_id: binding.auth_profile.clone(),
+                    provider: auth_profile.provider.as_str().to_string(),
+                    auth_method: auth_profile.auth_method.clone(),
+                    stored: true,
+                }),
             )
                 .into_response()
         }
@@ -308,18 +315,18 @@ pub async fn create_auth_profile(
 
 pub async fn get_auth_profile(
     State(state): State<AppState>,
-    Path(binding_id): Path<String>,
+    Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
     match resolve_binding_identity(&state, &query.realm_id, &binding_id).await {
         Ok((connection_ref, binding, auth_profile)) => (
             StatusCode::OK,
-            Json(serde_json::json!({
-                "connection_ref": &connection_ref,
-                "binding_id": &binding.id,
-                "profile_id": &binding.auth_profile,
-                "auth_profile": WireAuthProfile::from(&auth_profile),
-            })),
+            Json(WireAuthProfileDetail {
+                connection_ref: connection_ref.into(),
+                binding_id: binding.id.clone(),
+                profile_id: binding.auth_profile.clone(),
+                auth_profile: WireAuthProfile::from(&auth_profile),
+            }),
         )
             .into_response(),
         Err((status, msg)) => (status, Json(serde_json::json!({ "error": msg }))).into_response(),
@@ -328,7 +335,7 @@ pub async fn get_auth_profile(
 
 pub async fn delete_auth_profile(
     State(state): State<AppState>,
-    Path(binding_id): Path<String>,
+    Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
     let (connection_ref, binding, _) =
@@ -338,27 +345,22 @@ pub async fn delete_auth_profile(
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    let key = TokenKey::new(
-        connection_ref.realm_id.clone(),
-        connection_ref.binding_id.clone(),
-    );
+    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
     match state.token_store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %connection_ref,
+                binding_key = ?connection_ref,
                 action = "delete_profile",
                 "binding-scoped auth credentials deleted via REST"
             );
             (
                 StatusCode::NO_CONTENT,
-                Json(serde_json::json!({
-                    "realm_id": &connection_ref.realm_id,
-                    "binding_id": &connection_ref.binding_id,
-                    "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
-                    "cleared": true,
-                })),
+                Json(WireAuthProfileCleared {
+                    identity: WireBindingIdentity::from(&connection_ref),
+                    profile_id: binding.auth_profile.clone(),
+                    cleared: true,
+                }),
             )
                 .into_response()
         }
@@ -372,8 +374,8 @@ pub async fn delete_auth_profile(
 
 #[derive(serde::Deserialize)]
 pub struct TestBindingBody {
-    pub realm_id: String,
-    pub binding_id: String,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
 }
 
 pub async fn test_auth_profile(
@@ -386,7 +388,10 @@ pub async fn test_auth_profile(
             let registry = meerkat_providers::ProviderRuntimeRegistry::default();
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store));
-            match registry.resolve(&realm, &body.binding_id, &env).await {
+            match registry
+                .resolve(&realm, body.binding_id.as_str(), &env)
+                .await
+            {
                 Ok(conn) => {
                     let (connection_ref, binding, auth_profile) =
                         match resolve_binding_identity(&state, &body.realm_id, &body.binding_id)
@@ -486,14 +491,14 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
     let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "authorize_url": authorize_url,
-            "state": state_token,
-            "pkce_verifier": pkce.verifier.secret(),
-            "pkce_challenge": pkce.challenge.code,
-            "redirect_uri": body.redirect_uri,
-            "provider": body.provider,
-        })),
+        Json(WireLoginStart {
+            authorize_url,
+            state: state_token,
+            pkce_verifier: pkce.verifier.secret().to_string(),
+            pkce_challenge: pkce.challenge.code.clone(),
+            redirect_uri: body.redirect_uri,
+            provider: body.provider,
+        }),
     )
         .into_response()
 }
@@ -505,12 +510,12 @@ pub struct LoginCompleteBody {
     pub pkce_verifier: String,
     pub redirect_uri: String,
     #[serde(default = "default_realm")]
-    pub realm_id: String,
-    pub binding_id: Option<String>,
+    pub realm_id: RealmId,
+    pub binding_id: Option<BindingId>,
 }
 
-fn default_realm() -> String {
-    "dev".to_string()
+fn default_realm() -> RealmId {
+    RealmId::parse("dev").expect("'dev' is a valid realm slug")
 }
 
 pub async fn complete_login(
@@ -526,7 +531,7 @@ pub async fn complete_login(
         };
     let binding_id = body
         .binding_id
-        .unwrap_or_else(|| default_oauth_binding(mode).to_string());
+        .unwrap_or_else(|| default_oauth_binding_id(mode));
     let (connection_ref, binding, auth_profile) =
         match resolve_binding_identity(&state, &body.realm_id, &binding_id).await {
             Ok(v) => v,
@@ -599,10 +604,7 @@ pub async fn complete_login(
         metadata: serde_json::Value::Null,
     };
 
-    let key = TokenKey::new(
-        connection_ref.realm_id.clone(),
-        connection_ref.binding_id.clone(),
-    );
+    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
     if let Err(e) = state.token_store.save(&key, &tokens).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -613,7 +615,7 @@ pub async fn complete_login(
 
     tracing::info!(
         target: "meerkat::auth::audit",
-        binding_key = %connection_ref,
+        binding_key = ?connection_ref,
         action = "login_oauth_complete",
         provider = %body.provider,
         has_refresh_token = %tokens.refresh_token.is_some(),
@@ -622,16 +624,15 @@ pub async fn complete_login(
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "realm_id": &connection_ref.realm_id,
-            "binding_id": &connection_ref.binding_id,
-            "connection_ref": &connection_ref,
-            "profile_id": &binding.auth_profile,
-            "provider": body.provider,
-            "expires_at": expires_at.map(|e| e.to_rfc3339()),
-            "has_refresh_token": tokens.refresh_token.is_some(),
-            "scopes": tokens.scopes,
-        })),
+        Json(WireLoginReady {
+            state: None,
+            identity: WireBindingIdentity::from(&connection_ref),
+            profile_id: binding.auth_profile.clone(),
+            provider: body.provider,
+            expires_at: expires_at.map(|e| e.to_rfc3339()),
+            has_refresh_token: tokens.refresh_token.is_some(),
+            scopes: tokens.scopes.clone(),
+        }),
     )
         .into_response()
 }
@@ -664,15 +665,15 @@ pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoR
     match request_device_code(&http, &endpoints).await {
         Ok(resp) => (
             StatusCode::OK,
-            Json(serde_json::json!({
-                "device_code": resp.device_code,
-                "user_code": resp.user_code,
-                "verification_uri": resp.verification_uri,
-                "verification_uri_complete": resp.verification_uri_complete,
-                "expires_in": resp.expires_in,
-                "interval": resp.interval,
-                "provider": body.provider,
-            })),
+            Json(WireDeviceStart {
+                device_code: resp.device_code,
+                user_code: resp.user_code,
+                verification_uri: resp.verification_uri,
+                verification_uri_complete: resp.verification_uri_complete,
+                expires_in: resp.expires_in,
+                interval: resp.interval,
+                provider: body.provider,
+            }),
         )
             .into_response(),
         Err(e) => (
@@ -690,13 +691,13 @@ pub struct DeviceCompleteBody {
     pub provider: String,
     pub device_code: String,
     #[serde(default = "default_dev_realm_rest")]
-    pub realm_id: String,
+    pub realm_id: RealmId,
     #[serde(default)]
-    pub binding_id: Option<String>,
+    pub binding_id: Option<BindingId>,
 }
 
-fn default_dev_realm_rest() -> String {
-    "dev".into()
+fn default_dev_realm_rest() -> RealmId {
+    RealmId::parse("dev").expect("'dev' is a valid realm slug")
 }
 
 /// Device-code flow completion leg. Single-poll semantics — the caller
@@ -731,7 +732,7 @@ pub async fn complete_device_login(
     }
     let binding_id = body
         .binding_id
-        .unwrap_or_else(|| default_oauth_binding(mode).to_string());
+        .unwrap_or_else(|| default_oauth_binding_id(mode));
     let (connection_ref, binding, auth_profile) =
         match resolve_binding_identity(&state, &body.realm_id, &binding_id).await {
             Ok(v) => v,
@@ -807,10 +808,7 @@ pub async fn complete_device_login(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            let key = TokenKey::new(
-                connection_ref.realm_id.clone(),
-                connection_ref.binding_id.clone(),
-            );
+            let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
             if let Err(e) = state.token_store.save(&key, &tokens).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -822,7 +820,7 @@ pub async fn complete_device_login(
             }
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %connection_ref,
+                binding_key = ?connection_ref,
                 action = "login_device_complete",
                 provider = %body.provider,
                 has_refresh_token = %tokens.refresh_token.is_some(),
@@ -830,17 +828,15 @@ pub async fn complete_device_login(
             );
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "state": "ready",
-                    "realm_id": &connection_ref.realm_id,
-                    "binding_id": &connection_ref.binding_id,
-                    "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
-                    "provider": body.provider,
-                    "expires_at": expires_at.map(|e| e.to_rfc3339()),
-                    "has_refresh_token": tokens.refresh_token.is_some(),
-                    "scopes": tokens.scopes,
-                })),
+                Json(WireLoginReady {
+                    state: Some("ready".to_string()),
+                    identity: WireBindingIdentity::from(&connection_ref),
+                    profile_id: binding.auth_profile.clone(),
+                    provider: body.provider,
+                    expires_at: expires_at.map(|e| e.to_rfc3339()),
+                    has_refresh_token: tokens.refresh_token.is_some(),
+                    scopes: tokens.scopes.clone(),
+                }),
             )
                 .into_response()
         }
@@ -849,7 +845,7 @@ pub async fn complete_device_login(
 
 pub async fn get_auth_status(
     State(state): State<AppState>,
-    Path(binding_id): Path<String>,
+    Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
     let (connection_ref, binding, auth_profile) =
@@ -859,10 +855,7 @@ pub async fn get_auth_status(
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    let key = TokenKey::new(
-        connection_ref.realm_id.clone(),
-        connection_ref.binding_id.clone(),
-    );
+    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
     let stored = match state.token_store.load(&key).await {
         Ok(v) => v,
         Err(e) => {
@@ -891,26 +884,31 @@ pub async fn get_auth_status(
     };
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "realm_id": &connection_ref.realm_id,
-            "binding_id": &connection_ref.binding_id,
-            "connection_ref": &connection_ref,
-            "profile_id": &binding.auth_profile,
-            "provider": auth_profile.provider.as_str(),
-            "auth_method": &auth_profile.auth_method,
-            "state": state_label,
-            "expires_at": stored.as_ref().and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),
-            "last_refresh_at": stored.as_ref().and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
-            "account_id": stored.as_ref().and_then(|t| t.account_id.clone()),
-            "has_refresh_token": stored.as_ref().map(|t| t.refresh_token.is_some()).unwrap_or(false),
-        })),
+        Json(WireAuthStatusDetail {
+            identity: WireBindingIdentity::from(&connection_ref),
+            profile_id: binding.auth_profile.clone(),
+            provider: auth_profile.provider.as_str().to_string(),
+            auth_method: auth_profile.auth_method.clone(),
+            state: state_label.to_string(),
+            expires_at: stored
+                .as_ref()
+                .and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),
+            last_refresh_at: stored
+                .as_ref()
+                .and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
+            account_id: stored.as_ref().and_then(|t| t.account_id.clone()),
+            has_refresh_token: stored
+                .as_ref()
+                .map(|t| t.refresh_token.is_some())
+                .unwrap_or(false),
+        }),
     )
         .into_response()
 }
 
 pub async fn logout(
     State(state): State<AppState>,
-    Path(binding_id): Path<String>,
+    Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
     let (connection_ref, binding, _) =
@@ -920,27 +918,22 @@ pub async fn logout(
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    let key = TokenKey::new(
-        connection_ref.realm_id.clone(),
-        connection_ref.binding_id.clone(),
-    );
+    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
     match state.token_store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = %connection_ref,
+                binding_key = ?connection_ref,
                 action = "logout",
                 "binding-scoped auth credentials logged out via REST"
             );
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "realm_id": &connection_ref.realm_id,
-                    "binding_id": &connection_ref.binding_id,
-                    "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
-                    "cleared": true,
-                })),
+                Json(WireAuthProfileCleared {
+                    identity: WireBindingIdentity::from(&connection_ref),
+                    profile_id: binding.auth_profile.clone(),
+                    cleared: true,
+                }),
             )
                 .into_response()
         }

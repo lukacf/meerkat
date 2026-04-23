@@ -22,8 +22,10 @@ pub use comms::{
     PeerName as WireCommsPeerName, ResponseStatus as WireCommsResponseStatus,
 };
 pub use connection::{
-    WireAuthError, WireAuthProfile, WireAuthStatus, WireBackendProfile, WireConnectionRef,
-    WireProviderBinding, WireRealmConnectionSet,
+    WireAuthError, WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated,
+    WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus, WireAuthStatusDetail,
+    WireBackendProfile, WireBindingIdentity, WireConnectionRef, WireDeviceStart, WireLoginReady,
+    WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 
 pub use event::WireEvent;
@@ -71,13 +73,21 @@ pub use realtime::{
 };
 pub use result::WireRunResult;
 pub use runtime::{
-    PeerResponseTerminalStatusWire, RuntimeAcceptOutcomeType, RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
-    SessionExternalEventEnvelope, SessionPeerResponseTerminalParams,
+    PeerResponseTerminalStatusWire,
+    RuntimeAcceptOutcomeType,
+    RuntimeAcceptResult,
+    RuntimeRealtimeAttachmentStatusParams,
+    RuntimeRealtimeAttachmentStatusResult,
+    SessionExternalEventEnvelope,
+    SessionPeerResponseTerminalParams,
     // Re-export of the `StructuredProviderExtension` core relocation
     // from C-1 — external callers can still import via the wire path.
-    StructuredProviderExtension, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
+    StructuredProviderExtension,
+    WireInputLifecycleState,
+    WireInputState,
+    WireInputStateHistoryEntry,
+    WireRealtimeAttachmentStatus,
+    WireRuntimeState,
 };
 pub use schedule::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,

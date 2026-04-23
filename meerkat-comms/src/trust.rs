@@ -142,23 +142,6 @@ impl TrustedPeers {
         self.peers.iter().find(|p| &p.pubkey == pubkey)
     }
 
-    /// Get a peer by their name.
-    pub fn get_by_name(&self, name: &str) -> Option<&TrustedPeer> {
-        self.peers.iter().find(|p| p.name == name)
-    }
-
-    /// Add or update a trusted peer.
-    ///
-    /// If a peer with the same pubkey already exists, it will be updated.
-    /// Otherwise, a new peer will be added.
-    pub fn upsert(&mut self, peer: TrustedPeer) {
-        if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
-            *existing = peer;
-        } else {
-            self.peers.push(peer);
-        }
-    }
-
     /// Remove a peer by pubkey.
     pub fn remove(&mut self, pubkey: &PubKey) -> bool {
         let len_before = self.peers.len();

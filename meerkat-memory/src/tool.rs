@@ -92,49 +92,6 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(
-        &self,
-        call: ToolCallView<'_>,
-    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
-        if call.name != TOOL_NAME {
-            return Err(ToolError::NotFound {
-                name: call.name.to_string(),
-            });
-        }
-
-        let input: MemorySearchInput =
-            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
-                name: TOOL_NAME.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let limit = input.limit.unwrap_or(DEFAULT_LIMIT).min(20);
-
-        let results = self.store.search(&input.query, limit).await.map_err(|e| {
-            ToolError::ExecutionFailed {
-                message: format!("{TOOL_NAME}: {e}"),
-            }
-        })?;
-
-        let results_json: Vec<Value> = results
-            .into_iter()
-            .map(|r| {
-                json!({
-                    "content": r.content,
-                    "score": r.score,
-                    "session_id": r.metadata.session_id.to_string(),
-                    "turn": r.metadata.turn,
-                })
-            })
-            .collect();
-
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            serde_json::to_string(&results_json).unwrap_or_else(|_| "[]".to_string()),
-            false,
-        )
-        .into())
-    }
 }
 
 #[cfg(test)]

@@ -1647,25 +1647,6 @@ impl CommsRuntime {
         Ok(self.router.remove_trusted_peer(&public_key))
     }
 
-    /// Register a trust edge whose peer entry is marked private.
-    ///
-    /// The peer goes through the same router + classified-inbox sync as
-    /// [`register_trusted_peer`](Self::register_trusted_peer) — admission
-    /// and send-resolution behave identically — but its pubkey is added
-    /// to the router's private-pubkey directory filter so
-    /// `resolve_peer_directory()` (and downstream `comms.peers`
-    /// REST/RPC/MCP handlers) filter it out. Intended for control-plane
-    /// edges such as the supervisor→member lifecycle channel for
-    /// session-backed mob members, where delivery AND reply-routing must
-    /// work but the recipient must not appear as an ordinary sendable
-    /// peer on user-facing surfaces.
-    pub async fn register_private_trusted_peer(&self, peer: TrustedPeer) -> Result<(), SendError> {
-        let pubkey = peer.pubkey;
-        self.router.add_trusted_peer(peer);
-        self.router.mark_private(pubkey);
-        Ok(())
-    }
-
     /// Remove a previously registered private-trust edge.
     pub async fn unregister_private_trusted_peer(
         &self,
@@ -1769,18 +1750,6 @@ impl CommsRuntime {
             let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
-                    continue;
-                }
-                // Private peers are admission-visible and send-resolvable
-                // but never appear in the directory — that's the point of
-                // the private-trust seam (e.g. supervisor bridge for
-                // session-backed mob members). Still mark the name and
-                // pubkey as "known" so an unrelated inproc entry with the
-                // same identity doesn't fall through to the `Inproc`
-                // source below.
-                if self.router.is_private(&peer.pubkey) {
-                    trusted_names.insert(peer.name.clone());
-                    trusted_pubkeys.insert(peer.pubkey);
                     continue;
                 }
                 trusted_names.insert(peer.name.clone());

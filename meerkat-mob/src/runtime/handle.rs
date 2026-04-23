@@ -3540,9 +3540,13 @@ mod tests {
             serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
         // 0.6 clean break: session fields are #[serde(skip)] and must not appear
         assert!(snapshot_value.get("current_bridge_session_id").is_none());
-        // Identity-native fields must be present
-        assert!(!snapshot_value["agent_runtime_id"].is_null());
-        assert!(!snapshot_value["fence_token"].is_null());
+        // `agent_runtime_id` and `fence_token` are binding-era atoms marked
+        // `pub(crate)` + `#[serde(skip)]` per the struct definition — they
+        // are bridge-internal and must NOT leak into app-facing serialized
+        // payloads. The public identity contract is `agent_identity()`
+        // (derived from `agent_runtime_id.identity`).
+        assert!(snapshot_value.get("agent_runtime_id").is_none());
+        assert!(snapshot_value.get("fence_token").is_none());
     }
 
     #[test]
@@ -3604,13 +3608,15 @@ mod tests {
         );
         let receipt_value =
             serde_json::to_value(&receipt).expect("respawn receipt should serialize to json");
+        // Public contract: `identity` is the only identity field that
+        // surfaces in app-facing serialized output. The binding-era atoms
+        // (`agent_runtime_id`, `previous_fence_token`, `fence_token`) are
+        // `pub(crate)` + `#[serde(skip)]` on the struct definition — they
+        // are bridge-internal and must not leak.
         assert_eq!(receipt_value["identity"], "worker");
-        assert_eq!(
-            receipt_value["agent_runtime_id"],
-            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
-        );
-        assert_eq!(receipt_value["previous_fence_token"], 7);
-        assert_eq!(receipt_value["fence_token"], 8);
+        assert!(receipt_value.get("agent_runtime_id").is_none());
+        assert!(receipt_value.get("previous_fence_token").is_none());
+        assert!(receipt_value.get("fence_token").is_none());
 
         let delivery = MemberDeliveryReceipt {
             identity: AgentIdentity::from("worker"),
@@ -3621,11 +3627,12 @@ mod tests {
         let delivery_value =
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
         assert_eq!(delivery_value["identity"], "worker");
-        assert_eq!(delivery_value["fence_token"], 8);
+        assert!(delivery_value.get("agent_runtime_id").is_none());
+        assert!(delivery_value.get("fence_token").is_none());
     }
 
     #[test]
-    fn helper_result_serializes_identity_native_runtime_fields() {
+    fn helper_result_omits_binding_era_atoms_in_serialized_output() {
         let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(2));
         let result = HelperResult {
             output: Some("done".to_string()),
@@ -3636,12 +3643,15 @@ mod tests {
         };
 
         let value = serde_json::to_value(&result).expect("helper result should serialize to json");
+        // Public contract: `agent_identity`, `output`, `tokens_used` surface
+        // in app-facing output. The binding-era atoms (`agent_runtime_id`,
+        // `fence_token`) are `pub(crate)` + `#[serde(skip)]` per the struct
+        // definition — bridge-internal and must not leak. Session fields
+        // were never present.
         assert_eq!(value["agent_identity"], "worker");
-        assert_eq!(
-            value["agent_runtime_id"],
-            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
-        );
-        assert_eq!(value["fence_token"], 9);
+        assert_eq!(value["tokens_used"], 7);
+        assert!(value.get("agent_runtime_id").is_none());
+        assert!(value.get("fence_token").is_none());
         assert!(value.get("session_id").is_none());
         assert!(value.get("bridge_session_id").is_none());
     }

@@ -68,7 +68,6 @@ impl BuiltinTool for LoadSkillTool {
         match results.into_iter().next() {
             Some(resolved) => Ok(ToolOutput::Json(json!({
                 "id": resolved.id.0,
-                "canonical_key": canonical_key(&resolved.id),
                 "name": resolved.name,
                 "body": resolved.rendered_body,
                 "byte_size": resolved.byte_size,

@@ -81,7 +81,6 @@ impl BuiltinTool for SkillListResourcesTool {
 
         Ok(ToolOutput::Json(json!({
             "id": id.0,
-            "canonical_key": canonical_key(&id),
             "artifacts": artifacts,
         })))
     }
@@ -127,7 +126,6 @@ impl BuiltinTool for SkillReadResourceTool {
 
         Ok(ToolOutput::Json(json!({
             "id": id.0,
-            "canonical_key": canonical_key(&id),
             "artifact": artifact,
         })))
     }

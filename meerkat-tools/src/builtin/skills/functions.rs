@@ -77,7 +77,6 @@ impl BuiltinTool for SkillInvokeFunctionTool {
 
         Ok(ToolOutput::Json(json!({
             "id": id.0,
-            "canonical_key": canonical_key(&id),
             "function_name": function_name,
             "output": output,
         })))

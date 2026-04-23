@@ -54,7 +54,6 @@ fn partition_at_path(
         .map(|s| {
             json!({
                 "id": s.id.0,
-                "canonical_key": canonical_key(&s.id),
                 "name": s.name,
                 "description": s.description,
             })
@@ -132,7 +131,6 @@ impl BuiltinTool for BrowseSkillsTool {
                 .map(|s| {
                     json!({
                         "id": s.id.0,
-                        "canonical_key": canonical_key(&s.id),
                         "name": s.name,
                         "description": s.description,
                     })

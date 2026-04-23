@@ -3305,9 +3305,12 @@ mod tests {
         let runtime = CommsRuntime::new(config).await.unwrap();
 
         let peer_key = Keypair::generate();
-        let trusted_peer =
-            meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned("ally", peer_key.public_key().to_peer_id(), "inproc://ally")
-                .expect("trusted peer spec should be valid");
+        let trusted_peer = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+            "ally",
+            peer_key.public_key().to_peer_id(),
+            "inproc://ally",
+        )
+        .expect("trusted peer spec should be valid");
 
         CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer.clone())
             .await
@@ -3326,7 +3329,11 @@ mod tests {
         let snapshot = CoreCommsRuntime::peer_ingress_runtime_snapshot(&runtime)
             .await
             .expect("peer runtime snapshot should be available");
-        assert_eq!(snapshot.self_peer_id, runtime.public_key().to_peer_id());
+        assert_eq!(
+            snapshot.self_peer_id,
+            meerkat_core::comms::PeerId::parse(&runtime.public_key().to_peer_id())
+                .expect("pubkey->peer_id should parse"),
+        );
         assert!(!snapshot.auth_required);
         assert_eq!(
             snapshot.authority_phase,
@@ -3450,8 +3457,12 @@ mod tests {
             assert_eq!(inbox.dropped_count(), Some(1));
         }
 
-        let trusted_peer = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned("sender", peer_id.clone(), "inproc://sender")
-            .expect("trusted peer spec should be valid");
+        let trusted_peer = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+            "sender",
+            peer_id.clone(),
+            "inproc://sender",
+        )
+        .expect("trusted peer spec should be valid");
         CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer)
             .await
             .expect("add_trusted_peer should succeed");
@@ -4032,7 +4043,7 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
-        let peer_spec = meerkat_core::comms::meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        let peer_spec = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
             receiver.public_key().to_peer_id(),
             format!("inproc://{receiver_name}"),
@@ -4043,7 +4054,7 @@ mod tests {
             .await
             .expect("trusted peer add should succeed");
 
-        let reverse_spec = meerkat_core::comms::meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        let reverse_spec = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             &sender_name,
             sender.public_key().to_peer_id(),
             format!("inproc://{sender_name}"),
@@ -4138,10 +4149,20 @@ mod tests {
     #[tokio::test]
     async fn test_add_trusted_peer_invalid_peer_id_is_rejected() {
         let sender = CommsRuntime::inproc_only("trust-invalid-sender").unwrap();
+        // Construct a descriptor whose `peer_id` does not match the supplied
+        // `pubkey` — `descriptor_to_trusted_peer` derives the id from pubkey
+        // and rejects the mismatch with `SendError::Validation`.
+        let bogus_peer_key = Keypair::generate();
+        let real_peer_key = Keypair::generate();
         let invalid_peer_spec = meerkat_core::comms::TrustedPeerDescriptor {
-            name: "invalid".to_string(),
-            peer_id: "bad-peer-id".to_string(),
-            address: "inproc://invalid".to_string(),
+            name: meerkat_core::comms::PeerName::new("invalid").expect("valid peer name"),
+            peer_id: meerkat_core::comms::PeerId::parse(&bogus_peer_key.public_key().to_peer_id())
+                .expect("valid peer_id format"),
+            address: meerkat_core::comms::PeerAddress::new(
+                meerkat_core::comms::PeerTransport::Inproc,
+                "invalid",
+            ),
+            pubkey: *real_peer_key.public_key().as_bytes(),
         };
 
         let result = CoreCommsRuntime::add_trusted_peer(&sender, invalid_peer_spec).await;
@@ -4329,7 +4350,7 @@ mod tests {
             "expected Trusted or TrustedAndInproc, got {:?}",
             peer.source
         );
-        assert_eq!(peer.address, format!("inproc://{peer_name}"));
+        assert_eq!(peer.address.to_string(), format!("inproc://{peer_name}"));
         assert_eq!(peer.sendable_kinds.len(), 3);
         assert!(peer.sendable_kinds.contains(&"peer_message".to_string()));
         assert!(peer.sendable_kinds.contains(&"peer_request".to_string()));
@@ -4411,8 +4432,12 @@ mod tests {
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(&peer_name, peer_key, "tcp://127.0.0.1:9")
-                .expect("valid trusted peer"),
+            meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+                &peer_name,
+                peer_key,
+                "tcp://127.0.0.1:9",
+            )
+            .expect("valid trusted peer"),
         )
         .await
         .expect("add trusted peer");
@@ -4900,7 +4925,7 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         // Add receiver as trusted peer of sender
-        let peer_spec = meerkat_core::comms::meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        let peer_spec = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
             receiver.public_key().to_peer_id(),
             format!("inproc://{receiver_name}"),

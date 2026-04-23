@@ -1058,6 +1058,31 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
+            // Wave-d D-d: close the `supervisor_trust_publish` obligation
+            // on the DSL side with the epoch observed on the producer
+            // effect. The DSL guard enforces `epoch == supervisor_bound_epoch`
+            // so a stale ack for a superseded epoch is rejected without
+            // mutating state. Rejection here is non-fatal: the rollback
+            // path above already returned if trust publication failed,
+            // so a guard failure would indicate the binding has rotated
+            // between the `stage_supervisor_bind` commit and this ack
+            // staging — which means the ack is stale and correctly
+            // dropped without closing the (now-superseded) obligation.
+            if let Err(error) = adapter
+                .stage_supervisor_trust_published(
+                    session_id,
+                    supervisor_spec.peer_id.as_str(),
+                    payload.epoch,
+                )
+                .await
+            {
+                tracing::debug!(
+                    %session_id,
+                    epoch = payload.epoch,
+                    %error,
+                    "supervisor_trust_publish ack rejected by DSL (binding rotated?)"
+                );
+            }
             send_bridge_response(
                 comms_runtime,
                 candidate,
@@ -1167,6 +1192,28 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
+            // Wave-d D-d: close the `supervisor_trust_publish` obligation
+            // for the rotated binding. `AuthorizeSupervisor` above has
+            // already committed the DSL rotation to the new epoch, so
+            // the guard matches `(new_peer_id, new_epoch)` and the ack
+            // closes the obligation for the current binding. A stale
+            // ack (observed from a superseded rotation) would have a
+            // lower epoch and be rejected.
+            if let Err(error) = adapter
+                .stage_supervisor_trust_published(
+                    session_id,
+                    supervisor_spec.peer_id.as_str(),
+                    payload.epoch,
+                )
+                .await
+            {
+                tracing::debug!(
+                    %session_id,
+                    epoch = payload.epoch,
+                    %error,
+                    "supervisor_trust_publish ack rejected by DSL (binding rotated?)"
+                );
+            }
             if previous_binding.peer_id != payload.supervisor.peer_id
                 && let Err(error) = comms_runtime
                     .remove_trusted_peer(&previous_binding.peer_id)
@@ -1230,6 +1277,29 @@ async fn try_handle_supervisor_bridge_command(
                 )
                 .await;
                 return true;
+            }
+            // Wave-d D-d: close the `supervisor_trust_revoke` obligation
+            // with the epoch observed on the producer effect. Staged
+            // before the `RevokeSupervisor` transition flips the binding
+            // to `Unbound` — the DSL guard matches against the still-
+            // `Bound` binding. A stale revoke ack (epoch mismatch) would
+            // be rejected here, leaving the obligation open and the
+            // subsequent `stage_supervisor_revoke` below also rejecting
+            // (its guards are identical modulo the unbound-transition).
+            if let Err(error) = adapter
+                .stage_supervisor_trust_revoked(
+                    session_id,
+                    payload.supervisor.peer_id.clone(),
+                    payload.epoch,
+                )
+                .await
+            {
+                tracing::debug!(
+                    %session_id,
+                    epoch = payload.epoch,
+                    %error,
+                    "supervisor_trust_revoke ack rejected by DSL (binding rotated?)"
+                );
             }
             if let Err(error) = adapter
                 .stage_supervisor_revoke(
@@ -3039,6 +3109,163 @@ mod tests {
                 SupervisorBinding::Unbound
             ),
             "binding must be Unbound after matching revoke"
+        );
+    }
+
+    // Wave-d D-d: supervisor-trust-edge feedback acks carry the epoch
+    // observed on the producer effect. The DSL guard rejects a stale-
+    // epoch ack arriving after the binding has rotated forward — the
+    // outstanding obligation stays open, the stale ack does not close
+    // it. Mirrors `correlation_fields = [peer_id, epoch]` on the
+    // `supervisor_trust_publish` / `supervisor_trust_revoke` protocols.
+    #[tokio::test]
+    async fn dsl_supervisor_trust_publish_ack_stale_epoch_is_rejected() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        // Bind at epoch 1.
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                "super-a".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a".to_string(),
+                1,
+            )
+            .await
+            .expect("initial bind");
+
+        // Rotate forward to epoch 2 before the ack for epoch 1 arrives.
+        adapter
+            .stage_supervisor_authorize(
+                &session_id,
+                "super-a".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a".to_string(),
+                2,
+            )
+            .await
+            .expect("rotation to epoch 2");
+
+        // Stale ack for epoch 1 — must be DSL-rejected. The guard
+        // checks `self.supervisor_bound_epoch == Some(epoch)`, and the
+        // binding is now at epoch 2.
+        let stale = adapter
+            .stage_supervisor_trust_published(&session_id, "ed25519:super-a".to_string(), 1)
+            .await;
+        assert!(
+            matches!(stale, Err(SupervisorBindingStageError::Dsl(_))),
+            "stale-epoch publish ack must be DSL-rejected, got: {stale:?}"
+        );
+        // State must be unchanged — still bound at epoch 2.
+        match adapter.supervisor_binding(&session_id).await {
+            SupervisorBinding::Bound { epoch, .. } => {
+                assert_eq!(epoch, 2, "binding must still be at epoch 2");
+            }
+            SupervisorBinding::Unbound => panic!("stale ack must not unbind"),
+        }
+
+        // Matching-epoch ack closes the obligation — transition
+        // accepted, no state mutation (phase-preserving self-loop).
+        adapter
+            .stage_supervisor_trust_published(&session_id, "ed25519:super-a".to_string(), 2)
+            .await
+            .expect("matching-epoch ack must be accepted");
+    }
+
+    #[tokio::test]
+    async fn dsl_supervisor_trust_revoke_ack_stale_epoch_is_rejected() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        // Bind at epoch 1.
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                "super-a".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a".to_string(),
+                1,
+            )
+            .await
+            .expect("initial bind");
+
+        // Rotate forward to epoch 2.
+        adapter
+            .stage_supervisor_authorize(
+                &session_id,
+                "super-a".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a".to_string(),
+                2,
+            )
+            .await
+            .expect("rotation to epoch 2");
+
+        // Stale revoke ack for epoch 1 — DSL-rejected.
+        let stale = adapter
+            .stage_supervisor_trust_revoked(&session_id, "ed25519:super-a".to_string(), 1)
+            .await;
+        assert!(
+            matches!(stale, Err(SupervisorBindingStageError::Dsl(_))),
+            "stale-epoch revoke ack must be DSL-rejected, got: {stale:?}"
+        );
+        match adapter.supervisor_binding(&session_id).await {
+            SupervisorBinding::Bound { epoch, .. } => {
+                assert_eq!(epoch, 2, "binding must still be at epoch 2");
+            }
+            SupervisorBinding::Unbound => panic!("stale revoke ack must not unbind"),
+        }
+
+        // Matching-epoch revoke ack accepted.
+        adapter
+            .stage_supervisor_trust_revoked(&session_id, "ed25519:super-a".to_string(), 2)
+            .await
+            .expect("matching-epoch revoke ack must be accepted");
+    }
+
+    #[tokio::test]
+    async fn dsl_supervisor_trust_ack_rejects_mismatched_peer_id() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                "super-a".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a".to_string(),
+                7,
+            )
+            .await
+            .expect("initial bind");
+
+        // Correct epoch but wrong peer_id — must be rejected.
+        let wrong_peer = adapter
+            .stage_supervisor_trust_published(&session_id, "ed25519:unrelated".to_string(), 7)
+            .await;
+        assert!(
+            matches!(wrong_peer, Err(SupervisorBindingStageError::Dsl(_))),
+            "mismatched-peer ack must be DSL-rejected, got: {wrong_peer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsl_supervisor_trust_ack_rejected_when_unbound() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        // Unbound from the start — any ack must be rejected.
+        let unbound = adapter
+            .stage_supervisor_trust_published(&session_id, "ed25519:super-a".to_string(), 1)
+            .await;
+        assert!(
+            matches!(unbound, Err(SupervisorBindingStageError::Dsl(_))),
+            "publish ack must be rejected when Unbound, got: {unbound:?}"
         );
     }
 

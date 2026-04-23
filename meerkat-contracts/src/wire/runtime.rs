@@ -58,34 +58,11 @@ pub enum SessionExternalEventEnvelope {
     },
 }
 
-/// Request payload for `session/retire`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RuntimeRetireParams {
-    pub session_id: String,
-}
-
-/// Request payload for `session/reset`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RuntimeResetParams {
-    pub session_id: String,
-}
-
-/// Request payload for `session/submission`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct InputStateParams {
-    pub session_id: String,
-    pub input_id: String,
-}
-
-/// Request payload for `session/submissions`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct InputListParams {
-    pub session_id: String,
-}
+// `RuntimeRetireParams`, `RuntimeResetParams`, `InputStateParams`, and
+// `InputListParams` (and their `*Result` counterparts below) were deleted
+// in Wave B. Wave A removed the shell verbs (`session/retire`,
+// `session/reset`, `session/submission`, `session/submissions`); the wire
+// types are gone so they cannot regrow.
 
 /// Public runtime state projection used by RPC surfaces.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,18 +135,112 @@ pub struct WireInputStateHistoryEntry {
     pub reason: Option<String>,
 }
 
+/// Typed wire projection of the input admission policy.
+///
+/// Formerly `serde_json::Value`; wave-b retyped it so callers can pattern
+/// match on admission behavior instead of parsing opaque JSON.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInputPolicy {
+    Stage,
+    Queue,
+    Immediate,
+}
+
+/// Typed wire projection of an input's terminal outcome.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInputTerminalOutcome {
+    Completed,
+    Abandoned,
+    Superseded,
+    Coalesced,
+    Cancelled,
+}
+
+/// Typed wire projection of an input's durability class.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireInputDurability {
+    Durable,
+    Volatile,
+    Ephemeral,
+}
+
+/// Typed wire projection of where an input state was reconstructed from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireReconstructionSource {
+    Live,
+    EventStore,
+    Snapshot,
+    Replay,
+}
+
+/// Typed wire projection of the persisted input carrier.
+///
+/// The carrier is a structural discriminator. Untypeable provider-specific
+/// body bytes should be projected via `StructuredProviderExtension` — a
+/// typed opaque-bag newtype explicitly marked non-semantic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WirePersistedInput {
+    Prompt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_preview: Option<String>,
+    },
+    ExternalEvent {
+        event_type: String,
+    },
+    PeerMessage {
+        peer_name: PeerName,
+    },
+    Continuation,
+    Other {
+        carrier: String,
+    },
+}
+
+/// Typed non-semantic opaque bag for wire fields that cannot be fully typed
+/// without blocking Wave B. Explicitly marked non-semantic and RMAT-exempt.
+///
+/// Use of this type is a deliberate boundary marker: the content is
+/// passed through without interpretation. Any consumer that needs to
+/// interpret the content must promote the relevant structure into a
+/// proper typed variant in its own wave.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StructuredProviderExtension {
+    /// Free-form provider namespace discriminator (e.g. `"anthropic"`).
+    pub namespace: String,
+    /// Opaque key identifying the extension within the namespace.
+    pub key: String,
+    /// Opaque body. Non-semantic — never pattern matched across the wire.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    #[serde(default)]
+    pub body: String,
+}
+
 /// RPC-facing input state snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// All fields are typed. Wave B replaced six former `serde_json::Value`
+/// fields with typed projections so the wire carries no untyped carriers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireInputState {
     pub input_id: String,
     pub current_state: WireInputLifecycleState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy: Option<serde_json::Value>,
+    pub policy: Option<WireInputPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_outcome: Option<serde_json::Value>,
+    pub terminal_outcome: Option<WireInputTerminalOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub durability: Option<serde_json::Value>,
+    pub durability: Option<WireInputDurability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(default)]
@@ -179,9 +250,9 @@ pub struct WireInputState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<WireInputStateHistoryEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconstruction_source: Option<serde_json::Value>,
+    pub reconstruction_source: Option<WireReconstructionSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persisted_input: Option<serde_json::Value>,
+    pub persisted_input: Option<WirePersistedInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,17 +261,10 @@ pub struct WireInputState {
     pub updated_at: String,
 }
 
-/// Response payload for `session/submission`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(untagged)]
-pub enum InputStateResult {
-    Found(Box<WireInputState>),
-    Missing(()),
-}
+// `InputStateResult` was deleted in Wave B alongside `InputStateParams`.
 
 /// Response payload for `session/submit`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeAcceptResult {
     pub outcome_type: RuntimeAcceptOutcomeType,
@@ -211,32 +275,89 @@ pub struct RuntimeAcceptResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy: Option<serde_json::Value>,
+    pub policy: Option<WireInputPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<WireInputState>,
 }
 
-/// Response payload for `session/retire`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// `RuntimeRetireResult`, `RuntimeResetResult`, and `InputListResult` were
+// deleted in Wave B. See the deletion note on the corresponding `*Params`
+// types above.
+
+// -----------------------------------------------------------------------
+// V8 — Typed replacement for untyped `session/accept_input` ingress.
+// -----------------------------------------------------------------------
+
+/// Typed wire projection of `ConversationAppendRole`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RuntimeRetireResult {
-    pub inputs_abandoned: usize,
+#[serde(rename_all = "snake_case")]
+pub enum WireConversationAppendRole {
+    User,
+    Assistant,
+    SystemNotice,
+    Tool,
+}
+
+/// Typed wire projection of a conversation append operation. Body content
+/// is carried as the existing `WireContentBlock` vector so the wire stays
+/// structurally typed end-to-end.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireConversationAppend {
+    pub role: WireConversationAppendRole,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<WireContentBlock>,
+}
+
+/// Typed wire projection of a context-only append.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireConversationContextAppend {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<WireContentBlock>,
+}
+
+/// Typed wire projection of a batched staged input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireStagedRunInput {
     #[serde(default)]
-    pub inputs_pending_drain: usize,
+    pub contributing_input_ids: Vec<String>,
+    #[serde(default)]
+    pub appends: Vec<WireConversationAppend>,
+    #[serde(default)]
+    pub context_appends: Vec<WireConversationContextAppend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
-/// Response payload for `session/reset`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Typed wire projection of `meerkat_core::lifecycle::run_primitive::RunPrimitive`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RuntimeResetResult {
-    pub inputs_abandoned: usize,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireRunPrimitive {
+    StagedInput(WireStagedRunInput),
+    ImmediateAppend(WireConversationAppend),
+    ImmediateContextAppend(WireConversationContextAppend),
 }
 
-/// Response payload for `session/submissions`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Typed request payload for `session/accept_input`.
+///
+/// Replaces the untyped ad-hoc JSON shape the RPC handler parsed by hand
+/// pre-wave-b. Every field is a typed projection of a core type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct InputListResult {
-    pub input_ids: Vec<String>,
+pub struct SessionAcceptInputParams {
+    pub session_id: String,
+    pub primitive: WireRunPrimitive,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 // -----------------------------------------------------------------------

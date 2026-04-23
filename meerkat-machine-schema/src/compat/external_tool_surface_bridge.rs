@@ -15,7 +15,7 @@
 
 use crate::{
     EffectDisposition, EffectDispositionRule, EnumSchema, FieldSchema, InitSchema, MachineSchema,
-    RustBinding, StateSchema, TypeRef, VariantSchema,
+    NamedTypeBinding, RustBinding, StateSchema, TypeRef, VariantSchema,
 };
 use crate::identity::{
     EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId,
@@ -152,6 +152,11 @@ pub fn external_tool_surface_bridge_machine() -> MachineSchema {
                 disposition: EffectDisposition::External,
                 handoff_protocol: Some(ProtocolId::parse("surface_completion").expect("valid protocol slug")),
             },
+        ],
+        named_types: vec![
+            NamedTypeBinding::u64("TurnNumber"),
+            NamedTypeBinding::string("SurfaceId"),
+            NamedTypeBinding::string("SurfaceDeltaOperation"),
         ],
     }
 }

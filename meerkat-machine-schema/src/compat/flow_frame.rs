@@ -2,7 +2,7 @@ use indexmap::IndexMap;
 
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
-    Guard, HelperSchema, InvariantSchema, MachineSchema, Quantifier, RustBinding,
+    Guard, HelperSchema, InvariantSchema, MachineSchema, NamedTypeBinding, Quantifier, RustBinding,
     StateSchema, TransitionSchema, TypeRef, Update, VariantSchema, TriggerMatch,
 };
 use crate::identity::{
@@ -1912,6 +1912,12 @@ pub fn flow_frame_machine() -> MachineSchema {
             routed_disposition("BodyFrameCompleted", &["LoopIterationMachine"]),
             routed_disposition("BodyFrameFailed", &["LoopIterationMachine"]),
             routed_disposition("BodyFrameCanceled", &["LoopIterationMachine"]),
+        ],
+        named_types: vec![
+            NamedTypeBinding::string("FrameId"),
+            NamedTypeBinding::string("LoopInstanceId"),
+            NamedTypeBinding::string("BranchId"),
+            NamedTypeBinding::string("FlowNodeId"),
         ],
     }
 }

@@ -17,7 +17,7 @@
 
 use crate::{
     EffectDisposition, EffectDispositionRule, EnumSchema, FieldSchema, InitSchema, MachineSchema,
-    RustBinding, StateSchema, TypeRef, VariantSchema,
+    NamedTypeBinding, RustBinding, StateSchema, TypeRef, VariantSchema,
 };
 use crate::identity::{
     EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId,
@@ -95,6 +95,10 @@ pub fn ops_barrier_bridge_machine() -> MachineSchema {
             disposition: EffectDisposition::External,
             handoff_protocol: Some(ProtocolId::parse("ops_barrier_satisfaction").expect("valid protocol slug")),
         }],
+        named_types: vec![
+            NamedTypeBinding::string("WaitRequestId"),
+            NamedTypeBinding::string("OperationId"),
+        ],
     }
 }
 

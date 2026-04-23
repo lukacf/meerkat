@@ -215,3 +215,35 @@ pub struct NamedTypeBinding {
     pub name: NamedTypeId,
     pub rust: RustTypeAtom,
 }
+
+impl NamedTypeBinding {
+    /// Construct a binding whose Rust representation is `u64`.
+    ///
+    /// Panics if `name` is not a valid [`NamedTypeId`] slug. Intended for
+    /// catalog/compat construction sites; callers that want fallible
+    /// construction should build [`NamedTypeId`] directly and assemble
+    /// the struct by hand.
+    pub fn u64(name: &str) -> Self {
+        Self {
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::U64,
+        }
+    }
+
+    /// Construct a binding whose Rust representation is `String`.
+    pub fn string(name: &str) -> Self {
+        Self {
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::String,
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified
+    /// type path.
+    pub fn type_path(name: &str, rust_path: impl Into<String>) -> Self {
+        Self {
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePath(rust_path.into()),
+        }
+    }
+}

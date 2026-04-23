@@ -143,6 +143,11 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     invariants: vec![#(#invariants),*],
                     transitions: vec![#(#transitions),*],
                     effect_dispositions: vec![#(#dispositions),*],
+                    // Named-type bindings are attached by the catalog
+                    // wrapper (`catalog::dsl::mod::with_named_types`) so the
+                    // DSL macro surface stays stable while the authoritative
+                    // Rust-atom mapping remains schema-owned.
+                    named_types: vec![],
                     ci_step_limit: None,
                 }
             }

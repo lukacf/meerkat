@@ -32,18 +32,58 @@ pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
 
-use crate::MachineSchema;
+use crate::{MachineSchema, NamedTypeBinding};
+
+/// Attach authoritative [`NamedTypeBinding`]s to a DSL-generated schema.
+///
+/// The `machine!` macro does not yet emit `named_types` entries, so the
+/// catalog wrappers supply them here. This is the single source of truth
+/// for how DSL-declared named types lower to Rust atoms — the codegen
+/// consults these bindings rather than matching on type names.
+fn with_named_types(mut schema: MachineSchema, bindings: Vec<NamedTypeBinding>) -> MachineSchema {
+    schema.named_types = bindings;
+    schema
+}
 
 pub fn dsl_auth_machine() -> MachineSchema {
     auth_machine::AuthMachineState::schema()
 }
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
-    meerkat_machine::MeerkatMachineState::schema()
+    with_named_types(
+        meerkat_machine::MeerkatMachineState::schema(),
+        vec![
+            NamedTypeBinding::u64("BoundarySequence"),
+            NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::u64("Generation"),
+            NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("CommsRuntimeId"),
+            NamedTypeBinding::string("InputId"),
+            NamedTypeBinding::string("McpServerId"),
+            NamedTypeBinding::string("MobId"),
+            NamedTypeBinding::string("OperationId"),
+            NamedTypeBinding::string("PeerCorrelationId"),
+            NamedTypeBinding::string("RunId"),
+            NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string("ToolFilter"),
+            NamedTypeBinding::string("WorkId"),
+        ],
+    )
 }
 
 pub fn dsl_mob_machine() -> MachineSchema {
-    mob_machine::MobMachineState::schema()
+    with_named_types(
+        mob_machine::MobMachineState::schema(),
+        vec![
+            NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::u64("Generation"),
+            NamedTypeBinding::string("AgentIdentity"),
+            NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string("TaskId"),
+            NamedTypeBinding::string("WorkId"),
+        ],
+    )
 }
 
 pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
@@ -51,5 +91,11 @@ pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
 }
 
 pub fn dsl_occurrence_lifecycle_machine() -> MachineSchema {
-    occurrence_lifecycle::OccurrenceLifecycleMachineState::schema()
+    with_named_types(
+        occurrence_lifecycle::OccurrenceLifecycleMachineState::schema(),
+        vec![
+            NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string("ScheduleId"),
+        ],
+    )
 }

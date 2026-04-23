@@ -8,6 +8,7 @@ pub mod identity;
 mod machine;
 pub mod types;
 
+pub use identity::{NamedTypeBinding, RustTypeAtom};
 pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
 pub use catalog::{

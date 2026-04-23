@@ -11,24 +11,54 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::connection::{BindingId, IdentityError, RealmId};
+
 /// Key for a persisted token bundle: realm + binding.
+///
+/// Wave-c C-12 / C-1 follow-up: `realm_id: String` / `binding_id: String`
+/// retyped to `realm: RealmId` / `binding: BindingId` to match the typed-atom
+/// rename C-1 did on `ConnectionRef`. Consumers that need the flat string
+/// form use `.realm.as_str()` / `.binding.as_str()` at the exact site that
+/// needs it (path segments, log lines, keyring account keys).
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct TokenKey {
-    pub realm_id: String,
-    pub binding_id: String,
+    pub realm: RealmId,
+    pub binding: BindingId,
 }
 
 impl TokenKey {
-    pub fn new(realm_id: impl Into<String>, binding_id: impl Into<String>) -> Self {
-        Self {
-            realm_id: realm_id.into(),
-            binding_id: binding_id.into(),
-        }
+    /// Construct a token key from already-typed atoms. The primary
+    /// constructor — call sites that have the typed forms (e.g. from
+    /// `ConnectionRef.realm` / `ConnectionRef.binding`) use this
+    /// directly. Raw-string call sites build the atoms at their CLI /
+    /// wire boundary via `RealmId::parse` / `BindingId::parse` and
+    /// fold the resulting `Result<TokenKey, IdentityError>` into their
+    /// ambient error handling.
+    pub fn new(realm: RealmId, binding: BindingId) -> Self {
+        Self { realm, binding }
+    }
+
+    /// Construct a token key from raw strings, validating each component
+    /// against the slug grammar enforced by
+    /// `meerkat_core::connection::{RealmId,BindingId}::parse`. This is
+    /// the right entry point for callers that only have flat-string
+    /// input — the CLI `--connection-ref` parser, wire-layer handlers,
+    /// test fixtures.
+    pub fn parse(realm: impl AsRef<str>, binding: impl AsRef<str>) -> Result<Self, IdentityError> {
+        Ok(Self {
+            realm: RealmId::parse(realm.as_ref())?,
+            binding: BindingId::parse(binding.as_ref())?,
+        })
     }
 
     /// The flat account identifier used by OS keyrings. Format: `<realm>:<binding>`.
+    ///
+    /// Format stays identical to the pre-retype output; this method is the
+    /// source of truth for the keyring `service:account` convention, so any
+    /// renaming of the struct's fields must preserve this output byte-for-byte
+    /// to keep existing OAuth credentials reachable.
     pub fn keyring_account(&self) -> String {
-        format!("{}:{}", self.realm_id, self.binding_id)
+        format!("{}:{}", self.realm, self.binding)
     }
 }
 

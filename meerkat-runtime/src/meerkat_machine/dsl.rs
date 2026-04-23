@@ -209,29 +209,49 @@ impl From<Provider> for meerkat_core::provider::Provider {
     }
 }
 
-/// Typed mirror of [`meerkat_core::ConnectionRef`] — structural two-string
-/// projection (`realm_id` + `binding_id`) with bidirectional `From`.
+/// Typed mirror of [`meerkat_core::ConnectionRef`] — structural string
+/// projection carrying the flat forms of `realm` / `binding` / `profile`
+/// with bidirectional `From`.
+///
+/// The DSL layer keeps string fields because this mirror is the
+/// DSL-layer identity carrier (used inside runtime-owned guards /
+/// transitions where slug validation has already happened at the
+/// boundary). Domain-side `ConnectionRef` carries the typed atoms
+/// (`RealmId` / `BindingId` / `ProfileId`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ConnectionRef {
     pub realm_id: String,
     pub binding_id: String,
+    pub profile_id: Option<String>,
 }
 
 impl From<&meerkat_core::ConnectionRef> for ConnectionRef {
     fn from(r: &meerkat_core::ConnectionRef) -> Self {
         Self {
-            realm_id: r.realm_id.clone(),
-            binding_id: r.binding_id.clone(),
+            realm_id: r.realm.as_str().to_owned(),
+            binding_id: r.binding.as_str().to_owned(),
+            profile_id: r.profile.as_ref().map(|p| p.as_str().to_owned()),
         }
     }
 }
 
-impl From<ConnectionRef> for meerkat_core::ConnectionRef {
-    fn from(r: ConnectionRef) -> Self {
-        Self {
-            realm_id: r.realm_id,
-            binding_id: r.binding_id,
-        }
+/// Fallible conversion — DSL-layer flat strings may be slug-invalid
+/// (the DSL mirror intentionally accepts opaque strings to survive
+/// deserialization drift across schema versions), so lifting back to
+/// the typed-atom domain form may reject.
+impl TryFrom<ConnectionRef> for meerkat_core::ConnectionRef {
+    type Error = meerkat_core::IdentityError;
+
+    fn try_from(r: ConnectionRef) -> Result<Self, Self::Error> {
+        Ok(Self {
+            realm: meerkat_core::RealmId::parse(&r.realm_id)?,
+            binding: meerkat_core::BindingId::parse(&r.binding_id)?,
+            profile: r
+                .profile_id
+                .as_deref()
+                .map(meerkat_core::ProfileId::parse)
+                .transpose()?,
+        })
     }
 }
 

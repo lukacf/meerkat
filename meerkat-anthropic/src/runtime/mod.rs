@@ -312,9 +312,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .token_store
                         .as_ref()
                         .ok_or_else(|| interactive_login_error(binding))?;
+                    // Wave-c C-1 follow-up: `ConnectionRef` carries typed
+                    // `RealmId` / `BindingId` atoms (C-1) and `TokenKey`
+                    // now takes the same typed atoms (sibling retype).
                     let key = meerkat_core::auth::TokenKey::new(
-                        binding.connection_ref.realm.to_string(),
-                        binding.connection_ref.binding.to_string(),
+                        binding.connection_ref.realm.clone(),
+                        binding.connection_ref.binding.clone(),
                     );
                     let persisted = store
                         .load(&key)

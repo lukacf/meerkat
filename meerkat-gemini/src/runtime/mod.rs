@@ -224,9 +224,11 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         .token_store
                         .as_ref()
                         .ok_or_else(|| interactive_login_error(binding))?;
+                    // Wave-c C-1 follow-up: typed atoms on both ConnectionRef
+                    // and TokenKey.
                     let key = meerkat_core::auth::TokenKey::new(
-                        binding.connection_ref.realm.to_string(),
-                        binding.connection_ref.binding.to_string(),
+                        binding.connection_ref.realm.clone(),
+                        binding.connection_ref.binding.clone(),
                     );
                     let persisted = store
                         .load(&key)

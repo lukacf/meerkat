@@ -24,7 +24,7 @@ fn fresh_tokens() -> PersistedTokens {
 async fn concurrent_resolves_for_same_key_trigger_one_refresh() {
     let coord = Arc::new(InMemoryCoordinator::new());
     let counter = Arc::new(AtomicUsize::new(0));
-    let key = TokenKey::new("dev", "default_openai");
+    let key = TokenKey::parse("dev", "default_openai").expect("valid slugs");
 
     let mut handles = Vec::new();
     for _ in 0..8 {
@@ -66,7 +66,7 @@ async fn sequential_refreshes_are_not_short_circuited() {
     // re-run the refresh (no terminal caching in the coordinator itself).
     let coord = InMemoryCoordinator::new();
     let counter = Arc::new(AtomicUsize::new(0));
-    let key = TokenKey::new("dev", "x");
+    let key = TokenKey::parse("dev", "x").expect("valid slugs");
 
     for _ in 0..3 {
         let counter = Arc::clone(&counter);
@@ -93,7 +93,7 @@ async fn refresh_error_is_observed_by_all_waiters() {
     // If the single underlying refresh fails, every concurrent waiter sees
     // the same error (shared future result).
     let coord = Arc::new(InMemoryCoordinator::new());
-    let key = TokenKey::new("dev", "x");
+    let key = TokenKey::parse("dev", "x").expect("valid slugs");
 
     let mut handles = Vec::new();
     for _ in 0..4 {
@@ -134,7 +134,7 @@ async fn refreshes_for_distinct_keys_run_in_parallel() {
     let cb = Arc::clone(&counter_b);
     let (res_a, res_b) = tokio::join!(
         coord.with_refresh(
-            TokenKey::new("dev", "a"),
+            TokenKey::parse("dev", "a").expect("valid slugs"),
             Box::new(move || {
                 async move {
                     ca.fetch_add(1, Ordering::SeqCst);
@@ -144,7 +144,7 @@ async fn refreshes_for_distinct_keys_run_in_parallel() {
             }),
         ),
         coord.with_refresh(
-            TokenKey::new("dev", "b"),
+            TokenKey::parse("dev", "b").expect("valid slugs"),
             Box::new(move || {
                 async move {
                     cb.fetch_add(1, Ordering::SeqCst);

@@ -57,9 +57,17 @@ impl RealmOrigin {
 }
 
 /// Realm-scoped manifest pinned at creation time.
+///
+/// Wave-c C-12 / C-1 follow-up: `realm_id: String` retyped to
+/// `realm: RealmId` (matching the C-1 `ConnectionRef` rename).
+/// Serde-renamed to `"realm_id"` on-wire so existing persisted
+/// manifests on disk remain readable byte-identical — the retype is
+/// purely a domain-side typing improvement; the serialization
+/// contract is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealmManifest {
-    pub realm_id: String,
+    #[serde(rename = "realm_id")]
+    pub realm: meerkat_core::RealmId,
     pub backend: RealmBackend,
     #[serde(default)]
     pub origin: RealmOrigin,
@@ -467,7 +475,7 @@ pub async fn list_realm_manifests_in(
             root: path,
         });
     }
-    manifests.sort_by(|a, b| a.manifest.realm_id.cmp(&b.manifest.realm_id));
+    manifests.sort_by(|a, b| a.manifest.realm.cmp(&b.manifest.realm));
     Ok(manifests)
 }
 
@@ -529,7 +537,7 @@ fn validate_backend_hint(
         && requested != manifest.backend
     {
         return Err(StoreError::RealmBackendMismatch {
-            realm_id: manifest.realm_id.clone(),
+            realm_id: manifest.realm.as_str().to_owned(),
             requested: requested.as_str().to_string(),
             existing: manifest.backend.as_str().to_string(),
         });
@@ -557,8 +565,17 @@ async fn create_or_read_manifest_under_lock(
         None => default_backend()?,
     };
     let origin = origin_hint.unwrap_or(RealmOrigin::Explicit);
+    // Wave-c C-12: lift the `&str` realm-id argument into the typed
+    // `RealmId` atom. Upstream callers (surface bootstrap, cli, etc.)
+    // must have already validated the slug via
+    // `meerkat_core::RealmConfig::selection_from_inputs` /
+    // `validate_explicit_realm_id`, but the store-layer boundary
+    // parses defensively — a failure here means an upstream caller
+    // bypassed its validator.
+    let realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
     let manifest = RealmManifest {
-        realm_id: realm_id.to_string(),
+        realm,
         backend,
         origin,
         created_at: SystemTime::now()
@@ -633,8 +650,14 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
     let persisted: PersistedRealmManifest =
         serde_json::from_slice(bytes).map_err(StoreError::Serialization)?;
     let backend = parse_realm_backend(&persisted.realm_id, &persisted.backend)?;
+    // Wave-c C-12: lift the persisted realm slug into the typed
+    // `RealmId` atom. Validation failure at this boundary means the
+    // on-disk manifest was hand-edited to an invalid slug; surface
+    // via a dedicated typed error.
+    let realm = meerkat_core::RealmId::parse(&persisted.realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(persisted.realm_id.clone()))?;
     Ok(RealmManifest {
-        realm_id: persisted.realm_id,
+        realm,
         backend,
         origin: persisted.origin,
         created_at: persisted.created_at,
@@ -770,7 +793,7 @@ mod tests {
 
         let first_backend = manifests[0].backend;
         for manifest in manifests {
-            assert_eq!(manifest.realm_id, realm_id);
+            assert_eq!(manifest.realm.as_str(), realm_id);
             assert_eq!(manifest.backend, first_backend);
         }
 
@@ -779,7 +802,7 @@ mod tests {
                 .await
                 .unwrap();
         let parsed: RealmManifest = serde_json::from_str(&on_disk).unwrap();
-        assert_eq!(parsed.realm_id, realm_id);
+        assert_eq!(parsed.realm.as_str(), realm_id);
         assert_eq!(parsed.backend, first_backend);
     }
 

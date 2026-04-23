@@ -91,7 +91,10 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
         .await
         .unwrap();
 
@@ -124,7 +127,10 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
         .await
         .unwrap();
 

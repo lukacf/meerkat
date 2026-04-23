@@ -252,9 +252,16 @@ pub async fn resolve_external_authorizer(
     materialize_external_auth_lease(
         binding,
         envelope,
+        // Wave-c C-1 follow-up: `ConnectionRef` has no `Display` impl by
+        // wave-b design (the opaque `realm:binding` string form was
+        // deleted so no code path silently ferries the join through the
+        // runtime). Project realm/binding explicitly at this log/ident
+        // site.
         format!(
             "external:{}:{}:{}",
-            binding.connection_ref.realm, binding.connection_ref.binding, binding.auth_profile.id
+            binding.connection_ref.realm.as_str(),
+            binding.connection_ref.binding.as_str(),
+            binding.auth_profile.id,
         ),
     )
 }
@@ -381,7 +388,9 @@ fn enforce_metadata_requirements(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
+    use meerkat_core::{
+        AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider,
+    };
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
     };
@@ -450,10 +459,8 @@ mod tests {
     fn binding() -> ValidatedBinding {
         ValidatedBinding {
             connection_ref: ConnectionRef {
-                realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
-                binding: meerkat_core::connection::BindingId::parse("default")
-                    .expect("valid binding"),
-                profile: None,
+                realm_id: "dev".into(),
+                binding_id: "default".into(),
             },
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(

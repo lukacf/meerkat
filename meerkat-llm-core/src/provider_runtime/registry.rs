@@ -9,7 +9,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use meerkat_core::connection::{BindingId, RealmId};
 use meerkat_core::{AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope};
 
 use crate::LlmClient;
@@ -170,13 +169,17 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        let realm_ref = RealmId::parse(realm.realm_id.clone())
-            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        let binding_ref = BindingId::parse(binding.id.clone())
-            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        // Wave-c C-1 follow-up: `ConnectionRef` retyped to
+        // `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`
+        // (connection.rs:100). Parse the raw realm / binding slugs here at
+        // the typed boundary — an invalid slug at this point means the
+        // `RealmConnectionSet` was built from malformed config, which is a
+        // resolver-level source error.
         let connection_ref = meerkat_core::ConnectionRef {
-            realm: realm_ref,
-            binding: binding_ref,
+            realm: meerkat_core::RealmId::parse(&realm.realm_id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
+            binding: meerkat_core::BindingId::parse(&binding.id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
             profile: None,
         };
         let runtime = self

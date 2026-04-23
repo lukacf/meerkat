@@ -106,7 +106,7 @@ mod file_lock {
 
         fn lock_path_for(&self, key: &TokenKey) -> PathBuf {
             self.lock_dir
-                .join(format!("{}--{}.lock", key.realm_id, key.binding_id))
+                .join(format!("{}--{}.lock", key.realm, key.binding))
         }
     }
 

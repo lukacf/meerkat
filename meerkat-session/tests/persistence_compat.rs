@@ -371,12 +371,15 @@ fn fixture_11_input_state_provider_unknown_string() {
     );
 }
 
-/// Fixture #12: runtime-snapshot drift — owned by C-6r. Stays
-/// `#[ignore]`-d at C-3 since the runtime snapshot read path isn't
-/// yet wired through the migration.
+/// Fixture #12: runtime-snapshot drift — owned by C-6r. Un-ignored
+/// once the runtime-side `runtime_session_snapshots` load path in
+/// `meerkat-session::persistent::SessionService::restore_session`
+/// routes the raw blob through `deserialize_session_migrating`,
+/// which wraps `migrate_session_value` directly. The legacy payload
+/// canary (`thinking.budget_tokens`) now survives the round-trip
+/// without the shell needing to re-hydrate `provider_params` by
+/// hand, honoring the wave-c C-3 persistence contract.
 #[test]
-#[ignore = "fixture #12 requires the runtime-side `runtime_session_snapshots` \
-            read path to go through `migrate_session_value`; wired by C-6r"]
 fn fixture_12_runtime_session_snapshot_drift() {
     let raw = load_fixture("runtime_session_snapshot_drift");
     let snapshot = raw

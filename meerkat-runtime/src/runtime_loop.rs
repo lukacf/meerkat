@@ -180,6 +180,197 @@ fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> S
     meerkat_core::interaction::format_external_event_projection(source_name, body)
 }
 
+/// Build a core-owned [`PeerConversationProjection`] from a runtime
+/// [`crate::input::PeerInput`]. Returns `None` when the input has no
+/// peer-originated source (e.g. a mob-internal peer input without a
+/// `peer_id` header) or carries no convention — both shapes are
+/// legitimate "no projection available" rather than errors, so the
+/// caller falls through to the legacy body-as-text path.
+///
+/// The projection carries the full peer metadata (peer_id, request_id,
+/// intent, payload, phase/status) and owns the semantic rendering
+/// primitives (`prompt_text`, `block_prefix_text`, `context_key`) so
+/// the runtime-loop shell never needs to format peer messages itself.
+fn peer_projection_from_peer_input(
+    peer: &crate::input::PeerInput,
+) -> Option<PeerConversationProjection> {
+    let crate::input::InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
+
+    match &peer.convention {
+        Some(crate::input::PeerConvention::Message) => Some(PeerConversationProjection::Message {
+            peer_id: peer_id.clone(),
+        }),
+        Some(crate::input::PeerConvention::Request { request_id, intent }) => {
+            Some(PeerConversationProjection::Request {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                intent: intent.clone(),
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }) => {
+            Some(PeerConversationProjection::ResponseProgress {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                phase: match phase {
+                    crate::input::ResponseProgressPhase::Accepted => {
+                        PeerResponseProgressProjectionPhase::Accepted
+                    }
+                    crate::input::ResponseProgressPhase::InProgress => {
+                        PeerResponseProgressProjectionPhase::InProgress
+                    }
+                    crate::input::ResponseProgressPhase::PartialResult => {
+                        PeerResponseProgressProjectionPhase::PartialResult
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }) => {
+            Some(PeerConversationProjection::ResponseTerminal {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                status: match status {
+                    crate::input::ResponseTerminalStatus::Completed => {
+                        PeerResponseTerminalProjectionStatus::Completed
+                    }
+                    crate::input::ResponseTerminalStatus::Failed => {
+                        PeerResponseTerminalProjectionStatus::Failed
+                    }
+                    crate::input::ResponseTerminalStatus::Cancelled => {
+                        PeerResponseTerminalProjectionStatus::Cancelled
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        None => None,
+    }
+}
+
+/// Borrowing shim — lift an [`Input`] to its core peer projection when
+/// the input is a `PeerInput` with a peer-origin header. Used by the
+/// context-append path where the caller already has an `&Input`.
+fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
+    let Input::Peer(peer) = input else {
+        return None;
+    };
+    peer_projection_from_peer_input(peer)
+}
+
+/// Rendered prompt-text projection for a peer input.
+///
+/// For peer-originated inputs this returns the core-owned
+/// `PeerConversationProjection::prompt_text()` (the typed semantic
+/// rendering). For non-peer-originated sources (e.g. mob-internal
+/// peer inputs with no `peer_id` header, or convention=None), the
+/// raw `body` is the shell's best available fallback — the core
+/// projection would return an empty string and the runtime would
+/// otherwise ferry an empty prompt.
+fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
+    peer_projection_from_peer_input(peer)
+        .map(|projection| {
+            let prompt = projection.prompt_text();
+            if prompt.is_empty() {
+                peer.body.clone()
+            } else {
+                prompt
+            }
+        })
+        .unwrap_or_else(|| peer.body.clone())
+}
+
+/// Optional block prefix (`"[COMMS MESSAGE from <peer_id>]"`) for peer
+/// inputs that carry a `PeerConvention::Message`. Returns `None` for
+/// request / response conventions (those route through the
+/// context-append path instead) and for non-peer-originated inputs.
+fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
+    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
+}
+
+/// Convert an `Input` into a `ConversationAppend` on the `User` role,
+/// or `None` if the input contributes no user-visible append. The
+/// main exclusion is `ResponseTerminal` peer inputs — those land on
+/// the typed context-append path (`input_to_context_append`) so the
+/// LLM sees them as system context, not as a fresh user turn.
+fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+    if matches!(
+        input,
+        Input::Peer(crate::input::PeerInput {
+            convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+            ..
+        })
+    ) {
+        return None;
+    }
+
+    let content = match input {
+        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: p.blocks.clone().unwrap_or_default(),
+        },
+        Input::Peer(p) if p.blocks.is_some() => {
+            let raw_blocks = p.blocks.clone().unwrap_or_default();
+            if let Some(prefix) = peer_block_prefix_text(p) {
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                blocks.extend(raw_blocks);
+                CoreRenderable::Blocks { blocks }
+            } else {
+                // Non-peer-identified peer inputs: keep the body-as-prefix
+                // fallback that predated the typed peer projection; the
+                // projection seam is limited to conventioned peer-origin
+                // inputs. Empty or already-embedded body is a no-op.
+                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
+                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
+                });
+                if p.body.is_empty() || body_already_in_blocks {
+                    CoreRenderable::Blocks { blocks: raw_blocks }
+                } else {
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                        text: p.body.clone(),
+                    }];
+                    blocks.extend(raw_blocks);
+                    CoreRenderable::Blocks { blocks }
+                }
+            }
+        }
+        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: f.blocks.clone().unwrap_or_default(),
+        },
+        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: e.blocks.clone().unwrap_or_default(),
+        },
+        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+            CoreRenderable::Text {
+                text: input_to_prompt(input),
+            }
+        }
+        Input::Continuation(_) | Input::Operation(_) => return None,
+    };
+
+    Some(ConversationAppend {
+        role: ConversationAppendRole::User,
+        content,
+    })
+}
+
+/// Convert an `Input` into a `ConversationContextAppend` when the
+/// input is a peer `ResponseTerminal` (the only current context-append
+/// shape). The context key and rendered text are both owned by the
+/// core projection; the runtime-loop shell only maps from the typed
+/// projection into the core-renderable payload.
+fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
+    let projection = peer_projection(input)?;
+
+    Some(ConversationContextAppend {
+        key: projection.context_key()?,
+        content: CoreRenderable::Text {
+            text: projection.prompt_text(),
+        },
+    })
+}
+
 pub(crate) fn inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,

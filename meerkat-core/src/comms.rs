@@ -228,6 +228,56 @@ pub struct TrustedPeerDescriptor {
     pub pubkey: [u8; 32],
 }
 
+impl TrustedPeerDescriptor {
+    /// Parse string-shaped identity fields into the typed descriptor.
+    ///
+    /// Wave-c C-6r convenience for call sites that still receive raw
+    /// strings (`BridgePeerSpec::try_from`, in-process test harnesses,
+    /// bootstrap paths). The `name`/`peer_id`/`address` strings land
+    /// in their typed atoms via `PeerName::new` / `PeerId::parse` /
+    /// the transport-aware address parser; `pubkey` defaults to the
+    /// zero key when not provided by the caller — that is the correct
+    /// shape for intra-process `inproc` peers that rely on the router
+    /// identity map rather than envelope-signature verification, and
+    /// it keeps production paths explicit about pubkey provenance
+    /// (they always pass `with_pubkey` or construct the struct
+    /// literal directly).
+    pub fn new(
+        name: impl Into<String>,
+        peer_id: impl AsRef<str>,
+        address: impl AsRef<str>,
+    ) -> Result<Self, String> {
+        let name = PeerName::new(name).map_err(|e| format!("invalid peer name: {e}"))?;
+        let peer_id = PeerId::parse(peer_id.as_ref())
+            .map_err(|e| format!("invalid peer_id: {e}"))?;
+        let address_raw = address.as_ref();
+        let (scheme, endpoint) = address_raw
+            .split_once("://")
+            .ok_or_else(|| format!("peer address missing transport scheme: {address_raw}"))?;
+        let transport = match scheme {
+            "inproc" => PeerTransport::Inproc,
+            "uds" => PeerTransport::Uds,
+            "tcp" => PeerTransport::Tcp,
+            other => return Err(format!("unknown peer address transport: {other}")),
+        };
+        Ok(Self {
+            peer_id,
+            name,
+            address: PeerAddress::new(transport, endpoint),
+            pubkey: [0u8; 32],
+        })
+    }
+
+    /// Attach a non-zero Ed25519 signing pubkey. Test and production
+    /// paths that already have a derived `PeerId` + pubkey use the
+    /// field-literal constructor directly; this helper is for
+    /// retroactively stamping a pubkey onto a `new`-built descriptor.
+    pub fn with_pubkey(mut self, pubkey: [u8; 32]) -> Self {
+        self.pubkey = pubkey;
+        self
+    }
+}
+
 /// One-way peer lifecycle notification kind.
 ///
 /// These notifications are control-plane topology updates, not correlated

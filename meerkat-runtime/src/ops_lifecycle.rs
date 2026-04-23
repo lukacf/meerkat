@@ -1823,7 +1823,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::TrustedPeerSpec;
+    use meerkat_core::comms::TrustedPeerDescriptor;
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
     use meerkat_core::types::SessionId;
@@ -1885,7 +1885,7 @@ mod tests {
             &op_id,
             OperationPeerHandle {
                 peer_name: "peer".into(),
-                trusted_peer: TrustedPeerSpec::new("peer", "peer-id", "inproc://peer").unwrap(),
+                trusted_peer: TrustedPeerDescriptor::new("peer", "peer-id", "inproc://peer").unwrap(),
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
@@ -2329,7 +2329,7 @@ mod tests {
 
         let handle = OperationPeerHandle {
             peer_name: "member-x".into(),
-            trusted_peer: TrustedPeerSpec::new("member-x", "peer-id", "inproc://x").unwrap(),
+            trusted_peer: TrustedPeerDescriptor::new("member-x", "peer-id", "inproc://x").unwrap(),
         };
         registry.peer_ready(&op_id, handle).unwrap();
 

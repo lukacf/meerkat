@@ -43,6 +43,15 @@ impl MeerkatMachine {
                 .await
                 .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
+                // Wave-c C-6r: the shell-side ingress-ownership and
+                // peer-context update paths were removed in
+                // `bdd46095149ae` — the DSL transition IS the ownership
+                // decision now, and no shell update runs after a DSL
+                // rejection by construction. `comms_runtime` and `mob_id`
+                // are carried through the command for the DSL input to
+                // see (and for tracing) but have no shell side effect.
+                let _ = (comms_runtime, mob_id);
+                Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {
                 // Guard: session must exist.
@@ -206,4 +215,30 @@ impl MeerkatMachine {
         }
     }
 
+    /// Fire the typed `StopDrain` DSL input for `session_id` if the session
+    /// still has a live DSL authority. A guard rejection (e.g. the drain
+    /// was never `Running` for this session) is downgraded to a warn so the
+    /// caller's abort-cleanup flow proceeds — `StopDrain` is idempotent by
+    /// DSL construction, so "already stopped" is the only legitimate
+    /// rejection shape at this seam.
+    async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) {
+        let mut sessions = self.sessions.write().await;
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StopDrain,
+        ) {
+            tracing::warn!(
+                %session_id,
+                error = %crate::meerkat_machine::dsl_authority::map_error(err, "StopDrain"),
+                "DSL rejected StopDrain; proceeding with abort"
+            );
+        }
+    }
 }

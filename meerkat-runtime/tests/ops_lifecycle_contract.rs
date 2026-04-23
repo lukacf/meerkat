@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::ops_lifecycle::{
@@ -47,10 +47,22 @@ fn mob_member_spec(name: &str) -> OperationSpec {
 }
 
 fn peer_handle(name: &str) -> OperationPeerHandle {
+    // Wave-c C-6r: tests construct `TrustedPeerDescriptor` via the
+    // string-shaped `new` helper; a UUIDv5 slug from the name gives
+    // every test a stable peer_id without needing a live
+    // `CommsRuntime::public_key()` handle. The C-5 pubkey field
+    // defaults to zero — legitimate for inproc test peers that rely
+    // on the router's identity map rather than envelope-signature
+    // verification.
+    let peer_id = meerkat_core::comms::PeerId::new();
     OperationPeerHandle {
-        peer_name: name.into(),
-        trusted_peer: TrustedPeerSpec::new(name, format!("{name}-id"), format!("inproc://{name}"))
-            .unwrap(),
+        peer_name: meerkat_core::comms::PeerName::new(name).unwrap(),
+        trusted_peer: TrustedPeerDescriptor::new(
+            name,
+            peer_id.as_str(),
+            format!("inproc://{name}"),
+        )
+        .unwrap(),
     }
 }
 
@@ -552,7 +564,10 @@ async fn ops_lifecycle_contract_snapshot_includes_peer_handle() {
 
     let snap2 = registry.snapshot(&op_id).unwrap();
     assert!(snap2.peer_handle.is_some());
-    assert_eq!(snap2.peer_handle.unwrap().peer_name, "peer-snap");
+    assert_eq!(
+        snap2.peer_handle.unwrap().peer_name.as_str(),
+        "peer-snap"
+    );
 }
 
 #[tokio::test]

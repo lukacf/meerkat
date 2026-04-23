@@ -67,6 +67,20 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("ToolFilter"),
             NamedTypeBinding::string("WorkId"),
+            // Wave-c C-6r: typed PeerEndpoint twin.
+            NamedTypeBinding::type_path(
+                "PeerEndpoint",
+                "crate::catalog::dsl::meerkat_machine::PeerEndpoint",
+            ),
+            NamedTypeBinding::type_path(
+                "PeerName",
+                "crate::catalog::dsl::meerkat_machine::PeerName",
+            ),
+            NamedTypeBinding::type_path("PeerId", "crate::catalog::dsl::meerkat_machine::PeerId"),
+            NamedTypeBinding::type_path(
+                "PeerAddress",
+                "crate::catalog::dsl::meerkat_machine::PeerAddress",
+            ),
         ],
     )
 }

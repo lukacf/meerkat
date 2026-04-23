@@ -3021,36 +3021,98 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
-/// Track-B (R5): declarative peer endpoint descriptor.
+/// Track-B (R5) / wave-c C-6r: typed declarative peer endpoint descriptor.
 ///
 /// Carries the three fields the comms runtime needs to install a
-/// trusted peer: `name` (human-readable), `peer_id` (Ed25519 public
-/// key), `address` (transport URL). Shape mirrors
-/// `meerkat_core::comms::TrustedPeerSpec` but lives here as a
-/// DSL-local type so the schema validator sees a consistent opaque
-/// struct shape (matching `WiringEdge` in `mob_machine`).
+/// trusted peer: `name` (human-readable display slug), `peer_id`
+/// (Ed25519 pubkey-derived UUIDv5), `address` (transport URL).
+/// Wave-c C-6r retypes the fields from bare `String` to typed
+/// newtypes — `PeerName`, `PeerId`, `PeerAddress` — mirroring the
+/// runtime-side twin at
+/// `meerkat-runtime/src/meerkat_machine/dsl.rs::PeerEndpoint`. The
+/// two copies are required to stay structurally equivalent;
+/// the `peer_endpoint_structural_equivalence` tripwire in this
+/// crate's test harness asserts typed fields at both sites.
 ///
 /// Equality is component-wise. `PartialOrd` + `Ord` enable
 /// `BTreeSet<PeerEndpoint>` storage; `Hash` is retained for
 /// `HashSet` use at call sites that prefer it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerEndpoint {
-    pub name: String,
-    pub peer_id: String,
-    pub address: String,
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
 }
 
 impl PeerEndpoint {
     pub fn new(
-        name: impl Into<String>,
-        peer_id: impl Into<String>,
-        address: impl Into<String>,
+        name: impl Into<PeerName>,
+        peer_id: impl Into<PeerId>,
+        address: impl Into<PeerAddress>,
     ) -> Self {
         Self {
             name: name.into(),
             peer_id: peer_id.into(),
             address: address.into(),
         }
+    }
+}
+
+/// Schema-local newtype for a peer display name. Mirrors the shape
+/// that `meerkat_core::comms::PeerName` exposes across the core seam;
+/// the schema catalog keeps a DSL-local copy so validation can see a
+/// consistent opaque-struct shape without taking a dependency on
+/// `meerkat-core`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerName(pub String);
+
+impl<T: Into<String>> From<T> for PeerName {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Schema-local newtype for the canonical routing identity of a peer
+/// (the UUIDv5-derived `PeerId` carried by `meerkat_core::comms::PeerId`).
+/// Stored as a slug string so `MachineSchema` validation sees a stable
+/// opaque shape; call sites convert to/from the core typed form at the
+/// runtime seam.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerId(pub String);
+
+impl<T: Into<String>> From<T> for PeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Schema-local newtype for a peer transport endpoint URL. Mirrors the
+/// shape of `meerkat_core::comms::PeerAddress` at the core seam; keeps
+/// the DSL-local schema free of a meerkat-core dependency.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerAddress(pub String);
+
+impl<T: Into<String>> From<T> for PeerAddress {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerAddress {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

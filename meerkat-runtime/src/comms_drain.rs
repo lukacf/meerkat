@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
-use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerSpec};
+use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerDescriptor};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, PeerInputClass};
 use meerkat_core::lifecycle::RunControlCommand;
@@ -531,7 +531,7 @@ fn validate_bind_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
     sender: &str,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
-) -> Result<(TrustedPeerSpec, String), (BridgeRejectionCause, String)> {
+) -> Result<(TrustedPeerDescriptor, String), (BridgeRejectionCause, String)> {
     if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
@@ -593,7 +593,7 @@ fn validate_bind_request(
             "bind member failed: invalid bootstrap token".to_string(),
         ));
     }
-    let supervisor = TrustedPeerSpec::try_from(payload.supervisor.clone()).map_err(|error| {
+    let supervisor = TrustedPeerDescriptor::try_from(payload.supervisor.clone()).map_err(|error| {
         (
             BridgeRejectionCause::InvalidSupervisorSpec,
             format!("bind member failed: invalid supervisor peer spec: {error}"),
@@ -1005,11 +1005,18 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = adapter
                 .stage_supervisor_bind(
                     session_id,
-                    supervisor_spec.name.clone(),
-                    supervisor_spec.peer_id.clone(),
+                    supervisor_spec.name.as_str().to_owned(),
+                    supervisor_spec.peer_id.as_str(),
                     advertised_address.clone(),
                     payload.epoch,
                 )
+                // Wave-c C-6r V5: typed `PeerName` / `PeerId` carry the
+                // trust-edge identity across the core seam. The `stage_*`
+                // helpers still consume `String` on their way into the
+                // DSL input payload (the DSL schema is stringly for
+                // supervisor identity today); typed → string conversion
+                // happens at this single callsite so the typed atoms
+                // are preserved everywhere above the DSL boundary.
                 .await
             {
                 send_bridge_failure(
@@ -1025,10 +1032,11 @@ async fn try_handle_supervisor_bridge_command(
                 .add_trusted_peer(supervisor_spec.clone())
                 .await
             {
+                let peer_id_str = supervisor_spec.peer_id.as_str();
                 let reason = match rollback_bind_after_trust_publication_failure(
                     adapter,
                     session_id,
-                    &supervisor_spec.peer_id,
+                    &peer_id_str,
                     payload.epoch,
                 )
                 .await
@@ -1096,7 +1104,7 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             };
-            let supervisor_spec = match TrustedPeerSpec::try_from(payload.supervisor.clone()) {
+            let supervisor_spec = match TrustedPeerDescriptor::try_from(payload.supervisor.clone()) {
                 Ok(spec) => spec,
                 Err(error) => {
                     send_bridge_failure(
@@ -1114,9 +1122,9 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = adapter
                 .stage_supervisor_authorize(
                     session_id,
-                    supervisor_spec.name.clone(),
-                    supervisor_spec.peer_id.clone(),
-                    supervisor_spec.address.clone(),
+                    supervisor_spec.name.as_str().to_owned(),
+                    supervisor_spec.peer_id.as_str(),
+                    supervisor_spec.address.to_string(),
                     payload.epoch,
                 )
                 .await
@@ -1168,8 +1176,9 @@ async fn try_handle_supervisor_bridge_command(
                     &previous_binding,
                 )
                 .await;
+                let supervisor_peer_id_str = supervisor_spec.peer_id.as_str();
                 let cleanup_result = comms_runtime
-                    .remove_trusted_peer(&supervisor_spec.peer_id)
+                    .remove_trusted_peer(&supervisor_peer_id_str)
                     .await;
                 let mut reason = format!(
                     "authorize supervisor failed: previous supervisor trust removal failed after DSL commit: {error}"
@@ -1471,7 +1480,7 @@ async fn try_handle_supervisor_bridge_command(
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
             }
-            let peer_spec = match TrustedPeerSpec::try_from(payload.peer_spec) {
+            let peer_spec = match TrustedPeerDescriptor::try_from(payload.peer_spec) {
                 Ok(spec) => spec,
                 Err(error) => {
                     send_bridge_failure(
@@ -1644,7 +1653,7 @@ mod tests {
             self.inbox_notify.clone()
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             if let Some(message) = self.add_trusted_peer_errors.get(&peer.peer_id) {
                 return Err(SendError::Internal(message.clone()));
             }
@@ -1730,7 +1739,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-added").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
-        let peer_spec = TrustedPeerSpec::new(
+        let peer_spec = TrustedPeerDescriptor::new(
             "peer-added".to_string(),
             peer.public_key().to_peer_id(),
             "inproc://peer-added".to_string(),
@@ -1768,7 +1777,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
-        let peer_spec = TrustedPeerSpec::new(
+        let peer_spec = TrustedPeerDescriptor::new(
             "peer-removed".to_string(),
             peer.public_key().to_peer_id(),
             "inproc://peer-removed".to_string(),
@@ -2039,7 +2048,7 @@ mod tests {
         payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
     ) -> SupervisorBinding {
         let spec =
-            TrustedPeerSpec::try_from(payload.supervisor.clone()).expect("valid supervisor spec");
+            TrustedPeerDescriptor::try_from(payload.supervisor.clone()).expect("valid supervisor spec");
         SupervisorBinding::Bound {
             name: spec.name,
             peer_id: spec.peer_id,
@@ -2190,7 +2199,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current_supervisor = TrustedPeerSpec::new(
+        let current_supervisor = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             supervisor_runtime.public_key().to_peer_id(),
             "inproc://mob/__mob_supervisor__",
@@ -2269,7 +2278,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current = TrustedPeerSpec::new(
+        let current = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             "ed25519:current-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2382,7 +2391,7 @@ mod tests {
             self.inbox_notify.clone()
         }
 
-        async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             Ok(())
         }
 
@@ -2433,7 +2442,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let authorized = TrustedPeerSpec::new(
+        let authorized = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             "ed25519:supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2655,7 +2664,7 @@ mod tests {
         // Back-stops every command that calls `require_authorized_supervisor`
         // (revoke/observe/interrupt/retire/destroy/deliver/wire/unwire). A v1
         // payload must not coast on idempotent-ack or sender-match.
-        let supervisor = TrustedPeerSpec::new(
+        let supervisor = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             "ed25519:supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2740,7 +2749,7 @@ mod tests {
     async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
         // DOGMA-19 defensive scan: the old supervisor remains authoritative
         // until the new supervisor trust publishes successfully.
-        let old_supervisor = TrustedPeerSpec::new(
+        let old_supervisor = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             "ed25519:old-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2813,7 +2822,7 @@ mod tests {
     async fn authorize_supervisor_rolls_back_when_old_trust_removal_fails() {
         // DOGMA-19 defensive scan: if the old trust cannot be retired after
         // the DSL rotates, restore the old binding and clean the new trust up.
-        let old_supervisor = TrustedPeerSpec::new(
+        let old_supervisor = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             "ed25519:old-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2910,7 +2919,7 @@ mod tests {
             &supervisor.peer_id,
             &BridgeCommand::RevokeSupervisor(payload.clone()),
         );
-        let spec = TrustedPeerSpec::try_from(supervisor.clone()).expect("valid supervisor spec");
+        let spec = TrustedPeerDescriptor::try_from(supervisor.clone()).expect("valid supervisor spec");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -3038,7 +3047,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = TrustedPeerSpec::new(
+        let supervisor = TrustedPeerDescriptor::new(
             "mob/__mob_supervisor__",
             supervisor_runtime.public_key().to_peer_id(),
             "inproc://mob/__mob_supervisor__",

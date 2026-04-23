@@ -114,7 +114,6 @@ fn parse_error_code(error: &SkillError) -> (&'static str, &'static str) {
         SkillError::SourceUuidMutationWithoutLineage { .. } => ("identity_mutation", "identity"),
         SkillError::MissingSkillRemaps { .. } => ("identity_missing_remaps", "identity"),
         SkillError::RemapWithoutLineage { .. } => ("identity_remap", "identity"),
-        SkillError::InvalidLegacySkillRefFormat { .. } => ("invalid_legacy_ref", "resolver"),
         SkillError::UnknownSkillAlias { .. } => ("unknown_alias", "resolver"),
         SkillError::RemapCycle { .. } => ("remap_cycle", "identity"),
     }
@@ -308,7 +307,6 @@ impl SkillSource for FilesystemSkillSource {
 
             for (id_str, skill_file) in skill_files {
                 total_count += 1;
-                let id = SkillId(id_str);
 
                 match tokio::fs::read_to_string(&skill_file).await {
                     Ok(content) => match crate::parser::parse_skill_md(

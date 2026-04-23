@@ -41,6 +41,11 @@ use tokio::sync::Mutex;
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 
+/// Re-export of the crate-root `migrations` module so the canonical
+/// path `meerkat_session::persistent::migrations` (as named in the
+/// wave-c plan) resolves unchanged.
+pub use crate::migrations;
+
 const SESSION_ARCHIVED_KEY: &str = "session_archived";
 
 fn write_system_context_state(
@@ -392,11 +397,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?
                 .map(|bytes| {
-                    serde_json::from_slice::<Session>(&bytes).map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("failed to deserialize runtime session snapshot: {err}"),
-                        ))
-                    })
+                    meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
+                        |err| {
+                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                                format!("failed to deserialize runtime session snapshot: {err}"),
+                            ))
+                        },
+                    )
                 })
                 .transpose()?
         } else {
@@ -1869,6 +1876,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -2140,6 +2148,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -2368,6 +2377,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -3620,6 +3630,7 @@ mod tests {
         let id = session.id().clone();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 structured_output_retries: 2,
@@ -3780,6 +3791,7 @@ mod tests {
         let id = session.id().clone();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 structured_output_retries: 2,
@@ -4008,6 +4020,7 @@ mod tests {
         let id = session.id().clone();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 structured_output_retries: 2,
@@ -4092,6 +4105,7 @@ mod tests {
         let id = session.id().clone();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 structured_output_retries: 2,
@@ -4249,6 +4263,7 @@ mod tests {
     ) -> CreateSessionRequest {
         let mut session = Session::new();
         let metadata = meerkat_core::SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "test".to_string(),
             max_tokens: 1024,
             structured_output_retries: 2,

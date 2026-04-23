@@ -650,6 +650,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     // Create a session with metadata already set
     let mut session = Session::new();
     let original_metadata = SessionMetadata {
+        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "claude-sonnet-4-5".to_string(),
         max_tokens: 4096,
         structured_output_retries: 2,
@@ -731,6 +732,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -811,6 +813,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
     session.set_system_prompt("Persisted system prompt".to_string());
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -864,6 +867,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -917,6 +921,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -995,6 +1000,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -1318,6 +1324,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
     )));
     resumed
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".into(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1460,6 +1467,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1512,6 +1520,7 @@ async fn resume_with_disable_mob_stays_disabled() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1562,6 +1571,7 @@ async fn resume_with_enable_mob_stays_enabled() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1634,6 +1644,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1709,6 +1720,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -1802,6 +1814,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
             structured_output_retries: 2,
@@ -2194,6 +2207,7 @@ fn session_metadata_projects_connection_ref_into_llm_identity() {
         binding_id: "openai_default".to_string(),
     };
     let mut metadata = SessionMetadata {
+        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "gpt-5.4".to_string(),
         max_tokens: 1024,
         structured_output_retries: 2,

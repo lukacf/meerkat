@@ -682,6 +682,7 @@ mod tests {
         let mut resumed_session = Session::with_id(session_id.clone());
         resumed_session
             .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 2048,
                 structured_output_retries: 2,

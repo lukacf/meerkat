@@ -350,6 +350,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,

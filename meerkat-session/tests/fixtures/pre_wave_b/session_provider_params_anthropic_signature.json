@@ -1,0 +1,9 @@
+{
+    "id": "00000000-0000-0000-0000-000000000003",
+    "messages": [],
+    "session_metadata": {
+        "provider_params": {
+            "signature": "abc123"
+        }
+    }
+}

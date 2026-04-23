@@ -58,6 +58,7 @@ pub mod runtime_epoch;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_migrations;
 pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
@@ -198,9 +199,10 @@ pub use service::{
 pub use session::{
     DeferredFirstTurnPhase, PendingDeferredPrompt, PendingSystemContextAppend,
     PendingToolResultsMessage, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
-    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
-    SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
+    SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
+    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
+    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
     SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
     ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
     capability_base_filter_for_image_tool_results,

@@ -22,8 +22,28 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// Current session format version
-pub const SESSION_VERSION: u32 = 1;
+/// Current session format version.
+///
+/// Version history:
+/// - v1 — pre-wave-c. `SessionMetadata.connection_ref` inner fields were
+///   untyped strings (`realm_id`, `binding_id`, `profile`); no per-entity
+///   schema version byte on `SessionMetadata`.
+/// - v2 — wave-c C-3. `ConnectionRef` inner fields are typed
+///   `RealmId`/`BindingId`/`ProfileId` newtypes; `SessionMetadata` carries
+///   a `schema_version` byte. Opportunistic upgrade-on-read —
+///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
+///   into v2 shape; the next `save()` persists v2.
+pub const SESSION_VERSION: u32 = 2;
+
+/// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
+/// so `SessionMetadata` can evolve independently of the Session envelope.
+///
+/// - v1 — pre-wave-c. Default on read for rows written before the byte
+///   was introduced.
+/// - v2 — wave-c C-3. Typed `ConnectionRef` inner fields; any future
+///   `SessionMetadata`-local shape change bumps this without moving
+///   `SESSION_VERSION`.
+pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
 
 /// A conversation session with full history
 ///
@@ -850,6 +870,13 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionMetadata {
+    /// Per-entity schema version byte.
+    ///
+    /// Defaults to `1` on read so pre-wave-c rows without the field
+    /// deserialize cleanly; rewritten as `SESSION_METADATA_SCHEMA_VERSION`
+    /// on the next `save()` after a successful migration pass.
+    #[serde(default = "default_session_metadata_schema_version")]
+    pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
     #[serde(default = "default_structured_output_retries")]
@@ -893,6 +920,10 @@ pub struct SessionMetadata {
 
 fn default_structured_output_retries() -> u32 {
     2
+}
+
+fn default_session_metadata_schema_version() -> u32 {
+    1
 }
 
 /// Canonical durable LLM identity for a session.

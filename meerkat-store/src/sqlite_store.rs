@@ -153,7 +153,10 @@ impl SqliteSessionStore {
                 |row| row.get::<_, Vec<u8>>(0),
             )
             .optional()?
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
+            .map(|bytes| {
+                meerkat_core::session_migrations::deserialize_session_migrating(&bytes)
+                    .map_err(|err| StoreError::Internal(err.to_string()))
+            })
             .transpose()
         })
         .await

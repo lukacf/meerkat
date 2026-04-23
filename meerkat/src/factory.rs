@@ -674,7 +674,6 @@ fn is_openai_realtime_capable(model: &str) -> bool {
         .unwrap_or(false)
 }
 
-
 /// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
 ///
 /// Created before mob tool composition (so it can be passed into `MobToolsBuildArgs`),
@@ -2722,6 +2721,7 @@ impl AgentFactory {
             metadata
         } else {
             SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model,
                 max_tokens,
                 structured_output_retries: build_config.structured_output_retries,
@@ -2805,6 +2805,7 @@ mod tests {
         let mut resumed = Session::new();
         resumed
             .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "gemma-4-e2b".to_string(),
                 max_tokens: 8_192,
                 structured_output_retries: 2,

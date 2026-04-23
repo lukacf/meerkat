@@ -3579,6 +3579,7 @@ mod tests {
         let mut spoofed = Session::new();
         let spoofed_id = spoofed.id().clone();
         let _ = spoofed.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -3615,6 +3616,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -3656,6 +3658,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,

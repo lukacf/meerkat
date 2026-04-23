@@ -875,6 +875,7 @@ impl SessionService for MockSessionService {
         if session.session_metadata().is_none() {
             let build = req.build.as_ref();
             let metadata = SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: req.model.clone(),
                 max_tokens: req.max_tokens.unwrap_or(4096),
                 structured_output_retries: 2,
@@ -7503,6 +7504,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
     let mut resumed = Session::new();
     resumed
         .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,

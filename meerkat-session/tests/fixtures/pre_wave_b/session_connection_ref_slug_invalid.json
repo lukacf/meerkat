@@ -1,0 +1,11 @@
+{
+    "id": "00000000-0000-0000-0000-000000000007",
+    "messages": [],
+    "session_metadata": {
+        "connection_ref": {
+            "realm_id": "dev mode",
+            "binding_id": "default_openai",
+            "profile": null
+        }
+    }
+}

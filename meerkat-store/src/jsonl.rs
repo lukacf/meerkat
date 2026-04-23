@@ -296,8 +296,9 @@ impl JsonlStore {
         let mut contents = String::new();
         file.read_to_string(&mut contents).await?;
 
-        let session: Session =
-            serde_json::from_str(&contents).map_err(StoreError::Serialization)?;
+        let session =
+            meerkat_core::session_migrations::deserialize_session_migrating(contents.as_bytes())
+                .map_err(|err| StoreError::Internal(err.to_string()))?;
 
         Ok(Some(session))
     }

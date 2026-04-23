@@ -1710,7 +1710,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     result_tx,
                     skill_references: req.skill_references,
                     flow_tool_overlay: req.flow_tool_overlay,
-                    execution_kind: req.execution_kind,
+                    execution_kind: None,
                 })
                 .await
                 .map_err(|_| {

@@ -46,7 +46,6 @@ use meerkat_mob_pack::archive::MobpackArchive;
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::pack::{
     compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
-    validate_archive_bytes,
 };
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
@@ -8019,14 +8018,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         return Ok(());
     }
 
-    if let MobCommands::Web {
-        command: MobWebCommands::Build { pack, output },
-    } = &command
-    {
-        println!("{}", execute_mob_web_build(pack, output).await?);
-        return Ok(());
-    }
-
     let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
     let persistent = get_or_create_mob_persistent_service(scope, config).await?;
@@ -8444,97 +8435,6 @@ struct DerivedWebRequires {
 struct DerivedWebRuntime {
     profile: String,
     forbid: Vec<String>,
-}
-
-#[cfg(feature = "mob")]
-async fn execute_mob_web_build(
-    pack: &std::path::Path,
-    output: &std::path::Path,
-) -> anyhow::Result<String> {
-    let invocation = WebBuildInvocation {
-        wasm_pack_bin: std::env::var("RKAT_WASM_PACK_BIN")
-            .unwrap_or_else(|_| "wasm-pack".to_string()),
-    };
-    execute_mob_web_build_internal(pack, output, invocation).await
-}
-
-#[cfg(feature = "mob")]
-async fn execute_mob_web_build_internal(
-    pack: &std::path::Path,
-    output: &std::path::Path,
-    invocation: WebBuildInvocation,
-) -> anyhow::Result<String> {
-    let pack_bytes = tokio::fs::read(pack)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let archive = MobpackArchive::from_archive_bytes(&pack_bytes)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    let digest = compute_archive_digest(&pack_bytes)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    validate_web_forbidden_capabilities(&archive.manifest)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    let manifest_web = derive_manifest_web_toml(&archive.manifest, &digest.to_string())
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-
-    let target = WasmBuildTarget {
-        output_dir: output.to_path_buf(),
-    };
-    let parent = target
-        .output_dir
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    tokio::fs::create_dir_all(parent).await.map_err(|err| {
-        anyhow::anyhow!(
-            "failed creating web output parent '{}': {err}",
-            parent.display()
-        )
-    })?;
-    let staging = parent.join(format!(
-        ".mob-web-build-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    tokio::fs::create_dir_all(&staging).await.map_err(|err| {
-        anyhow::anyhow!(
-            "failed creating staging directory '{}': {err}",
-            staging.display()
-        )
-    })?;
-    let wasm_out_dir = staging.join("pkg");
-    tokio::fs::create_dir_all(&wasm_out_dir)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "failed creating wasm staging directory '{}': {err}",
-                wasm_out_dir.display()
-            )
-        })?;
-
-    if let Err(err) = run_wasm_pack_build(&invocation.wasm_pack_bin, &wasm_out_dir).await {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(err);
-    }
-    if let Err(err) = finalize_web_bundle(
-        &staging,
-        &wasm_out_dir,
-        &pack_bytes,
-        manifest_web.as_bytes(),
-        &target.output_dir,
-    )
-    .await
-    {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(err);
-    }
-
-    Ok(format!(
-        "built\toutput={}\tdigest={}\tartifacts=5",
-        target.output_dir.display(),
-        digest
-    ))
 }
 
 #[cfg(feature = "mob")]
@@ -11445,125 +11345,6 @@ mod tests {
     }
 
     #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_generates_required_artifacts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = create_mobpack_fixture_dir(temp.path());
-        let pack_out = temp.path().join("web-ok.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
-        let out_dir = temp.path().join("web-out");
-        let output = execute_mob_web_build_internal(
-            &pack_out,
-            &out_dir,
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect("web build should succeed");
-
-        assert!(
-            output.contains("built\toutput="),
-            "web build should report success output: {output}"
-        );
-        for file in [
-            "index.html",
-            "runtime.js",
-            "runtime_bg.wasm",
-            "mobpack.bin",
-            "manifest.web.toml",
-        ] {
-            assert!(
-                out_dir.join(file).exists(),
-                "missing required web artifact {file}"
-            );
-        }
-        let manifest_web =
-            std::fs::read_to_string(out_dir.join("manifest.web.toml")).expect("read manifest.web");
-        assert!(
-            manifest_web.contains("AUTO-GENERATED by rkat mob web build"),
-            "manifest.web.toml should be derived output"
-        );
-        assert!(
-            manifest_web.contains("forbid = ["),
-            "manifest.web.toml should capture forbidden capability policy"
-        );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_rejects_forbidden_capabilities() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = temp.path().join("forbidden-mob");
-        std::fs::create_dir_all(mob_dir.join("skills")).expect("skills");
-        std::fs::write(
-            mob_dir.join("manifest.toml"),
-            r#"[mobpack]
-name = "forbidden"
-version = "1.0.0"
-
-[requires]
-capabilities = ["shell"]
-"#,
-        )
-        .expect("manifest");
-        std::fs::write(
-            mob_dir.join("definition.json"),
-            br#"{"id":"forbidden-mob"}"#,
-        )
-        .expect("def");
-        let pack_out = temp.path().join("forbidden.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
-        let err = execute_mob_web_build_internal(
-            &pack_out,
-            &temp.path().join("web-out"),
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect_err("web build should reject forbidden capabilities");
-        assert!(
-            err.to_string()
-                .contains("forbidden capability 'shell' is not allowed for web builds"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_fails_on_incomplete_artifacts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = create_mobpack_fixture_dir(temp.path());
-        let pack_out = temp.path().join("web-fail.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), true);
-        let err = execute_mob_web_build_internal(
-            &pack_out,
-            &temp.path().join("web-out"),
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect_err("web build should reject incomplete artifact set");
-        assert!(
-            err.to_string().contains("missing wasm artifact"),
-            "unexpected error: {err}"
-        );
-    }
-
     #[cfg(feature = "mob")]
     #[test]
     fn test_trust_policy_resolution_precedence() {

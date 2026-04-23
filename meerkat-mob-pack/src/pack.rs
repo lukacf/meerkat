@@ -95,16 +95,6 @@ pub fn inspect_archive_bytes(bytes: &[u8]) -> Result<InspectResult, PackValidati
     })
 }
 
-pub fn validate_archive_bytes(bytes: &[u8]) -> Result<(), PackValidationError> {
-    let files = extract_targz_safe(bytes)?;
-    validate_required_files(&files)?;
-    ensure_no_trust_section(&files)?;
-    parse_manifest(&files)?;
-    let definition = parse_definition(&files)?;
-    reject_realm_refs(&definition)?;
-    Ok(())
-}
-
 pub fn compute_archive_digest(bytes: &[u8]) -> Result<MobpackDigest, PackValidationError> {
     let files = extract_targz_safe(bytes)?;
     Ok(canonical_digest_from_map(&files))
@@ -351,80 +341,6 @@ mod tests {
         assert_eq!(inspect.version, "1.0.0");
         assert_eq!(inspect.digest, packed.digest);
         assert!(inspect.file_count >= 4);
-    }
-
-    #[test]
-    fn test_validate_rejects_invalid_pack() {
-        let mut files = BTreeMap::new();
-        files.insert(
-            "manifest.toml".to_string(),
-            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n".to_vec(),
-        );
-        let archive = create_targz(&files).unwrap();
-        let err = validate_archive_bytes(&archive).unwrap_err();
-        assert!(matches!(err, PackValidationError::MissingDefinition));
-    }
-
-    #[test]
-    fn test_validate_rejects_trust_in_manifest() {
-        let mut files = BTreeMap::new();
-        files.insert(
-            "manifest.toml".to_string(),
-            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n[trust]\npolicy = \"permissive\"\n"
-                .to_vec(),
-        );
-        files.insert("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec());
-        let archive = create_targz(&files).unwrap();
-        let err = validate_archive_bytes(&archive).unwrap_err();
-        assert!(matches!(err, PackValidationError::TrustSectionForbidden));
-    }
-
-    #[test]
-    fn test_validate_rejects_realm_ref_in_profile() {
-        let definition_json = r#"{
-            "id": "mob",
-            "profiles": {
-                "worker": {"realm_profile": "shared-worker"}
-            }
-        }"#;
-        let mut files = BTreeMap::new();
-        files.insert(
-            "manifest.toml".to_string(),
-            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n".to_vec(),
-        );
-        files.insert(
-            "definition.json".to_string(),
-            definition_json.as_bytes().to_vec(),
-        );
-        let archive = create_targz(&files).unwrap();
-        let err = validate_archive_bytes(&archive).unwrap_err();
-        match err {
-            PackValidationError::RealmRefForbidden { profile_name } => {
-                assert_eq!(profile_name, "worker");
-            }
-            other => panic!("expected RealmRefForbidden, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_validate_accepts_inline_profiles_only() {
-        let definition_json = r#"{
-            "id": "mob",
-            "profiles": {
-                "coder": {"model": "claude-sonnet-4-5"}
-            }
-        }"#;
-        let mut files = BTreeMap::new();
-        files.insert(
-            "manifest.toml".to_string(),
-            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n".to_vec(),
-        );
-        files.insert(
-            "definition.json".to_string(),
-            definition_json.as_bytes().to_vec(),
-        );
-        let archive = create_targz(&files).unwrap();
-        validate_archive_bytes(&archive).expect("inline-only profiles should pass validation");
     }
 
     fn fixture_mob_dir() -> TempDir {

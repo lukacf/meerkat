@@ -9797,9 +9797,23 @@ async fn test_unwire_external_removes_trust_and_projection() {
     );
 }
 
+// Rejection-assertion tripwires for external peer wiring.
+//
+// External peer wiring is scope-deferred until supervisor-owned trust
+// authority is restored (see `MobActor::handle_wire` / `handle_unwire` in
+// `actor.rs`: `PeerTarget::External(_)` arm returns `MobError::WiringError`
+// with message `"external peer wiring requires supervisor-owned trust
+// authority; scope-deferred beyond Wave D ..."`). The two tests below pin
+// that current contract: `handle.wire` / `handle.unwire` with an External
+// target MUST return `WiringError` containing `"scope-deferred"`.
+//
+// When supervisor-owned trust authority lands and external wiring is
+// restored, both tests will fail loudly, pointing whoever restores the
+// feature at the exact sites that need to be flipped back to positive-path
+// assertions (wire succeeds; unwire succeeds; `MobEventKind::MembersUnwired`
+// or the restored `ExternalPeer*` variant appears in the event ledger).
 #[tokio::test]
-#[ignore = "external peer wiring scope-deferred; tracked by upstream trust-authority work (c.f. #28 D-obs-audit)"]
-async fn test_unwire_external_emits_external_peer_unwired_event() {
+async fn test_wire_external_rejects_with_scope_deferred_wiring_error() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
@@ -9811,96 +9825,57 @@ async fn test_unwire_external_emits_external_peer_unwired_event() {
         "inproc://remote-mob/worker/agent-b",
     )
     .expect("valid external peer");
-    handle
+
+    let err = handle
         .wire(
             AgentIdentity::from("l-1"),
             PeerTarget::External(external.clone()),
         )
         .await
-        .expect("wire external");
+        .expect_err(
+            "external peer wiring is scope-deferred until supervisor-owned trust authority \
+             is restored; handle.wire(PeerTarget::External) MUST reject with WiringError",
+        );
+    match &err {
+        MobError::WiringError(msg) => assert!(
+            msg.contains("scope-deferred"),
+            "expected scope-deferred rejection, got: {msg}"
+        ),
+        other => panic!("expected MobError::WiringError, got: {other:?}"),
+    }
+}
 
+#[tokio::test]
+async fn test_unwire_external_rejects_with_scope_deferred_wiring_error() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
     handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = TrustedPeerDescriptor::test_only_unsigned(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+
+    let err = handle
         .unwire(
             AgentIdentity::from("l-1"),
             PeerTarget::External(external.clone()),
         )
         .await
-        .expect("unwire external");
-
-    let events = handle.events().replay_all().await.expect("replay");
-    // ExternalPeerUnwired variant was deleted in wave-a 0ad584cde and not
-    // restored in #27 (MembersWired/Unwired were; ExternalPeer* were not
-    // because they carried full TrustedPeerSpec for replay/respawn — full
-    // restoration needs supervisor-owned trust authority). Observable
-    // surrogate: a MembersUnwired event against the external peer name.
-    assert!(events.iter().any(|event| {
-        matches!(
-            &event.kind,
-            MobEventKind::MembersUnwired { a, b }
-                if (a.as_str() == "l-1" && b.as_str() == external.name.as_str())
-                    || (b.as_str() == "l-1" && a.as_str() == external.name.as_str())
-        )
-    }));
-}
-
-#[tokio::test]
-#[ignore = "external peer wiring scope-deferred; tracked by upstream trust-authority work (c.f. #28 D-obs-audit)"]
-async fn test_unwire_external_is_idempotent_and_emits_single_event() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
-        .await
-        .expect("spawn lead");
-    let external = TrustedPeerDescriptor::test_only_unsigned(
-        "remote-mob/worker/agent-b",
-        "ed25519:remote-agent-b",
-        "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
-    let external_name = MeerkatId::from(external.name.as_str());
-
-    handle
-        .wire(
-            AgentIdentity::from("l-1"),
-            PeerTarget::External(external.clone()),
-        )
-        .await
-        .expect("wire external");
-    handle
-        .unwire(AgentIdentity::from("l-1"), external_name.clone())
-        .await
-        .expect("first external unwire");
-    handle
-        .unwire(AgentIdentity::from("l-1"), external_name.clone())
-        .await
-        .expect("second external unwire");
-
-    let entry = handle
-        .get_member(&AgentIdentity::from("l-1"))
-        .await
-        .expect("member should exist");
-    assert!(
-        !entry
-            .wired_to
-            .contains(&AgentIdentity::from(external_name.as_str()))
-    );
-    assert!(!entry.external_peer_specs.contains_key(&external_name));
-
-    let events = handle.events().replay_all().await.expect("replay");
-    // ExternalPeerUnwired was deleted in 0ad584cde; observable surrogate is
-    // a MembersUnwired event tagged with the external peer name.
-    let count = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                &event.kind,
-                MobEventKind::MembersUnwired { a, b }
-                    if (a.as_str() == "l-1" && b.as_str() == external_name.as_str())
-                        || (b.as_str() == "l-1" && a.as_str() == external_name.as_str())
-            )
-        })
-        .count();
-    assert_eq!(count, 1, "idempotent external unwire should emit one event");
+        .expect_err(
+            "external peer unwiring is scope-deferred until supervisor-owned trust authority \
+             is restored; handle.unwire(PeerTarget::External) MUST reject with WiringError",
+        );
+    match &err {
+        MobError::WiringError(msg) => assert!(
+            msg.contains("scope-deferred"),
+            "expected scope-deferred rejection, got: {msg}"
+        ),
+        other => panic!("expected MobError::WiringError, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

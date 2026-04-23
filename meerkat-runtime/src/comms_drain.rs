@@ -1739,7 +1739,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-added").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
-        let peer_spec = TrustedPeerDescriptor::new(
+        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
             "peer-added".to_string(),
             peer.public_key().to_peer_id(),
             "inproc://peer-added".to_string(),
@@ -1777,7 +1777,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
-        let peer_spec = TrustedPeerDescriptor::new(
+        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
             "peer-removed".to_string(),
             peer.public_key().to_peer_id(),
             "inproc://peer-removed".to_string(),
@@ -2199,7 +2199,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current_supervisor = TrustedPeerDescriptor::new(
+        let current_supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             supervisor_runtime.public_key().to_peer_id(),
             "inproc://mob/__mob_supervisor__",
@@ -2278,7 +2278,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current = TrustedPeerDescriptor::new(
+        let current = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             "ed25519:current-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2442,7 +2442,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let authorized = TrustedPeerDescriptor::new(
+        let authorized = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             "ed25519:supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2664,7 +2664,7 @@ mod tests {
         // Back-stops every command that calls `require_authorized_supervisor`
         // (revoke/observe/interrupt/retire/destroy/deliver/wire/unwire). A v1
         // payload must not coast on idempotent-ack or sender-match.
-        let supervisor = TrustedPeerDescriptor::new(
+        let supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             "ed25519:supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2749,7 +2749,7 @@ mod tests {
     async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
         // DOGMA-19 defensive scan: the old supervisor remains authoritative
         // until the new supervisor trust publishes successfully.
-        let old_supervisor = TrustedPeerDescriptor::new(
+        let old_supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             "ed25519:old-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -2822,7 +2822,7 @@ mod tests {
     async fn authorize_supervisor_rolls_back_when_old_trust_removal_fails() {
         // DOGMA-19 defensive scan: if the old trust cannot be retired after
         // the DSL rotates, restore the old binding and clean the new trust up.
-        let old_supervisor = TrustedPeerDescriptor::new(
+        let old_supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             "ed25519:old-supervisor",
             "inproc://mob/__mob_supervisor__",
@@ -3047,7 +3047,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = TrustedPeerDescriptor::new(
+        let supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
             supervisor_runtime.public_key().to_peer_id(),
             "inproc://mob/__mob_supervisor__",

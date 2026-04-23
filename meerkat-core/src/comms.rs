@@ -229,27 +229,26 @@ pub struct TrustedPeerDescriptor {
 }
 
 impl TrustedPeerDescriptor {
-    /// Parse string-shaped identity fields into the typed descriptor.
+    /// Parse string-shaped identity fields into a typed descriptor with
+    /// a **zero Ed25519 signing pubkey**.
     ///
-    /// Wave-c C-6r convenience for call sites that still receive raw
-    /// strings (`BridgePeerSpec::try_from`, in-process test harnesses,
-    /// bootstrap paths). The `name`/`peer_id`/`address` strings land
-    /// in their typed atoms via `PeerName::new` / `PeerId::parse` /
-    /// the transport-aware address parser; `pubkey` defaults to the
-    /// zero key when not provided by the caller — that is the correct
-    /// shape for intra-process `inproc` peers that rely on the router
-    /// identity map rather than envelope-signature verification, and
-    /// it keeps production paths explicit about pubkey provenance
-    /// (they always pass `with_pubkey` or construct the struct
-    /// literal directly).
-    pub fn new(
+    /// The zero-pubkey default is **test-only** — envelope signature
+    /// verification trivially fails against it. In-process `inproc`
+    /// tests use this shape because the router identity map is what
+    /// authorizes the peer; production paths must construct
+    /// `TrustedPeerDescriptor` via the struct literal with an explicit
+    /// pubkey (or use [`Self::with_pubkey`] to stamp one onto a
+    /// test-built descriptor). The loud name keeps the hazard surface
+    /// explicit — a production call site using this helper is always
+    /// wrong and will read wrong at review.
+    pub fn test_only_unsigned(
         name: impl Into<String>,
         peer_id: impl AsRef<str>,
         address: impl AsRef<str>,
     ) -> Result<Self, String> {
         let name = PeerName::new(name).map_err(|e| format!("invalid peer name: {e}"))?;
-        let peer_id = PeerId::parse(peer_id.as_ref())
-            .map_err(|e| format!("invalid peer_id: {e}"))?;
+        let peer_id =
+            PeerId::parse(peer_id.as_ref()).map_err(|e| format!("invalid peer_id: {e}"))?;
         let address_raw = address.as_ref();
         let (scheme, endpoint) = address_raw
             .split_once("://")
@@ -271,7 +270,8 @@ impl TrustedPeerDescriptor {
     /// Attach a non-zero Ed25519 signing pubkey. Test and production
     /// paths that already have a derived `PeerId` + pubkey use the
     /// field-literal constructor directly; this helper is for
-    /// retroactively stamping a pubkey onto a `new`-built descriptor.
+    /// retroactively stamping a pubkey onto a descriptor built via
+    /// [`Self::test_only_unsigned`].
     pub fn with_pubkey(mut self, pubkey: [u8; 32]) -> Self {
         self.pubkey = pubkey;
         self

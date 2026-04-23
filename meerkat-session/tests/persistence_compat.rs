@@ -17,9 +17,11 @@
 //! - per-fixture typed assertions (the Anthropic `thinking` canary
 //!   verifies the typed bag preserves the nested shape byte-for-byte).
 //!
-//! Fixture #12 (`runtime_session_snapshot_drift`) stays `#[ignore]`-d
-//! until C-6r lands the runtime snapshot read path — C-3 only provides
-//! the transform entry point.
+//! Fixture #12 (`runtime_session_snapshot_drift`) was un-ignored by
+//! C-6r, which routes the `runtime_session_snapshots` read path in
+//! `PersistentSessionService::load_authoritative_session_base`
+//! through `deserialize_session_migrating` — the same migration entry
+//! point used for the primary `SessionStore::load` path. Now green.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

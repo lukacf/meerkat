@@ -57,7 +57,7 @@ fn peer_handle(name: &str) -> OperationPeerHandle {
     let peer_id = meerkat_core::comms::PeerId::new();
     OperationPeerHandle {
         peer_name: meerkat_core::comms::PeerName::new(name).unwrap(),
-        trusted_peer: TrustedPeerDescriptor::new(
+        trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
             name,
             peer_id.as_str(),
             format!("inproc://{name}"),

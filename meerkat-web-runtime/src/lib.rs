@@ -561,6 +561,65 @@ fn err_js(code: &str, message: &str) -> JsValue {
     JsValue::from_str(&json.to_string())
 }
 
+/// Wasm boundary parser for caller-supplied `realm:binding[:profile]` input.
+///
+/// `meerkat_core::connection::ConnectionRef` is structural-only by wave-b
+/// design — no `parse` / `Display` impl exists so string form cannot ferry
+/// through the runtime. Each surface that takes a flat colon-delimited
+/// connection-ref at its ingress edge owns its own boundary parser; this is
+/// the wasm_bindgen surface's. See `meerkat-cli/src/cli_parse.rs` for the
+/// CLI-side equivalent.
+fn parse_connection_ref_boundary(raw: &str) -> Result<meerkat_core::ConnectionRef, JsValue> {
+    let trimmed = raw.trim();
+    let mut parts = trimmed.splitn(4, ':');
+    let realm_str = parts
+        .next()
+        .expect("splitn always yields at least one element");
+    let Some(binding_str) = parts.next() else {
+        return Err(err_js(
+            "invalid_config",
+            &format!("connection_ref requires `realm:binding[:profile]`; got `{raw}`"),
+        ));
+    };
+    let profile_str = parts.next();
+    if parts.next().is_some() {
+        return Err(err_js(
+            "invalid_config",
+            &format!(
+                "connection_ref takes at most three components (`realm:binding[:profile]`); got `{raw}`"
+            ),
+        ));
+    }
+
+    let realm = meerkat_core::connection::RealmId::parse(realm_str).map_err(|e| {
+        err_js(
+            "invalid_config",
+            &format!("invalid connection_ref realm `{realm_str}`: {e}"),
+        )
+    })?;
+    let binding = meerkat_core::connection::BindingId::parse(binding_str).map_err(|e| {
+        err_js(
+            "invalid_config",
+            &format!("invalid connection_ref binding `{binding_str}`: {e}"),
+        )
+    })?;
+    let profile = match profile_str {
+        None => None,
+        Some(p) => Some(meerkat_core::connection::ProfileId::parse(p).map_err(|e| {
+            err_js(
+                "invalid_config",
+                &format!("invalid connection_ref profile `{p}`: {e}"),
+            )
+        })?),
+    };
+
+    Ok(meerkat_core::ConnectionRef {
+        realm,
+        binding,
+        profile,
+    })
+}
+
 fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
     err_js(code, &msg.to_string())
 }
@@ -1228,13 +1287,7 @@ fn build_session_request_with_connection_ref(
 
     let mut build_config = AgentBuildConfig::new(model);
     if let Some(conn) = connection_ref {
-        let parsed = meerkat_core::ConnectionRef::parse(conn).ok_or_else(|| {
-            err_js(
-                "invalid_config",
-                "connection_ref must be in `realm:binding` form",
-            )
-        })?;
-        build_config.connection_ref = Some(parsed);
+        build_config.connection_ref = Some(parse_connection_ref_boundary(conn)?);
     }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
@@ -1331,14 +1384,6 @@ pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
     create_runtime_backed_session(config, system_prompt, String::new())
 }
 
-/// Per-turn options parsed from `options_json`.
-#[derive(Debug, Default, Deserialize)]
-struct TurnOptions {
-    /// Additional instruction sections appended for this turn only.
-    #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
-}
-
 #[derive(Debug, Deserialize)]
 struct AppendSystemContextOptions {
     text: String,
@@ -1413,12 +1458,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 /// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
 /// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
-pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result<JsValue, JsValue> {
-    let options: TurnOptions = if options_json.is_empty() || options_json == "{}" {
-        TurnOptions::default()
-    } else {
-        serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
-    };
+pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     let (session_service, session_id, run_id, _keep_alive) = with_runtime_state_mut(|state| {
         let session = state
             .sessions
@@ -1448,11 +1488,8 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-
                 skill_references: None,
                 flow_tool_overlay: None,
-                additional_instructions: options.additional_instructions,
-                execution_kind: None,
             },
         )
         .await;
@@ -1996,15 +2033,8 @@ pub async fn wire_cross_mob(
     let name_a = format!("{mob_a}/{}/{agent_a}", entry_a.role);
     let name_b = format!("{mob_b}/{}/{agent_b}", entry_b.role);
 
-    let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
-        &name_b,
-        key_b.clone(),
-        format!("inproc://{name_b}"),
-    )
-    .map_err(|e| err_str("wire_error", e))?;
-    let spec_a =
-        meerkat_core::comms::TrustedPeerSpec::new(&name_a, key_a, format!("inproc://{name_a}"))
-            .map_err(|e| err_str("wire_error", e))?;
+    let spec_a = build_inproc_trusted_peer(&name_a, &key_a)?;
+    let spec_b = build_inproc_trusted_peer(&name_b, &key_b)?;
 
     comms_a
         .add_trusted_peer(spec_b)
@@ -2016,6 +2046,37 @@ pub async fn wire_cross_mob(
         .map_err(|e| err_str("wire_error", e))?;
 
     Ok(())
+}
+
+/// Build an inproc [`TrustedPeerDescriptor`] for intra-/cross-mob wire in the
+/// embedded wasm runtime.
+///
+/// V5 dogma: the core seam is keyed by typed [`PeerId`] (a UUIDv5 derived
+/// from the Ed25519 signing pubkey), not by display name. This helper
+/// parses the `ed25519:<base64>` form returned by
+/// [`CommsRuntime::public_key`] back into typed `PubKey` bytes, derives the
+/// canonical `PeerId` via
+/// [`meerkat_comms::router::peer_id_from_pubkey`] so router and trust-store
+/// lookups round-trip, and stamps the 32-byte pubkey on the descriptor so
+/// receiver-side signature verification continues to work.
+fn build_inproc_trusted_peer(
+    name: &str,
+    pubkey_str: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, JsValue> {
+    let pubkey = meerkat_comms::identity::PubKey::from_peer_id(pubkey_str)
+        .map_err(|e| err_str("wire_error", format!("invalid pubkey `{pubkey_str}`: {e}")))?;
+    let peer_id = meerkat_comms::router::peer_id_from_pubkey(&pubkey);
+    let peer_name = meerkat_core::comms::PeerName::new(name)
+        .map_err(|e| err_str("wire_error", format!("invalid peer name `{name}`: {e}")))?;
+    Ok(meerkat_core::comms::TrustedPeerDescriptor {
+        peer_id,
+        name: peer_name,
+        address: meerkat_core::comms::PeerAddress::new(
+            meerkat_core::comms::PeerTransport::Inproc,
+            name,
+        ),
+        pubkey: *pubkey.as_bytes(),
+    })
 }
 
 #[derive(Debug, serde::Deserialize)]

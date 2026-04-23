@@ -42,7 +42,12 @@ const PEER_ID_UUID_NAMESPACE: uuid::Uuid =
 /// Callers that hold only a [`PeerId`] and need to route through the trust
 /// store use this together with [`TrustedPeers::find_by_peer_id`] (which
 /// performs the linear match under the store read lock).
-pub(crate) fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> PeerId {
+///
+/// Exposed publicly so out-of-crate consumers (wasm web runtime, future
+/// embedded hosts) that construct [`meerkat_core::comms::TrustedPeerDescriptor`]
+/// from a pubkey-string round-trip against the same UUIDv5 namespace the
+/// router uses internally.
+pub fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> PeerId {
     PeerId::from_uuid(uuid::Uuid::new_v5(
         &PEER_ID_UUID_NAMESPACE,
         pubkey.as_bytes(),

@@ -97,12 +97,6 @@ export interface RenderMetadata {
   salience?: RenderSalience;
 }
 
-/** Options for a single turn. */
-export interface TurnOptions {
-  /** Additional instructions for this turn only. */
-  additionalInstructions?: string[];
-}
-
 /** Runtime system-context append request. */
 export interface AppendSystemContextOptions {
   /** Instruction text injected at the next LLM boundary. */

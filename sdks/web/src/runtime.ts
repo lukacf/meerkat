@@ -76,7 +76,7 @@ export interface WasmModule {
   destroy_runtime: () => void;
   create_session_simple: (configJson: string) => number;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
-  start_turn: (handle: number, prompt: string, optionsJson: string) => Promise<string>;
+  start_turn: (handle: number, prompt: string) => Promise<string>;
   get_session_state: (handle: number) => string;
   destroy_session: (handle: number) => void;
   poll_events: (handle: number) => string;

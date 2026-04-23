@@ -20,8 +20,10 @@ use meerkat_contracts::wire::{
 
 fn sample_connection_ref() -> meerkat_core::ConnectionRef {
     meerkat_core::ConnectionRef {
-        realm_id: "dev".to_string(),
-        binding_id: "default_openai".to_string(),
+        realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::connection::BindingId::parse("default_openai")
+            .expect("valid binding"),
+        profile: None,
     }
 }
 
@@ -44,7 +46,6 @@ fn sample_auth_profile() -> meerkat_core::AuthProfile {
             env: "OPENAI_API_KEY".to_string(),
             fallback: Vec::new(),
         },
-        storage: meerkat_core::CredentialStorageSpec::Ephemeral,
         constraints: Default::default(),
         metadata_defaults: Default::default(),
     }
@@ -65,8 +66,8 @@ fn connection_ref_serde_roundtrip() {
     let domain = sample_connection_ref();
     let wire: WireConnectionRef = domain.clone().into();
     let s = serde_json::to_string(&wire).unwrap();
-    assert!(s.contains("\"realm_id\":\"dev\""));
-    assert!(s.contains("\"binding_id\":\"default_openai\""));
+    assert!(s.contains("\"realm\":\"dev\""));
+    assert!(s.contains("\"binding\":\"default_openai\""));
     let back: WireConnectionRef = serde_json::from_str(&s).unwrap();
     let redomain: meerkat_core::ConnectionRef = back.into();
     assert_eq!(redomain, domain);
@@ -84,12 +85,11 @@ fn backend_profile_wire_carries_provider_as_string() {
 }
 
 #[test]
-fn auth_profile_wire_carries_source_and_storage_discriminator() {
+fn auth_profile_wire_carries_source_discriminator() {
     let ap = sample_auth_profile();
     let wire: WireAuthProfile = (&ap).into();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"source_kind\":\"env\""));
-    assert!(s.contains("\"storage_kind\":\"ephemeral\""));
     let back: WireAuthProfile = serde_json::from_str(&s).unwrap();
     assert_eq!(back, wire);
 }
@@ -191,8 +191,8 @@ mod schema_emission {
     fn connection_ref_schema_has_realm_and_binding() {
         let s = schema_json::<WireConnectionRef>();
         let props = s.pointer("/properties").expect("schema has properties");
-        assert!(props.get("realm_id").is_some());
-        assert!(props.get("binding_id").is_some());
+        assert!(props.get("realm").is_some());
+        assert!(props.get("binding").is_some());
     }
 
     #[test]
@@ -200,7 +200,6 @@ mod schema_emission {
         let s = schema_json::<WireAuthProfile>();
         let props = s.pointer("/properties").expect("schema has properties");
         assert!(props.get("source_kind").is_some());
-        assert!(props.get("storage_kind").is_some());
         assert!(props.get("auth_method").is_some());
     }
 

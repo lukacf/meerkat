@@ -802,8 +802,6 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         event_tx: None,
         skill_references: None,
         flow_tool_overlay: None,
-        additional_instructions: None,
-        execution_kind: None,
     }
 }
 

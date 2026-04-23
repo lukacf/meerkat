@@ -88,6 +88,17 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "BindSupervisor",
         "AuthorizeSupervisor",
         "RevokeSupervisor",
+        // Wave-d D-d: supervisor-trust-edge feedback acks for the
+        // `supervisor_trust_publish` / `supervisor_trust_revoke` handoff
+        // protocols. Staged by `stage_supervisor_trust_{published,
+        // publish_failed, revoked, revoke_failed}` from the
+        // `try_handle_supervisor_bridge_command` path after the shell
+        // calls `Router::{add,remove}_trusted_peer`. DSL-internal; not
+        // dispatched through `MeerkatMachineCommand`.
+        "SupervisorTrustEdgePublished",
+        "SupervisorTrustEdgePublishFailed",
+        "SupervisorTrustEdgeRevoked",
+        "SupervisorTrustEdgeRevokeFailed",
         // U9 (dogma #4): realtime product-turn lifecycle is driven via
         // `RealtimeProductTurnHandle` (meerkat-core/src/handles.rs) from the
         // realtime-WS dispatch loop in `meerkat-rpc::realtime_ws`, not

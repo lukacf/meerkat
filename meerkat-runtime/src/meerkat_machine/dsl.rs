@@ -2580,6 +2580,40 @@ machine! {
                 epoch: u64,
             },
 
+            // Supervisor-trust-edge feedback inputs (C-F2 / wave-d D-d).
+            //
+            // Feedback acks for the `supervisor_trust_publish` /
+            // `supervisor_trust_revoke` handoff protocols hosted on the
+            // compat `SupervisorTrustBridgeMachine`. The realising shell
+            // (`comms_drain::try_handle_supervisor_bridge_command`) calls
+            // `Router::add_trusted_peer` / `remove_trusted_peer` after the
+            // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
+            // DSL commit, then stages one of these four inputs carrying
+            // the `epoch` observed on the producer effect. The
+            // transitions guard on `peer_id` and `epoch` matching the
+            // current `supervisor_bound_*` binding, so a stale ack for
+            // epoch `N - 1` arriving after the binding has rotated to
+            // epoch `N` is rejected by the DSL without clearing the
+            // outstanding obligation.
+            SupervisorTrustEdgePublished {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgePublishFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+            SupervisorTrustEdgeRevoked {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgeRevokeFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+
             // Track-B (R5) peer-projection inputs. See catalog DSL for
             // full rationale. Rejected in `Initializing`, `Retired`,
             // `Stopped`, `Destroyed`.
@@ -6456,6 +6490,77 @@ machine! {
                 self.supervisor_bound_address = None;
                 self.supervisor_bound_epoch = None;
             }
+            to Idle
+        }
+
+        // Supervisor-trust-edge feedback transitions (C-F2 / wave-d D-d).
+        //
+        // Each transition is phase-preserving and guards on both
+        // `peer_id` and `epoch` matching the current binding. An ack for
+        // epoch `N - 1` arriving after a rotation advanced the binding
+        // to epoch `N` is rejected by the DSL — the outstanding
+        // obligation stays open and the stale ack cannot satisfy it.
+        transition SupervisorTrustEdgePublished {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublished { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgePublishFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublishFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevoked {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevoked { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevokeFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
             to Idle
         }
 

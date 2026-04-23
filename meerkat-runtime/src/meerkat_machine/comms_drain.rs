@@ -729,6 +729,138 @@ impl MeerkatMachine {
         .map_err(SupervisorBindingStageError::Dsl)?;
         Ok(())
     }
+
+    /// Stage a DSL `SupervisorTrustEdgePublished` feedback input (C-F2 /
+    /// wave-d D-d).
+    ///
+    /// Invoked by `try_handle_supervisor_bridge_command` after a
+    /// successful `Router::add_trusted_peer` call. The `epoch` passed
+    /// through is the one observed on the originating
+    /// `PublishSupervisorTrustEdge` effect (i.e. the epoch of the
+    /// `BindSupervisor` / `AuthorizeSupervisor` commit that triggered
+    /// the publication). The DSL guard rejects the ack if the binding
+    /// has since rotated forward — a stale ack cannot close the
+    /// outstanding obligation for the newer epoch.
+    pub async fn stage_supervisor_trust_published(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublished {
+                peer_id,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgePublishFailed` feedback input
+    /// (C-F2 / wave-d D-d).
+    ///
+    /// Invoked when `Router::add_trusted_peer` returns an error. The
+    /// `epoch` comes from the originating producer effect; the DSL
+    /// guard rejects a stale-epoch ack arriving after the binding has
+    /// rotated forward.
+    pub async fn stage_supervisor_trust_publish_failed(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+        reason: String,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublishFailed {
+                peer_id,
+                epoch,
+                reason,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgeRevoked` feedback input (C-F2 /
+    /// wave-d D-d).
+    ///
+    /// Invoked after a successful `Router::remove_trusted_peer` call.
+    /// Epoch guard semantics mirror `stage_supervisor_trust_published`.
+    pub async fn stage_supervisor_trust_revoked(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevoked {
+                peer_id,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgeRevokeFailed` feedback input
+    /// (C-F2 / wave-d D-d).
+    ///
+    /// Invoked when `Router::remove_trusted_peer` returns an error.
+    /// Epoch guard semantics mirror `stage_supervisor_trust_published`.
+    pub async fn stage_supervisor_trust_revoke_failed(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+        reason: String,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevokeFailed {
+                peer_id,
+                epoch,
+                reason,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
 }
 
 /// Errors raised when staging a supervisor-binding input against the DSL

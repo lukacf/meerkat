@@ -57,25 +57,25 @@ mod tests {
         assert!(
             machine_names
                 .iter()
-                .any(|name| name == "ScheduleLifecycleMachine"),
+                .any(|name| name.as_str() == "ScheduleLifecycleMachine"),
             "schedule lifecycle machine must be a canonical schema"
         );
         assert!(
             machine_names
                 .iter()
-                .any(|name| name == "OccurrenceLifecycleMachine"),
+                .any(|name| name.as_str() == "OccurrenceLifecycleMachine"),
             "occurrence lifecycle machine must be a canonical schema"
         );
         assert!(
             coverage_names
                 .iter()
-                .any(|name| name == "ScheduleLifecycleMachine"),
+                .any(|name| name.as_str() == "ScheduleLifecycleMachine"),
             "schedule lifecycle machine must have coverage metadata"
         );
         assert!(
             coverage_names
                 .iter()
-                .any(|name| name == "OccurrenceLifecycleMachine"),
+                .any(|name| name.as_str() == "OccurrenceLifecycleMachine"),
             "occurrence lifecycle machine must have coverage metadata"
         );
     }
@@ -88,7 +88,7 @@ mod tests {
             let transition = machine
                 .transitions
                 .iter()
-                .find(|transition| transition.name == transition_name);
+                .find(|transition| transition.name.as_str() == transition_name);
 
             assert!(transition.is_some(), "missing {transition_name} transition");
             let Some(transition) = transition else {
@@ -98,7 +98,7 @@ mod tests {
             assert!(
                 transition.updates.iter().any(|update| matches!(
                     update,
-                    Update::Increment { field, amount } if field == "revision" && *amount == 1
+                    Update::Increment { field, amount } if field.as_str() == "revision" && *amount == 1
                 )),
                 "{transition_name} should advance the revision"
             );
@@ -106,7 +106,7 @@ mod tests {
                 transition
                     .emit
                     .iter()
-                    .any(|effect| effect.variant == "SupersedePendingOccurrences"),
+                    .any(|effect| effect.variant.as_str() == "SupersedePendingOccurrences"),
                 "{transition_name} should supersede older pending occurrences"
             );
         }
@@ -121,7 +121,7 @@ mod tests {
 
         for compat_name in ["FlowRunMachine", "FlowFrameMachine", "LoopIterationMachine"] {
             assert!(
-                !machine_names.iter().any(|name| name == compat_name),
+                !machine_names.iter().any(|name| name.as_str() == compat_name),
                 "{compat_name} should remain compat-only, not canonical"
             );
         }

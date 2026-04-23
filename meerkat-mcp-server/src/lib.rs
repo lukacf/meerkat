@@ -138,9 +138,10 @@ pub struct MeerkatRunInput {
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt.
+    /// Skills to preload into the system prompt — typed `SkillKey`s
+    /// (source_uuid + skill_name).
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -160,13 +161,16 @@ pub struct MeerkatRunInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Route this session's LLM calls through a realm-scoped provider
-    /// binding. Format: `"<realm_id>:<binding_id>"` referencing a
-    /// `[realm.<realm_id>.binding.<binding_id>]` entry in the active
-    /// Config. When set, the provider runtime registry resolves the
-    /// binding's auth profile and backend profile through the standard
+    /// binding. Typed `WireConnectionRef` referencing a
+    /// `[realm.<realm>.binding.<binding>]` entry in the active Config.
+    /// Pre-wave-c this was `Option<String>` parsed as `"realm:binding"`
+    /// — the string form is now rejected at the deserialization
+    /// boundary (dogma #5: no untyped joins on the ingress seam).
+    /// When set, the provider runtime registry resolves the binding's
+    /// auth profile and backend profile through the standard
     /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<String>,
+    pub connection_ref: Option<meerkat_contracts::wire::connection::WireConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -835,9 +839,10 @@ pub struct MeerkatResumeInput {
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt.
+    /// Skills to preload into the system prompt — typed `SkillKey`s
+    /// (source_uuid + skill_name).
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -911,8 +916,9 @@ pub struct MeerkatMcpReloadInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatSkillsInput {
     pub action: String,
+    /// Typed skill identity for the `inspect` action.
     #[serde(default)]
-    pub skill_id: Option<String>,
+    pub skill_key: Option<meerkat_core::skills::SkillKey>,
     /// Optional source selector for inspect action.
     #[serde(default)]
     pub source: Option<String>,
@@ -1567,7 +1573,13 @@ async fn handle_meerkat_skills(
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
                 .map(|e| meerkat_contracts::SkillEntry {
-                    id: e.descriptor.id.0.clone(),
+                    // Project the typed `SkillKey` to the wire's
+                    // stringified `<source_uuid>/<skill_name>` form.
+                    // `SkillEntry.id` is owned by `meerkat-contracts`;
+                    // retyping it to `SkillKey` is a wire-type change
+                    // that belongs to the contracts cleanup track, not
+                    // mcp-server. This projection preserves wire shape.
+                    id: e.descriptor.key.to_string(),
                     name: e.descriptor.name.clone(),
                     description: e.descriptor.description.clone(),
                     scope: e.descriptor.scope.to_string(),
@@ -1580,19 +1592,24 @@ async fn handle_meerkat_skills(
                 .map_err(|e| format!("serialization failed: {e}"))
         }
         "inspect" => {
-            let skill_id = input
-                .skill_id
-                .as_deref()
-                .ok_or_else(|| "missing 'skill_id' for inspect action".to_string())?;
+            let skill_key = input
+                .skill_key
+                .as_ref()
+                .ok_or_else(|| "missing 'skill_key' for inspect action".to_string())?;
+            // Apply the identity registry remap chain before dispatch
+            // so legacy source_uuids still resolve to the canonical
+            // backing skill (C-4 invariant — registry-backed engines
+            // apply remaps; others identity-project).
+            let canonical = runtime
+                .canonical_skill_key(skill_key)
+                .await
+                .map_err(|e| format!("skill canonicalization failed: {e}"))?;
             let doc = runtime
-                .load_from_source(
-                    &meerkat_core::skills::SkillId::from(skill_id),
-                    input.source.as_deref(),
-                )
+                .load_from_source(&canonical, input.source.as_deref())
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
-                id: doc.descriptor.id.0.clone(),
+                id: doc.descriptor.key.to_string(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
                 scope: doc.descriptor.scope.to_string(),
@@ -1747,12 +1764,6 @@ fn canonical_skill_keys(
     params
         .canonical_skill_keys_with_registry(&registry)
         .map_err(|e| format!("Invalid skill refs: {e}"))
-}
-
-fn preload_skill_ids(
-    preload_skills: Option<Vec<String>>,
-) -> Option<Vec<meerkat_core::skills::SkillId>> {
-    preload_skills.map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect())
 }
 
 async fn handle_meerkat_read(
@@ -2474,7 +2485,7 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
-    let preload_skills = preload_skill_ids(input.preload_skills.clone());
+    let preload_skills = input.preload_skills.clone();
     let skill_references = canonical_skill_keys(
         &config,
         input.skill_refs.clone(),
@@ -2582,12 +2593,8 @@ async fn handle_meerkat_run(
         config_generation: current_generation,
         connection_ref: input
             .connection_ref
-            .as_deref()
-            .and_then(|raw| raw.split_once(':'))
-            .map(|(realm_id, binding_id)| meerkat_core::ConnectionRef {
-                realm_id: realm_id.to_string(),
-                binding_id: binding_id.to_string(),
-            }),
+            .clone()
+            .map(meerkat_core::ConnectionRef::from),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -2796,7 +2803,7 @@ async fn handle_meerkat_resume(
     } else {
         input.prompt
     };
-    let preload_skills = preload_skill_ids(input.preload_skills.clone());
+    let preload_skills = input.preload_skills.clone();
     let skill_references = canonical_skill_keys(
         &config,
         input.skill_refs.clone(),

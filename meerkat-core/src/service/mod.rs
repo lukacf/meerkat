@@ -758,6 +758,7 @@ pub enum AppendSystemContextStatus {
 
 /// Ephemeral per-turn tool overlay for flow-dispatched turns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]

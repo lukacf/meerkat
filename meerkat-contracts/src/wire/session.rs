@@ -343,6 +343,7 @@ pub enum WireAssistantBlock {
         /// invariant ("tool-call args pass through un-parsed from provider
         /// to dispatcher") — see `CLAUDE.md` Rust design principles §3.
         /// Allow-listed by dogma-blind-spots §7.
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
         args: Box<serde_json::value::RawValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
@@ -418,6 +419,7 @@ impl From<StopReason> for WireStopReason {
 pub struct WireToolCall {
     pub id: String,
     pub name: String,
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     pub args: Box<serde_json::value::RawValue>,
 }
 

@@ -1,5 +1,5 @@
 mod source {
-    #![allow(clippy::expect_used, clippy::assign_op_pattern)]
+    #![allow(clippy::expect_used, clippy::assign_op_pattern, dead_code)]
     //! MobMachine — DSL-generated canonical state.
     //!
     //! The generated `MobMachineState` is the machine-owned portion of mob state.

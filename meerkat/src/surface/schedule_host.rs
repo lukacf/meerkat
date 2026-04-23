@@ -4,11 +4,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use meerkat_core::{ContentInput, SessionId, types::RenderMetadata};
-use meerkat_runtime::{AcceptOutcome, CompletionHandle, CompletionOutcome};
+use meerkat_runtime::CompletionHandle;
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
-    MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrencePhase, RuntimeDeliveryOutcome,
-    ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig, ScheduleService, ScheduleStoreKind,
+    MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrencePhase, ScheduleDomainError,
+    ScheduleDriver, ScheduleDriverConfig, ScheduleService, ScheduleStoreKind,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
 };
@@ -46,19 +46,6 @@ struct ResolvedScheduledSession {
 pub struct AcceptedScheduledInput {
     pub correlation_id: Option<String>,
     pub handle: Option<CompletionHandle>,
-}
-
-/// Typed projection of a runtime admission outcome into the schedule surface.
-///
-/// The schedule taxonomy (`OccurrenceFailureClass`) has domain-specific variants
-/// (target/lease/mob) that the runtime does not know about, so we keep it distinct
-/// from the runtime's `AcceptOutcome`. Callers exhaustively match this projection
-/// and route the rejected arm through `immediate_delivery_failure` with the
-/// correct failure class, rather than laundering it back through the accepted
-/// path with a sentinel correlation id.
-pub enum RuntimeAdmissionProjection {
-    Admitted(AcceptedScheduledInput),
-    Rejected { outcome: RuntimeDeliveryOutcome },
 }
 
 #[derive(Debug, Clone)]
@@ -386,57 +373,6 @@ pub fn spawn_schedule_host(
     }
 }
 
-pub fn project_runtime_admission(
-    outcome: AcceptOutcome,
-    handle: Option<CompletionHandle>,
-) -> RuntimeAdmissionProjection {
-    match outcome {
-        AcceptOutcome::Accepted { input_id, .. } => {
-            RuntimeAdmissionProjection::Admitted(AcceptedScheduledInput {
-                correlation_id: Some(input_id.to_string()),
-                handle,
-            })
-        }
-        AcceptOutcome::Deduplicated { existing_id, .. } => {
-            RuntimeAdmissionProjection::Admitted(AcceptedScheduledInput {
-                correlation_id: Some(existing_id.to_string()),
-                handle,
-            })
-        }
-        AcceptOutcome::Rejected { reason } => RuntimeAdmissionProjection::Rejected {
-            outcome: RuntimeDeliveryOutcome::AdmissionRejected {
-                detail: reason.to_string(),
-            },
-        },
-        // `AcceptOutcome` is `#[non_exhaustive]`; treat additions as rejections
-        // until the surface is taught to project them.
-        other => RuntimeAdmissionProjection::Rejected {
-            outcome: RuntimeDeliveryOutcome::AdmissionRejected {
-                detail: format!("unsupported runtime accept outcome: {other:?}"),
-            },
-        },
-    }
-}
-
-/// Build a `DeliveryDispatch` from a runtime admission projection.
-///
-/// Admitted inputs flow through `build_dispatch_from_accepted`; rejected inputs
-/// flow through `immediate_delivery_failure` with `OccurrenceFailureClass::RuntimeRejected`.
-pub fn dispatch_from_admission(
-    occurrence: &Occurrence,
-    projection: RuntimeAdmissionProjection,
-    materialized_session_id: Option<SessionId>,
-) -> DeliveryDispatch {
-    match projection {
-        RuntimeAdmissionProjection::Admitted(accepted) => {
-            build_dispatch_from_accepted(occurrence, accepted, materialized_session_id)
-        }
-        RuntimeAdmissionProjection::Rejected { outcome } => {
-            immediate_runtime_delivery_failure(occurrence, outcome, None, materialized_session_id)
-        }
-    }
-}
-
 pub fn build_dispatch_from_accepted(
     occurrence: &Occurrence,
     accepted: AcceptedScheduledInput,
@@ -454,19 +390,17 @@ pub fn build_dispatch_from_accepted(
     let attempt_count = occurrence.attempt_count;
     let correlation_id = accepted.correlation_id.clone();
     let completed_materialized_session_id = materialized_session_id.clone();
-    let completion = match accepted.handle {
-        Some(handle) => scheduled_completion_future(handle, materialized_session_id.clone()),
-        None => Box::pin(async move {
-            let mut receipt = DeliveryReceipt::new(
-                occurrence_id,
-                attempt_count,
-                DeliveryReceiptStage::Completed,
-            );
-            receipt.correlation_id = correlation_id;
-            receipt.materialized_session_id = completed_materialized_session_id;
-            Ok(DeliveryTerminal::completed(Some(receipt)))
-        }),
-    };
+    let _ = accepted.handle;
+    let completion = Box::pin(async move {
+        let mut receipt = DeliveryReceipt::new(
+            occurrence_id,
+            attempt_count,
+            DeliveryReceiptStage::Completed,
+        );
+        receipt.correlation_id = correlation_id;
+        receipt.materialized_session_id = completed_materialized_session_id;
+        Ok(DeliveryTerminal::completed(Some(receipt)))
+    });
 
     DeliveryDispatch {
         receipt,
@@ -544,38 +478,6 @@ pub fn immediate_delivery_failure(
     }
 }
 
-pub fn immediate_runtime_delivery_failure(
-    occurrence: &Occurrence,
-    runtime_outcome: RuntimeDeliveryOutcome,
-    correlation_id: Option<String>,
-    materialized_session_id: Option<SessionId>,
-) -> DeliveryDispatch {
-    let detail = runtime_outcome.detail();
-    let failure_class = runtime_outcome.derived_failure_class();
-    let mut receipt = DeliveryReceipt::new(
-        occurrence.occurrence_id.clone(),
-        occurrence.attempt_count,
-        DeliveryReceiptStage::DispatchStarted,
-    );
-    receipt.correlation_id = correlation_id.clone();
-    receipt.materialized_session_id = materialized_session_id.clone();
-    DeliveryDispatch {
-        receipt,
-        correlation_id,
-        materialized_session_id: materialized_session_id.clone(),
-        completion: Box::pin(async move {
-            Ok(DeliveryTerminal {
-                phase: OccurrencePhase::DeliveryFailed,
-                receipt: None,
-                detail: Some(detail),
-                failure_class: Some(failure_class),
-                runtime_outcome: Some(runtime_outcome),
-                materialized_session_id,
-            })
-        }),
-    }
-}
-
 pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
     format!(
         "schedule:{}:occurrence:{}:attempt:{}",
@@ -583,77 +485,11 @@ pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
     )
 }
 
-/// Project a runtime `CompletionOutcome` into a schedule `DeliveryTerminal`.
-///
-/// This is an exhaustive typed mapping from the runtime's completion taxonomy
-/// into the schedule's terminal delivery projection. The schedule persists the
-/// typed runtime meaning and only derives `OccurrenceFailureClass` for its own
-/// lifecycle bookkeeping.
-fn scheduled_completion_future(
-    handle: CompletionHandle,
-    materialized_session_id: Option<SessionId>,
-) -> DeliveryCompletion {
-    Box::pin(async move {
-        Ok(match handle.wait().await {
-            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult => {
-                DeliveryTerminal {
-                    phase: OccurrencePhase::Completed,
-                    receipt: None,
-                    detail: None,
-                    failure_class: None,
-                    runtime_outcome: None,
-                    materialized_session_id,
-                }
-            }
-            CompletionOutcome::Abandoned(reason) => {
-                let runtime_outcome =
-                    RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
-                DeliveryTerminal {
-                    phase: OccurrencePhase::DeliveryFailed,
-                    receipt: None,
-                    detail: Some(runtime_outcome.detail()),
-                    failure_class: Some(runtime_outcome.derived_failure_class()),
-                    runtime_outcome: Some(runtime_outcome),
-                    materialized_session_id,
-                }
-            }
-            CompletionOutcome::CallbackPending { tool_name, args } => {
-                let runtime_outcome = RuntimeDeliveryOutcome::CompletionCallbackPending {
-                    tool_name,
-                    payload: args,
-                };
-                DeliveryTerminal {
-                    phase: OccurrencePhase::DeliveryFailed,
-                    receipt: None,
-                    detail: Some(runtime_outcome.detail()),
-                    failure_class: Some(runtime_outcome.derived_failure_class()),
-                    runtime_outcome: Some(runtime_outcome),
-                    materialized_session_id,
-                }
-            }
-            CompletionOutcome::RuntimeTerminated(reason) => {
-                let runtime_outcome =
-                    RuntimeDeliveryOutcome::CompletionRuntimeTerminated { detail: reason };
-                DeliveryTerminal {
-                    phase: OccurrencePhase::DeliveryFailed,
-                    receipt: None,
-                    detail: Some(runtime_outcome.detail()),
-                    failure_class: Some(runtime_outcome.derived_failure_class()),
-                    runtime_outcome: Some(runtime_outcome),
-                    materialized_session_id,
-                }
-            }
-        })
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    use meerkat_runtime::CompletionOutcome;
-    use serde_json::json;
     use std::collections::BTreeMap;
 
     fn sample_occurrence() -> Occurrence {
@@ -693,79 +529,4 @@ mod tests {
         occurrence
     }
 
-    #[test]
-    fn dispatch_from_admission_keeps_rejected_runtime_meaning_typed() {
-        let occurrence = sample_occurrence();
-        let dispatch = dispatch_from_admission(
-            &occurrence,
-            RuntimeAdmissionProjection::Rejected {
-                outcome: RuntimeDeliveryOutcome::AdmissionRejected {
-                    detail: "runtime rejected input".to_string(),
-                },
-            },
-            None,
-        );
-
-        assert_eq!(
-            dispatch.receipt.stage,
-            DeliveryReceiptStage::DispatchStarted
-        );
-        let terminal =
-            futures::executor::block_on(dispatch.completion).expect("completion should resolve");
-        assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::RuntimeRejected)
-        );
-        assert!(matches!(
-            terminal.runtime_outcome,
-            Some(RuntimeDeliveryOutcome::AdmissionRejected { .. })
-        ));
-    }
-
-    #[test]
-    fn scheduled_completion_future_maps_callback_pending_without_surface_reclassification() {
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::CallbackPending {
-            tool_name: "search".to_string(),
-            args: json!({"q":"meerkat"}),
-        });
-        let terminal = futures::executor::block_on(scheduled_completion_future(handle, None))
-            .expect("completion should resolve");
-
-        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
-        assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::RuntimeRejected)
-        );
-        assert!(matches!(
-            terminal.runtime_outcome,
-            Some(RuntimeDeliveryOutcome::CompletionCallbackPending { .. })
-        ));
-        assert!(
-            terminal
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("callback pending for tool 'search'")),
-            "terminal detail should preserve runtime callback meaning: {terminal:?}"
-        );
-    }
-
-    #[test]
-    fn scheduled_completion_future_maps_runtime_terminated_without_surface_reclassification() {
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::RuntimeTerminated(
-            "runtime stopped".to_string(),
-        ));
-        let terminal = futures::executor::block_on(scheduled_completion_future(handle, None))
-            .expect("completion should resolve");
-
-        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
-        assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::TransportError)
-        );
-        assert_eq!(terminal.detail.as_deref(), Some("runtime stopped"));
-        assert!(matches!(
-            terminal.runtime_outcome,
-            Some(RuntimeDeliveryOutcome::CompletionRuntimeTerminated { .. })
-        ));
-    }
 }

@@ -1,29 +1,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
 use super::{
-    NoopScheduleMobHost, RuntimeAdmissionProjection, ScheduledPromptDispatch,
-    SharedScheduleTargetAdapter, SurfaceScheduleSessionHost, default_persistent_executor,
-    dispatch_from_admission, immediate_delivery_failure, materialize_session,
-    project_runtime_admission, schedule_attempt_idempotency_key, schedule_host_supported,
-    spawn_schedule_host,
+    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleSessionHost, default_persistent_executor, materialize_session,
+    schedule_host_supported, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
     ScheduleDomainError, ScheduleService, Session, SessionMaterializationSpec, SessionService,
     SessionTargetBinding, TargetProbeOutcome,
 };
-use meerkat_contracts::SkillsParams;
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
-use meerkat_runtime::{
-    CorrelationId, IdempotencyKey, Input, InputDurability, InputHeader, InputOrigin,
-    InputVisibility, MeerkatMachine, PromptInput,
-};
+use meerkat_runtime::MeerkatMachine;
 
 pub fn spawn_runtime_backed_schedule_host(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -185,112 +178,6 @@ impl RuntimeBackedScheduleSessionHost {
         }
     }
 
-    fn canonical_skill_keys(
-        &self,
-        skill_references: Vec<String>,
-    ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, ScheduleDomainError> {
-        if skill_references.is_empty() {
-            return Ok(None);
-        }
-
-        let registry = self
-            .config
-            .skills
-            .build_source_identity_registry()
-            .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
-
-        SkillsParams {
-            preload_skills: None,
-            skill_refs: None,
-            skill_references: Some(skill_references),
-        }
-        .canonical_skill_keys_with_registry(&registry)
-        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))
-    }
-
-    async fn accept_scheduled_prompt_with_completion(
-        &self,
-        session_id: &SessionId,
-        occurrence: &crate::Occurrence,
-        prompt: ContentInput,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        skill_references: Vec<String>,
-        additional_instructions: Vec<String>,
-    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-        self.ensure_runtime_session_registered(session_id).await?;
-        let skill_keys = self.canonical_skill_keys(skill_references)?;
-
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: None,
-                skill_references: skill_keys,
-                flow_tool_overlay: None,
-                additional_instructions: (!additional_instructions.is_empty())
-                    .then_some(additional_instructions),
-                model: None,
-                provider: None,
-                provider_params: None,
-                render_metadata,
-                execution_kind: None,
-                connection_ref: None,
-            },
-        );
-        let mut prompt_input = PromptInput::from_content_input(prompt, turn_metadata);
-        prompt_input.header.source = InputOrigin::System;
-        prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-            schedule_attempt_idempotency_key(occurrence),
-        ));
-        prompt_input.header.correlation_id =
-            Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
-
-        let (outcome, handle) = self
-            .runtime_adapter
-            .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(project_runtime_admission(outcome, handle))
-    }
-
-    async fn accept_scheduled_event_with_completion(
-        &self,
-        session_id: &SessionId,
-        occurrence: &crate::Occurrence,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-        self.ensure_runtime_session_registered(session_id).await?;
-
-        let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-            header: InputHeader {
-                id: meerkat_core::lifecycle::InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::External {
-                    source_name: format!("schedule:{}", occurrence.schedule_id),
-                },
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: Some(IdempotencyKey::new(schedule_attempt_idempotency_key(
-                    occurrence,
-                ))),
-                supersession_key: None,
-                correlation_id: Some(CorrelationId::from_uuid(occurrence.occurrence_id.0)),
-            },
-            event_type,
-            payload,
-            blocks: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata,
-        });
-
-        let (outcome, handle) = self
-            .runtime_adapter
-            .accept_input_with_completion(session_id, input)
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(project_runtime_admission(outcome, handle))
-    }
 }
 
 #[async_trait]
@@ -363,68 +250,27 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
 
     async fn deliver_prompt(
         &self,
-        session_id: &SessionId,
-        occurrence: &crate::Occurrence,
-        dispatch: ScheduledPromptDispatch,
+        _session_id: &SessionId,
+        _occurrence: &crate::Occurrence,
+        _dispatch: ScheduledPromptDispatch,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
-        match self
-            .accept_scheduled_prompt_with_completion(
-                session_id,
-                occurrence,
-                dispatch.prompt,
-                dispatch.render_metadata,
-                dispatch.skill_references,
-                dispatch.additional_instructions,
-            )
-            .await
-        {
-            Ok(projection) => Ok(dispatch_from_admission(
-                occurrence,
-                projection,
-                dispatch.materialized_session_id,
-            )),
-            Err(error) => Ok(immediate_delivery_failure(
-                occurrence,
-                error.to_string(),
-                crate::OccurrenceFailureClass::RuntimeRejected,
-                None,
-                dispatch.materialized_session_id,
-            )),
-        }
+        Err(ScheduleDomainError::Internal(
+            "runtime-backed deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+        ))
     }
 
     async fn deliver_event(
         &self,
-        session_id: &SessionId,
-        occurrence: &crate::Occurrence,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        _session_id: &SessionId,
+        _occurrence: &crate::Occurrence,
+        _event_type: String,
+        _payload: serde_json::Value,
+        _render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        _materialized_session_id: Option<SessionId>,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
-        match self
-            .accept_scheduled_event_with_completion(
-                session_id,
-                occurrence,
-                event_type,
-                payload,
-                render_metadata,
-            )
-            .await
-        {
-            Ok(projection) => Ok(dispatch_from_admission(
-                occurrence,
-                projection,
-                materialized_session_id,
-            )),
-            Err(error) => Ok(immediate_delivery_failure(
-                occurrence,
-                error.to_string(),
-                crate::OccurrenceFailureClass::RuntimeRejected,
-                None,
-                materialized_session_id,
-            )),
-        }
+        Err(ScheduleDomainError::Internal(
+            "runtime-backed deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+        ))
     }
 }
 

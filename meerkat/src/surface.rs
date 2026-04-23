@@ -37,11 +37,10 @@ pub use runtime_backed::{
 #[cfg(feature = "session-store")]
 pub use runtime_schedule_host::spawn_runtime_backed_schedule_host;
 pub use schedule_host::{
-    AcceptedScheduledInput, NoopScheduleMobHost, RuntimeAdmissionProjection, ScheduleHostHandle,
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, async_completion_dispatch, build_dispatch_from_accepted,
-    dispatch_from_admission, immediate_completed_dispatch, immediate_delivery_failure,
-    project_runtime_admission, schedule_attempt_idempotency_key, schedule_host_supported,
+    AcceptedScheduledInput, NoopScheduleMobHost, ScheduleHostHandle, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    async_completion_dispatch, build_dispatch_from_accepted, immediate_completed_dispatch,
+    immediate_delivery_failure, schedule_attempt_idempotency_key, schedule_host_supported,
     spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]

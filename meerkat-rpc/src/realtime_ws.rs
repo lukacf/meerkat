@@ -137,16 +137,6 @@ fn product_turn_completion_is_logically_terminal(
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RealtimeBindingProjection {
-    Unattached,
-    IntentPresentUnbound,
-    BindingNotReady,
-    BindingReady,
-    ReplacementPending,
-    ReattachRequired,
-}
-
 /// Tiny splitmix64 PRNG. Used to produce a per-channel full-jitter stream for
 /// reconnect backoff without pulling a crate-level `rand` dependency into the
 /// realtime hot path. Deterministic per-overlay: tests can seed it by
@@ -1987,7 +1977,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                 let now = Instant::now();
                                 let now_utc = Utc::now();
                                 match current_binding_projection(&state.runtime, binding.as_ref()).await {
-                                    Ok(RealtimeBindingProjection::ReattachRequired)
+                                    Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired)
                                         if matches!(role, meerkat_contracts::RealtimeChannelRole::Primary) =>
                                     {
                                         if let Some(status) = reconnect_overlay.begin_if_needed(now, now_utc) {
@@ -2070,13 +2060,13 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         binding.as_ref(),
                                                     )
                                                     .await
-                                                        && projection != RealtimeBindingProjection::ReattachRequired
+                                                        && projection != meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired
                                                     {
                                                         reconnect_overlay.clear();
                                                         let _ = emit_status_update(
                                                             &mut socket,
                                                             &mut last_visible_status,
-                                                            projection_to_channel_status(projection),
+                                                            projection.into(),
                                                             false,
                                                             Some((state.host.as_ref(), &registered)),
                                                         )
@@ -2138,7 +2128,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         let _ = emit_status_update(
                                             &mut socket,
                                             &mut last_visible_status,
-                                            projection_to_channel_status(projection),
+                                            projection.into(),
                                             false,
                                             Some((state.host.as_ref(), &registered)),
                                         )
@@ -2400,8 +2390,7 @@ async fn bind_realtime_target(
                         .runtime_adapter()
                         .realtime_attachment_status(&session_id)
                         .await
-                        .map(session_projection_from_runtime)
-                        .map(projection_to_channel_status)
+                        .map(RealtimeChannelStatus::from)
                         .map_err(|err| runtime_error_frame(err, "status"))?;
                     Ok(BindRealtimeTargetOutput {
                         status,
@@ -2416,8 +2405,7 @@ async fn bind_realtime_target(
                     .runtime_adapter()
                     .realtime_attachment_status(&session_id)
                     .await
-                    .map(session_projection_from_runtime)
-                    .map(projection_to_channel_status)
+                    .map(RealtimeChannelStatus::from)
                     .map_err(|err| runtime_error_frame(err, "status"))?;
                 Ok(BindRealtimeTargetOutput {
                     status,
@@ -2513,8 +2501,7 @@ async fn bind_realtime_target(
                     .runtime_adapter()
                     .realtime_attachment_status(&current_session_id)
                     .await
-                    .map(session_projection_from_runtime)
-                    .map(projection_to_channel_status)
+                    .map(RealtimeChannelStatus::from)
                     .map_err(|err| runtime_error_frame(err, "status"))?;
                 Ok(BindRealtimeTargetOutput {
                     status,
@@ -2596,8 +2583,7 @@ async fn open_product_session_bridge(
         .runtime_adapter()
         .realtime_attachment_status(session_id)
         .await
-        .map(session_projection_from_runtime)
-        .map(projection_to_channel_status)
+        .map(RealtimeChannelStatus::from)
         .map_err(|err| runtime_error_frame(err, "status"))?;
     Ok((
         status,
@@ -2630,51 +2616,10 @@ async fn cleanup_realtime_binding(
         .map_err(|err| runtime_error_frame(err, "detach"))
 }
 
-fn projection_to_channel_status(projection: RealtimeBindingProjection) -> RealtimeChannelStatus {
-    match projection {
-        RealtimeBindingProjection::Unattached => RealtimeChannelStatus {
-            state: RealtimeChannelState::Closed,
-            attempt_count: 0,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("no realtime channel is open for this target".to_string()),
-        },
-        RealtimeBindingProjection::IntentPresentUnbound
-        | RealtimeBindingProjection::BindingNotReady => RealtimeChannelStatus {
-            state: RealtimeChannelState::Opening,
-            attempt_count: 0,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("realtime attachment is pending".to_string()),
-        },
-        RealtimeBindingProjection::BindingReady => RealtimeChannelStatus {
-            state: RealtimeChannelState::Ready,
-            attempt_count: 0,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: None,
-        },
-        RealtimeBindingProjection::ReplacementPending => RealtimeChannelStatus {
-            state: RealtimeChannelState::Reconnecting,
-            attempt_count: 1,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("realtime attachment replacement is pending".to_string()),
-        },
-        RealtimeBindingProjection::ReattachRequired => RealtimeChannelStatus {
-            state: RealtimeChannelState::Reconnecting,
-            attempt_count: 1,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("realtime attachment requires reattach".to_string()),
-        },
-    }
-}
-
 async fn current_binding_projection(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
-) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
+) -> Result<meerkat_runtime::RealtimeAttachmentStatus, RealtimeChannelErrorFrame> {
     let Some(binding) = binding else {
         return Err(RealtimeChannelErrorFrame {
             code: RealtimeErrorCode::ChannelNotBound,
@@ -2686,33 +2631,7 @@ async fn current_binding_projection(
         .runtime_adapter()
         .realtime_attachment_status(binding.current_session_id())
         .await
-        .map(session_projection_from_runtime)
         .map_err(|err| runtime_error_frame(err, "status"))
-}
-
-fn session_projection_from_runtime(
-    status: meerkat_runtime::RealtimeAttachmentStatus,
-) -> RealtimeBindingProjection {
-    match status {
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached => {
-            RealtimeBindingProjection::Unattached
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound => {
-            RealtimeBindingProjection::IntentPresentUnbound
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => {
-            RealtimeBindingProjection::BindingNotReady
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
-            RealtimeBindingProjection::BindingReady
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => {
-            RealtimeBindingProjection::ReplacementPending
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => {
-            RealtimeBindingProjection::ReattachRequired
-        }
-    }
 }
 
 async fn emit_status_update(
@@ -3532,8 +3451,7 @@ async fn rotate_live_realtime_binding(
             .runtime_adapter()
             .realtime_attachment_status(new_session_id)
             .await
-            .map(session_projection_from_runtime)
-            .map(projection_to_channel_status)
+            .map(RealtimeChannelStatus::from)
             .map_err(|err| runtime_error_frame(err, "status"))?;
         (status, None)
     };

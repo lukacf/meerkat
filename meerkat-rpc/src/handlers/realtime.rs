@@ -98,6 +98,39 @@ pub async fn handle_realtime_capabilities(
     RpcResponse::success(id, RealtimeCapabilitiesResult { capabilities })
 }
 
+pub async fn handle_realtime_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    adapter: &dyn SessionServiceRuntimeExt,
+    #[cfg(feature = "mob")] mob_state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
+) -> RpcResponse {
+    let params: RealtimeStatusParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+
+    let session_id = match resolve_realtime_target_session(
+        &params.target,
+        #[cfg(feature = "mob")]
+        mob_state,
+    )
+    .await
+    {
+        Ok(sid) => sid,
+        Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
+    };
+
+    match adapter.realtime_attachment_status(&session_id).await {
+        Ok(status) => RpcResponse::success(
+            id,
+            RealtimeStatusResult {
+                status: status.into(),
+            },
+        ),
+        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
+    }
+}
+
 pub async fn handle_realtime_open_info(
     id: Option<RpcId>,
     params: Option<&RawValue>,

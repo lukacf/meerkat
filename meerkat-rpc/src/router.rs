@@ -1248,6 +1248,39 @@ impl MethodRouter {
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
+            "realtime/status" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: realtime/status",
+                    )
+                } else {
+                    let maybe_session_id = match self
+                        .resolve_realtime_target_session_id(id.clone(), params)
+                        .await
+                    {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Some(session_id) = maybe_session_id
+                        && let Err(response) =
+                            self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::realtime::handle_realtime_status(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                        #[cfg(feature = "mob")]
+                        &self.mob_state,
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,

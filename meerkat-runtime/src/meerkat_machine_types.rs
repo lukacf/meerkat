@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
+use chrono::{DateTime, Utc};
 use indexmap::IndexSet;
+use meerkat_contracts::{RealtimeChannelState, RealtimeChannelStatus};
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::lifecycle::WaitRequestId;
@@ -48,6 +50,105 @@ pub enum RealtimeAttachmentStatus {
     BindingReady,
     ReplacementPending,
     ReattachRequired,
+}
+
+/// Typed reconnect-progress carrier produced by the realtime-WS reconnect
+/// overlay. Wave-c C-9c (R4): `attempt_count` and `next_retry_at` were
+/// hard-coded `0` or `1` in the two duplicate status projections; this
+/// struct is the typed carrier the overlay emits so the canonical
+/// `RealtimeChannelStatus` projection can surface actual retry-budget
+/// exhaustion signal to RPC / MCP callers.
+///
+/// `deadline_at` is the wall-clock cutoff after which the reconnect cycle
+/// will be abandoned (`reconnect_policy.max_total_ms` on top of the
+/// cycle's start time). `None` outside an active reconnect cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectProgress {
+    pub attempt_count: u32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub deadline_at: Option<DateTime<Utc>>,
+}
+
+impl ReconnectProgress {
+    pub fn new(
+        attempt_count: u32,
+        next_retry_at: Option<DateTime<Utc>>,
+        deadline_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            attempt_count,
+            next_retry_at,
+            deadline_at,
+        }
+    }
+}
+
+impl RealtimeAttachmentStatus {
+    /// Canonical mapping to the public wire reason. `None` means the
+    /// `reason` field is unset on the projected `RealtimeChannelStatus`
+    /// (used for `BindingReady`, where there is no explanatory text).
+    fn default_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Unattached => Some("no realtime channel is open for this target"),
+            Self::IntentPresentUnbound | Self::BindingNotReady => {
+                Some("realtime attachment is pending")
+            }
+            Self::BindingReady => None,
+            Self::ReplacementPending => Some("realtime attachment replacement is pending"),
+            Self::ReattachRequired => Some("realtime attachment requires reattach"),
+        }
+    }
+
+    fn channel_state(self) -> RealtimeChannelState {
+        match self {
+            Self::Unattached => RealtimeChannelState::Closed,
+            Self::IntentPresentUnbound | Self::BindingNotReady => RealtimeChannelState::Opening,
+            Self::BindingReady => RealtimeChannelState::Ready,
+            Self::ReplacementPending | Self::ReattachRequired => {
+                RealtimeChannelState::Reconnecting
+            }
+        }
+    }
+
+    /// Wave-c C-9c (R3/R4) canonical projection, overlay-aware variant.
+    ///
+    /// Shell callers that own live reconnect state (the realtime-WS
+    /// handler inside the active socket loop) pass `Some(progress)` so
+    /// the projected `RealtimeChannelStatus` surfaces real retry-budget
+    /// data. Callers without overlay state (RPC `realtime/status`
+    /// responder, MCP bridge) pass `None` and get the current reconnect
+    /// defaults (`attempt_count = 1` for the two reconnecting states,
+    /// `0` elsewhere) — identical to the pre-C-9c projection output,
+    /// just routed through a single canonical site.
+    pub fn to_channel_status(
+        self,
+        reconnect: Option<&ReconnectProgress>,
+    ) -> RealtimeChannelStatus {
+        let state = self.channel_state();
+        let reason = self.default_reason().map(str::to_string);
+        let (attempt_count, next_retry_at, deadline_at) = match (state, reconnect) {
+            (RealtimeChannelState::Reconnecting, Some(progress)) => (
+                progress.attempt_count,
+                progress.next_retry_at.map(|dt| dt.to_rfc3339()),
+                progress.deadline_at.map(|dt| dt.to_rfc3339()),
+            ),
+            (RealtimeChannelState::Reconnecting, None) => (1, None, None),
+            _ => (0, None, None),
+        };
+        RealtimeChannelStatus {
+            state,
+            attempt_count,
+            next_retry_at,
+            deadline_at,
+            reason,
+        }
+    }
+}
+
+impl From<RealtimeAttachmentStatus> for RealtimeChannelStatus {
+    fn from(status: RealtimeAttachmentStatus) -> Self {
+        status.to_channel_status(None)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

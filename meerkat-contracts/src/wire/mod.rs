@@ -57,7 +57,7 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    AudioFormatMismatchContext, RealtimeAudioChunk, RealtimeAudioFormat,
+    AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioChunk, RealtimeAudioFormat,
     RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeCapabilitiesParams,
     RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelConfig,
     RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,

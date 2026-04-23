@@ -87,6 +87,7 @@ pub use wire::{
     PeerResponseTerminalStatusWire,
     ProviderCatalog,
     RealtimeAudioChunk,
+    RealtimeActionResult,
     RealtimeAudioFormat,
     RealtimeBargeInTruncateFrame,
     RealtimeCapabilities,

@@ -117,6 +117,26 @@ pub enum RealtimeErrorCode {
     /// (`MemberSessionBindingReleased` effect). Signalled only for
     /// `MobMember` targets; `SessionTarget` channels do not encounter this.
     BindingReleased,
+    /// Provider authentication rejected the connection or request. Maps
+    /// from `meerkat_client::LlmError::AuthenticationFailed` so the wire
+    /// surfaces a typed code instead of collapsing into
+    /// `InvalidTarget`.
+    AuthenticationFailed,
+    /// Provider returned a content-filter rejection
+    /// (`meerkat_client::LlmError::ContentFiltered`). Typed so clients
+    /// can distinguish policy rejection from transport failure.
+    ContentFiltered,
+    /// Provider rejected the request because the configured model is
+    /// unknown or unavailable
+    /// (`meerkat_client::LlmError::ModelNotFound`). Typed so clients
+    /// can distinguish model-catalog drift from realtime transport
+    /// misconfiguration.
+    ModelNotFound,
+    /// Provider returned `InvalidRequest` for a shape the realtime
+    /// layer cannot classify more specifically. Kept distinct from
+    /// `InvalidTarget` (which is about parse/resolve of the target
+    /// itself, not the outgoing request payload).
+    InvalidRequest,
 }
 
 impl RealtimeErrorCode {
@@ -152,6 +172,10 @@ impl RealtimeErrorCode {
             Self::CommitTurnUnavailable => "commit_turn_unavailable",
             Self::ChannelReconnecting => "channel_reconnecting",
             Self::BindingReleased => "binding_released",
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::ContentFiltered => "content_filtered",
+            Self::ModelNotFound => "model_not_found",
+            Self::InvalidRequest => "invalid_request",
         }
     }
 }
@@ -630,6 +654,26 @@ pub struct RealtimeChannelErrorFrame {
     /// Structured context keyed to the code, when additional fields are useful.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<RealtimeErrorDetails>,
+}
+
+/// Typed outcome of an in-process realtime action dispatched against a
+/// product session (`interrupt`, `close`, …). Replaces the
+/// `Result<(), RealtimeChannelErrorFrame>` shape that previously forced
+/// callers to string-match the error message to detect "nothing to
+/// interrupt" as a benign no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealtimeActionResult {
+    /// The action succeeded.
+    Completed,
+    /// The action was a preemptive no-op — there was no pending state
+    /// for it to operate on (e.g. `Interrupt` with no in-flight turn,
+    /// `Close` on an already-closed session). Callers should treat
+    /// this the same as `Completed`: the desired post-condition (no
+    /// pending turn / closed session) is already satisfied.
+    NoOpPreemptive,
+    /// The action failed; the typed error frame is the surface-visible
+    /// failure. Callers should propagate as a `channel.error` frame.
+    Failed(RealtimeChannelErrorFrame),
 }
 
 /// Payload for `channel.closed`.

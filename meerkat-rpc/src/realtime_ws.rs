@@ -23,7 +23,7 @@ use meerkat_client::{
     RealtimeSessionEvent, RealtimeSessionFactory, realtime_session::RealtimeSessionOpenConfig,
 };
 use meerkat_contracts::{
-    AudioFormatMismatchContext, RealtimeAudioFormat, RealtimeCapabilities,
+    AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioFormat, RealtimeCapabilities,
     RealtimeChannelClosedFrame, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
     RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelState,
     RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeClientFrame, RealtimeErrorCode,
@@ -209,7 +209,7 @@ enum RealtimeProductSessionCommand {
         respond: oneshot::Sender<Result<(), RealtimeChannelErrorFrame>>,
     },
     Interrupt {
-        respond: oneshot::Sender<Result<(), RealtimeChannelErrorFrame>>,
+        respond: oneshot::Sender<RealtimeActionResult>,
     },
     SubmitToolResult {
         result: meerkat_core::ToolResult,
@@ -980,8 +980,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         })
                                                         .await;
                                                     match respond_rx.await {
-                                                        Ok(Ok(())) => {}
-                                                        Ok(Err(error)) => {
+                                                        Ok(RealtimeActionResult::Completed)
+                                                        | Ok(RealtimeActionResult::NoOpPreemptive) => {}
+                                                        Ok(RealtimeActionResult::Failed(error)) => {
                                                             let _ = send_server_frame(
                                                                 &mut socket,
                                                                 &RealtimeServerFrame::ChannelError(error),
@@ -1078,23 +1079,15 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             })
                                                             .await;
                                                         match respond_rx.await {
-                                                            Ok(Ok(())) => {
+                                                            Ok(RealtimeActionResult::Completed)
+                                                            | Ok(RealtimeActionResult::NoOpPreemptive) => {
                                                                 if let Some(handle) =
                                                                     product_turn_handle.as_ref()
                                                                 {
                                                                     let _ = handle.turn_terminal();
                                                                 }
                                                             }
-                                                            Ok(Err(error))
-                                                                if preemptive_interrupt_can_be_ignored(&error) =>
-                                                            {
-                                                                if let Some(handle) =
-                                                                    product_turn_handle.as_ref()
-                                                                {
-                                                                    let _ = handle.turn_terminal();
-                                                                }
-                                                            }
-                                                            Ok(Err(error)) => {
+                                                            Ok(RealtimeActionResult::Failed(error)) => {
                                                                 let _ = send_server_frame(
                                                                     &mut socket,
                                                                     &RealtimeServerFrame::ChannelError(error),
@@ -2923,12 +2916,22 @@ async fn run_product_session_actor(
                         );
                     }
                     RealtimeProductSessionCommand::Interrupt { respond } => {
-                        let _ = respond.send(
-                            session
-                                .interrupt()
-                                .await
-                                .map_err(|error| realtime_client_error_frame(error, "interrupt"))
-                        );
+                        // Preemptive interrupts can land when there is no
+                        // pending turn to cancel — that was previously
+                        // surfaced as an `InvalidRequest` error and
+                        // string-matched by the caller. Classify it here
+                        // as a typed `NoOpPreemptive` variant so callers
+                        // branch on the enum instead.
+                        let result = match session.interrupt().await {
+                            Ok(()) => RealtimeActionResult::Completed,
+                            Err(meerkat_client::LlmError::InvalidRequest { .. }) => {
+                                RealtimeActionResult::NoOpPreemptive
+                            }
+                            Err(error) => RealtimeActionResult::Failed(
+                                realtime_client_error_frame(error, "interrupt"),
+                            ),
+                        };
+                        let _ = respond.send(result);
                     }
                     RealtimeProductSessionCommand::SubmitToolResult { result, respond } => {
                         let _ = respond.send(
@@ -3859,26 +3862,26 @@ fn realtime_client_error_frame(
     err: meerkat_client::LlmError,
     action: &str,
 ) -> RealtimeChannelErrorFrame {
-    match err {
-        meerkat_client::LlmError::InvalidRequest { message }
-        | meerkat_client::LlmError::AuthenticationFailed { message }
-        | meerkat_client::LlmError::ContentFiltered { reason: message }
-        | meerkat_client::LlmError::ModelNotFound { model: message } => RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: format!("realtime {action} failed: {message}"),
-            details: None,
-        },
-        other => RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::ProviderSessionFailed,
-            message: format!("realtime {action} failed: {other}"),
-            details: None,
-        },
+    let (code, message) = match err {
+        meerkat_client::LlmError::AuthenticationFailed { message } => {
+            (RealtimeErrorCode::AuthenticationFailed, message)
+        }
+        meerkat_client::LlmError::ContentFiltered { reason } => {
+            (RealtimeErrorCode::ContentFiltered, reason)
+        }
+        meerkat_client::LlmError::ModelNotFound { model } => {
+            (RealtimeErrorCode::ModelNotFound, model)
+        }
+        meerkat_client::LlmError::InvalidRequest { message } => {
+            (RealtimeErrorCode::InvalidRequest, message)
+        }
+        other => (RealtimeErrorCode::ProviderSessionFailed, other.to_string()),
+    };
+    RealtimeChannelErrorFrame {
+        code,
+        message: format!("realtime {action} failed: {message}"),
+        details: None,
     }
-}
-
-fn preemptive_interrupt_can_be_ignored(error: &RealtimeChannelErrorFrame) -> bool {
-    error.code == RealtimeErrorCode::InvalidTarget
-        && error.message.contains("realtime interrupt failed")
 }
 
 async fn send_error_and_close(

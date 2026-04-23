@@ -1248,6 +1248,56 @@ mod handoff_binding {
             .expect("dual-mode binding should validate");
     }
 
+    /// Wave-d D-c: `auth_lease_bundle` composition validates in isolation
+    /// and carries the structural seam closure for the AuthMachine
+    /// lifecycle-event publication. Asserts:
+    /// - the composition is registered in `compat_composition_schemas()`;
+    /// - it validates against canonical + the `auth_lease_bridge_machine`
+    ///   compat (route type-checking across AuthMachine→bridge mirror);
+    /// - the Route `auth_lifecycle_event_crosses_to_bridge` carries the
+    ///   canonical AuthMachine's `EmitLifecycleEvent` effect into the
+    ///   bridge's `MirrorLifecycleEvent` input;
+    /// - the handoff protocol `auth_lease_lifecycle_publication` is
+    ///   declared on the bridge's `PublishLifecycleEvent` effect.
+    ///
+    /// This is the red-test anchor for the orphan-closure contract: if
+    /// any of the composition components are removed or renamed, this
+    /// fails before the broader drift tests do, naming the specific
+    /// structural loss.
+    #[test]
+    fn auth_lease_bundle_composition_closes_auth_machine_orphan() {
+        let comp = compat_composition_schemas()
+            .into_iter()
+            .find(|c| c.name.as_str() == "auth_lease_bundle")
+            .expect("auth_lease_bundle must be registered in compat_composition_schemas()");
+
+        let mut machines = canonical_machine_schemas();
+        machines.push(meerkat_machine_schema::auth_lease_bridge_machine());
+        let refs: Vec<_> = machines.iter().collect();
+        comp.validate_against(&refs).unwrap_or_else(|err| {
+            panic!("auth_lease_bundle must validate against canonical + auth_lease_bridge: {err:?}")
+        });
+
+        let route = comp
+            .routes
+            .iter()
+            .find(|r| r.name.as_str() == "auth_lifecycle_event_crosses_to_bridge")
+            .expect("route auth_lifecycle_event_crosses_to_bridge must be present");
+        assert_eq!(route.from_machine.as_str(), "auth_machine");
+        assert_eq!(route.effect_variant.as_str(), "EmitLifecycleEvent");
+        assert_eq!(route.to.machine.as_str(), "auth_lease_bridge");
+        assert_eq!(route.to.input_variant.as_str(), "MirrorLifecycleEvent");
+
+        let protocol = comp
+            .handoff_protocols
+            .iter()
+            .find(|p| p.name.as_str() == "auth_lease_lifecycle_publication")
+            .expect("handoff protocol auth_lease_lifecycle_publication must be present");
+        assert_eq!(protocol.producer_instance.as_str(), "auth_lease_bridge");
+        assert_eq!(protocol.effect_variant.as_str(), "PublishLifecycleEvent");
+        assert_eq!(protocol.realizing_actor.as_str(), "auth_lease_owner");
+    }
+
     #[test]
     fn compat_composition_schemas_is_accessible_and_validates_each_returned_entry() {
         // `compat_composition_schemas()` is invoked by the codegen iteration
@@ -1262,6 +1312,7 @@ mod handoff_binding {
             meerkat_machine_schema::loop_iteration_machine(),
             meerkat_machine_schema::ops_barrier_bridge_machine(),
             meerkat_machine_schema::external_tool_surface_bridge_machine(),
+            meerkat_machine_schema::auth_lease_bridge_machine(),
         ]);
         let machine_refs: Vec<_> = machines.iter().collect();
         for composition in &compositions {

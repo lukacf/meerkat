@@ -14,6 +14,8 @@
 // and carry a standard wire-shape import prelude that submodules selectively
 // use. Temporary until D-GATE closes and compat surfaces retire in a later wave.
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
+mod auth_lease_bridge;
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
 mod external_tool_surface_bridge;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
 mod flow_frame;
@@ -28,6 +30,7 @@ mod ops_barrier_bridge;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
 mod supervisor_trust_bridge;
 
+pub use auth_lease_bridge::auth_lease_bridge_machine;
 pub use external_tool_surface_bridge::external_tool_surface_bridge_machine;
 pub use flow_frame::flow_frame_machine;
 pub use flow_run::flow_run_machine;

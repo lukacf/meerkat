@@ -58,9 +58,10 @@ fn normalize(s: &str) -> String {
 #[test]
 fn every_declared_protocol_file_matches_codegen_output() {
     use meerkat_machine_schema::{
-        MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
-        compat_composition_schemas, external_tool_surface_bridge_machine, flow_frame_machine,
-        flow_run_machine, loop_iteration_machine, ops_barrier_bridge_machine,
+        MachineSchema, auth_lease_bridge_machine, canonical_composition_schemas,
+        canonical_machine_schemas, compat_composition_schemas,
+        external_tool_surface_bridge_machine, flow_frame_machine, flow_run_machine,
+        loop_iteration_machine, ops_barrier_bridge_machine,
     };
 
     let root = repo_root();
@@ -73,6 +74,7 @@ fn every_declared_protocol_file_matches_codegen_output() {
         loop_iteration_machine(),
         ops_barrier_bridge_machine(),
         external_tool_surface_bridge_machine(),
+        auth_lease_bridge_machine(),
     ]);
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();

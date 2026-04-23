@@ -556,6 +556,7 @@ pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
         flow_frame_loop_composition(),
         supervisor_trust_bundle_composition(),
         mob_destroy_session_ingress_bundle_composition(),
+        auth_lease_bundle_composition(),
     ]
 }
 
@@ -1522,6 +1523,171 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
             ],
         }],
         witnesses: vec![witness("mob_destroying_session_ingress_round_trip", &[])],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
+    }
+}
+
+/// Host composition for the `auth_lease_lifecycle_publication` handoff
+/// protocol — wave-d D-c closes the AuthMachine composition-registry
+/// orphan. Until this composition landed, the canonical per-binding
+/// `AuthMachine` (`catalog::dsl::auth_machine`) was declared in
+/// `canonical_machine_schemas()` but had zero references in the
+/// composition registry: its `EmitLifecycleEvent { new_state }`
+/// External-disposition effect crossed to the runtime's
+/// `RuntimeAuthLeaseHandle` owner as an undeclared seam.
+///
+/// The composition links the canonical `AuthMachine` to the compat
+/// `AuthLeaseBridgeMachine` via a route that mirrors the lifecycle
+/// event into the bridge's input; the bridge then hosts the
+/// `handoff_protocol = Some("auth_lease_lifecycle_publication")`
+/// disposition annotation that the canonical DSL macro cannot express
+/// today. The pattern mirrors `supervisor_trust_bundle_composition`
+/// and `mob_bundle_composition`: a minimal compat bridge hosts the
+/// protocol annotation, the canonical machine owns the authoritative
+/// state, and a composition Route wires the producer effect into the
+/// bridge's mirror input so the seam is discoverable in the registry
+/// and `xtask seam-inventory`.
+///
+/// Mode: `EffectExtractor` with zero declared feedback inputs.
+/// `AuthMachine`'s own transitions already carry the authoritative
+/// phase progression (`Valid` -> `Expiring` -> `Refreshing` ->
+/// {`Valid`, `ReauthRequired`} -> `Released`); the runtime owner
+/// consumes the publication purely to refresh the projection consumed
+/// by provider callbacks and the refresh/reauth policy surface. There
+/// is no feedback input on `AuthMachine` for this obligation — the
+/// DSL's state is the source of truth, and no ack is required. Per
+/// validator contract
+/// (`composition::validate_generation_mode_binding`), an
+/// `EffectExtractor` protocol with neither authority plumbing nor any
+/// feedback inputs is accepted without requiring a stacked
+/// `HandleBridge` mode.
+///
+/// Actors:
+/// - `auth_machine_authority` (Machine) — canonical `AuthMachine`.
+/// - `auth_lease_bridge_authority` (Machine) — compat bridge.
+/// - `auth_lease_owner` (Owner) — realising actor; corresponds to
+///   `meerkat-runtime::handles::auth_lease::RuntimeAuthLeaseHandle`.
+fn auth_lease_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: comp_id("auth_lease_bundle"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("auth_machine"),
+                machine_name: mach_id("AuthMachine"),
+                actor: act_id("auth_machine_authority"),
+            },
+            MachineInstance {
+                instance_id: mi_id("auth_lease_bridge"),
+                machine_name: mach_id("AuthLeaseBridgeMachine"),
+                actor: act_id("auth_lease_bridge_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("auth_machine_authority"),
+            machine_actor("auth_lease_bridge_authority"),
+            owner_actor("auth_lease_owner"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: protocol_id("auth_lease_lifecycle_publication"),
+            producer_instance: mi_id("auth_lease_bridge"),
+            effect_variant: ev_id("PublishLifecycleEvent"),
+            realizing_actor: act_id("auth_lease_owner"),
+            correlation_fields: vec![fld_id("new_state")],
+            obligation_fields: vec![fld_id("new_state")],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "informative publication: AuthMachine's own transitions carry the \
+                 authoritative phase fact; runtime owner refreshes the lease-state \
+                 projection under task-scheduling fairness"
+                    .into(),
+            ),
+            rust: ProtocolRustBinding {
+                module_path:
+                    "meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"
+                        .into(),
+                generation_mode: ProtocolGenerationMode::EffectExtractor,
+                required_imports: vec![
+                    "use crate::handles::auth_lease::AuthLeaseBridgeEffect;".into(),
+                ],
+                authority_type_path: None,
+                mutator_trait_path: None,
+                input_enum_path: None,
+                effect_enum_path: Some("crate::handles::auth_lease::AuthLeaseBridgeEffect".into()),
+                transition_type_path: None,
+                error_type_path: None,
+                executor_trigger_input_variant: None,
+                bridge_source_type_path: None,
+                helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                handle_trait_path: None,
+                handle_method_names: BTreeMap::new(),
+                handle_arg_accessors: BTreeMap::new(),
+                handle_method_forwarded_fields: BTreeMap::new(),
+                input_payload_module_path: None,
+                additional_modes: vec![],
+            },
+        }],
+        entry_inputs: vec![],
+        routes: vec![route(
+            "auth_lifecycle_event_crosses_to_bridge",
+            "auth_machine",
+            "EmitLifecycleEvent",
+            "auth_lease_bridge",
+            RouteTargetKind::Input,
+            "MirrorLifecycleEvent",
+            &[bind("new_state", "new_state")],
+        )],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "auth_lease_lifecycle_publication_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: mi_id("auth_lease_bridge"),
+                    effect_variant: ev_id("PublishLifecycleEvent"),
+                    protocol_name: protocol_id("auth_lease_lifecycle_publication"),
+                },
+                statement: "every AuthMachine lifecycle-phase transition's external \
+                    publication crosses into the runtime auth-lease owner through the \
+                    explicit `auth_lease_lifecycle_publication` protocol rather than \
+                    ad-hoc shell observation"
+                    .into(),
+                references_machines: vec![mi_id("auth_machine"), mi_id("auth_lease_bridge")],
+                references_actors: vec![
+                    act_id("auth_machine_authority"),
+                    act_id("auth_lease_bridge_authority"),
+                    act_id("auth_lease_owner"),
+                ],
+            },
+            CompositionInvariant {
+                name: "auth_lifecycle_event_bridge_route_present".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("auth_machine"),
+                    effect_variant: ev_id("EmitLifecycleEvent"),
+                    to_machine: mi_id("auth_lease_bridge"),
+                    input_variant: rv(RouteTargetKind::Input, "MirrorLifecycleEvent"),
+                },
+                statement: "canonical AuthMachine lifecycle events reach the \
+                    publication-bridge input through the explicit composition route"
+                    .into(),
+                references_machines: vec![mi_id("auth_machine"), mi_id("auth_lease_bridge")],
+                references_actors: vec![
+                    act_id("auth_machine_authority"),
+                    act_id("auth_lease_bridge_authority"),
+                ],
+            },
+        ],
+        witnesses: vec![witness(
+            "auth_lease_lifecycle_publication_round_trip",
+            &["auth_lifecycle_event_crosses_to_bridge"],
+        )],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,

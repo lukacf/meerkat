@@ -45,6 +45,12 @@ use crate::session_runtime::SessionRuntime;
 pub const REALTIME_WS_PATH: &str = "/realtime/ws";
 const DEFAULT_OPEN_TOKEN_TTL: Duration = Duration::from_secs(60);
 const RECONNECT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Wave-c C-9b R7: cap provider `session.close().await` inside the
+/// product-session actor so a stuck provider close can never pin the
+/// actor task indefinitely. OpenAI / Anthropic realtime closes run a
+/// WebSocket close handshake; 5 s is well above normal close-frame
+/// round-trips and well below any operator-observable hang.
+const REALTIME_PROVIDER_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct RealtimeWsState {
@@ -691,6 +697,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     // that never produces a value, so the arm is inert.
                     #[cfg(feature = "mob")]
                     let mut realtime_binding_events = bound.binding_events;
+                    // Wave-c C-9b R8: hold the mob handle for the lifetime
+                    // of the socket loop so the Lagged branch can
+                    // re-resolve the canonical binding.
+                    #[cfg(feature = "mob")]
+                    let realtime_mob_handle = bound.mob_handle;
                     // W3-H: `realtime_binding_events` is `Some` only for
                     // MobMember channels. The main select! loop below adds a
                     // new arm that consumes from this receiver, updating
@@ -1951,15 +1962,200 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             // binding state). No action needed.
                                         }
                                         Some(Err(())) => {
-                                            // Lagged — slow consumer. The
-                                            // canonical binding map remains the
-                                            // source of truth; next poll-loop
-                                            // tick re-reads via
-                                            // realtime_attachment_status on the
-                                            // current session_id. No action.
+                                            // Wave-c C-9b R8: Lagged — the
+                                            // broadcast receiver missed at
+                                            // least one `MemberRealtimeBindingEvent`.
+                                            // Pre-R8, we relied on the
+                                            // `RECONNECT_POLL_INTERVAL` poll
+                                            // loop to reread
+                                            // `realtime_attachment_status` on
+                                            // the current_session_id — but
+                                            // that doesn't observe a missed
+                                            // `Rotated` event: if the socket
+                                            // missed a rotation, the poll
+                                            // polls the retired session
+                                            // indefinitely. Re-resolve the
+                                            // canonical MobMachine binding
+                                            // map directly, and if it has
+                                            // moved, drive a synthetic rotate
+                                            // through the next binding-event
+                                            // arm by mutating
+                                            // `current_session_id` and
+                                            // running the same rotate-binding
+                                            // sequence we would have run on a
+                                            // live event.
                                             tracing::warn!(
-                                                "realtime WS: binding event subscriber lagged"
+                                                "realtime WS: binding event subscriber lagged; re-resolving via MobMachine"
                                             );
+                                            if let (
+                                                Some(handle),
+                                                Some(RealtimeSocketBinding::MobMemberPrimary {
+                                                    mob_id: bound_mob_id,
+                                                    agent_identity: bound_identity,
+                                                    current_session_id,
+                                                }),
+                                            ) = (
+                                                realtime_mob_handle.as_ref(),
+                                                binding.as_mut(),
+                                            ) {
+                                                match handle
+                                                    .current_realtime_binding(bound_identity.clone())
+                                                    .await
+                                                {
+                                                    Ok(Some(canonical))
+                                                        if &canonical != current_session_id =>
+                                                    {
+                                                        tracing::debug!(
+                                                            %bound_mob_id,
+                                                            %bound_identity,
+                                                            stale = %current_session_id,
+                                                            canonical = %canonical,
+                                                            "realtime WS: Lagged re-resolve detected rotation; converging"
+                                                        );
+                                                        if let Err(err) = state
+                                                            .runtime
+                                                            .ensure_runtime_session_for_rotation(&canonical)
+                                                            .await
+                                                        {
+                                                            tracing::warn!(
+                                                                %canonical,
+                                                                %err,
+                                                                "realtime WS: Lagged re-resolve — ensure_runtime_session_for_rotation failed"
+                                                            );
+                                                        }
+                                                        let old_session_id =
+                                                            current_session_id.clone();
+                                                        match rotate_live_realtime_binding(
+                                                            &state.runtime,
+                                                            &old_session_id,
+                                                            &canonical,
+                                                            turning_mode,
+                                                            state.host.session_factory(),
+                                                            uses_product_session,
+                                                            &mut product_session,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(rotated_status) => {
+                                                                *current_session_id = canonical;
+                                                                pending_turn =
+                                                                    RealtimePendingTurn::default();
+                                                                reconnect_overlay.clear();
+                                                                clear_reconnect_progress_in_dsl(
+                                                                    &state.runtime,
+                                                                    binding.as_ref(),
+                                                                )
+                                                                .await;
+                                                                (
+                                                                    session_context_handle,
+                                                                    product_turn_handle,
+                                                                    _wake_observer_guard,
+                                                                    _bridge_observer_guard,
+                                                                ) = bind_realtime_session_observers(
+                                                                    &state.runtime,
+                                                                    binding.as_ref(),
+                                                                    wake_tx.clone(),
+                                                                )
+                                                                .await;
+                                                                let _ = emit_status_update(
+                                                                    &mut socket,
+                                                                    &mut last_visible_status,
+                                                                    rotated_status,
+                                                                    false,
+                                                                    Some((
+                                                                        state.host.as_ref(),
+                                                                        &registered,
+                                                                    )),
+                                                                )
+                                                                .await;
+                                                            }
+                                                            Err(error) => {
+                                                                let _ = send_server_frame(
+                                                                    &mut socket,
+                                                                    &RealtimeServerFrame::ChannelError(
+                                                                        error.clone(),
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                                let _ = send_server_frame(
+                                                                    &mut socket,
+                                                                    &RealtimeServerFrame::ChannelClosed(
+                                                                        RealtimeChannelClosedFrame {
+                                                                            reason: Some(
+                                                                                error.code.as_str()
+                                                                                    .to_string(),
+                                                                            ),
+                                                                        },
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    Ok(Some(_)) => {
+                                                        // Canonical binding
+                                                        // unchanged — the lag
+                                                        // was benign (a Set
+                                                        // event for a sibling
+                                                        // identity, or a
+                                                        // no-op churn).
+                                                    }
+                                                    Ok(None) => {
+                                                        // Member has no
+                                                        // binding — treat as
+                                                        // Released: the
+                                                        // broadcast will also
+                                                        // deliver this
+                                                        // terminally; pre-empt
+                                                        // by closing now.
+                                                        tracing::debug!(
+                                                            %bound_mob_id,
+                                                            %bound_identity,
+                                                            "realtime WS: Lagged re-resolve found no binding; closing channel"
+                                                        );
+                                                        let _ = send_server_frame(
+                                                            &mut socket,
+                                                            &RealtimeServerFrame::ChannelError(
+                                                                RealtimeChannelErrorFrame {
+                                                                    code: RealtimeErrorCode::BindingReleased,
+                                                                    message:
+                                                                        "mob member retired; realtime binding released"
+                                                                            .to_string(),
+                                                                    details: None,
+                                                                },
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        let _ = send_server_frame(
+                                                            &mut socket,
+                                                            &RealtimeServerFrame::ChannelClosed(
+                                                                RealtimeChannelClosedFrame {
+                                                                    reason: Some(
+                                                                        RealtimeErrorCode::BindingReleased
+                                                                            .to_string(),
+                                                                    ),
+                                                                },
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        break;
+                                                    }
+                                                    Err(err) => {
+                                                        // Transient mob-actor
+                                                        // unavailability: fall
+                                                        // through to the next
+                                                        // poll tick. A real
+                                                        // outage surfaces via
+                                                        // the attachment
+                                                        // status path.
+                                                        tracing::warn!(
+                                                            %err,
+                                                            "realtime WS: Lagged re-resolve failed; will retry via poll loop"
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                         None => {
                                             // Broadcast closed (mob actor
@@ -2419,6 +2615,8 @@ async fn bind_realtime_target(
                         bridge: Some(bridge),
                         #[cfg(feature = "mob")]
                         binding_events: None,
+                        #[cfg(feature = "mob")]
+                        mob_handle: None,
                     })
                 } else {
                     runtime
@@ -2438,6 +2636,8 @@ async fn bind_realtime_target(
                         bridge: None,
                         #[cfg(feature = "mob")]
                         binding_events: None,
+                        #[cfg(feature = "mob")]
+                        mob_handle: None,
                     })
                 }
             } else {
@@ -2453,6 +2653,8 @@ async fn bind_realtime_target(
                     bridge: None,
                     #[cfg(feature = "mob")]
                     binding_events: None,
+                    #[cfg(feature = "mob")]
+                    mob_handle: None,
                 })
             }
         }
@@ -2530,6 +2732,7 @@ async fn bind_realtime_target(
                     binding: Some(binding),
                     bridge: Some(bridge),
                     binding_events: Some(binding_events),
+                    mob_handle: Some(mob_handle.clone()),
                 })
             } else {
                 runtime
@@ -2548,6 +2751,7 @@ async fn bind_realtime_target(
                     binding: Some(binding),
                     bridge: None,
                     binding_events: Some(binding_events),
+                    mob_handle: Some(mob_handle.clone()),
                 })
             }
         }
@@ -2579,6 +2783,15 @@ struct BindRealtimeTargetOutput {
     binding_events: Option<
         tokio::sync::broadcast::Receiver<meerkat_mob::runtime::state::MemberRealtimeBindingEvent>,
     >,
+    /// Wave-c C-9b R8: mob handle clone retained so the WS event loop
+    /// can re-resolve the canonical binding via
+    /// `current_realtime_binding(identity)` when the binding-events
+    /// broadcast surfaces `RecvError::Lagged` (a slow consumer can miss
+    /// a `Rotated` event on the first subscribe, leaving
+    /// `current_session_id` pinned to the retired session until the
+    /// socket happens to see another event).
+    #[cfg(feature = "mob")]
+    mob_handle: Option<meerkat_mob::runtime::handle::MobHandle>,
 }
 
 async fn open_product_session_bridge(
@@ -2900,6 +3113,32 @@ async fn require_product_session_reattach(
         .map_err(|err| runtime_error_frame(err, "reattach"))
 }
 
+/// Wave-c C-9b R7: close the provider session under a bounded timeout
+/// so the product-session actor is never pinned by a stuck provider
+/// close handshake. A timeout expiry is logged at `warn!` but otherwise
+/// treated the same as a clean close — the actor then drops `session`,
+/// running the provider's own drop-path cancellation.
+async fn close_realtime_session_bounded(
+    mut session: Box<dyn meerkat_client::RealtimeSession>,
+) {
+    match tokio::time::timeout(REALTIME_PROVIDER_CLOSE_TIMEOUT, session.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(
+                ?err,
+                "C-9b R7: realtime session.close() returned error; actor proceeds to drop"
+            );
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_secs = REALTIME_PROVIDER_CLOSE_TIMEOUT.as_secs(),
+                "C-9b R7: realtime session.close() exceeded bounded timeout; dropping session to reclaim the actor task"
+            );
+        }
+    }
+    drop(session);
+}
+
 async fn run_product_session_actor(
     mut session: Box<dyn meerkat_client::RealtimeSession>,
     mut command_rx: mpsc::Receiver<RealtimeProductSessionCommand>,
@@ -2909,8 +3148,8 @@ async fn run_product_session_actor(
         tokio::select! {
             command = command_rx.recv() => {
                 let Some(command) = command else {
-                    let _ = session.close().await;
-                    break;
+                    close_realtime_session_bounded(session).await;
+                    return;
                 };
                 match command {
                     RealtimeProductSessionCommand::RefreshProjection {
@@ -2994,8 +3233,8 @@ async fn run_product_session_actor(
                         );
                     }
                     RealtimeProductSessionCommand::Close => {
-                        let _ = session.close().await;
-                        break;
+                        close_realtime_session_bounded(session).await;
+                        return;
                     }
                 }
             }
@@ -3007,8 +3246,8 @@ async fn run_product_session_actor(
                             .await
                             .is_err()
                         {
-                            let _ = session.close().await;
-                            break;
+                            close_realtime_session_bounded(session).await;
+                            return;
                         }
                     }
                     Ok(None) => {

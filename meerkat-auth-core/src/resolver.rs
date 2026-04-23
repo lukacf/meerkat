@@ -252,9 +252,16 @@ pub async fn resolve_external_authorizer(
     materialize_external_auth_lease(
         binding,
         envelope,
+        // Wave-c C-1 follow-up: `ConnectionRef` has no `Display` impl by
+        // wave-b design (the opaque `realm:binding` string form was
+        // deleted so no code path silently ferries the join through the
+        // runtime). Project realm/binding explicitly at this log/ident
+        // site.
         format!(
-            "external:{}:{}",
-            binding.connection_ref, binding.auth_profile.id
+            "external:{}:{}:{}",
+            binding.connection_ref.realm.as_str(),
+            binding.connection_ref.binding.as_str(),
+            binding.auth_profile.id,
         ),
     )
 }

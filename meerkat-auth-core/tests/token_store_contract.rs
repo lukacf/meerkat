@@ -33,7 +33,7 @@ fn sample_oauth() -> PersistedTokens {
 }
 
 fn k(realm: &str, binding: &str) -> TokenKey {
-    TokenKey::new(realm, binding)
+    TokenKey::parse(realm, binding).expect("valid slugs in test fixture")
 }
 
 // --- EphemeralTokenStore (4a.4) ----------------------------------------

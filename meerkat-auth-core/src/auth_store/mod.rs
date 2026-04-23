@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn token_key_keyring_account() {
-        let k = TokenKey::new("dev", "default_openai");
+        let k = TokenKey::parse("dev", "default_openai").expect("valid slugs");
         assert_eq!(k.keyring_account(), "dev:default_openai");
     }
 }

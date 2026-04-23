@@ -51,7 +51,7 @@ async fn crossproc_child_runner() {
     let lock_dir = PathBuf::from(std::env::var(LOCK_DIR_ENV).unwrap());
 
     let coord = FileLockCoordinator::new(lock_dir);
-    let key = TokenKey::new("crossproc", "counter");
+    let key = TokenKey::parse("crossproc", "counter").expect("valid slugs");
     let counter_inside = counter.clone();
     let result = coord
         .with_refresh(
@@ -139,7 +139,7 @@ async fn in_process_two_coordinators_share_lock_dir() {
     let lock_dir = temp.path().to_path_buf();
     let a = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
     let b = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
-    let key = TokenKey::new("dev", "x");
+    let key = TokenKey::parse("dev", "x").expect("valid slugs");
 
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));

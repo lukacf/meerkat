@@ -29,8 +29,8 @@ impl FileTokenStore {
     }
 
     fn path_for(&self, key: &TokenKey) -> PathBuf {
-        self.realm_dir(&key.realm_id)
-            .join(format!("{}.json", key.binding_id))
+        self.realm_dir(key.realm.as_str())
+            .join(format!("{}.json", key.binding.as_str()))
     }
 }
 
@@ -48,10 +48,10 @@ impl TokenStore for FileTokenStore {
     }
 
     async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        let dir = self.realm_dir(&key.realm_id);
+        let dir = self.realm_dir(key.realm.as_str());
         tokio::fs::create_dir_all(&dir).await?;
         let final_path = self.path_for(key);
-        let tmp_path = dir.join(format!("{}.json.tmp", key.binding_id));
+        let tmp_path = dir.join(format!("{}.json.tmp", key.binding.as_str()));
 
         let mut bytes = serde_json::to_vec_pretty(tokens)?;
         bytes.push(b'\n');
@@ -82,9 +82,16 @@ impl TokenStore for FileTokenStore {
             if !realm_path.is_dir() {
                 continue;
             }
-            let realm_id = match realm_path.file_name().and_then(|n| n.to_str()) {
-                Some(s) => s.to_string(),
+            let realm_raw = match realm_path.file_name().and_then(|n| n.to_str()) {
+                Some(s) => s,
                 None => continue,
+            };
+            // Skip directories whose names are not valid realm slugs —
+            // they cannot have been written by this store, so they
+            // cannot be returned as TokenKeys.
+            let realm = match meerkat_core::connection::RealmId::parse(realm_raw) {
+                Ok(r) => r,
+                Err(_) => continue,
             };
             let mut bindings = match tokio::fs::read_dir(&realm_path).await {
                 Ok(rd) => rd,
@@ -95,14 +102,15 @@ impl TokenStore for FileTokenStore {
                 if path.extension().and_then(|s| s.to_str()) != Some("json") {
                     continue;
                 }
-                let binding_id = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
+                let binding_raw = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s,
                     None => continue,
                 };
-                out.push(TokenKey {
-                    realm_id: realm_id.clone(),
-                    binding_id,
-                });
+                let binding = match meerkat_core::connection::BindingId::parse(binding_raw) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                out.push(TokenKey::new(realm.clone(), binding));
             }
         }
         Ok(out)

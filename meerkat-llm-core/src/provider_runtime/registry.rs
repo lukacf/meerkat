@@ -169,9 +169,18 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        // Wave-c C-1 follow-up: `ConnectionRef` retyped to
+        // `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`
+        // (connection.rs:100). Parse the raw realm / binding slugs here at
+        // the typed boundary — an invalid slug at this point means the
+        // `RealmConnectionSet` was built from malformed config, which is a
+        // resolver-level source error.
         let connection_ref = meerkat_core::ConnectionRef {
-            realm_id: realm.realm_id.clone(),
-            binding_id: binding.id.clone(),
+            realm: meerkat_core::RealmId::parse(&realm.realm_id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
+            binding: meerkat_core::BindingId::parse(&binding.id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
+            profile: None,
         };
         let runtime = self
             .runtimes

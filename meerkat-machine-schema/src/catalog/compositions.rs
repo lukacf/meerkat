@@ -546,6 +546,7 @@ pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
         mob_bundle_composition(),
         external_tool_bundle_composition(),
         flow_frame_loop_composition(),
+        supervisor_trust_bundle_composition(),
     ]
 }
 
@@ -1080,5 +1081,276 @@ fn owner_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: act_id(name),
         kind: ActorKind::Owner,
+    }
+}
+
+/// Host composition for the `supervisor_trust_publish` and
+/// `supervisor_trust_revoke` handoff protocols — C-F2 step-lock
+/// formalisation for the trust-edge mutation that runs alongside
+/// `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
+/// transitions on `MeerkatMachine`.
+///
+/// The canonical `MeerkatMachine` already owns the authoritative
+/// supervisor-binding fact (`supervisor_binding_kind` +
+/// `supervisor_bound_*`), but the companion trust edge in
+/// `meerkat-comms::Router` was mutated by the shell as a separate step
+/// today (see `meerkat-runtime/src/meerkat_machine/dsl.rs` DSL comment
+/// `:114-134` and `state-scope-audit.md` §3 row F2).
+///
+/// C-F2 formalises the step-lock as a generated obligation pair so the
+/// companion trust-edge mutation crosses from the supervisor-binding
+/// authority back through acknowledged owner feedback, not via a raw
+/// shell call that the machine forgets about. The compat
+/// `SupervisorTrustBridgeMachine` hosts the `handoff_protocol`
+/// annotations; the realising actor `supervisor_bridge_owner`
+/// corresponds to `meerkat-runtime::comms_drain`, which calls
+/// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` and emits
+/// the typed feedback ack through the generated protocol helper.
+///
+/// Two protocols:
+///
+/// * `supervisor_trust_publish` — publish trust edge (add trusted
+///   peer). Emitted alongside `BindSupervisor` and
+///   `AuthorizeSupervisor`. Feedback: `SupervisorTrustEdgePublished`
+///   or `SupervisorTrustEdgePublishFailed` (the latter triggers a
+///   shell-side rollback of the supervisor-binding DSL commit —
+///   preserving the invariant that "trust edge is published iff
+///   `supervisor_binding_kind == Bound`").
+/// * `supervisor_trust_revoke` — revoke trust edge (remove trusted
+///   peer). Emitted alongside `RevokeSupervisor` and during the
+///   previous-supervisor cleanup half of `AuthorizeSupervisor`.
+///   Feedback: `SupervisorTrustEdgeRevoked` or
+///   `SupervisorTrustEdgeRevokeFailed`.
+///
+/// `closure_policy` is `AckRequired` for both: the shell must feed
+/// back success or failure. `liveness_annotation` documents that
+/// feedback is eventual under the comms transport's liveness guarantee
+/// (the existing `send_bridge_response` path already surfaces typed
+/// outcomes).
+///
+/// Mode: ShellBridge. The owner (`comms_drain`) consumes the
+/// obligation via the generated `accept_<effect>` helper, calls
+/// `router.add_trusted_peer` / `remove_trusted_peer`, and submits the
+/// feedback through the generated helper. Until the protocol helpers
+/// are wired through the DSL's transition emission (step 10 codegen
+/// scope), the protocol's declarative presence in the catalog carries
+/// the seam-closure obligation — the producer and feedback shapes are
+/// now part of the closed-world composition registry and appear in
+/// `xtask seam-inventory`.
+fn supervisor_trust_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: comp_id("supervisor_trust_bundle"),
+        machines: vec![MachineInstance {
+            instance_id: mi_id("supervisor_trust_bridge"),
+            machine_name: mach_id("SupervisorTrustBridgeMachine"),
+            actor: act_id("supervisor_trust_bridge_authority"),
+        }],
+        actors: vec![
+            machine_actor("supervisor_trust_bridge_authority"),
+            owner_actor("supervisor_bridge_owner"),
+        ],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: protocol_id("supervisor_trust_publish"),
+                producer_instance: mi_id("supervisor_trust_bridge"),
+                effect_variant: ev_id("PublishSupervisorTrustEdge"),
+                realizing_actor: act_id("supervisor_bridge_owner"),
+                // Correlation on `peer_id + epoch` — the same tuple
+                // `RevokeSupervisor` guards on (`peer_id_matches_current`
+                // + `epoch_matches_current`) so the obligation ack
+                // cannot be confused across a rotation.
+                correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
+                obligation_fields: vec![
+                    fld_id("peer_id"),
+                    fld_id("name"),
+                    fld_id("address"),
+                    fld_id("epoch"),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: mi_id("supervisor_trust_bridge"),
+                        input_variant: iv_id("SupervisorTrustEdgePublished"),
+                        field_bindings: vec![
+                            FeedbackFieldBinding {
+                                input_field: fld_id("peer_id"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("peer_id")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("epoch"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("epoch")),
+                            },
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: mi_id("supervisor_trust_bridge"),
+                        input_variant: iv_id("SupervisorTrustEdgePublishFailed"),
+                        field_bindings: vec![
+                            FeedbackFieldBinding {
+                                input_field: fld_id("peer_id"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("peer_id")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("epoch"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("epoch")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("reason"),
+                                source: FeedbackFieldSource::OwnerContext("reason".into()),
+                            },
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under comms transport liveness — \
+                     `send_bridge_response` surfaces the typed outcome"
+                        .into(),
+                ),
+                rust: ProtocolRustBinding {
+                    module_path:
+                        "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
+                    generation_mode: ProtocolGenerationMode::ShellBridge,
+                    required_imports: vec![
+                        "use crate::comms_drain::SupervisorTrustBridgeEffect;".into(),
+                    ],
+                    authority_type_path: None,
+                    mutator_trait_path: None,
+                    input_enum_path: None,
+                    effect_enum_path: Some(
+                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
+                    ),
+                    transition_type_path: None,
+                    error_type_path: None,
+                    executor_trigger_input_variant: None,
+                    bridge_source_type_path: None,
+                    helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                    handle_trait_path: None,
+                    handle_method_names: BTreeMap::new(),
+                    handle_arg_accessors: BTreeMap::new(),
+                    handle_method_forwarded_fields: BTreeMap::new(),
+                    input_payload_module_path: None,
+                    additional_modes: vec![],
+                },
+            },
+            EffectHandoffProtocol {
+                name: protocol_id("supervisor_trust_revoke"),
+                producer_instance: mi_id("supervisor_trust_bridge"),
+                effect_variant: ev_id("RevokeSupervisorTrustEdge"),
+                realizing_actor: act_id("supervisor_bridge_owner"),
+                correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
+                obligation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: mi_id("supervisor_trust_bridge"),
+                        input_variant: iv_id("SupervisorTrustEdgeRevoked"),
+                        field_bindings: vec![
+                            FeedbackFieldBinding {
+                                input_field: fld_id("peer_id"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("peer_id")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("epoch"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("epoch")),
+                            },
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: mi_id("supervisor_trust_bridge"),
+                        input_variant: iv_id("SupervisorTrustEdgeRevokeFailed"),
+                        field_bindings: vec![
+                            FeedbackFieldBinding {
+                                input_field: fld_id("peer_id"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("peer_id")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("epoch"),
+                                source: FeedbackFieldSource::ObligationField(fld_id("epoch")),
+                            },
+                            FeedbackFieldBinding {
+                                input_field: fld_id("reason"),
+                                source: FeedbackFieldSource::OwnerContext("reason".into()),
+                            },
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under comms transport liveness — \
+                     `send_bridge_response` surfaces the typed outcome"
+                        .into(),
+                ),
+                rust: ProtocolRustBinding {
+                    module_path:
+                        "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
+                    generation_mode: ProtocolGenerationMode::ShellBridge,
+                    required_imports: vec![
+                        "use crate::comms_drain::SupervisorTrustBridgeEffect;".into(),
+                    ],
+                    authority_type_path: None,
+                    mutator_trait_path: None,
+                    input_enum_path: None,
+                    effect_enum_path: Some(
+                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
+                    ),
+                    transition_type_path: None,
+                    error_type_path: None,
+                    executor_trigger_input_variant: None,
+                    bridge_source_type_path: None,
+                    helper_return_shape: ProtocolHelperReturnShape::Obligations,
+                    handle_trait_path: None,
+                    handle_method_names: BTreeMap::new(),
+                    handle_arg_accessors: BTreeMap::new(),
+                    handle_method_forwarded_fields: BTreeMap::new(),
+                    input_payload_module_path: None,
+                    additional_modes: vec![],
+                },
+            },
+        ],
+        entry_inputs: vec![],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "supervisor_trust_publish_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: mi_id("supervisor_trust_bridge"),
+                    effect_variant: ev_id("PublishSupervisorTrustEdge"),
+                    protocol_name: protocol_id("supervisor_trust_publish"),
+                },
+                statement: "supervisor trust-edge publication crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_publish` protocol".into(),
+                references_machines: vec![mi_id("supervisor_trust_bridge")],
+                references_actors: vec![
+                    act_id("supervisor_trust_bridge_authority"),
+                    act_id("supervisor_bridge_owner"),
+                ],
+            },
+            CompositionInvariant {
+                name: "supervisor_trust_revoke_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: mi_id("supervisor_trust_bridge"),
+                    effect_variant: ev_id("RevokeSupervisorTrustEdge"),
+                    protocol_name: protocol_id("supervisor_trust_revoke"),
+                },
+                statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_revoke` protocol".into(),
+                references_machines: vec![mi_id("supervisor_trust_bridge")],
+                references_actors: vec![
+                    act_id("supervisor_trust_bridge_authority"),
+                    act_id("supervisor_bridge_owner"),
+                ],
+            },
+        ],
+        witnesses: vec![
+            witness("supervisor_trust_publish_round_trip", &[]),
+            witness("supervisor_trust_revoke_round_trip", &[]),
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
     }
 }

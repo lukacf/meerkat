@@ -1739,16 +1739,16 @@ impl From<crate::HandlingMode> for InputLane {
 // shapes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerEndpoint {
-    pub name: String,
-    pub peer_id: String,
-    pub address: String,
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
 }
 
 impl PeerEndpoint {
     pub fn new(
-        name: impl Into<String>,
-        peer_id: impl Into<String>,
-        address: impl Into<String>,
+        name: impl Into<PeerName>,
+        peer_id: impl Into<PeerId>,
+        address: impl Into<PeerAddress>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1758,23 +1758,64 @@ impl PeerEndpoint {
     }
 }
 
-impl From<meerkat_core::comms::TrustedPeerSpec> for PeerEndpoint {
-    fn from(spec: meerkat_core::comms::TrustedPeerSpec) -> Self {
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
         Self {
-            name: spec.name,
-            peer_id: spec.peer_id,
-            address: spec.address,
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
         }
     }
 }
 
-impl From<PeerEndpoint> for meerkat_core::comms::TrustedPeerSpec {
-    fn from(ep: PeerEndpoint) -> Self {
-        Self {
-            name: ep.name,
-            peer_id: ep.peer_id,
-            address: ep.address,
-        }
+/// DSL-local newtype for a peer display name. Wraps the slug string
+/// so the schema validator sees a stable opaque shape; mirrors
+/// `meerkat_core::comms::PeerName` but avoids dragging the core
+/// comms types into the DSL grammar.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerName(pub String);
+
+impl<T: Into<String>> From<T> for PeerName {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// DSL-local newtype for the canonical peer routing id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerId(pub String);
+
+impl<T: Into<String>> From<T> for PeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// DSL-local newtype for a peer transport endpoint URL.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerAddress(pub String);
+
+impl<T: Into<String>> From<T> for PeerAddress {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerAddress {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

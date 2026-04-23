@@ -244,12 +244,6 @@ pub async fn resolve_repositories_with_roots(
         }
     }
 
-    // Embedded skills always appended as lowest precedence.
-    sources.push(NamedSource {
-        name: "embedded".into(),
-        source: SourceNode::Embedded(EmbeddedSkillSource::new()),
-    });
-
     Ok(Some(CompositeSkillSource::from_named(sources)))
 }
 

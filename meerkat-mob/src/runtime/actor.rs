@@ -937,38 +937,6 @@ impl MobActor {
         }
     }
 
-    async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        self.dsl_authority
-            .state
-            .member_kickoff_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_starting
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_callback_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_started
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_failed
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_cancelled
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_error
-            .remove(&agent_identity.to_string());
-        self.roster.write().await.set_kickoff(agent_identity, None);
-    }
-
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
         if let Err(stop_error) = self.stop_all_autonomous_members().await {
             tracing::warn!(
@@ -1001,95 +969,6 @@ impl MobActor {
         agent_identity: &MeerkatId,
         input: mob_dsl::MobMachineInput,
     ) -> Result<bool, MobError> {
-        if !self
-            .dsl_authority
-            .state
-            .member_kickoff_pending
-            .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
-                .member_kickoff_starting
-                .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
-                .member_kickoff_callback_pending
-                .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
-                .member_kickoff_started
-                .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
-                .member_kickoff_failed
-                .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
-                .member_kickoff_cancelled
-                .contains(&agent_identity.to_string())
-            && let Some(current_phase) = self.kickoff_phase_for(agent_identity).await
-        {
-            match Self::kickoff_phase_to_dsl(current_phase) {
-                mob_dsl::KickoffPhase::Pending => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_pending
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Starting => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_starting
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::CallbackPending => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_callback_pending
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Started => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_started
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Failed => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_failed
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Cancelled => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_cancelled
-                        .insert(agent_identity.to_string());
-                }
-            }
-            if let Some(error) = self
-                .roster
-                .read()
-                .await
-                .get(agent_identity)
-                .and_then(|entry| {
-                    entry
-                        .kickoff
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.error.clone())
-                })
-            {
-                self.dsl_authority
-                    .state
-                    .member_kickoff_error
-                    .insert(agent_identity.to_string(), error);
-            }
-        }
-
         let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
             Ok(transition) => transition,
             Err(_) => return Ok(false),

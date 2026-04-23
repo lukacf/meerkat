@@ -14,8 +14,6 @@ struct Frontmatter {
     name: String,
     description: String,
     #[serde(default)]
-    requires_capabilities: Vec<String>,
-    #[serde(default)]
     metadata: IndexMap<String, String>,
     #[serde(default)]
     version: Option<String>,
@@ -71,7 +69,6 @@ pub fn parse_skill_md(
             name: fm.name,
             description: fm.description,
             scope,
-            requires_capabilities: fm.requires_capabilities,
             metadata,
             ..Default::default()
         },

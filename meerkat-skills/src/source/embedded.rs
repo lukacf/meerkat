@@ -8,25 +8,6 @@ use meerkat_core::skills::{
 
 use crate::registration::{SkillRegistration, collect_registered_skills};
 
-/// Convert a static `SkillRegistration` to a `SkillDescriptor`.
-fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor, SkillError> {
-    let id = SkillId(reg.id.to_string());
-    let canonical_name = SkillName::parse(id.skill_name())?;
-    Ok(SkillDescriptor {
-        id,
-        // Canonical runtime name is slug; human-readable name is preserved in metadata.
-        name: canonical_name.to_string(),
-        description: reg.description.to_string(),
-        scope: reg.scope,
-        requires_capabilities: reg
-            .requires_capabilities
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect(),
-        metadata: IndexMap::from([("display_name".to_string(), reg.name.to_string())]),
-        ..Default::default()
-    })
-}
 
 /// Convert a static `SkillRegistration` to a `SkillDocument`.
 fn registration_to_document(reg: &SkillRegistration) -> Result<SkillDocument, SkillError> {

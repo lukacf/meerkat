@@ -31,7 +31,6 @@ pub struct SourceCapabilityHandshake {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalSkillSummary {
     pub source_uuid: String,
-    pub skill_name: String,
     pub description: String,
 }
 
@@ -259,34 +258,6 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
         Ok(())
     }
 
-    /// Resolve the canonical `source_uuid` for a skill by consulting the remote
-    /// source's `skills/list_summaries` enumeration. The in-memory index is a
-    /// read-through projection of that canonical enumeration — never treated as
-    /// authority on its own. A miss after refresh is a typed `NotFound`, not a
-    /// silent substitution of the local source UUID.
-    async fn source_for_skill(&self, skill_id: &SkillId) -> Result<String, SkillError> {
-        if let Some(found) = self.skill_source_index.read().await.get(skill_id).cloned() {
-            return Ok(found);
-        }
-
-        self.ensure_capability("skills/list_summaries").await?;
-        let summaries = self.client.skills_list_summaries().await?;
-
-        let mut discovered = None;
-        let mut index = self.skill_source_index.write().await;
-        for summary in summaries {
-            let id = SkillId(summary.skill_name.clone());
-            if id == *skill_id {
-                discovered = Some(summary.source_uuid.clone());
-            }
-            index.insert(id, summary.source_uuid);
-        }
-
-        discovered.ok_or_else(|| SkillError::NotFound {
-            id: skill_id.clone(),
-        })
-    }
-
     pub async fn list_artifacts(
         &self,
         skill_id: &SkillId,
@@ -381,40 +352,6 @@ fn validate_capability(
 
 #[allow(clippy::manual_async_fn)]
 impl<C: ExternalClient + Send + Sync> SkillSource for ExternalSkillSource<C> {
-    fn list(
-        &self,
-        filter: &SkillFilter,
-    ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
-        async move {
-            self.ensure_capability("skills/list_summaries").await?;
-            let summaries = self.client.skills_list_summaries().await?;
-
-            {
-                let mut index = self.skill_source_index.write().await;
-                index.clear();
-                for summary in &summaries {
-                    index.insert(
-                        SkillId(summary.skill_name.clone()),
-                        summary.source_uuid.clone(),
-                    );
-                }
-            }
-
-            let descriptors = summaries
-                .into_iter()
-                .map(|summary| SkillDescriptor {
-                    id: SkillId(summary.skill_name.clone()),
-                    name: summary.skill_name,
-                    description: summary.description,
-                    scope: SkillScope::Project,
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>();
-
-            Ok(apply_filter(&descriptors, filter))
-        }
-    }
-
     fn load(&self, id: &SkillId) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
         async move {
             self.ensure_capability("skills/load_package").await?;

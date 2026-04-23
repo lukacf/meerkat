@@ -45,32 +45,6 @@ impl CompositeSkillSource {
 }
 
 impl SkillSource for CompositeSkillSource {
-    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        let mut first_source: HashMap<SkillId, String> = HashMap::new();
-        let mut result = Vec::new();
-
-        for named in &self.sources {
-            let descriptors = named.source.list(filter).await?;
-            for mut desc in descriptors {
-                if first_source.contains_key(&desc.id) {
-                    let winning_source = first_source
-                        .get(&desc.id)
-                        .map_or("unknown", std::string::String::as_str);
-                    tracing::info!(
-                        skill_id = %desc.id,
-                        shadowed_source = %named.name,
-                        winning_source = %winning_source,
-                        "Skill shadowed by higher-precedence repository"
-                    );
-                } else {
-                    desc.source_name.clone_from(&named.name);
-                    first_source.insert(desc.id.clone(), named.name.clone());
-                    result.push(desc);
-                }
-            }
-        }
-        Ok(result)
-    }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
         for named in &self.sources {
@@ -167,60 +141,7 @@ impl SkillSource for CompositeSkillSource {
         Err(SkillError::NotFound { id: id.clone() })
     }
 
-    async fn list_all_with_provenance(
-        &self,
-        filter: &SkillFilter,
-    ) -> Result<Vec<SkillIntrospectionEntry>, SkillError> {
-        // Track which source won each skill ID.
-        let mut first_source: HashMap<SkillId, String> = HashMap::new();
-        let mut result = Vec::new();
 
-        for named in &self.sources {
-            let descriptors = named.source.list(filter).await?;
-            for mut desc in descriptors {
-                if let Some(winning_source) = first_source.get(&desc.id) {
-                    // This skill is shadowed by a higher-precedence source.
-                    desc.source_name.clone_from(&named.name);
-                    result.push(SkillIntrospectionEntry {
-                        descriptor: desc,
-                        shadowed_by: Some(winning_source.clone()),
-                        is_active: false,
-                    });
-                } else {
-                    desc.source_name.clone_from(&named.name);
-                    first_source.insert(desc.id.clone(), named.name.clone());
-                    result.push(SkillIntrospectionEntry {
-                        descriptor: desc,
-                        shadowed_by: None,
-                        is_active: true,
-                    });
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    async fn load_from_source(
-        &self,
-        id: &SkillId,
-        source_name: Option<&str>,
-    ) -> Result<SkillDocument, SkillError> {
-        match source_name {
-            Some(name) => {
-                // Load from a specific named source, bypassing first-wins.
-                for named in &self.sources {
-                    if named.name == name {
-                        return named.source.load(id).await;
-                    }
-                }
-                Err(SkillError::NotFound { id: id.clone() })
-            }
-            None => {
-                // Normal first-wins resolution.
-                self.load(id).await
-            }
-        }
-    }
 }
 
 #[cfg(test)]

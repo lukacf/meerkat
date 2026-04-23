@@ -4,10 +4,6 @@ use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
-use crate::runtime::mob_member_lifecycle_authority::{
-    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
-    MobMemberLifecycleAuthority, MobMemberLifecycleInput,
-};
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,

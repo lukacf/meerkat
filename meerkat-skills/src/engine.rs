@@ -17,7 +17,6 @@ where
     S: SkillSource + Send + Sync,
 {
     source: S,
-    available_capabilities: HashSet<String>,
     inventory_threshold: usize,
     max_injection_bytes: usize,
 }
@@ -46,21 +45,6 @@ where
         self.max_injection_bytes = max_bytes;
         self
     }
-}
-
-/// Filter skills to those whose required capabilities are all available.
-fn filter_by_capabilities(
-    skills: Vec<SkillDescriptor>,
-    available: &HashSet<String>,
-) -> Vec<SkillDescriptor> {
-    skills
-        .into_iter()
-        .filter(|s| {
-            s.requires_capabilities
-                .iter()
-                .all(|cap| available.contains(cap))
-        })
-        .collect()
 }
 
 #[allow(clippy::manual_async_fn)]

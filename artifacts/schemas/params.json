@@ -55,6 +55,14 @@
   },
   "CoreCreateParams": {
     "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
       "Provider": {
         "description": "Supported LLM providers.",
         "enum": [
@@ -66,19 +74,33 @@
         ],
         "type": "string"
       },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
       "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].",
+        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
-          "binding_id": {
-            "type": "string"
+          "binding": {
+            "$ref": "#/$defs/BindingId"
           },
-          "realm_id": {
-            "type": "string"
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
           }
         },
         "required": [
-          "realm_id",
-          "binding_id"
+          "realm",
+          "binding"
         ],
         "type": "object"
       }
@@ -164,38 +186,6 @@
       "prompt"
     ],
     "title": "CoreCreateParams",
-    "type": "object"
-  },
-  "InputListParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/submissions`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "InputListParams",
-    "type": "object"
-  },
-  "InputStateParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/submission`.",
-    "properties": {
-      "input_id": {
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id",
-      "input_id"
-    ],
-    "title": "InputStateParams",
     "type": "object"
   },
   "ListSchedulesParams": {
@@ -507,7 +497,7 @@
       },
       "MobDefinitionInput": {
         "additionalProperties": false,
-        "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.",
+        "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.\n\nNot `Eq`: `profiles` transitively carries float provider params.",
         "properties": {
           "backend": {
             "$ref": "#/$defs/MobBackendConfigInput",
@@ -1006,7 +996,7 @@
             "description": "Inline profile definition."
           }
         ],
-        "description": "Profile binding input: either an inline profile or a realm profile reference."
+        "description": "Profile binding input: either an inline profile or a realm profile reference.\n\nNot `Eq`: `Inline(MobProfileInput)` transitively carries float provider\nparams (`temperature`, `top_p`) so `Eq` cannot be derived without\nlosing fidelity."
       },
       "MobProfileInput": {
         "additionalProperties": false,
@@ -1048,7 +1038,17 @@
           "peer_description": {
             "type": "string"
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
@@ -1334,6 +1334,29 @@
         ],
         "type": "string"
       },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
         "oneOf": [
@@ -1483,6 +1506,164 @@
         "enum": [
           "autonomous_host",
           "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
         ],
         "type": "string"
       }
@@ -1652,7 +1833,7 @@
   "RealtimeCapabilitiesParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1732,7 +1913,7 @@
         "type": "string"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1858,7 +2039,7 @@
   "RealtimeStatusParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1912,22 +2093,6 @@
     "title": "RealtimeStatusParams",
     "type": "object"
   },
-  "RuntimeAcceptParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/submit`.",
-    "properties": {
-      "input": true,
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id",
-      "input"
-    ],
-    "title": "RuntimeAcceptParams",
-    "type": "object"
-  },
   "RuntimeRealtimeAttachmentStatusParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `session/realtime_attachment_status`.",
@@ -1940,48 +2105,6 @@
       "session_id"
     ],
     "title": "RuntimeRealtimeAttachmentStatusParams",
-    "type": "object"
-  },
-  "RuntimeResetParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/reset`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeResetParams",
-    "type": "object"
-  },
-  "RuntimeRetireParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/retire`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeRetireParams",
-    "type": "object"
-  },
-  "RuntimeStateParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `session/status`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeStateParams",
     "type": "object"
   },
   "ScheduleIdParams": {
@@ -2019,7 +2142,7 @@
   "SkillsParams": {
     "$defs": {
       "SkillKey": {
-        "description": "Canonical runtime identity for a skill.",
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
           "skill_name": {
             "$ref": "#/$defs/SkillName"
@@ -2039,15 +2162,22 @@
         "type": "string"
       },
       "SkillRef": {
-        "anyOf": [
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
           {
-            "type": "string"
-          },
-          {
-            "$ref": "#/$defs/SkillKey"
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
-        ],
-        "description": "Boundary compatibility reference: legacy string or structured key."
+        ]
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",
@@ -2055,20 +2185,11 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Skills parameters for session/turn requests.\n\n`preload_skills`: Pre-load these skills at session creation.\n`None` or empty = inventory-only mode (no pre-loading).\n`Some([])` is normalized to `None` to prevent silent misconfiguration.\n\n`skill_references`: Skill IDs to resolve and inject for this turn.\n`None` or empty = no per-turn skill injection.",
+    "description": "Skills parameters for session/turn requests.\n\n`preload_skills` and `skill_refs` both carry typed `SkillKey`s — there is\nno legacy string path. Wire ingress parses JSON objects directly to\n`SkillKey` (`{\"source_uuid\":\"…\",\"skill_name\":\"…\"}`); malformed input is a\ntyped ingress error, not a legacy-upgrade.\n\n`Some([])` is normalized to `None` to prevent silent misconfiguration.",
     "properties": {
       "preload_skills": {
         "items": {
-          "type": "string"
-        },
-        "type": [
-          "array",
-          "null"
-        ]
-      },
-      "skill_references": {
-        "items": {
-          "type": "string"
+          "$ref": "#/$defs/SkillKey"
         },
         "type": [
           "array",
@@ -2076,7 +2197,6 @@
         ]
       },
       "skill_refs": {
-        "description": "Structured refs for Skills V2.1. Supports legacy strings via `SkillRef::Legacy`.",
         "items": {
           "$ref": "#/$defs/SkillRef"
         },

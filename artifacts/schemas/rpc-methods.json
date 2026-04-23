@@ -225,52 +225,10 @@
       "result_type": "RealtimeCapabilitiesResult"
     },
     {
-      "description": "Get a session's current runtime state",
-      "name": "session/status",
-      "params_type": "RuntimeStateParams",
-      "result_type": "RuntimeStateResult"
-    },
-    {
       "description": "Get a session's realtime attachment status",
       "name": "session/realtime_attachment_status",
       "params_type": "RuntimeRealtimeAttachmentStatusParams",
       "result_type": "RuntimeRealtimeAttachmentStatusResult"
-    },
-    {
-      "description": "Batch: realtime attachment statuses for many sessions in one round-trip",
-      "name": "session/realtime_attachment_statuses",
-      "params_type": "RuntimeRealtimeAttachmentStatusesParams",
-      "result_type": "RuntimeRealtimeAttachmentStatusesResult"
-    },
-    {
-      "description": "Accept a runtime input for a session",
-      "name": "session/submit",
-      "params_type": "RuntimeAcceptParams",
-      "result_type": "RuntimeAcceptResult"
-    },
-    {
-      "description": "Retire a session runtime",
-      "name": "session/retire",
-      "params_type": "RuntimeRetireParams",
-      "result_type": "RuntimeRetireResult"
-    },
-    {
-      "description": "Reset a session runtime",
-      "name": "session/reset",
-      "params_type": "RuntimeResetParams",
-      "result_type": "RuntimeResetResult"
-    },
-    {
-      "description": "Get the state of a specific input on a session",
-      "name": "session/submission",
-      "params_type": "InputStateParams",
-      "result_type": "InputStateResult"
-    },
-    {
-      "description": "List active inputs for a session",
-      "name": "session/submissions",
-      "params_type": "InputListParams",
-      "result_type": "InputListResult"
     },
     {
       "description": "Create a mob from a definition",

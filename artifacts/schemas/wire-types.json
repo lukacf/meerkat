@@ -157,22 +157,6 @@
             "type": "string"
           }
         ]
-      },
-      "InteractionId": {
-        "description": "Unique identifier for an interaction.",
-        "type": "string"
-      },
-      "PeerName": {
-        "type": "string"
-      },
-      "ResponseStatus": {
-        "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
-        "enum": [
-          "accepted",
-          "completed",
-          "failed"
-        ],
-        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -239,133 +223,6 @@
           "body"
         ],
         "type": "object"
-      },
-      {
-        "description": "Send a one-way peer message.",
-        "properties": {
-          "blocks": {
-            "items": {
-              "$ref": "#/$defs/ContentBlock"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "body": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "handling_mode": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/HandlingMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "kind": {
-            "const": "peer_message",
-            "type": "string"
-          },
-          "to": {
-            "$ref": "#/$defs/PeerName"
-          }
-        },
-        "required": [
-          "kind",
-          "to"
-        ],
-        "type": "object"
-      },
-      {
-        "description": "Send a request to a peer.",
-        "properties": {
-          "body": {
-            "description": "Legacy promotion: if `params` is absent, `body` is wrapped as\n`{\"body\": <body>}` for backwards-compatibility with single-string\nrequesters. Prefer `params`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "handling_mode": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/HandlingMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "intent": {
-            "type": "string"
-          },
-          "kind": {
-            "const": "peer_request",
-            "type": "string"
-          },
-          "params": true,
-          "stream": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/InputStreamMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "to": {
-            "$ref": "#/$defs/PeerName"
-          }
-        },
-        "required": [
-          "kind",
-          "to",
-          "intent"
-        ],
-        "type": "object"
-      },
-      {
-        "description": "Send a response to a prior peer request.",
-        "properties": {
-          "handling_mode": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/HandlingMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "in_reply_to": {
-            "$ref": "#/$defs/InteractionId"
-          },
-          "kind": {
-            "const": "peer_response",
-            "type": "string"
-          },
-          "result": true,
-          "status": {
-            "$ref": "#/$defs/ResponseStatus"
-          },
-          "to": {
-            "$ref": "#/$defs/PeerName"
-          }
-        },
-        "required": [
-          "kind",
-          "to",
-          "in_reply_to",
-          "status"
-        ],
-        "type": "object"
       }
     ],
     "title": "CommsCommandRequest"
@@ -397,146 +254,6 @@
     ],
     "title": "ContractVersion",
     "type": "object"
-  },
-  "InputListResult": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/submissions`.",
-    "properties": {
-      "input_ids": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array"
-      }
-    },
-    "required": [
-      "input_ids"
-    ],
-    "title": "InputListResult",
-    "type": "object"
-  },
-  "InputStateResult": {
-    "$defs": {
-      "WireInputLifecycleState": {
-        "description": "Public input lifecycle state projection used by RPC surfaces.",
-        "enum": [
-          "accepted",
-          "queued",
-          "staged",
-          "applied",
-          "applied_pending_consumption",
-          "consumed",
-          "superseded",
-          "coalesced",
-          "abandoned"
-        ],
-        "type": "string"
-      },
-      "WireInputState": {
-        "description": "RPC-facing input state snapshot.",
-        "properties": {
-          "attempt_count": {
-            "default": 0,
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "current_state": {
-            "$ref": "#/$defs/WireInputLifecycleState"
-          },
-          "durability": true,
-          "history": {
-            "items": {
-              "$ref": "#/$defs/WireInputStateHistoryEntry"
-            },
-            "type": "array"
-          },
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "input_id": {
-            "type": "string"
-          },
-          "last_boundary_sequence": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "last_run_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "persisted_input": true,
-          "policy": true,
-          "reconstruction_source": true,
-          "recovery_count": {
-            "default": 0,
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "terminal_outcome": true,
-          "updated_at": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "input_id",
-          "current_state",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "WireInputStateHistoryEntry": {
-        "description": "Input transition history entry for RPC-facing snapshots.",
-        "properties": {
-          "from": {
-            "$ref": "#/$defs/WireInputLifecycleState"
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "timestamp": {
-            "type": "string"
-          },
-          "to": {
-            "$ref": "#/$defs/WireInputLifecycleState"
-          }
-        },
-        "required": [
-          "timestamp",
-          "from",
-          "to"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "anyOf": [
-      {
-        "$ref": "#/$defs/WireInputState"
-      },
-      {
-        "type": "null"
-      }
-    ],
-    "description": "Response payload for `session/submission`.",
-    "title": "InputStateResult"
   },
   "McpLiveOpResponse": {
     "$defs": {
@@ -1230,7 +947,7 @@
             "description": "Inline profile definition."
           }
         ],
-        "description": "Profile binding input: either an inline profile or a realm profile reference."
+        "description": "Profile binding input: either an inline profile or a realm profile reference.\n\nNot `Eq`: `Inline(MobProfileInput)` transitively carries float provider\nparams (`temperature`, `top_p`) so `Eq` cannot be derived without\nlosing fidelity."
       },
       "MobProfileInput": {
         "additionalProperties": false,
@@ -1272,7 +989,17 @@
           "peer_description": {
             "type": "string"
           },
-          "provider_params": true,
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
+          },
           "runtime_mode": {
             "$ref": "#/$defs/WireMobRuntimeMode",
             "default": "autonomous_host"
@@ -1558,6 +1285,29 @@
         ],
         "type": "string"
       },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
         "oneOf": [
@@ -1709,11 +1459,169 @@
           "turn_driven"
         ],
         "type": "string"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.",
+    "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.\n\nNot `Eq`: `profiles` transitively carries float provider params.",
     "properties": {
       "backend": {
         "$ref": "#/$defs/MobBackendConfigInput",
@@ -2665,7 +2573,27 @@
           },
           {
             "const": "binding_released",
-            "description": "W3-H: the mob member this channel was bound to has been retired and\nits realtime binding released by the MobMachine\n(`MemberRealtimeBindingReleased` effect). Signalled only for\n`MobMember` targets; `SessionTarget` channels do not encounter this.",
+            "description": "W3-H: the mob member this channel was bound to has been retired and\nits realtime binding released by the MobMachine\n(`MemberSessionBindingChanged { old: Some, new: None }` effect).\nSignalled only for `MobMember` targets; `SessionTarget` channels\ndo not encounter this.",
+            "type": "string"
+          },
+          {
+            "const": "authentication_failed",
+            "description": "Provider authentication rejected the connection or request. Maps\nfrom `meerkat_client::LlmError::AuthenticationFailed` so the wire\nsurfaces a typed code instead of collapsing into\n`InvalidTarget`.",
+            "type": "string"
+          },
+          {
+            "const": "content_filtered",
+            "description": "Provider returned a content-filter rejection\n(`meerkat_client::LlmError::ContentFiltered`). Typed so clients\ncan distinguish policy rejection from transport failure.",
+            "type": "string"
+          },
+          {
+            "const": "model_not_found",
+            "description": "Provider rejected the request because the configured model is\nunknown or unavailable\n(`meerkat_client::LlmError::ModelNotFound`). Typed so clients\ncan distinguish model-catalog drift from realtime transport\nmisconfiguration.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_request",
+            "description": "Provider returned `InvalidRequest` for a shape the realtime\nlayer cannot classify more specifically. Kept distinct from\n`InvalidTarget` (which is about parse/resolve of the target\nitself, not the outgoing request payload).",
             "type": "string"
           }
         ]
@@ -3673,7 +3601,7 @@
   },
   "RealtimeChannelTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
+    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
     "oneOf": [
       {
         "properties": {
@@ -4564,7 +4492,7 @@
         "type": "object"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -5245,7 +5173,27 @@
           },
           {
             "const": "binding_released",
-            "description": "W3-H: the mob member this channel was bound to has been retired and\nits realtime binding released by the MobMachine\n(`MemberRealtimeBindingReleased` effect). Signalled only for\n`MobMember` targets; `SessionTarget` channels do not encounter this.",
+            "description": "W3-H: the mob member this channel was bound to has been retired and\nits realtime binding released by the MobMachine\n(`MemberSessionBindingChanged { old: Some, new: None }` effect).\nSignalled only for `MobMember` targets; `SessionTarget` channels\ndo not encounter this.",
+            "type": "string"
+          },
+          {
+            "const": "authentication_failed",
+            "description": "Provider authentication rejected the connection or request. Maps\nfrom `meerkat_client::LlmError::AuthenticationFailed` so the wire\nsurfaces a typed code instead of collapsing into\n`InvalidTarget`.",
+            "type": "string"
+          },
+          {
+            "const": "content_filtered",
+            "description": "Provider returned a content-filter rejection\n(`meerkat_client::LlmError::ContentFiltered`). Typed so clients\ncan distinguish policy rejection from transport failure.",
+            "type": "string"
+          },
+          {
+            "const": "model_not_found",
+            "description": "Provider rejected the request because the configured model is\nunknown or unavailable\n(`meerkat_client::LlmError::ModelNotFound`). Typed so clients\ncan distinguish model-catalog drift from realtime transport\nmisconfiguration.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_request",
+            "description": "Provider returned `InvalidRequest` for a shape the realtime\nlayer cannot classify more specifically. Kept distinct from\n`InvalidTarget` (which is about parse/resolve of the target\nitself, not the outgoing request payload).",
             "type": "string"
           }
         ]
@@ -5852,12 +5800,25 @@
   },
   "RuntimeAcceptResult": {
     "$defs": {
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
       "RuntimeAcceptOutcomeType": {
         "description": "Discriminator for `session/submit` responses.",
         "enum": [
           "accepted",
           "deduplicated",
           "rejected"
+        ],
+        "type": "string"
+      },
+      "WireInputDurability": {
+        "description": "Typed wire projection of an input's durability class.",
+        "enum": [
+          "durable",
+          "volatile",
+          "ephemeral"
         ],
         "type": "string"
       },
@@ -5876,8 +5837,17 @@
         ],
         "type": "string"
       },
+      "WireInputPolicy": {
+        "description": "Typed wire projection of the input admission policy.\n\nFormerly `serde_json::Value`; wave-b retyped it so callers can pattern\nmatch on admission behavior instead of parsing opaque JSON.",
+        "enum": [
+          "stage",
+          "queue",
+          "immediate"
+        ],
+        "type": "string"
+      },
       "WireInputState": {
-        "description": "RPC-facing input state snapshot.",
+        "description": "RPC-facing input state snapshot.\n\nAll fields are typed. Wave B replaced six former `serde_json::Value`\nfields with typed projections so the wire carries no untyped carriers.",
         "properties": {
           "attempt_count": {
             "default": 0,
@@ -5891,7 +5861,16 @@
           "current_state": {
             "$ref": "#/$defs/WireInputLifecycleState"
           },
-          "durability": true,
+          "durability": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputDurability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "history": {
             "items": {
               "$ref": "#/$defs/WireInputStateHistoryEntry"
@@ -5921,16 +5900,52 @@
               "null"
             ]
           },
-          "persisted_input": true,
-          "policy": true,
-          "reconstruction_source": true,
+          "persisted_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePersistedInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reconstruction_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReconstructionSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recovery_count": {
             "default": 0,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "terminal_outcome": true,
+          "terminal_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "updated_at": {
             "type": "string"
           }
@@ -5968,6 +5983,110 @@
           "to"
         ],
         "type": "object"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WirePersistedInput": {
+        "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "prompt",
+                "type": "string"
+              },
+              "text_preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "peer_message",
+                "type": "string"
+              },
+              "peer_name": {
+                "$ref": "#/$defs/PeerName"
+              }
+            },
+            "required": [
+              "kind",
+              "peer_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "continuation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "carrier": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "carrier"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReconstructionSource": {
+        "description": "Typed wire projection of where an input state was reconstructed from.",
+        "enum": [
+          "live",
+          "event_store",
+          "snapshot",
+          "replay"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5988,7 +6107,16 @@
       "outcome_type": {
         "$ref": "#/$defs/RuntimeAcceptOutcomeType"
       },
-      "policy": true,
+      "policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputPolicy"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "reason": {
         "type": [
           "string",
@@ -6038,73 +6166,6 @@
       "status"
     ],
     "title": "RuntimeRealtimeAttachmentStatusResult",
-    "type": "object"
-  },
-  "RuntimeResetResult": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/reset`.",
-    "properties": {
-      "inputs_abandoned": {
-        "format": "uint",
-        "minimum": 0,
-        "type": "integer"
-      }
-    },
-    "required": [
-      "inputs_abandoned"
-    ],
-    "title": "RuntimeResetResult",
-    "type": "object"
-  },
-  "RuntimeRetireResult": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/retire`.",
-    "properties": {
-      "inputs_abandoned": {
-        "format": "uint",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "inputs_pending_drain": {
-        "default": 0,
-        "format": "uint",
-        "minimum": 0,
-        "type": "integer"
-      }
-    },
-    "required": [
-      "inputs_abandoned"
-    ],
-    "title": "RuntimeRetireResult",
-    "type": "object"
-  },
-  "RuntimeStateResult": {
-    "$defs": {
-      "WireRuntimeState": {
-        "description": "Public runtime state projection used by RPC surfaces.",
-        "enum": [
-          "initializing",
-          "idle",
-          "attached",
-          "running",
-          "retired",
-          "stopped",
-          "destroyed"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/status`.",
-    "properties": {
-      "state": {
-        "$ref": "#/$defs/WireRuntimeState"
-      }
-    },
-    "required": [
-      "state"
-    ],
-    "title": "RuntimeStateResult",
     "type": "object"
   },
   "ScheduleListResult": {
@@ -8849,7 +8910,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Transcript block inside a block-assistant message.",
+    "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
     "oneOf": [
       {
         "properties": {
@@ -8925,7 +8986,9 @@
           },
           "data": {
             "properties": {
-              "args": true,
+              "args": {
+                "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+              },
               "id": {
                 "type": "string"
               },
@@ -9137,11 +9200,7 @@
         "type": "string"
       },
       "source_kind": {
-        "description": "Discriminator: \"inline_secret\" / \"env\" / \"managed_store\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
-        "type": "string"
-      },
-      "storage_kind": {
-        "description": "Discriminator for the storage variant:\n\"keyring\" / \"file\" / \"auto\" / \"ephemeral\" / \"host_managed\".",
+        "description": "Discriminator: \"inline_secret\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
         "type": "string"
       }
     },
@@ -9149,8 +9208,7 @@
       "id",
       "provider",
       "auth_method",
-      "source_kind",
-      "storage_kind"
+      "source_kind"
     ],
     "title": "WireAuthProfile",
     "type": "object"
@@ -9393,19 +9451,43 @@
     "type": "object"
   },
   "WireConnectionRef": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Wire projection of [`meerkat_core::ConnectionRef`].",
-    "properties": {
-      "binding_id": {
+    "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
       },
-      "realm_id": {
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
         "type": "string"
       }
     },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+    "properties": {
+      "binding": {
+        "$ref": "#/$defs/BindingId"
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ProfileId"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "realm": {
+        "$ref": "#/$defs/RealmId"
+      }
+    },
     "required": [
-      "realm_id",
-      "binding_id"
+      "realm",
+      "binding"
     ],
     "title": "WireConnectionRef",
     "type": "object"
@@ -9707,6 +9789,19 @@
   },
   "WireInputState": {
     "$defs": {
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "WireInputDurability": {
+        "description": "Typed wire projection of an input's durability class.",
+        "enum": [
+          "durable",
+          "volatile",
+          "ephemeral"
+        ],
+        "type": "string"
+      },
       "WireInputLifecycleState": {
         "description": "Public input lifecycle state projection used by RPC surfaces.",
         "enum": [
@@ -9719,6 +9814,15 @@
           "superseded",
           "coalesced",
           "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputPolicy": {
+        "description": "Typed wire projection of the input admission policy.\n\nFormerly `serde_json::Value`; wave-b retyped it so callers can pattern\nmatch on admission behavior instead of parsing opaque JSON.",
+        "enum": [
+          "stage",
+          "queue",
+          "immediate"
         ],
         "type": "string"
       },
@@ -9747,10 +9851,114 @@
           "to"
         ],
         "type": "object"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WirePersistedInput": {
+        "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "prompt",
+                "type": "string"
+              },
+              "text_preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "peer_message",
+                "type": "string"
+              },
+              "peer_name": {
+                "$ref": "#/$defs/PeerName"
+              }
+            },
+            "required": [
+              "kind",
+              "peer_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "continuation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "carrier": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "carrier"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReconstructionSource": {
+        "description": "Typed wire projection of where an input state was reconstructed from.",
+        "enum": [
+          "live",
+          "event_store",
+          "snapshot",
+          "replay"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "RPC-facing input state snapshot.",
+    "description": "RPC-facing input state snapshot.\n\nAll fields are typed. Wave B replaced six former `serde_json::Value`\nfields with typed projections so the wire carries no untyped carriers.",
     "properties": {
       "attempt_count": {
         "default": 0,
@@ -9764,7 +9972,16 @@
       "current_state": {
         "$ref": "#/$defs/WireInputLifecycleState"
       },
-      "durability": true,
+      "durability": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputDurability"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "history": {
         "items": {
           "$ref": "#/$defs/WireInputStateHistoryEntry"
@@ -9794,16 +10011,52 @@
           "null"
         ]
       },
-      "persisted_input": true,
-      "policy": true,
-      "reconstruction_source": true,
+      "persisted_input": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePersistedInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputPolicy"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reconstruction_source": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireReconstructionSource"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "recovery_count": {
         "default": 0,
         "format": "uint32",
         "minimum": 0,
         "type": "integer"
       },
-      "terminal_outcome": true,
+      "terminal_outcome": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputTerminalOutcome"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "updated_at": {
         "type": "string"
       }
@@ -10022,11 +10275,7 @@
             "type": "string"
           },
           "source_kind": {
-            "description": "Discriminator: \"inline_secret\" / \"env\" / \"managed_store\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
-            "type": "string"
-          },
-          "storage_kind": {
-            "description": "Discriminator for the storage variant:\n\"keyring\" / \"file\" / \"auto\" / \"ephemeral\" / \"host_managed\".",
+            "description": "Discriminator: \"inline_secret\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
             "type": "string"
           }
         },
@@ -10034,8 +10283,7 @@
           "id",
           "provider",
           "auth_method",
-          "source_kind",
-          "storage_kind"
+          "source_kind"
         ],
         "type": "object"
       },
@@ -10280,7 +10528,7 @@
         ]
       },
       "WireAssistantBlock": {
-        "description": "Transcript block inside a block-assistant message.",
+        "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
         "oneOf": [
           {
             "properties": {
@@ -10356,7 +10604,9 @@
               },
               "data": {
                 "properties": {
-                  "args": true,
+                  "args": {
+                    "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+                  },
                   "id": {
                     "type": "string"
                   },
@@ -10644,7 +10894,7 @@
         ]
       },
       "WireSessionMessage": {
-        "description": "Canonical transcript message for public wire surfaces.",
+        "description": "Canonical transcript message for public wire surfaces.\n\nNot `PartialEq`: the `BlockAssistant.blocks` variant carries\n`WireAssistantBlock`s which hold opaque tool-call args as\n`Box<RawValue>`. See `WireAssistantBlock` doc.",
         "oneOf": [
           {
             "properties": {
@@ -10781,7 +11031,7 @@
         "type": "string"
       },
       "WireToolCall": {
-        "description": "Legacy assistant tool call payload.",
+        "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
         "properties": {
           "args": true,
           "id": {
@@ -10834,7 +11084,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Full session history in canonical wire format.",
+    "description": "Full session history in canonical wire format.\n\nNot `PartialEq`: `messages` carries `WireSessionMessage` which\ntransitively holds opaque tool-call args; compare via serialization\nround-trip rather than field equality.",
     "properties": {
       "has_more": {
         "type": "boolean"
@@ -10968,7 +11218,7 @@
         ]
       },
       "WireAssistantBlock": {
-        "description": "Transcript block inside a block-assistant message.",
+        "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
         "oneOf": [
           {
             "properties": {
@@ -11044,7 +11294,9 @@
               },
               "data": {
                 "properties": {
-                  "args": true,
+                  "args": {
+                    "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+                  },
                   "id": {
                     "type": "string"
                   },
@@ -11344,7 +11596,7 @@
         "type": "string"
       },
       "WireToolCall": {
-        "description": "Legacy assistant tool call payload.",
+        "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
         "properties": {
           "args": true,
           "id": {
@@ -11397,7 +11649,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Canonical transcript message for public wire surfaces.",
+    "description": "Canonical transcript message for public wire surfaces.\n\nNot `PartialEq`: the `BlockAssistant.blocks` variant carries\n`WireAssistantBlock`s which hold opaque tool-call args as\n`Box<RawValue>`. See `WireAssistantBlock` doc.",
     "oneOf": [
       {
         "properties": {
@@ -11592,7 +11844,7 @@
   },
   "WireToolCall": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Legacy assistant tool call payload.",
+    "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
     "properties": {
       "args": true,
       "id": {

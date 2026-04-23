@@ -124,7 +124,6 @@ export interface MobUnwireParams {
 }
 
 export interface RuntimeStateParams {
-  session_id: string;
 }
 
 export interface RuntimeRealtimeAttachmentStatusParams {
@@ -148,25 +147,18 @@ export interface RealtimeCapabilitiesParams {
 }
 
 export interface RuntimeAcceptParams {
-  input: unknown;
-  session_id: string;
 }
 
 export interface RuntimeRetireParams {
-  session_id: string;
 }
 
 export interface RuntimeResetParams {
-  session_id: string;
 }
 
 export interface InputStateParams {
-  input_id: string;
-  session_id: string;
 }
 
 export interface InputListParams {
-  session_id: string;
 }
 
 export interface ScheduleIdParams {
@@ -284,7 +276,6 @@ export interface MobUnwireResult {
 }
 
 export interface RuntimeStateResult {
-  state: "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 }
 
 export interface RuntimeRealtimeAttachmentStatusResult {
@@ -396,18 +387,15 @@ export interface RuntimeAcceptResult {
   existing_id?: string;
   input_id?: string;
   outcome_type: "accepted" | "deduplicated" | "rejected";
-  policy?: unknown;
+  policy?: "stage" | "queue" | "immediate";
   reason?: string;
   state?: Record<string, unknown>;
 }
 
 export interface RuntimeRetireResult {
-  inputs_abandoned: number;
-  inputs_pending_drain?: number;
 }
 
 export interface RuntimeResetResult {
-  inputs_abandoned: number;
 }
 
 export interface WireInputStateHistoryEntry {
@@ -421,22 +409,21 @@ export interface WireInputState {
   attempt_count?: number;
   created_at: string;
   current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
-  durability?: unknown;
+  durability?: "durable" | "volatile" | "ephemeral";
   history?: Record<string, unknown>[];
   idempotency_key?: string;
   input_id: string;
   last_boundary_sequence?: number;
   last_run_id?: string;
-  persisted_input?: unknown;
-  policy?: unknown;
-  reconstruction_source?: unknown;
+  persisted_input?: Record<string, unknown>;
+  policy?: "stage" | "queue" | "immediate";
+  reconstruction_source?: "live" | "event_store" | "snapshot" | "replay";
   recovery_count?: number;
-  terminal_outcome?: unknown;
+  terminal_outcome?: "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
   updated_at: string;
 }
 
 export interface InputListResult {
-  input_ids: string[];
 }
 
 export interface ScheduleListResult {
@@ -506,8 +493,9 @@ export interface WireModelProfile {
 }
 
 export interface WireConnectionRef {
-  binding_id: string;
-  realm_id: string;
+  binding: string;
+  profile?: string;
+  realm: string;
 }
 
 export interface WireBackendProfile {
@@ -523,7 +511,6 @@ export interface WireAuthProfile {
   id: string;
   provider: string;
   source_kind: string;
-  storage_kind: string;
 }
 
 export interface WireProviderBinding {

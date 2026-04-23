@@ -211,8 +211,28 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
-      "SkillId": {
-        "description": "Skill identifier — newtype for type safety.\n\nThe canonical format is a slash-delimited path: `{collection-path}/{name}`.\nExamples: `\"extraction/email-extractor\"`, `\"a/b/c\"`, `\"pdf-processing\"`.",
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "StopReason": {
@@ -987,7 +1007,7 @@
           },
           "skills": {
             "items": {
-              "$ref": "#/$defs/SkillId"
+              "$ref": "#/$defs/SkillKey"
             },
             "type": "array"
           },
@@ -1788,7 +1808,7 @@
               },
               "skills": {
                 "items": {
-                  "$ref": "#/$defs/SkillId"
+                  "$ref": "#/$defs/SkillKey"
                 },
                 "type": "array"
               },
@@ -2165,8 +2185,28 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
-      "SkillId": {
-        "description": "Skill identifier — newtype for type safety.\n\nThe canonical format is a slash-delimited path: `{collection-path}/{name}`.\nExamples: `\"extraction/email-extractor\"`, `\"a/b/c\"`, `\"pdf-processing\"`.",
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "StopReason": {

@@ -3842,30 +3842,8 @@ impl MobActor {
             "MobActor::finalize_spawn_from_pending roster updated"
         );
 
-        let planned_wiring_targets = self
-            .spawn_wiring_targets(profile_name, agent_identity)
-            .await;
-
-        let (wired_spawn_targets, wiring_error) = self
-            .apply_spawn_wiring(agent_identity, &planned_wiring_targets)
-            .await;
-        if let Some(wiring_error) = wiring_error {
-            if let Err(rollback_error) = self
-                .rollback_failed_spawn(
-                    agent_identity,
-                    profile_name,
-                    &member_ref,
-                    &wired_spawn_targets,
-                    &planned_wiring_targets,
-                )
-                .await
-            {
-                return Err(MobError::Internal(format!(
-                    "spawn wiring failed for '{agent_identity}': {wiring_error}; rollback failed: {rollback_error}"
-                )));
-            }
-            return Err(wiring_error);
-        }
+        let planned_wiring_targets: Vec<MeerkatId> = Vec::new();
+        let wired_spawn_targets: Vec<MeerkatId> = Vec::new();
 
         #[cfg(feature = "runtime-adapter")]
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
@@ -3937,59 +3915,7 @@ impl MobActor {
             }
         }
 
-        // auto_wire_parent: wire to the actual spawner member when the spawn
-        // request came from a session-owned mob tool call.
-        if auto_wire_parent
-            && let Some(parent_id) = self
-                .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), agent_identity)
-                .await
-            && let Err(error) = self.do_wire(agent_identity, &parent_id).await
-        {
-            tracing::warn!(
-                error = %error,
-                peer = %parent_id,
-                "auto_wire_parent: failed to wire to spawning member"
-            );
-        }
-
-        // Restore peer wiring from a prior respawn.
-        let mut failed_restore_peer_ids = Vec::new();
-        if let Some(mut wiring) = restore_wiring {
-            wiring.local_peers.sort();
-            wiring.local_peers.dedup();
-            for peer_id in wiring
-                .local_peers
-                .into_iter()
-                .filter(|peer_id| peer_id != agent_identity)
-            {
-                if let Err(e) = self.do_wire(agent_identity, &peer_id).await {
-                    tracing::warn!(
-                        error = %e,
-                        peer = %peer_id,
-                        "failed to restore wiring after respawn"
-                    );
-                    failed_restore_peer_ids.push(peer_id.clone());
-                }
-            }
-            wiring.external_peers.sort_by(|a, b| a.name.cmp(&b.name));
-            wiring.external_peers.dedup_by(|a, b| a.name == b.name);
-            for spec in wiring.external_peers {
-                if spec.name == agent_identity.as_str() {
-                    continue;
-                }
-                if let Err(e) = self.do_wire_external(agent_identity, &spec).await {
-                    tracing::warn!(
-                        error = %e,
-                        peer = %spec.name,
-                        "failed to restore external wiring after respawn"
-                    );
-                    failed_restore_peer_ids.push(MeerkatId::from(spec.name.clone()));
-                }
-            }
-        }
-
-        failed_restore_peer_ids.sort();
-        failed_restore_peer_ids.dedup();
+        let failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
 
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -6940,65 +6866,6 @@ impl MobActor {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
-
-    /// Apply auto/role wiring for a newly spawned meerkat.
-    ///
-    /// `wiring_targets` is expected to be deduplicated by `spawn_wiring_targets()`.
-    /// The actor keeps command ordering, but per-edge wire effects run with bounded
-    /// parallelism to reduce spawn fan-out latency.
-    async fn apply_spawn_wiring(
-        &self,
-        agent_identity: &MeerkatId,
-        wiring_targets: &[MeerkatId],
-    ) -> (Vec<MeerkatId>, Option<MobError>) {
-        if wiring_targets.is_empty() {
-            return (Vec::new(), None);
-        }
-
-        const MAX_PARALLEL_SPAWN_WIRES: usize = 8;
-        let mut in_flight = FuturesUnordered::new();
-        let mut remaining = wiring_targets.iter().cloned();
-        let mut successful_targets = Vec::new();
-        let mut first_error: Option<MobError> = None;
-
-        for _ in 0..MAX_PARALLEL_SPAWN_WIRES {
-            let Some(target_id) = remaining.next() else {
-                break;
-            };
-            in_flight.push(self.wire_spawn_target(agent_identity, target_id));
-        }
-
-        while let Some(result) = in_flight.next().await {
-            match result {
-                Ok(target_id) => successful_targets.push(target_id),
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-            if let Some(target_id) = remaining.next() {
-                in_flight.push(self.wire_spawn_target(agent_identity, target_id));
-            }
-        }
-
-        (successful_targets, first_error)
-    }
-
-    async fn wire_spawn_target(
-        &self,
-        agent_identity: &MeerkatId,
-        target_id: MeerkatId,
-    ) -> Result<MeerkatId, MobError> {
-        self.do_wire(agent_identity, &target_id)
-            .await
-            .map_err(|e| {
-                MobError::WiringError(format!(
-                    "role_wiring fan-out failed for {agent_identity} <-> {target_id}: {e}"
-                ))
-            })?;
-        Ok(target_id)
-    }
 
     /// Compensate a failed spawn wiring path to avoid partial state.
     async fn rollback_failed_spawn(

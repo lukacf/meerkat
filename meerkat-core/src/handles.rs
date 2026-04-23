@@ -1,4 +1,4 @@
-//! Cross-crate DSL handle traits for the MeerkatMachine DSL.
+//! Cross-crate DSL handle traits.
 //!
 //! Downstream crates (`meerkat-mcp`, `meerkat-comms`, `meerkat-session`) drive
 //! DSL transitions through these trait objects without importing
@@ -632,7 +632,7 @@ pub struct AuthLeaseSnapshot {
 /// seam, not in random helpers") and §20 ("every important behavior
 /// reduces to one clear owner").
 ///
-/// The actual state transition is gated by the MeerkatMachine DSL's
+/// The actual state transition is gated by the AuthMachine DSL's
 /// `MarkAuthExpiring` input (which enforces the `valid → expiring`
 /// legality); this constant only controls *when* the runner fires
 /// that input, not whether the transition is legal.

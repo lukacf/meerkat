@@ -296,6 +296,49 @@ pub trait CompositionDispatcher: Send + Sync {
     ) -> Result<DispatchOutcome, DispatchRefusal>;
 }
 
+/// Typed, owner-supplied context provider for an [`OwnerProvided`][op] binding.
+///
+/// Issue #342 — some routes need consumer-side fields that aren't in the
+/// producer's effect body (the canonical case is `session_id` on the
+/// `meerkat_mob_seam` composition: the mob effect doesn't carry it, but
+/// the consumer's applied input requires it). Rather than smuggle that
+/// state through a `serde_json::Value` side channel, the runtime that
+/// owns the dispatcher supplies it through a typed context provider.
+///
+/// **Exactly one method, no `serde_json::Value` in the signature.** The
+/// returned fields are typed [`OwnedFieldValue`]s keyed by
+/// [`FieldId`] — the same representation the route-binding table already
+/// uses for producer-field projections. The dispatcher can merge the
+/// provider's fields with producer-projected fields when constructing
+/// the typed input for a `ConsumerSurface`.
+///
+/// Implementations are synchronous and infallible: context retrieval
+/// should be an in-process lookup against state the runtime already
+/// owns (pinned session id, realm id, bind-epoch, …). Anything that
+/// could fail belongs on the producer effect body or on the consumer
+/// surface.
+///
+/// [op]: CompositionBinding::OwnerProvided
+pub trait ContextProvider<E: ProducerEffect>: Send + Sync {
+    /// Produce the owner-supplied typed context fields for a routed
+    /// `effect` emitted by `producer`.
+    ///
+    /// The returned vector's `FieldId`s must match the route's
+    /// [`BindingSource::ContextField`][bs] references declared in the
+    /// composition schema (#342). Missing ids surface as
+    /// [`DispatchRefusal::MissingProducerField`] at the dispatcher in
+    /// the same way unfulfilled producer fields do — the dispatcher
+    /// treats producer and owner-provided fields uniformly once
+    /// projection starts.
+    ///
+    /// [bs]: # "See issue #342: BindingSource gains ContextField(FieldId)"
+    fn provide_context(
+        &self,
+        producer: &ProducerInstance,
+        effect: &EffectPayload<E>,
+    ) -> Vec<(FieldId, OwnedFieldValue)>;
+}
+
 /// Typed binding attached to a runtime that holds a dispatcher.
 ///
 /// Discriminates the "machine participates in a composition" case from the
@@ -306,12 +349,36 @@ pub trait CompositionDispatcher: Send + Sync {
 /// constructor halves on `MeerkatMachine` (`with_composition(...)` vs
 /// `standalone(...)` / `ephemeral()` / `persistent()`) are the public
 /// face of this distinction.
+///
+/// **OwnerProvided (#342)**: some routes need consumer-side fields that
+/// aren't in the producer effect body — the canonical case is
+/// `session_id` on the `meerkat_mob_seam` composition. The
+/// `OwnerProvided` variant pairs a dispatcher with a typed
+/// [`ContextProvider`] so the runtime that owns the dispatcher supplies
+/// the missing fields from its own typed state at dispatch time.
+/// `OwnerProvided` is semantically a superset of `Wired`: callers that
+/// only need the dispatcher reach it through the same
+/// [`wired`](Self::wired) accessor; callers that need the context
+/// provider reach it through
+/// [`context_provider`](Self::context_provider), which returns `Some`
+/// only for `OwnerProvided`.
 pub enum CompositionBinding<E: ProducerEffect> {
     /// Machine is not part of a composition. Routed-effect dispatch is not
     /// available.
     Standalone,
     /// Machine participates in a composition and owns a typed dispatcher.
+    /// No owner-supplied context: all route bindings project from the
+    /// producer's effect body.
     Wired(Arc<dyn CompositionDispatcher<Effect = E>>),
+    /// Machine participates in a composition that declares routes with
+    /// owner-supplied context (issue #342). The `context` is consulted
+    /// alongside the producer effect at dispatch time to fulfil route
+    /// bindings whose source is `ContextField` rather than
+    /// `ProducerField`.
+    OwnerProvided {
+        dispatcher: Arc<dyn CompositionDispatcher<Effect = E>>,
+        context: Arc<dyn ContextProvider<E>>,
+    },
 }
 
 impl<E: ProducerEffect> fmt::Debug for CompositionBinding<E> {
@@ -322,11 +389,52 @@ impl<E: ProducerEffect> fmt::Debug for CompositionBinding<E> {
                 .debug_struct("CompositionBinding::Wired")
                 .field("dispatcher", &"<dyn CompositionDispatcher>")
                 .finish(),
+            Self::OwnerProvided { .. } => f
+                .debug_struct("CompositionBinding::OwnerProvided")
+                .field("dispatcher", &"<dyn CompositionDispatcher>")
+                .field("context", &"<dyn ContextProvider>")
+                .finish(),
         }
     }
 }
 
 impl<E: ProducerEffect> CompositionBinding<E> {
+    /// Construct a `Standalone` binding.
+    ///
+    /// Mirrors `MeerkatMachine::standalone(...)` at the binding level so
+    /// call sites that wire a runtime without composition can say so
+    /// positively instead of spelling the enum variant. Equivalent to
+    /// `CompositionBinding::Standalone`.
+    pub fn standalone() -> Self {
+        Self::Standalone
+    }
+
+    /// Construct a `Wired` binding from a composition dispatcher.
+    ///
+    /// Use this when every route binding projects from the producer
+    /// effect body alone. If any route declares an owner-supplied
+    /// context field, use [`Self::owner_provided`] instead.
+    pub fn wired_with(dispatcher: Arc<dyn CompositionDispatcher<Effect = E>>) -> Self {
+        Self::Wired(dispatcher)
+    }
+
+    /// Construct an `OwnerProvided` binding from a composition
+    /// dispatcher and a typed context provider.
+    ///
+    /// Use this for compositions whose route bindings reference owner-
+    /// supplied context fields (per issue #342) — the provider is
+    /// consulted at dispatch time for each routed effect so the
+    /// missing fields can be fulfilled from the runtime's own state.
+    pub fn owner_provided(
+        dispatcher: Arc<dyn CompositionDispatcher<Effect = E>>,
+        context: Arc<dyn ContextProvider<E>>,
+    ) -> Self {
+        Self::OwnerProvided {
+            dispatcher,
+            context,
+        }
+    }
+
     /// Report whether this machine is standalone (no composition attached).
     pub fn is_standalone(&self) -> bool {
         matches!(self, Self::Standalone)
@@ -334,14 +442,32 @@ impl<E: ProducerEffect> CompositionBinding<E> {
 
     /// Borrow the wired dispatcher, if any.
     ///
-    /// Returns `None` only for [`CompositionBinding::Standalone`]. Callers
-    /// that reach a routed-effect site MUST have a `Wired` binding — the
-    /// type split exists so this is enforced at the construction boundary,
-    /// not re-checked at every call site.
+    /// Returns `None` only for [`CompositionBinding::Standalone`].
+    /// Both `Wired` and `OwnerProvided` expose their dispatcher through
+    /// this accessor so call sites that only need to dispatch a typed
+    /// effect don't have to branch on context-provider presence — the
+    /// type split exists so this is enforced at the construction
+    /// boundary, not re-checked at every call site.
     pub fn wired(&self) -> Option<&Arc<dyn CompositionDispatcher<Effect = E>>> {
         match self {
             Self::Standalone => None,
             Self::Wired(d) => Some(d),
+            Self::OwnerProvided { dispatcher, .. } => Some(dispatcher),
+        }
+    }
+
+    /// Borrow the owner-supplied [`ContextProvider`], if any.
+    ///
+    /// Returns `Some` only for [`CompositionBinding::OwnerProvided`].
+    /// `Standalone` has no dispatcher; `Wired` has a dispatcher but no
+    /// owner-supplied context, so callers that walk route bindings and
+    /// encounter a `ContextField` source on a `Wired` binding should
+    /// surface a typed refusal rather than silently treat it as an
+    /// empty context.
+    pub fn context_provider(&self) -> Option<&Arc<dyn ContextProvider<E>>> {
+        match self {
+            Self::Standalone | Self::Wired(_) => None,
+            Self::OwnerProvided { context, .. } => Some(context),
         }
     }
 }
@@ -680,5 +806,97 @@ mod tests {
         let binding: CompositionBinding<SeamEffect> = CompositionBinding::Wired(dispatcher);
         assert!(!binding.is_standalone());
         assert!(binding.wired().is_some());
+        assert!(
+            binding.context_provider().is_none(),
+            "plain Wired binding has no owner-supplied context"
+        );
+    }
+
+    /// Owner-supplied context provider for routes that need typed
+    /// fields not in the producer effect body. In production this would
+    /// be a runtime-owned struct (e.g. one carrying a pinned
+    /// `SessionId`); the test just returns a canned pair to exercise
+    /// the trait's single-method signature.
+    struct PinnedSessionContext {
+        session_id: String,
+    }
+
+    impl ContextProvider<SeamEffect> for PinnedSessionContext {
+        fn provide_context(
+            &self,
+            _producer: &ProducerInstance,
+            _effect: &EffectPayload<SeamEffect>,
+        ) -> Vec<(FieldId, OwnedFieldValue)> {
+            vec![(
+                FieldId::parse("session_id").expect("field id"),
+                OwnedFieldValue::Str(self.session_id.clone()),
+            )]
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_provided_binding_exposes_both_dispatcher_and_context() {
+        let consumer = Arc::new(RecordingMeerkatSurface::default());
+        let dispatcher = Arc::new(build_dispatcher(consumer));
+        let context = Arc::new(PinnedSessionContext {
+            session_id: "session-abc".into(),
+        });
+        let binding: CompositionBinding<SeamEffect> =
+            CompositionBinding::owner_provided(dispatcher, context);
+
+        assert!(!binding.is_standalone());
+        assert!(
+            binding.wired().is_some(),
+            "OwnerProvided is a superset of Wired for dispatcher access"
+        );
+        assert!(
+            binding.context_provider().is_some(),
+            "OwnerProvided must expose the owner-supplied context"
+        );
+
+        // The typed provider returns the expected single owner-supplied
+        // field. Matches the #342 use case: `session_id` is absent from
+        // the producer effect body but present in the projected fields
+        // the consumer needs.
+        let provider = binding.context_provider().expect("context provider");
+        let producer = mob_producer();
+        let effect = sample_effect();
+        let fields = provider.provide_context(&producer, &effect);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0.as_str(), "session_id");
+        match &fields[0].1 {
+            OwnedFieldValue::Str(s) => assert_eq!(s, "session-abc"),
+            other => panic!("expected Str context field, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn composition_binding_constructors_parallel_machine_halves() {
+        // `CompositionBinding::standalone()` is the binding-level mirror
+        // of `MeerkatMachine::standalone(...)`; `wired_with` and
+        // `owner_provided` mirror `MeerkatMachine::with_composition(...)`.
+        // The constructor split exists so call sites say positively which
+        // half they are wiring, rather than spelling the enum variant.
+        let standalone: CompositionBinding<SeamEffect> = CompositionBinding::standalone();
+        assert!(standalone.is_standalone());
+        assert!(standalone.wired().is_none());
+        assert!(standalone.context_provider().is_none());
+
+        let consumer = Arc::new(RecordingMeerkatSurface::default());
+        let dispatcher = Arc::new(build_dispatcher(consumer));
+        let wired: CompositionBinding<SeamEffect> =
+            CompositionBinding::wired_with(Arc::clone(&dispatcher));
+        assert!(!wired.is_standalone());
+        assert!(wired.wired().is_some());
+        assert!(wired.context_provider().is_none());
+
+        let context = Arc::new(PinnedSessionContext {
+            session_id: "session-xyz".into(),
+        });
+        let owner_provided: CompositionBinding<SeamEffect> =
+            CompositionBinding::owner_provided(dispatcher, context);
+        assert!(!owner_provided.is_standalone());
+        assert!(owner_provided.wired().is_some());
+        assert!(owner_provided.context_provider().is_some());
     }
 }

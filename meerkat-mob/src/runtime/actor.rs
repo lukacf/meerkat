@@ -1061,7 +1061,19 @@ impl MobActor {
         Ok(true)
     }
 
-    #[allow(dead_code)]
+    /// Count of in-flight flow runs tracked by the mob actor's shell,
+    /// reported by test-only snapshots (`MobOrchestratorSnapshot`,
+    /// `MobLifecycleSnapshot`). Wave-c WAR-1: this is shell-state
+    /// introspection, not an authority read seam — `run_cancel_tokens`
+    /// is the actor's own `BTreeMap<RunId, CancellationToken>` and
+    /// carries no DSL semantics. Production callers on the
+    /// `apply_in_phase` / `can_accept_in_phase` path (historical, see
+    /// docs/architecture/machine-simplification-proposal.md) were
+    /// removed earlier, leaving only the cfg-test snapshot sites; gate
+    /// the method the same way its callers are gated so the
+    /// `NoDeadAuthorityWiring` rule can drop the silencing allow
+    /// without widening production reachability.
+    #[cfg(test)]
     fn machine_active_run_count(&self) -> u32 {
         self.run_cancel_tokens.len() as u32
     }

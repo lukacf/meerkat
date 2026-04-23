@@ -203,6 +203,13 @@ machine! {
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
             emit SupersedePendingOccurrences { superseding_revision: self.revision }
         }
+
+        transition DeleteDeleted {
+            on input Delete { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Deleted }
+            update {}
+            to Deleted
+        }
     }
 }
 

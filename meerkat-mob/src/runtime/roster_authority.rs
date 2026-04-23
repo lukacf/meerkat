@@ -1,7 +1,6 @@
 use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 use meerkat_core::types::SessionId;
-use std::collections::BTreeSet;
 
 mod sealed {
     pub trait Sealed {}
@@ -15,9 +14,6 @@ mod sealed {
 /// without touching the underlying projection directly.
 pub(crate) trait RosterMutator: sealed::Sealed {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool;
-    /// Re-project the `Retiring` marker set from the DSL. See
-    /// [`Roster::sync_retiring_projection`].
-    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>);
     fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool;
     fn set_kickoff(
         &mut self,
@@ -138,10 +134,6 @@ impl RosterAuthority {
 impl RosterMutator for RosterAuthority {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool {
         self.roster.add(entry)
-    }
-
-    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>) {
-        self.roster.sync_retiring_projection(retiring_runtime_ids);
     }
 
     fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool {

@@ -26,10 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// (`MemberSpawned` creates `Active`; `MemberRetired` removes entirely).
 ///
 /// As of phase 5G, authority over `Retiring` is owned by the `MobMachine`
-/// DSL via its `member_state_markers` map. This enum is now a read-only
-/// projection produced by [`Roster::sync_retiring_projection`] whenever
-/// the DSL marker map changes. Shell code MUST NOT write to
-/// `RosterEntry::state` except through that projection path.
+/// DSL via its `member_state_markers` map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemberState {
     #[default]
@@ -83,14 +80,6 @@ pub struct RosterEntry {
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Lifecycle state (Active or Retiring).
-    ///
-    /// This is a read-only projection of the `MobMachine` DSL's
-    /// `member_state_markers` map. The actor calls
-    /// [`Roster::sync_retiring_projection`] after any transition that
-    /// mutates the marker map; no shell code should assign this field
-    /// directly. The field exists solely so that cloned/serialized
-    /// `RosterEntry` values can be consumed by read surfaces without
-    /// a back-channel to the DSL authority.
     #[serde(default)]
     pub state: MemberState,
     /// Set of peer identities this member is wired to.
@@ -489,31 +478,6 @@ impl Roster {
             .entries
             .values()
             .any(|e| e.state == MemberState::Active)
-    }
-
-    /// Re-project the `Retiring` marker set from the `MobMachine` DSL onto
-    /// the shell's `RosterEntry::state` field.
-    ///
-    /// This is the ONLY path by which `state` may be mutated in phase 5G:
-    /// the actor calls it after any DSL transition that touches
-    /// `member_state_markers`. Entries whose `agent_runtime_id` appears in
-    /// `retiring_runtime_ids` are marked `Retiring`; all others are
-    /// reset to `Active`.
-    ///
-    /// The set is keyed on the DSL's string representation of a runtime id
-    /// (`"{identity}:{generation}"`, matching
-    /// `mob_dsl::AgentRuntimeId::from_domain`). Callers read it directly
-    /// from `MobMachineAuthority::state::member_state_markers` and pass the
-    /// string keys through; no additional conversion is required.
-    pub(crate) fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>) {
-        for entry in self.entries.values_mut() {
-            let key = entry.agent_runtime_id.to_string();
-            entry.state = if retiring_runtime_ids.contains(&key) {
-                MemberState::Retiring
-            } else {
-                MemberState::Active
-            };
-        }
     }
 
     /// Verify that each entry's key matches its `agent_identity` field.
@@ -916,177 +880,13 @@ mod tests {
         assert_eq!(parsed.wired_to.len(), 1);
     }
 
-    /// Test helper: build a `Retiring` marker set keyed on the DSL's
-    /// stringified runtime-id form (`"{identity}:{generation}"`). Tests
-    /// spawn members at `Generation::INITIAL`, so the identity stringifies
-    /// to `"<identity>:0"`.
-    fn retiring_set_for(ids: &[&str]) -> BTreeSet<String> {
-        ids.iter()
-            .map(|id| AgentRuntimeId::initial(AgentIdentity::from(*id)).to_string())
-            .collect()
-    }
 
-    #[test]
-    fn test_sync_retiring_projection_flips_state() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
-        assert_eq!(
-            roster.get(&MeerkatId::from("a")).unwrap().state,
-            MemberState::Retiring
-        );
-        // Empty set restores to Active.
-        roster.sync_retiring_projection(&BTreeSet::new());
-        assert_eq!(
-            roster.get(&MeerkatId::from("a")).unwrap().state,
-            MemberState::Active
-        );
-        // Unknown runtime ids in the set are silently ignored.
-        roster.sync_retiring_projection(&retiring_set_for(&["nope"]));
-        assert_eq!(
-            roster.get(&MeerkatId::from("a")).unwrap().state,
-            MemberState::Active
-        );
-    }
 
-    #[test]
-    fn test_list_excludes_retiring() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("b"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
-        let active: Vec<_> = roster.list().collect();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].agent_identity, AgentIdentity::from("b"));
-    }
 
-    #[test]
-    fn test_list_all_includes_retiring() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("b"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
-        let all: Vec<_> = roster.list_all().collect();
-        assert_eq!(all.len(), 2);
-    }
 
-    #[test]
-    fn test_list_retiring_only() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("b"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
-        let retiring: Vec<_> = roster.list_retiring().collect();
-        assert_eq!(retiring.len(), 1);
-        assert_eq!(retiring[0].agent_identity, AgentIdentity::from("a"));
-    }
-
-    #[test]
-    fn test_len_and_is_empty_count_active_only() {
-        let mut roster = Roster::new();
-        assert!(roster.is_empty());
-        assert_eq!(roster.len(), 0);
-
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        assert_eq!(roster.len(), 1);
-        assert!(!roster.is_empty());
-
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
-        assert_eq!(roster.len(), 0);
-        assert!(roster.is_empty());
-    }
-
-    #[test]
-    fn test_by_profile_excludes_retiring() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("w1"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        add_member(
-            &mut roster,
-            MeerkatId::from("w2"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["w1"]));
-
-        let workers: Vec<_> = roster.by_profile(&ProfileName::from("worker")).collect();
-        assert_eq!(workers.len(), 1);
-        assert_eq!(workers[0].agent_identity, AgentIdentity::from("w2"));
-    }
-
-    #[test]
-    fn test_get_returns_retiring() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
-
-        let entry = roster.get(&MeerkatId::from("a"));
-        assert!(entry.is_some());
-        assert_eq!(entry.unwrap().state, MemberState::Retiring);
-    }
 
     #[test]
     fn test_serde_roundtrip_with_state_field() {
@@ -1298,24 +1098,6 @@ mod tests {
         assert_eq!(found.len(), 2);
     }
 
-    #[test]
-    fn test_find_by_label_excludes_retiring() {
-        let mut roster = Roster::new();
-        roster.add(make_add_entry(
-            MeerkatId::from("a"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-            {
-                let mut m = BTreeMap::new();
-                m.insert("faction".to_string(), "north".to_string());
-                m
-            },
-        ));
-        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
-        assert!(roster.find_by_label("faction", "north").is_none());
-        assert_eq!(roster.find_all_by_label("faction", "north").count(), 0);
-    }
 
     #[test]
     fn test_roster_entry_roundtrip_json() {

@@ -1404,12 +1404,10 @@ impl MobBuilder {
             phase => phase,
         };
         // Plain mobs (orchestrator: None in the definition) skip orchestrator
-        // guards entirely; mobs with an orchestrator bind the topology
-        // coordinator when entering Running.
+        // guards entirely. The coordinator-bound fact is MobMachine state
+        // (see `coordinator_bound` in the mob DSL), initialized to `true`
+        // by the machine's init block; no shell-side bind is needed.
         let has_orchestrator = definition.orchestrator.is_some();
-        if has_orchestrator && initial_phase == MobState::Running {
-            topology_service.bind_coordinator();
-        }
         let flow_engine = FlowEngine::new(
             flow_executor,
             handle.clone(),

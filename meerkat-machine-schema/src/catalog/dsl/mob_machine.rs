@@ -232,6 +232,94 @@ machine! {
         }
 
         // =====================================================================
+        // Track-B (R5): identity-level wiring mutations.
+        //
+        // `WireMembers`/`UnwireMembers` mutate `wiring_edges` at DSL
+        // authority and bump `topology_epoch`. The `WiringGraphChanged`
+        // effect lets the `RecomputeMobPeerOverlay` composition driver
+        // linearize peer-overlay recomputation against graph changes.
+        // =====================================================================
+
+        transition WireMembersRunning {
+            on input WireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        transition UnwireMembersRunning {
+            on input UnwireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            update {
+                self.wiring_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        // =====================================================================
+        // Track-B (R5): identity-level session-binding mutations.
+        //
+        // `BindMemberSession`/`RotateMemberSession`/`ReleaseMemberSession`
+        // are the explicit-driven counterparts to the Spawn/Retire-coupled
+        // binding updates. Each bumps `topology_epoch` and emits
+        // `MemberSessionBindingChanged { epoch, agent_identity, old, new }`
+        // so the composition driver can recompute overlay endpoints
+        // keyed on the updated session.
+        // =====================================================================
+
+        transition BindMemberSessionRunning {
+            on input BindMemberSession { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_has_runtime" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {
+                self.member_session_bindings.insert(agent_identity, session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(session_id) }
+        }
+
+        transition RotateMemberSessionRunning {
+            on input RotateMemberSession { agent_identity, old_session_id, new_session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_has_runtime" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "old_session_id_matches_current" {
+                self.member_session_bindings.get_cloned(agent_identity) == Some(old_session_id)
+            }
+            update {
+                self.member_session_bindings.insert(agent_identity, new_session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(old_session_id), new_session_id: Some(new_session_id) }
+        }
+
+        transition ReleaseMemberSessionRunning {
+            on input ReleaseMemberSession { agent_identity, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_id_matches_current" {
+                self.member_session_bindings.get_cloned(agent_identity) == Some(session_id)
+            }
+            update {
+                self.member_session_bindings.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+        }
+
+        // =====================================================================
         // Direct transitions
         // =====================================================================
 

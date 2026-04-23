@@ -1331,45 +1331,31 @@ impl MobActor {
     }
 
     fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
-        let mut topology_advanced = false;
         if self.has_orchestrator {
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::StageSpawn, "stage_spawn")?;
-            topology_advanced = true;
-        }
-        if topology_advanced {
-            self.flow_engine.note_topology_spawn_boundary();
         }
         Ok(())
     }
 
     fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
-        let mut topology_advanced = false;
-        if self.has_orchestrator {
-            match self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteSpawn, "complete_spawn")
-            {
-                Ok(()) => {
-                    topology_advanced = true;
-                }
-                Err(error) => {
-                    if let Some(spawn_ticket) = spawn_ticket {
-                        tracing::warn!(
-                            spawn_ticket,
-                            error = %error,
-                            context,
-                            "failed to reconcile orchestrator pending-spawn snapshot"
-                        );
-                    } else {
-                        tracing::warn!(
-                            error = %error,
-                            context,
-                            "failed to reconcile orchestrator pending-spawn snapshot"
-                        );
-                    }
-                }
+        if self.has_orchestrator
+            && let Err(error) =
+                self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteSpawn, "complete_spawn")
+        {
+            if let Some(spawn_ticket) = spawn_ticket {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    context,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
+            } else {
+                tracing::warn!(
+                    error = %error,
+                    context,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
             }
-        }
-        if topology_advanced {
-            self.flow_engine.note_topology_spawn_boundary();
         }
     }
 
@@ -2285,24 +2271,15 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                let mut topology_unbound = false;
-                                if self.has_orchestrator {
-                                    match self.apply_dsl_signal(
+                                if self.has_orchestrator
+                                    && let Err(error) = self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::StopOrchestrator,
                                         "stop_orchestrator",
-                                    ) {
-                                        Ok(()) => {
-                                            topology_unbound = true;
-                                        }
-                                        Err(error) => {
-                                            stop_result = Err(MobError::Internal(format!(
-                                                "orchestrator StopOrchestrator transition failed during stop: {error}"
-                                            )));
-                                        }
-                                    }
-                                }
-                                if topology_unbound {
-                                    self.flow_engine.unbind_topology_coordinator();
+                                    )
+                                {
+                                    stop_result = Err(MobError::Internal(format!(
+                                        "orchestrator StopOrchestrator transition failed during stop: {error}"
+                                    )));
                                 }
                                 if stop_result.is_ok()
                                     && let Err(error) = self.apply_dsl_input(
@@ -2362,24 +2339,15 @@ impl MobActor {
                                 Err(error)
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
-                                let mut topology_bound = false;
-                                if self.has_orchestrator {
-                                    match self.apply_dsl_signal(
+                                if self.has_orchestrator
+                                    && let Err(error) = self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::ResumeOrchestrator,
                                         "resume_orchestrator",
-                                    ) {
-                                        Ok(()) => {
-                                            topology_bound = true;
-                                        }
-                                        Err(error) => {
-                                            resume_result = Err(MobError::Internal(format!(
-                                                "orchestrator ResumeOrchestrator transition failed during resume: {error}"
-                                            )));
-                                        }
-                                    }
-                                }
-                                if topology_bound {
-                                    self.flow_engine.bind_topology_coordinator();
+                                    )
+                                {
+                                    resume_result = Err(MobError::Internal(format!(
+                                        "orchestrator ResumeOrchestrator transition failed during resume: {error}"
+                                    )));
                                 }
                                 if resume_result.is_ok()
                                     && let Err(error) = self.apply_dsl_input(
@@ -5203,7 +5171,6 @@ impl MobActor {
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator then Destroy.
         if self.has_orchestrator {
-            let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
                 let mut probe =
@@ -5211,21 +5178,16 @@ impl MobActor {
                 if probe
                     .apply_signal(mob_dsl::MobMachineSignal::StopOrchestrator)
                     .is_ok()
-                {
-                    if let Err(error) = self.apply_dsl_signal(
+                    && let Err(error) = self.apply_dsl_signal(
                         mob_dsl::MobMachineSignal::StopOrchestrator,
                         "stop_orchestrator_destroy",
-                    ) {
-                        return Err(MobError::Internal(format!(
-                            "orchestrator StopOrchestrator transition failed during destroy: {error}"
-                        ))
-                        .into());
-                    }
-                    topology_unbound = true;
+                    )
+                {
+                    return Err(MobError::Internal(format!(
+                        "orchestrator StopOrchestrator transition failed during destroy: {error}"
+                    ))
+                    .into());
                 }
-            }
-            if topology_unbound {
-                self.flow_engine.unbind_topology_coordinator();
             }
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::DestroyOrchestrator,
@@ -5500,7 +5462,6 @@ impl MobActor {
             );
         }
         if self.has_orchestrator {
-            let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
                 let mut probe =
@@ -5513,17 +5474,12 @@ impl MobActor {
                         mob_dsl::MobMachineSignal::StopOrchestrator,
                         "stop_orchestrator_reset",
                     )?;
-                    topology_unbound = true;
                 }
-            }
-            if topology_unbound {
-                self.flow_engine.unbind_topology_coordinator();
             }
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::ResumeOrchestrator,
                 "resume_orchestrator_reset",
             )?;
-            self.flow_engine.bind_topology_coordinator();
         }
         self.apply_dsl_input(mob_dsl::MobMachineInput::Resume, "resume_input_reset")
             .map_err(|error| {

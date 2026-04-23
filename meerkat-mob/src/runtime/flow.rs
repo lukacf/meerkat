@@ -104,18 +104,6 @@ impl FlowEngine {
         }
     }
 
-    pub(crate) fn bind_topology_coordinator(&self) -> u32 {
-        self.topology.bind_coordinator()
-    }
-
-    pub(crate) fn unbind_topology_coordinator(&self) -> u32 {
-        self.topology.unbind_coordinator()
-    }
-
-    pub(crate) fn note_topology_spawn_boundary(&self) -> u32 {
-        self.topology.note_spawn_boundary()
-    }
-
     pub async fn execute_flow(
         &self,
         run_id: RunId,

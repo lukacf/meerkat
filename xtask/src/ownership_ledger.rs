@@ -31,6 +31,13 @@ pub enum Subsystem {
     Runtime,
     Mcp,
     Mob,
+    /// Per-binding auth-lease lifecycle (dogma #44 resolved). The AuthMachine
+    /// kernel in `meerkat-runtime/src/auth_machine/` owns the semantics of
+    /// auth-lease phase transitions; the `AuthLeaseHandle` impl in
+    /// `meerkat-runtime/src/handles/auth_lease.rs` is the only boundary into
+    /// it. Tracking as its own subsystem keeps the state cells, semantic
+    /// operations, and coupling invariants orthogonal to the runtime core.
+    Auth,
 }
 
 impl fmt::Display for Subsystem {
@@ -39,6 +46,7 @@ impl fmt::Display for Subsystem {
             Self::Runtime => write!(f, "runtime"),
             Self::Mcp => write!(f, "mcp"),
             Self::Mob => write!(f, "mob"),
+            Self::Auth => write!(f, "auth"),
         }
     }
 }
@@ -990,7 +998,12 @@ pub fn format_ownership_finding(finding: &OwnershipFinding) -> String {
 
 fn build_report(registry: &OwnershipRegistry, findings: Vec<OwnershipFinding>) -> OwnershipReport {
     let mut summaries = Vec::new();
-    for subsystem in [Subsystem::Runtime, Subsystem::Mcp, Subsystem::Mob] {
+    for subsystem in [
+        Subsystem::Runtime,
+        Subsystem::Mcp,
+        Subsystem::Mob,
+        Subsystem::Auth,
+    ] {
         summaries.push(SubsystemSummary {
             subsystem,
             state_cells: registry
@@ -1110,7 +1123,12 @@ fn render_markdown(report: &OwnershipReport) -> String {
         ));
     }
 
-    for subsystem in [Subsystem::Runtime, Subsystem::Mcp, Subsystem::Mob] {
+    for subsystem in [
+        Subsystem::Runtime,
+        Subsystem::Mcp,
+        Subsystem::Mob,
+        Subsystem::Auth,
+    ] {
         out.push_str(&format!(
             "\n## {} State Cells\n\n",
             title_case_subsystem(subsystem)
@@ -1227,11 +1245,16 @@ fn title_case_subsystem(subsystem: Subsystem) -> &'static str {
         Subsystem::Runtime => "Runtime",
         Subsystem::Mcp => "MCP",
         Subsystem::Mob => "Mob",
+        Subsystem::Auth => "Auth",
     }
 }
 
 fn subsystem_of_path(path: &str) -> Subsystem {
-    if path.starts_with("meerkat-runtime/") {
+    if path.starts_with("meerkat-runtime/src/handles/auth_lease.rs")
+        || path.starts_with("meerkat-runtime/src/auth_machine/")
+    {
+        Subsystem::Auth
+    } else if path.starts_with("meerkat-runtime/") {
         Subsystem::Runtime
     } else if path.starts_with("meerkat-mcp/") {
         Subsystem::Mcp
@@ -1552,6 +1575,31 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 .map(str::to_string)
                 .collect(),
             },
+            // dogma #43/#44: AuthMachine authority boundary. Every
+            // AuthLeaseHandle trait method on `RuntimeAuthLeaseHandle` is a
+            // public boundary into the per-binding AuthMachine kernel. Each
+            // method must route through
+            // `auth_machine::dsl::AuthMachineState::transition`; reducer-style
+            // phase writes are a shell-authority bypass.
+            TraitImplBoundary {
+                family_name: "auth-lease-registry".into(),
+                path_suffix: "meerkat-runtime/src/handles/auth_lease.rs".into(),
+                type_name: "RuntimeAuthLeaseHandle".into(),
+                trait_name: "AuthLeaseHandle".into(),
+                method_names: vec![
+                    "acquire_lease",
+                    "mark_expiring",
+                    "begin_refresh",
+                    "complete_refresh",
+                    "refresh_failed",
+                    "mark_reauth_required",
+                    "release_lease",
+                    "snapshot",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            },
         ],
         public_inherent: vec![
             PublicInherentBoundary {
@@ -1691,11 +1739,9 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 "handle_force_cancel",
                 "handle_retire",
                 "handle_respawn",
-                "handle_wire",
-                "handle_unwire",
                 "handle_submit_work",
                 "handle_cancel_all_work",
-                "retire_all_members",
+                "handle_rotate_supervisor",
                 "handle_task_create",
                 "handle_task_update",
                 "handle_run_flow",
@@ -1887,7 +1933,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "session map is identity-to-runtime-capability reachability only; registration, stale attachment normalization, and teardown are enforced by adapter publication rules rather than ad hoc shell pre-checks",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "MeerkatMachine.comms_drain_slots",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
@@ -2175,6 +2221,24 @@ fn state_cells() -> Vec<StateCellEntry> {
             None,
             EntryStatus::Closed,
             "treat ops registry as opaque access to canonical operation lifecycle truth; spawn receipts carry canonical operation ids and live member-op lookups target non-terminal lifecycle state only",
+        ),
+        // dogma #44 resolved: per-binding AuthMachine slot map is the only
+        // shell-side container; the kernel state for each binding lives
+        // inside the AuthMachineState wrapper and all writes flow through
+        // `auth_machine::dsl::AuthMachineState::transition`.
+        state_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "RuntimeAuthLeaseHandle.machines",
+            Subsystem::Auth,
+            StateClass::CapabilityIndex,
+            "per-binding AuthMachine kernel state",
+            Some(contract(
+                "per-binding AuthMachineAuthority wrappers keyed by binding_key",
+                "acquire/expire/refresh/complete/fail/reauth/release DSL transitions + release removals",
+                StalenessPolicy::Forbidden,
+            )),
+            EntryStatus::Closed,
+            "shell owns only the per-binding registry; every phase/expiry/refresh-attempt write is a DSL transition through AuthMachineState::transition",
         ),
     ]
 }
@@ -3080,32 +3144,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
-            "handle_wire",
-            BoundaryKind::EnumDispatch,
-            "MobActor",
-            &["roster", "wiring", "edge_locks"],
-            "Roster wiring projection contract + trust-edge mutation + edge-lock discipline",
-            &[
-                "wire command establishes trust edges, emits canonical wiring events, and only then publishes reciprocal roster projection updates",
-            ],
-            &["wiring projection, trust-edge mutation, and edge-lock discipline remain coupled"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
-            "handle_unwire",
-            BoundaryKind::EnumDispatch,
-            "MobActor",
-            &["roster", "wiring", "edge_locks"],
-            "Roster wiring projection contract + trust-edge mutation + edge-lock discipline",
-            &[
-                "unwire command tears down trust edges and emits canonical unwire events before publishing reciprocal roster projection updates",
-            ],
-            &["wiring projection, trust-edge mutation, and edge-lock discipline remain coupled"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
             "handle_submit_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3136,16 +3174,16 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
-            "retire_all_members",
+            "handle_rotate_supervisor",
             BoundaryKind::EnumDispatch,
             "MobActor",
-            &["roster", "runtime_bridge", "pending_spawns"],
-            "PendingSpawnLineage + RosterAuthority + disposal pipeline",
+            &["roster", "runtime_bridge"],
+            "Supervisor-bridge rotation protocol + local authority advance after partial-rotation",
             &[
-                "bulk-retire first drains pending spawn lineage, then retires every canonical roster member through the same teardown path",
+                "rotation advances local authority; partial-failure against a rotated remote leaves local state as source of truth",
             ],
             &[
-                "bulk-retire cannot leave partially retired member/runtime linkage or orphan pending spawns",
+                "rotation rollback is best-effort; post-forward-rotation the local authority never reverts to superseded state",
             ],
             EntryStatus::Closed,
         ),
@@ -3254,6 +3292,104 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "reset command drains pending lineage, retires canonical members, and only then returns lifecycle to the reset-prepared state",
             ],
             &["reset command cannot preserve stale pending/member/runtime truth"],
+            EntryStatus::Closed,
+        ),
+        // dogma #43/#44 resolved: AuthMachine per-binding lease lifecycle.
+        // Every method fires exactly one DSL input through
+        // `auth_machine::dsl::AuthMachineState::transition`; the registry
+        // owns only the binding-keyed slot map.
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "acquire_lease",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine Acquire transition — per-binding lease lifecycle",
+            &[
+                "binding appears in auth_valid_leases with the supplied expiry and refresh_attempt reset to 0",
+            ],
+            &["every phase/expiry write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "mark_expiring",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine MarkExpiring transition",
+            &["phase advances to Expiring only from Valid"],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "begin_refresh",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine BeginRefresh transition — refresh dedup",
+            &[
+                "phase advances to Refreshing only from Valid or Expiring; concurrent BeginRefresh rejected",
+            ],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "complete_refresh",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine CompleteRefresh transition",
+            &["phase returns to Valid with updated expires_at/last_refresh only from Refreshing",],
+            &["every phase/expiry write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "refresh_failed",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine RefreshFailedTransient / RefreshFailedPermanent transitions",
+            &[
+                "transient failure bounces back to Expiring; permanent failure routes to ReauthRequired",
+            ],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "mark_reauth_required",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine MarkReauthRequired transition",
+            &["any known phase transitions to ReauthRequired"],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "release_lease",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine Release transition — terminal",
+            &["binding is removed from the registry after the DSL terminal transition"],
+            &["every removal follows a DSL terminal transition — no shell-side bypass"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-runtime/src/handles/auth_lease.rs",
+            "snapshot",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine observable snapshot — read boundary",
+            &["snapshot reflects the current DSL state of the binding, never a stale projection"],
+            &["read seam exposes AuthMachine truth directly without shell interpretation"],
             EntryStatus::Closed,
         ),
     ]

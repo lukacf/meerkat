@@ -127,6 +127,28 @@ machine! {
             // transition. The `supervisor_binding_consistency` invariant
             // enforces that the companion fields are populated exactly
             // when `supervisor_binding_kind == Bound`.
+            //
+            // C-F2 formalises the step-lock as a pair of generated
+            // handoff obligations on the `supervisor_trust_bundle`
+            // composition:
+            //
+            //   * `supervisor_trust_publish` — producer effect
+            //     `PublishSupervisorTrustEdge`; realising actor
+            //     `supervisor_bridge_owner` calls
+            //     `meerkat-comms::Router::add_trusted_peer(...)` and
+            //     feeds back `SupervisorTrustEdgePublished` (success)
+            //     or `SupervisorTrustEdgePublishFailed` (failure,
+            //     triggers DSL rollback).
+            //   * `supervisor_trust_revoke` — producer effect
+            //     `RevokeSupervisorTrustEdge`; realising actor calls
+            //     `Router::remove_trusted_peer(...)` and feeds back
+            //     `SupervisorTrustEdgeRevoked` or
+            //     `SupervisorTrustEdgeRevokeFailed`.
+            //
+            // Both use `ClosurePolicy::AckRequired`. See
+            // `meerkat-machine-schema/src/compat/supervisor_trust_bridge.rs`
+            // and `xtask seam-inventory` output
+            // (`## Declared Handoff Obligation Pairs`).
             supervisor_binding_kind: Enum<SupervisorBindingKind>,
             supervisor_bound_name: Option<String>,
             supervisor_bound_peer_id: Option<String>,

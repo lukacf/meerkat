@@ -3,7 +3,7 @@ use std::fmt;
 use clap::Args;
 use meerkat_machine_schema::{
     CompositionSchema, EffectDisposition, MachineSchema, Route, canonical_composition_schemas,
-    canonical_machine_schemas,
+    canonical_machine_schemas, compat_composition_schemas,
 };
 
 /// CLI args for `xtask seam-inventory`.
@@ -753,6 +753,7 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         &unresolved_public_surface_alignment_debt,
         &routed_realizations,
         &unresolved_routed_debt,
+        &compositions,
     );
 
     let strict = args.strict;
@@ -978,6 +979,7 @@ fn print_summary(
     unresolved_public_surface_alignment_debt: &[&SurfaceContractEntry],
     routed_realizations: &[RoutedRealization],
     unresolved_routed_debt: &[&RoutedRealization],
+    compositions: &[CompositionSchema],
 ) {
     let total = entries.len();
     let no_owner = entries
@@ -1015,6 +1017,57 @@ fn print_summary(
             println!("  {} :: {}", entry.machine, entry.effect_variant);
         }
     }
+    println!();
+    // Generated handoff obligation pairs declared in canonical + compat
+    // compositions. Each protocol is an obligation pair: producer effect
+    // → realising actor → typed feedback input(s) that close the
+    // step-lock (ack / failure). Compat producers (e.g. the
+    // `SupervisorTrustBridgeMachine`) host the annotation for effects
+    // whose authority lives in the runtime shell but whose producer
+    // shape needs a schema-declared `handoff_protocol`.
+    let compat = compat_composition_schemas();
+    let mut protocol_rows: Vec<(String, String, String, String, String, String)> = Vec::new();
+    let all_compositions: Vec<&CompositionSchema> =
+        compositions.iter().chain(compat.iter()).collect();
+    for composition in &all_compositions {
+        for protocol in &composition.handoff_protocols {
+            let feedback_variants: Vec<String> = protocol
+                .allowed_feedback_inputs
+                .iter()
+                .map(|fb| {
+                    format!(
+                        "{}::{}",
+                        fb.machine_instance.as_str(),
+                        fb.input_variant.as_str(),
+                    )
+                })
+                .collect();
+            protocol_rows.push((
+                protocol.name.as_str().to_string(),
+                composition.name.as_str().to_string(),
+                protocol.producer_instance.as_str().to_string(),
+                protocol.effect_variant.as_str().to_string(),
+                protocol.realizing_actor.as_str().to_string(),
+                feedback_variants.join(", "),
+            ));
+        }
+    }
+    protocol_rows.sort();
+    println!("## Declared Handoff Obligation Pairs (canonical + compat)");
+    println!(
+        "  {:40} {:28} {:30} {:32} {:32} feedback_inputs",
+        "protocol", "composition", "producer_instance", "effect", "realizing_actor"
+    );
+    for (protocol, composition, producer, effect, actor, feedback) in &protocol_rows {
+        println!(
+            "  {:40} {:28} {:30} {:32} {:32} {}",
+            protocol, composition, producer, effect, actor, feedback
+        );
+    }
+    println!(
+        "  total handoff obligation pairs:            {}",
+        protocol_rows.len()
+    );
     println!();
     println!("## Public Surface Contracts");
     for entry in public_surface_contracts {

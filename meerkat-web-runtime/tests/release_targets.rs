@@ -9,7 +9,6 @@ fn parse_js_error(raw: wasm_bindgen::JsValue) -> serde_json::Value {
 }
 
 #[wasm_bindgen_test(async)]
-#[ignore]
 async fn release_targets_red_ok_browser_runtime_bootstrap_remains_explicit() {
     let err = create_session_simple(
         &json!({

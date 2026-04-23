@@ -111,7 +111,6 @@ version = "0.1.0"
 }
 
 #[wasm_bindgen_test(async)]
-#[ignore]
 async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_tools_and_events() {
     let not_initialized = create_session_simple(
         &json!({
@@ -275,7 +274,6 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 }
 
 #[wasm_bindgen_test]
-#[ignore]
 fn browser_contract_rejects_forbidden_browser_capabilities_before_session_creation() {
     let blocked = inspect_mobpack(&build_mobpack(&["shell"]))
         .expect_err("forbidden browser capability should be rejected");

@@ -22,6 +22,9 @@ machine! {
             realtime_binding_authority_epoch: Option<u64>,
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
+            realtime_reconnect_attempt_count: u64,
+            realtime_reconnect_next_retry_at_ms: Option<u64>,
+            realtime_reconnect_deadline_at_ms: Option<u64>,
             // Live-topology reconfigure phase — temporarily blocks realtime
             // publishes/attaches while an LLM-identity swap is in progress.
             live_topology_phase: Enum<LiveTopologyPhase>,
@@ -213,6 +216,9 @@ machine! {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
+            realtime_reconnect_attempt_count = 0,
+            realtime_reconnect_next_retry_at_ms = None,
+            realtime_reconnect_deadline_at_ms = None,
             live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
@@ -319,6 +325,12 @@ machine! {
             DetachRealtimeBinding,
             RequireRealtimeReattach,
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            ProjectRealtimeReconnectProgress {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
+            ClearRealtimeReconnectProgress,
             // Ops-barrier satisfaction feedback input (wired to the
             // `ops_barrier_satisfaction` handoff protocol on the compat
             // `mob_bundle` composition). Carries the exact operation ids
@@ -548,6 +560,11 @@ machine! {
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
+            RealtimeReconnectProgressProjected {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
             // MCP server lifecycle effects. Emitted on each per-server state
             // transition so the shell can toggle the `[MCP_PENDING]` system
             // notice and refresh tool availability deterministically.
@@ -651,6 +668,7 @@ machine! {
         disposition RejectSurfaceCall => external,
         disposition RealtimeIntentProjected => external,
         disposition RealtimeBindingRotated => external,
+        disposition RealtimeReconnectProgressProjected => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
         disposition PeerInteractionStateChanged => external,
@@ -1942,6 +1960,40 @@ machine! {
                 self.realtime_reattach_required = false;
             }
             to Idle
+        }
+
+        transition ProjectRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeReconnectProgress { attempt_count, next_retry_at_ms, deadline_at_ms }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = attempt_count;
+                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
+                self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: attempt_count,
+                next_retry_at_ms: next_retry_at_ms,
+                deadline_at_ms: deadline_at_ms,
+            }
+        }
+
+        transition ClearRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ClearRealtimeReconnectProgress
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: 0,
+                next_retry_at_ms: None,
+                deadline_at_ms: None,
+            }
         }
 
         // =====================================================================

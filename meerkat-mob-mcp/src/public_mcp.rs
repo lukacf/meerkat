@@ -2,9 +2,8 @@ use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, MobPeerTarget, MobUnwireParams, MobWireParams,
     RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget, RealtimeOpenRequest,
-    RealtimeStatusParams, RealtimeStatusResult, WireContentInput, WireMobBackendKind,
-    WireMobRuntimeMode, WireRuntimeBinding,
+    RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    WireContentInput, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -210,88 +209,6 @@ const fn default_limit() -> usize {
     100
 }
 
-fn channel_status(
-    state: RealtimeChannelState,
-    reason: Option<&str>,
-    attempt_count: u32,
-) -> RealtimeChannelStatus {
-    RealtimeChannelStatus {
-        state,
-        attempt_count,
-        next_retry_at: None,
-        deadline_at: None,
-        reason: reason.map(str::to_string),
-    }
-}
-
-fn realtime_status_from_runtime(
-    status: meerkat_runtime::RealtimeAttachmentStatus,
-) -> RealtimeChannelStatus {
-    match status {
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached => channel_status(
-            RealtimeChannelState::Closed,
-            Some("no realtime channel is open for this target"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound
-        | meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => channel_status(
-            RealtimeChannelState::Opening,
-            Some("realtime attachment is pending"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
-            channel_status(RealtimeChannelState::Ready, None, 0)
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment replacement is pending"),
-            1,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment requires reattach"),
-            1,
-        ),
-    }
-}
-
-#[allow(dead_code)]
-fn realtime_status_from_mob_status(status: &Value) -> Result<RealtimeChannelStatus, McpToolError> {
-    let Some(status) = status.as_str() else {
-        return Err(McpToolError::internal(
-            "mob member live attachment status should serialize as a string",
-        ));
-    };
-    let projected = match status {
-        "unattached" => channel_status(
-            RealtimeChannelState::Closed,
-            Some("no realtime channel is open for this target"),
-            0,
-        ),
-        "intent_present_unbound" | "binding_not_ready" => channel_status(
-            RealtimeChannelState::Opening,
-            Some("realtime attachment is pending"),
-            0,
-        ),
-        "binding_ready" => channel_status(RealtimeChannelState::Ready, None, 0),
-        "replacement_pending" => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment replacement is pending"),
-            1,
-        ),
-        "reattach_required" => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment requires reattach"),
-            1,
-        ),
-        other => {
-            return Err(McpToolError::internal(format!(
-                "unsupported mob live attachment status '{other}'"
-            )));
-        }
-    };
-    Ok(projected)
-}
 
 /// W3-H: resolve a `RealtimeChannelTarget` to the concrete bridge session id
 /// the RPC query should operate on. `SessionTarget` returns its session id
@@ -336,12 +253,10 @@ async fn realtime_status_payload(
 ) -> Result<RealtimeStatusResult, McpToolError> {
     let session_id = resolve_target_session_id(state, &params.target).await?;
     let status = state
-        .realtime_session_realtime_attachment_status(&session_id)
+        .realtime_session_realtime_channel_status(&session_id)
         .await
         .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-    Ok(RealtimeStatusResult {
-        status: realtime_status_from_runtime(status),
-    })
+    Ok(RealtimeStatusResult { status })
 }
 
 pub fn public_tool_names() -> &'static [&'static str] {

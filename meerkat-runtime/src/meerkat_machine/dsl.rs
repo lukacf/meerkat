@@ -1936,6 +1936,25 @@ machine! {
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
 
+            // --- Realtime reconnect progress (wave-c C-9c R4) ---
+            //
+            // Overlay-tracked reconnect progress the realtime-WS shell projects
+            // into the DSL via `ProjectRealtimeReconnectProgress`. RPC/MCP
+            // `realtime/status` queries against a session whose socket is
+            // actively reconnecting read these fields through
+            // `project_realtime_attachment_status` so the public
+            // `RealtimeChannelStatus` surfaces real `attempt_count` and
+            // `next_retry_at` instead of the pre-R4 `1`/`0` hard-codes.
+            //
+            // Cleared on `PublishRealtimeSignal::BindingReady` and on any
+            // transition that returns the binding to `Unbound` without a
+            // reattach requirement — the overlay only owns the reconnect
+            // cycle's lifetime, so progress fields fall to zero the instant
+            // the cycle ends.
+            realtime_reconnect_attempt_count: u64,
+            realtime_reconnect_next_retry_at_ms: Option<u64>,
+            realtime_reconnect_deadline_at_ms: Option<u64>,
+
             // --- Live-topology reconfigure phase ---
             live_topology_phase: LiveTopologyPhase,
 
@@ -2194,6 +2213,9 @@ machine! {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
+            realtime_reconnect_attempt_count = 0,
+            realtime_reconnect_next_retry_at_ms = None,
+            realtime_reconnect_deadline_at_ms = None,
             live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
@@ -2414,6 +2436,17 @@ machine! {
             DetachRealtimeBinding,
             RequireRealtimeReattach,
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            // Wave-c C-9c R4: overlay-tracked reconnect progress projected
+            // into DSL state so RPC/MCP status queries read real retry state.
+            // The `*_ms` fields are millis-since-epoch so the DSL doesn't
+            // depend on `chrono::DateTime`; the shell converts at the
+            // projection boundary.
+            ProjectRealtimeReconnectProgress {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
+            ClearRealtimeReconnectProgress,
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -2649,6 +2682,15 @@ machine! {
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
+            // Wave-c C-9c R4: reconnect-progress projected effect. Shell
+            // consumers (e.g. observability pipelines) can subscribe;
+            // production RPC/MCP `realtime/status` responders read the
+            // state field directly via `project_realtime_attachment_status`.
+            RealtimeReconnectProgressProjected {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
             // MCP server lifecycle effects.
@@ -2751,6 +2793,7 @@ machine! {
         disposition RejectSurfaceCall => external,
         disposition RealtimeIntentProjected => external,
         disposition RealtimeBindingRotated => external,
+        disposition RealtimeReconnectProgressProjected => external,
         disposition LiveTopologyPhaseChanged => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
@@ -5522,6 +5565,47 @@ machine! {
                 self.realtime_reattach_required = false;
             }
             to Idle
+        }
+
+        // Wave-c C-9c R4: overlay → DSL input that records the current
+        // reconnect-cycle attempt count and next-retry deadline so
+        // `project_realtime_attachment_status` can surface them to
+        // RPC/MCP `realtime/status` responders.
+        transition ProjectRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeReconnectProgress { attempt_count, next_retry_at_ms, deadline_at_ms }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = attempt_count;
+                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
+                self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: attempt_count,
+                next_retry_at_ms: next_retry_at_ms,
+                deadline_at_ms: deadline_at_ms,
+            }
+        }
+
+        // Wave-c C-9c R4: reset the reconnect-progress fields. Shell fires
+        // this when the overlay clears (successful reconnect, operator
+        // detach, or non-reconnecting lifecycle transition).
+        transition ClearRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ClearRealtimeReconnectProgress
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: 0,
+                next_retry_at_ms: None,
+                deadline_at_ms: None,
+            }
         }
 
         // =====================================================================

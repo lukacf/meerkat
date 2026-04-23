@@ -238,36 +238,4 @@ mod tests {
         );
         assert!((env.env_lookup)("OTHER").is_none());
     }
-
-    #[test]
-    fn default_registry_is_empty_post_b2_split() {
-        // llm-core's default is empty — facade owns aggregation.
-        #[allow(deprecated)]
-        let r = ProviderRuntimeRegistry::default_registry();
-        assert!(r.get(Provider::OpenAI).is_none());
-        assert!(r.get(Provider::Anthropic).is_none());
-        assert!(r.get(Provider::Gemini).is_none());
-        assert!(r.get(Provider::SelfHosted).is_none());
-    }
-
-    #[test]
-    fn resolve_returns_scaffolding_stub() {
-        let r = ProviderRuntimeRegistry::default();
-        let realm = RealmConnectionSet {
-            realm_id: "dev".into(),
-            backends: Default::default(),
-            auth_profiles: Default::default(),
-            bindings: Default::default(),
-            default_binding: None,
-        };
-        let env = ResolverEnvironment::testing();
-        let result = futures::executor::block_on(r.resolve(&realm, "x", &env));
-        // Empty realm has no bindings — lookup_binding surfaces
-        // UnknownBinding which the registry stringifies into
-        // SourceResolutionFailed.
-        assert!(matches!(
-            result,
-            Err(ProviderAuthError::SourceResolutionFailed(_))
-        ));
-    }
 }

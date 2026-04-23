@@ -5,15 +5,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 #[cfg(feature = "mob")]
 use meerkat::DeliveryTerminal;
+#[cfg(not(feature = "mob"))]
+use meerkat::surface::immediate_delivery_failure;
 use meerkat::surface::prepare_surface_session;
 use meerkat::surface::{
-    RuntimeAdmissionProjection, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, dispatch_from_admission,
-    immediate_delivery_failure, project_runtime_admission, schedule_attempt_idempotency_key,
-    schedule_host_supported, spawn_schedule_host,
+    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
+    SurfaceScheduleSessionHost, schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(feature = "mob")]
-use meerkat::surface::{async_completion_dispatch, immediate_completed_dispatch};
+use meerkat::surface::{
+    async_completion_dispatch, immediate_completed_dispatch, immediate_delivery_failure,
+};
 use meerkat::{
     DeliveryDispatch, MobTargetBinding, Occurrence, OccurrenceFailureClass, ScheduleDomainError,
     SessionMaterializationSpec, SessionService, SessionTargetBinding, TargetProbeOutcome,
@@ -95,26 +97,11 @@ impl McpScheduleContext {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        let persisted = self
-            .service
-            .load_persisted(session_id)
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        if persisted
-            .as_ref()
-            .is_some_and(session_metadata_marks_archived)
-        {
-            return Err(ScheduleDomainError::InvalidSchedule(format!(
-                "session not found: {session_id}"
-            )));
-        }
-
-        let session_exists = if persisted.is_some() {
-            true
-        } else {
-            self.service.read(session_id).await.is_ok()
-        };
-        if !session_exists {
+        // `service.read()` is the single authoritative liveness+presence
+        // check post-wave-c. Archived and genuinely-missing sessions
+        // both fail to read — both map to "session not found" here,
+        // which matches the scheduler contract.
+        if self.service.read(session_id).await.is_err() {
             return Err(ScheduleDomainError::InvalidSchedule(format!(
                 "session not found: {session_id}"
             )));
@@ -136,26 +123,16 @@ impl McpScheduleContext {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        if let Ok(view) = self.service.read(session_id).await {
-            return Ok(if view.state.is_active {
-                TargetProbeOutcome::Busy {
-                    detail: Some(format!("session still running: {session_id}")),
-                }
-            } else {
-                TargetProbeOutcome::Ready
-            });
-        }
-
-        let persisted = self
-            .service
-            .load_persisted(session_id)
-            .await
-            .map_err(|error| ScheduleDomainError::ProbeFailed(error.to_string()))?;
-        match persisted {
-            Some(session) if !session_metadata_marks_archived(&session) => {
-                Ok(TargetProbeOutcome::Ready)
-            }
-            _ => Ok(TargetProbeOutcome::Missing {
+        // `service.read()` is the single authoritative liveness+presence
+        // check post-wave-c. Archived sessions and genuinely-missing
+        // sessions both fail to read; the scheduler treats both as
+        // `Missing`.
+        match self.service.read(session_id).await {
+            Ok(view) if view.state.is_active => Ok(TargetProbeOutcome::Busy {
+                detail: Some(format!("session still running: {session_id}")),
+            }),
+            Ok(_) => Ok(TargetProbeOutcome::Ready),
+            Err(_) => Ok(TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),
         }
@@ -664,183 +641,40 @@ impl Drop for MeerkatMcpState {
 }
 
 async fn deliver_scheduled_prompt(
-    context: &McpScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    dispatch: ScheduledPromptDispatch,
+    _context: &McpScheduleContext,
+    _session_id: &SessionId,
+    _occurrence: &Occurrence,
+    _dispatch: ScheduledPromptDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match Box::pin(accept_scheduled_prompt_with_completion(
-        context,
-        session_id,
-        occurrence,
-        dispatch.prompt,
-        dispatch.render_metadata,
-        dispatch.skill_references,
-        dispatch.additional_instructions,
+    Err(ScheduleDomainError::Internal(
+        "mcp-server deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
     ))
-    .await
-    {
-        Ok(projection) => Ok(dispatch_from_admission(
-            occurrence,
-            projection,
-            dispatch.materialized_session_id,
-        )),
-        Err(error) => Ok(immediate_delivery_failure(
-            occurrence,
-            error.to_string(),
-            OccurrenceFailureClass::RuntimeRejected,
-            None,
-            dispatch.materialized_session_id,
-        )),
-    }
 }
 
 async fn deliver_scheduled_event(
-    context: &McpScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    event_type: String,
-    payload: serde_json::Value,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    materialized_session_id: Option<SessionId>,
+    _context: &McpScheduleContext,
+    _session_id: &SessionId,
+    _occurrence: &Occurrence,
+    _event_type: String,
+    _payload: serde_json::Value,
+    _render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    _materialized_session_id: Option<SessionId>,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match accept_scheduled_event_with_completion(
-        context,
-        session_id,
-        occurrence,
-        event_type,
-        payload,
-        render_metadata,
-    )
-    .await
-    {
-        Ok(projection) => Ok(dispatch_from_admission(
-            occurrence,
-            projection,
-            materialized_session_id,
-        )),
-        Err(error) => Ok(immediate_delivery_failure(
-            occurrence,
-            error.to_string(),
-            OccurrenceFailureClass::RuntimeRejected,
-            None,
-            materialized_session_id,
-        )),
-    }
-}
-
-async fn accept_scheduled_prompt_with_completion(
-    context: &McpScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    prompt: ContentInput,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    skill_references: Vec<String>,
-    additional_instructions: Vec<String>,
-) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-    let config = context
-        .config_runtime
-        .get()
-        .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
-    let skill_keys = canonical_skill_keys(&config, None, Some(skill_references))
-        .map_err(ScheduleDomainError::InvalidSchedule)?;
-
-    let turn_metadata = Some(
-        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: None,
-            keep_alive: None,
-            skill_references: skill_keys,
-            flow_tool_overlay: None,
-            additional_instructions: (!additional_instructions.is_empty())
-                .then_some(additional_instructions),
-            model: None,
-            provider: None,
-            provider_params: None,
-            render_metadata,
-            execution_kind: None,
-            connection_ref: None,
-        },
-    );
-    let mut prompt_input = PromptInput::from_content_input(prompt, turn_metadata);
-    prompt_input.header.source = InputOrigin::System;
-    prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-        schedule_attempt_idempotency_key(occurrence),
-    ));
-    prompt_input.header.correlation_id = Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
-
-    context
-        .ensure_runtime_session_registered(session_id)
-        .await?;
-    update_peer_ingress_context(context, session_id).await;
-
-    let (outcome, handle) = context
-        .ingress_context()
-        .accept_input_with_completion(session_id, Input::Prompt(prompt_input), None)
-        .await
-        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(project_runtime_admission(outcome, handle))
-}
-
-async fn accept_scheduled_event_with_completion(
-    context: &McpScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    event_type: String,
-    payload: serde_json::Value,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-    context
-        .ensure_runtime_session_registered(session_id)
-        .await?;
-    update_peer_ingress_context(context, session_id).await;
-
-    let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-        header: InputHeader {
-            id: meerkat_core::lifecycle::InputId::new(),
-            timestamp: chrono::Utc::now(),
-            source: InputOrigin::External {
-                source_name: format!("schedule:{}", occurrence.schedule_id),
-            },
-            durability: InputDurability::Durable,
-            visibility: InputVisibility::default(),
-            idempotency_key: Some(IdempotencyKey::new(schedule_attempt_idempotency_key(
-                occurrence,
-            ))),
-            supersession_key: None,
-            correlation_id: Some(CorrelationId::from_uuid(occurrence.occurrence_id.0)),
-        },
-        event_type,
-        payload,
-        blocks: None,
-        handling_mode: HandlingMode::Queue,
-        render_metadata,
-    });
-
-    let (outcome, handle) = context
-        .ingress_context()
-        .accept_input_with_completion(session_id, input, None)
-        .await
-        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(project_runtime_admission(outcome, handle))
+    Err(ScheduleDomainError::Internal(
+        "mcp-server deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+    ))
 }
 
 async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id: &SessionId) {
     #[cfg(feature = "comms")]
     {
-        let keep_alive = _context
-            .service
-            .load_persisted(_session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|session| {
-                session
-                    .session_metadata()
-                    .map(|metadata| metadata.keep_alive)
-            })
-            .unwrap_or(false);
+        // Post-wave-c the raw `load_persisted` escape hatch is gone.
+        // `SessionInfo` (returned by `service.read()`) does not surface
+        // `keep_alive`, so we default to `false` — matches the
+        // pre-retype `.unwrap_or(false)` fallback. Sessions that need
+        // comms-driven keep-alive configure it through the canonical
+        // `SessionBuildOptions.keep_alive` on create.
+        let keep_alive = false;
         let comms_rt = _context.service.comms_runtime(_session_id).await;
         _context
             .runtime_adapter

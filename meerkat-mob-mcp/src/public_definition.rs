@@ -128,7 +128,10 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             .output_schema
             .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
             .transpose()?,
-        provider_params: input.provider_params,
+        provider_params: input
+            .provider_params
+            .map(|wire| serde_json::to_value(wire).map_err(|error| error.to_string()))
+            .transpose()?,
     })
 }
 

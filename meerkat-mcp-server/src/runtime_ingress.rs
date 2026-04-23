@@ -271,7 +271,7 @@ impl McpRuntimeIngressContext {
     ) -> Result<SessionId, SessionError> {
         let session = self
             .service
-            .load_persisted(session_id)
+            .load_authoritative_session(session_id)
             .await?
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.clone(),
@@ -520,10 +520,6 @@ async fn apply_runtime_turn(
         flow_tool_overlay: primitive
             .turn_metadata()
             .and_then(|meta| meta.flow_tool_overlay.clone()),
-        additional_instructions: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.additional_instructions.clone()),
-        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
     };
 
     match context
@@ -559,12 +555,6 @@ async fn apply_runtime_turn(
                         flow_tool_overlay: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
-                        additional_instructions: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.additional_instructions.clone()),
-                        execution_kind: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.execution_kind),
                     },
                     boundary,
                     contributing_input_ids,

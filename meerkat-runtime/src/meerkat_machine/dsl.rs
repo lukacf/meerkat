@@ -1383,6 +1383,22 @@ pub enum TurnCancellationReason {
     Observed,
 }
 
+/// Typed admission-signal classifier for the `PostAdmissionSignal` effect.
+/// Closed set of post-admission wake/interrupt intents emitted by the
+/// ingress authority so the shell dispatcher matches exhaustively on a
+/// typed discriminant instead of comparing string literals. Mirrors the
+/// shell-side `driver::ephemeral::PostAdmissionSignal` strength ordering
+/// (WakeLoop < InterruptYielding < RequestImmediateProcessing); the
+/// shell enum additionally carries a `None` bottom that the DSL never
+/// emits, so only the three emitted variants appear here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PostAdmissionSignalKind {
+    #[default]
+    WakeLoop,
+    InterruptYielding,
+    RequestImmediateProcessing,
+}
+
 /// Typed base lifecycle state for an external tool surface. Closed mirror of
 /// [`meerkat_core::tool_scope::ExternalToolSurfaceBaseState`] — replaces the
 /// former literal-string values in `surface_base_state`.
@@ -2637,7 +2653,7 @@ machine! {
             ApplyControlPlaneCommand,
             InitiateRecycle,
             IngressAccepted,
-            PostAdmissionSignal { signal: String },
+            PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
             CompletionResolved,
@@ -3630,7 +3646,7 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Idle + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionIdleImmediate {
@@ -3642,7 +3658,7 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
         // Attached + immediate → Running (phase change!)
         transition AcceptWithCompletionAttachedImmediate {
@@ -3657,7 +3673,7 @@ machine! {
             }
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
             emit SubmitRunPrimitive
         }
         // Attached + queued (immediate=false, interrupt_yielding=false)
@@ -3670,7 +3686,7 @@ machine! {
             update {}
             to Attached
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
         transition AcceptWithCompletionRunningQueuedPassive {
@@ -3703,7 +3719,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
         transition AcceptWithCompletionRunningInterruptYielding {
@@ -3715,7 +3731,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "InterruptYielding" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
@@ -3727,7 +3743,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops

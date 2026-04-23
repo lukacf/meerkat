@@ -1029,3 +1029,42 @@ fn post_admission_signal_request_immediate_ordering() {
     assert!(!PostAdmissionSignal::InterruptYielding.should_process_immediately());
     assert!(PostAdmissionSignal::RequestImmediateProcessing.should_process_immediately());
 }
+
+// Pins the DSL effect carries a typed `PostAdmissionSignalKind` variant, not
+// a string. The `map` helper's match is exhaustive with no default arm —
+// adding a variant without updating consumers stops compilation.
+#[test]
+fn post_admission_signal_dsl_effect_carries_typed_variant() {
+    use meerkat_runtime::meerkat_machine::dsl::{MeerkatMachineEffect, PostAdmissionSignalKind};
+
+    fn map(signal: PostAdmissionSignalKind) -> PostAdmissionSignal {
+        match signal {
+            PostAdmissionSignalKind::WakeLoop => PostAdmissionSignal::WakeLoop,
+            PostAdmissionSignalKind::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            PostAdmissionSignalKind::RequestImmediateProcessing => {
+                PostAdmissionSignal::RequestImmediateProcessing
+            }
+        }
+    }
+
+    for (variant, expected) in [
+        (
+            PostAdmissionSignalKind::WakeLoop,
+            PostAdmissionSignal::WakeLoop,
+        ),
+        (
+            PostAdmissionSignalKind::InterruptYielding,
+            PostAdmissionSignal::InterruptYielding,
+        ),
+        (
+            PostAdmissionSignalKind::RequestImmediateProcessing,
+            PostAdmissionSignal::RequestImmediateProcessing,
+        ),
+    ] {
+        let effect = MeerkatMachineEffect::PostAdmissionSignal { signal: variant };
+        let MeerkatMachineEffect::PostAdmissionSignal { signal } = effect else {
+            panic!("constructed effect did not round-trip as PostAdmissionSignal");
+        };
+        assert_eq!(map(signal), expected);
+    }
+}

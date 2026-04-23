@@ -14486,7 +14486,7 @@ fn runtime_modeled_post_admission_signal_from_effects(effects: &[KernelEffect]) 
         .find(|effect| effect.variant == "PostAdmissionSignal")
         .and_then(|effect| effect.fields.get("signal"))
         .and_then(|value| match value {
-            KernelValue::String(value) => Some(value.clone()),
+            KernelValue::NamedVariant { variant, .. } => Some(variant.as_str().to_string()),
             _ => None,
         })
         .unwrap_or_else(|| "None".to_string())

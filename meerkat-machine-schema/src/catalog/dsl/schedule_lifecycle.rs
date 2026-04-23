@@ -197,6 +197,17 @@ machine! {
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
             emit SupersedePendingOccurrences { superseding_revision: self.revision }
         }
+
+        // Idempotent no-op: Delete applied to an already-Deleted schedule
+        // leaves state unchanged and emits zero effects. Without this the
+        // authority would return NoMatchingTransition and shell callers
+        // would be forced to re-derive the phase before firing Delete.
+        transition DeleteDeleted {
+            on input Delete { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Deleted }
+            update {}
+            to Deleted
+        }
     }
 }
 
@@ -215,4 +226,41 @@ pub enum OverlapPolicy {
 pub enum MissingTargetPolicy {
     MarkMisfired,
     Skip,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_from_deleted_is_noop() {
+        let mut auth = ScheduleLifecycleMachineAuthority::new();
+
+        let first = ScheduleLifecycleMachineMutator::apply(
+            &mut auth,
+            ScheduleLifecycleInput::Delete { at_utc_ms: 100 },
+        )
+        .expect("first Delete from Active must succeed");
+        assert_eq!(first.to_phase, ScheduleLifecycleState::Deleted);
+        let revision_after_delete = auth.state.revision;
+        let planning_after_delete = auth.state.planning_cursor_utc_ms;
+        let ordinal_after_delete = auth.state.next_occurrence_ordinal;
+
+        let second = ScheduleLifecycleMachineMutator::apply(
+            &mut auth,
+            ScheduleLifecycleInput::Delete { at_utc_ms: 200 },
+        )
+        .expect("Delete from Deleted must be idempotent, not a transition error");
+        assert_eq!(second.from_phase, ScheduleLifecycleState::Deleted);
+        assert_eq!(second.to_phase, ScheduleLifecycleState::Deleted);
+        assert!(
+            second.effects.is_empty(),
+            "Delete from Deleted must emit zero effects, got {:?}",
+            second.effects
+        );
+        assert_eq!(auth.state.revision, revision_after_delete);
+        assert_eq!(auth.state.planning_cursor_utc_ms, planning_after_delete);
+        assert_eq!(auth.state.next_occurrence_ordinal, ordinal_after_delete);
+    }
 }

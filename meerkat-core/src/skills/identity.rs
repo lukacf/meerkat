@@ -15,10 +15,7 @@ pub struct SkillAlias {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SourceIdentityRegistry {
-    aliases: HashMap<String, SkillKey>,
-    remaps: HashMap<SkillKey, SkillKey>,
-}
+pub struct SourceIdentityRegistry;
 
 impl SourceIdentityRegistry {
     pub fn build(
@@ -113,27 +110,6 @@ impl SourceIdentityRegistry {
             aliases: alias_index,
             remaps: remap_index,
         })
-    }
-
-    pub fn resolve_skill_ref(&self, reference: &SkillRef) -> Result<SkillKey, SkillError> {
-        match reference {
-            SkillRef::Structured(key) => self.apply_remaps(key.clone()),
-            SkillRef::Legacy(legacy) => {
-                let key = match parse_legacy_as_key(legacy) {
-                    Ok(parsed) => parsed,
-                    Err(_) => self.aliases.get(legacy).cloned().ok_or_else(|| {
-                        SkillError::UnknownSkillAlias {
-                            alias: legacy.clone(),
-                        }
-                    })?,
-                };
-                self.apply_remaps(key)
-            }
-        }
-    }
-
-    pub fn canonical_skill_id(key: &SkillKey) -> super::SkillId {
-        super::SkillId(format!("{}/{}", key.source_uuid, key.skill_name))
     }
 
     fn apply_remaps(&self, mut key: SkillKey) -> Result<SkillKey, SkillError> {

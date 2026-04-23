@@ -116,42 +116,6 @@ pub enum CommsCommandRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_self_session: Option<bool>,
     },
-    /// Send a one-way peer message.
-    PeerMessage {
-        to: PeerName,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        blocks: Option<Vec<ContentBlock>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        handling_mode: Option<HandlingMode>,
-    },
-    /// Send a request to a peer.
-    PeerRequest {
-        to: PeerName,
-        intent: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        params: Option<serde_json::Value>,
-        /// Legacy promotion: if `params` is absent, `body` is wrapped as
-        /// `{"body": <body>}` for backwards-compatibility with single-string
-        /// requesters. Prefer `params`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        handling_mode: Option<HandlingMode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stream: Option<InputStreamMode>,
-    },
-    /// Send a response to a prior peer request.
-    PeerResponse {
-        to: PeerName,
-        in_reply_to: InteractionId,
-        status: ResponseStatus,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        handling_mode: Option<HandlingMode>,
-    },
 }
 
 /// Cross-field validation failure for [`CommsCommandRequest::into_command`].
@@ -421,29 +385,6 @@ pub struct PeerDirectoryEntry {
     pub last_unreachable_reason: Option<PeerReachabilityReason>,
     /// Supplementary discovery metadata (description, labels).
     pub meta: crate::PeerMeta,
-}
-
-/// Canonical payload for registering a trusted peer through a runtime seam.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrustedPeerSpec {
-    pub name: String,
-    pub peer_id: String,
-    pub address: String,
-}
-
-impl TrustedPeerSpec {
-    pub fn new(
-        name: impl Into<String>,
-        peer_id: impl Into<String>,
-        address: impl Into<String>,
-    ) -> Result<Self, String> {
-        let name = PeerName::new(name.into())?;
-        Ok(Self {
-            name: name.0,
-            peer_id: peer_id.into(),
-            address: address.into(),
-        })
-    }
 }
 
 /// Scope for streaming event output.

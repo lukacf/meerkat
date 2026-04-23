@@ -2653,13 +2653,6 @@ impl AgentFactory {
             builder = builder
                 .with_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
         }
-        // Phase 1.5-rev: identify which connection_ref this agent routes
-        // through so the runner can key auth-lease lifecycle transitions.
-        if let Some(cref) = &build_config.connection_ref {
-            builder = builder
-                .with_connection_ref_binding_key(format!("{}:{}", cref.realm_id, cref.binding_id));
-        }
-
         // 12h. Wire completion feed + enrichment for cursor-based delivery
         if let Some(feed) = completion_feed {
             builder = builder.with_completion_feed(feed);

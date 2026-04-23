@@ -138,38 +138,6 @@ impl SkillsParams {
         })
     }
 
-    /// Canonicalize through the source-identity resolver boundary, producing
-    /// typed canonical `SkillKey` values.
-    pub fn canonical_skill_keys_with_registry(
-        &self,
-        registry: &SourceIdentityRegistry,
-    ) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
-        let Some(refs) = self.canonical_skill_refs() else {
-            return Ok(None);
-        };
-
-        let mut keys = Vec::with_capacity(refs.len());
-        for reference in refs {
-            keys.push(registry.resolve_skill_ref(&reference)?);
-        }
-
-        Ok(Some(keys))
-    }
-
-    /// Canonicalize through the source-identity resolver boundary and down-convert
-    /// to canonical `SkillId` strings for legacy callers.
-    pub fn canonical_skill_ids_with_registry(
-        &self,
-        registry: &SourceIdentityRegistry,
-    ) -> Result<Option<Vec<SkillId>>, meerkat_core::skills::SkillError> {
-        Ok(self
-            .canonical_skill_keys_with_registry(registry)?
-            .map(|keys| {
-                keys.into_iter()
-                    .map(|key| SourceIdentityRegistry::canonical_skill_id(&key))
-                    .collect()
-            }))
-    }
 }
 
 #[cfg(test)]

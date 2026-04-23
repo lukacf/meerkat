@@ -639,10 +639,6 @@ pub struct AuthLeaseSnapshot {
 pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
-///
-/// Covers the auth-lifecycle inputs on the MeerkatMachine DSL. Each method
-/// drives the corresponding DSL transition and returns
-/// `Err(DslTransitionError)` if the guard rejects.
 pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `AcquireAuthLease { binding_key, expires_at }` — unconditional.
     ///

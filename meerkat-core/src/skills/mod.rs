@@ -211,7 +211,6 @@ pub struct SourceIdentityRecord {
     pub display_name: String,
     pub transport_kind: SourceTransportKind,
     pub fingerprint: String,
-    pub status: SourceIdentityStatus,
 }
 
 /// Lineage event for source identity governance.
@@ -400,8 +399,6 @@ pub struct SkillDescriptor {
     pub name: String,
     pub description: String,
     pub scope: SkillScope,
-    /// Capability IDs required for this skill (as string forms of CapabilityId).
-    pub requires_capabilities: Vec<String>,
     /// Extensible metadata (from SKILL.md frontmatter `metadata:` field).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub metadata: IndexMap<String, String>,

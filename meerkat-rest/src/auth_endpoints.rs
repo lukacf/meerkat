@@ -385,7 +385,7 @@ pub async fn test_auth_profile(
 ) -> impl IntoResponse {
     match resolve_realm(&state, &body.realm_id).await {
         Ok(realm) => {
-            let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+            let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store));
             match registry

@@ -32,8 +32,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, SurfaceSessionRecoveryContext,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, noop_request_action, request_action,
+    RequestAlreadyExists, RequestContext, RequestTerminal, SurfaceRequestExecutor,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -65,6 +66,8 @@ use meerkat_core::{
     RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
     format_verbose_event,
 };
+#[cfg(feature = "mob")]
+use meerkat_mob::MobSessionService as _;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
@@ -536,14 +539,19 @@ async fn apply_runtime_turn(
         session_id.clone(),
         false,
     );
+    // The turn-metadata keep_alive carrier is typed (`KeepAlivePolicy`); the
+    // session recovery override and stored session metadata still track a
+    // boolean. Collapse the typed per-turn policy into the boolean used by
+    // the recovery path: presence of a policy is interpreted as "keep the
+    // materialized resources alive across this turn".
     let keep_alive = match primitive
         .turn_metadata()
-        .and_then(|metadata| metadata.keep_alive)
+        .and_then(|metadata| metadata.keep_alive.as_ref())
     {
-        Some(keep_alive) => keep_alive,
+        Some(_policy) => true,
         None => context
             .session_service
-            .load_persisted(session_id)
+            .load_persisted_session(session_id)
             .await
             .ok()
             .flatten()
@@ -568,15 +576,11 @@ async fn apply_runtime_turn(
         flow_tool_overlay: primitive
             .turn_metadata()
             .and_then(|meta| meta.flow_tool_overlay.clone()),
-        additional_instructions: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.additional_instructions.clone()),
-        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
     };
 
     let session_identity = context
         .session_service
-        .load_persisted(session_id)
+        .load_persisted_session(session_id)
         .await
         .ok()
         .flatten()
@@ -615,7 +619,7 @@ async fn apply_runtime_turn(
         Err(SessionError::NotFound { .. }) => {
             let session = context
                 .session_service
-                .load_persisted(session_id)
+                .load_persisted_session(session_id)
                 .await?
                 .ok_or(SessionError::NotFound {
                     id: session_id.clone(),
@@ -684,12 +688,6 @@ async fn apply_runtime_turn(
                         flow_tool_overlay: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
-                        additional_instructions: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.additional_instructions.clone()),
-                        execution_kind: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.execution_kind),
                     },
                     boundary,
                     contributing_input_ids,
@@ -786,6 +784,53 @@ fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError>
     }
 }
 
+/// Default keep-alive TTL applied to per-turn metadata when the REST wire
+/// carries the boolean `keep_alive: true` override. Mirrors the canonical
+/// default used elsewhere in the runtime layer.
+const REST_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
+
+/// Translate the REST wire `Option<bool>` keep-alive override into the typed
+/// `Option<KeepAlivePolicy>` carried on `RuntimeTurnMetadata`.
+///
+/// * `Some(true)` -> `Some(Pinned, ttl = REST_TURN_KEEP_ALIVE_TTL_SECS)` —
+///   opts in to a caller-owned keep-alive lifetime for this turn.
+/// * `Some(false)` and `None` -> `None`. Per-turn metadata cannot "disable"
+///   keep-alive; the session-level `keep_alive` flag on `SessionBuildOptions`
+///   is the authoritative switch. A false override is interpreted as
+///   "inherit session default" on the turn metadata seam.
+fn resolve_turn_keep_alive_policy(
+    requested: Option<bool>,
+) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+    match requested {
+        Some(true) => Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+            ttl: std::time::Duration::from_secs(REST_TURN_KEEP_ALIVE_TTL_SECS),
+            policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+        }),
+        Some(false) | None => None,
+    }
+}
+
+/// Translate the REST wire `Option<Vec<String>>` additional-instructions list
+/// into the typed `Option<Vec<TurnInstruction>>` carried on
+/// `RuntimeTurnMetadata`. The REST envelope does not carry a role per entry;
+/// strings are interpreted as `TurnInstructionKind::User` to match the
+/// end-user prompt lineage they originate from.
+fn resolve_turn_additional_instructions(
+    requested: Option<Vec<String>>,
+) -> Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>> {
+    requested.map(|instructions| {
+        instructions
+            .into_iter()
+            .map(
+                |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                    body,
+                },
+            )
+            .collect()
+    })
+}
+
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), ApiError> {
     meerkat::surface::validate_public_peer_meta(peer_meta).map_err(ApiError::BadRequest)
 }
@@ -850,9 +895,6 @@ pub struct CreateSessionRequest {
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Legacy compatibility skill refs for per-turn injection.
-    #[serde(default)]
-    pub skill_references: Option<Vec<String>>,
     /// Optional key-value labels attached at session creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -883,38 +925,49 @@ fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
         || req.peer_meta.is_some()
 }
 
+/// Parse the REST wire `preload_skills: Option<Vec<String>>` into the typed
+/// `Option<Vec<SkillKey>>` consumed by the session build path.
+///
+/// Each string is parsed as a `SkillName` and wrapped in a builtin-source
+/// `SkillKey`, matching the CLI convention for unqualified skill ids.
+fn parse_preload_skill_keys(
+    ids: Option<Vec<String>>,
+) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
+    let Some(ids) = ids else { return Ok(None) };
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let skill_name = meerkat_core::skills::SkillName::parse(&id)
+            .map_err(|e| format!("invalid preload_skills entry `{id}`: {e}"))?;
+        out.push(meerkat_core::skills::SkillKey::builtin(skill_name));
+    }
+    Ok(Some(out))
+}
+
 async fn canonical_skill_keys_for_state(
     state: &AppState,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, ApiError> {
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
-        skill_references,
     };
 
+    // Validate the registry builds: invalid source-identity config is
+    // surfaced as a typed `BadRequest` even though the helper itself does
+    // not consult the registry to canonicalize keys (the runtime skill
+    // engine applies remaps at resolution time).
     let snapshot = state
         .config_runtime
         .get()
         .await
         .map_err(config_runtime_err_to_api)?;
-    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let registry = snapshot
+    snapshot
         .config
         .skills
-        .build_source_identity_registry_with_roots(
-            state.context_root.as_deref(),
-            state
-                .user_config_root
-                .as_deref()
-                .or(default_user_root.as_deref()),
-        )
-        .map_err(|e| ApiError::BadRequest(format!("Invalid skill_refs: {e}")))?;
+        .build_source_identity_registry()
+        .map_err(|e| ApiError::BadRequest(format!("Invalid skills config: {e}")))?;
 
-    params
-        .canonical_skill_keys_with_registry(&registry)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid skill_refs: {e}")))
+    Ok(params.canonical_skill_keys())
 }
 
 /// Continue session request
@@ -956,9 +1009,6 @@ pub struct ContinueSessionRequest {
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Legacy compatibility refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_references: Option<Vec<String>>,
     /// Optional per-turn flow tool overlay.
     #[serde(default)]
     pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
@@ -1413,6 +1463,10 @@ async fn mob_spawn_helper(
         .mob_spawn_helper(&mob_id, identity, req.prompt, options)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let payload = serde_json::to_value(result)
+        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")))?;
+    Ok(Json(payload))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1499,6 +1553,10 @@ async fn mob_fork_helper(
         )
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let payload = serde_json::to_value(result)
+        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")))?;
+    Ok(Json(payload))
 }
 
 /// GET /mob/{id}/members/{agent_identity}/status — member execution snapshot.
@@ -1582,12 +1640,14 @@ pub struct CommsSendRequest {
 
 impl CommsSendRequest {
     /// Recipient peer name for error normalization, if the command targets one.
+    ///
+    /// The typed wire currently carries only the local-session `Input`
+    /// variant, which has no peer recipient; the peer-targeting variants
+    /// were removed when `CommsCommandRequest` was tightened to the single
+    /// input-injection shape.
     fn peer_name(&self) -> Option<&str> {
         use meerkat_core::comms::CommsCommandRequest;
         match &self.command {
-            CommsCommandRequest::PeerMessage { to, .. }
-            | CommsCommandRequest::PeerRequest { to, .. }
-            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
             CommsCommandRequest::Input { .. } => None,
         }
     }
@@ -1779,7 +1839,7 @@ async fn comms_peers(
 
 fn make_runtime_external_event_input(
     event_type: &str,
-    payload: Value,
+    payload: Box<serde_json::value::RawValue>,
     blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
 ) -> Result<meerkat_runtime::Input, ApiError> {
     if event_type.trim().is_empty() {
@@ -1787,6 +1847,12 @@ fn make_runtime_external_event_input(
             "event_type cannot be empty".to_string(),
         ));
     }
+
+    // The wire carries the payload as an opaque `Box<RawValue>` so the
+    // runtime layer can decide how to interpret it. The runtime input type
+    // still expects a `serde_json::Value`, so parse at the boundary.
+    let payload: Value = serde_json::from_str(payload.get())
+        .map_err(|e| ApiError::BadRequest(format!("invalid payload JSON: {e}")))?;
 
     let blocks = blocks
         .map(|blocks| {
@@ -1861,6 +1927,8 @@ async fn post_external_event(
         ),
     }
     .map_err(IntoResponse::into_response)?;
+
+    admit_runtime_input_via_webhook(&state, &session_id, input).await
 }
 
 /// Admit a correlated terminal peer response through the typed runtime ingress.
@@ -1917,6 +1985,46 @@ async fn post_peer_response_terminal(
         blocks: None,
         handling_mode: None,
     });
+
+    admit_runtime_input_via_webhook(&state, &session_id, input).await
+}
+
+/// Admit a webhook-originated runtime input via `MeerkatMachine::accept_input`
+/// and map the typed accept outcome into the HTTP response shape shared by
+/// `/external-events` and `/peer-response-terminal`.
+async fn admit_runtime_input_via_webhook(
+    state: &AppState,
+    session_id: &SessionId,
+    input: meerkat_runtime::Input,
+) -> Result<(StatusCode, Json<Value>), Response> {
+    match state.runtime_adapter.accept_input(session_id, input).await {
+        Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
+        | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {
+            Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
+        }
+        Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => {
+            Err((StatusCode::CONFLICT, Json(json!({"error": reason}))).into_response())
+        }
+        Ok(outcome) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!("unexpected runtime accept outcome: {outcome:?}"),
+            })),
+        )
+            .into_response()),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("runtime not accepting input while in state: {state}"),
+            })),
+        )
+            .into_response()),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response()),
+    }
 }
 
 /// List skills with provenance information.
@@ -1936,7 +2044,10 @@ async fn list_skills(
     let wire: Vec<meerkat_contracts::SkillEntry> = entries
         .iter()
         .map(|e| meerkat_contracts::SkillEntry {
-            id: e.descriptor.id.0.clone(),
+            id: format!(
+                "{}/{}",
+                e.descriptor.key.source_uuid, e.descriptor.key.skill_name
+            ),
             name: e.descriptor.name.clone(),
             description: e.descriptor.description.clone(),
             scope: e.descriptor.scope.to_string(),
@@ -1959,16 +2070,16 @@ async fn inspect_skill(
         .as_ref()
         .ok_or_else(|| ApiError::NotFound("skills not enabled".into()))?;
 
+    let skill_name = meerkat_core::skills::SkillName::parse(id.as_str())
+        .map_err(|e| ApiError::BadRequest(format!("invalid skill id `{id}`: {e}")))?;
+    let key = meerkat_core::skills::SkillKey::builtin(skill_name);
     let doc = runtime
-        .load_from_source(
-            &meerkat_core::skills::SkillId::from(id.as_str()),
-            query.source.as_deref(),
-        )
+        .load_from_source(&key, query.source.as_deref())
         .await
         .map_err(|e| ApiError::NotFound(format!("skill inspect failed: {e}")))?;
 
     Ok(Json(meerkat_contracts::SkillInspectResponse {
-        id: doc.descriptor.id.0.clone(),
+        id: doc.descriptor.key.to_string(),
         name: doc.descriptor.name.clone(),
         description: doc.descriptor.description.clone(),
         scope: doc.descriptor.scope.to_string(),
@@ -2117,19 +2228,15 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
 
 fn validate_config_for_commit_with_roots(
     config: &Config,
-    context_root: Option<&std::path::Path>,
-    user_root: Option<&std::path::Path>,
+    _context_root: Option<&std::path::Path>,
+    _user_root: Option<&std::path::Path>,
 ) -> Result<(), ApiError> {
     config
         .validate()
         .map_err(|e| ApiError::BadRequest(format!("Invalid config: {e}")))?;
-    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     config
         .skills
-        .build_source_identity_registry_with_roots(
-            context_root,
-            user_root.or(default_user_root.as_deref()),
-        )
+        .build_source_identity_registry()
         .map_err(|e| ApiError::BadRequest(format!("Invalid skills source-identity config: {e}")))?;
     Ok(())
 }
@@ -2290,40 +2397,118 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
     }
 }
 
-/// Create and run a new session (inner body returning RequestOutcome).
+/// Extract an optional `RequestContext` from the `X-Meerkat-Request-Id` header
+/// and register it with the canonical surface request executor.
+///
+/// Requests without the header are not tracked (returns `Ok(None)`). Empty or
+/// malformed headers surface as `BadRequest`. Duplicate keys are rejected via
+/// the executor's typed `RequestAlreadyExists` outcome.
+fn extract_request_context(
+    headers: &axum::http::HeaderMap,
+    executor: &SurfaceRequestExecutor,
+) -> Result<Option<RequestContext>, ApiError> {
+    let Some(header_value) = headers.get("x-meerkat-request-id") else {
+        return Ok(None);
+    };
+    let request_id = header_value
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("X-Meerkat-Request-Id must be valid UTF-8".into()))?
+        .trim();
+    if request_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "X-Meerkat-Request-Id must not be empty".into(),
+        ));
+    }
+    match executor.try_begin_request(request_id, noop_request_action()) {
+        Ok(ctx) => Ok(Some(ctx)),
+        Err(RequestAlreadyExists) => Err(ApiError::DuplicateRequestId {
+            request_id: request_id.to_string(),
+        }),
+    }
+}
+
+/// Drive a `RequestTerminal` outcome through the canonical surface request
+/// executor: `Publish(val)` commits the tracked request (late cancel is
+/// rejected as a typed terminal transition), `RespondWithoutPublish(val)`
+/// routes through `finish_unpublished` so any late cancel that arrived first
+/// still supersedes the response.
+async fn with_request_lifecycle<T>(
+    executor: &SurfaceRequestExecutor,
+    ctx: Option<RequestContext>,
+    outcome: RequestTerminal<T>,
+) -> T {
+    match ctx {
+        Some(ctx) => match outcome {
+            RequestTerminal::Publish(val) => {
+                // `publish_and_complete` rejects terminal phases (e.g. late
+                // cancel landed first). REST handlers do not spawn long-running
+                // tasks after announcing `Publish`, so the only failures here
+                // come from shutdown racing, where we still return the value.
+                let _ = executor.publish_and_complete(ctx.key());
+                val
+            }
+            RequestTerminal::RespondWithoutPublish(val) => {
+                // `finish_unpublished`'s `CompleteOutcome` distinguishes
+                // Completed vs SupersededByCancel on other surfaces. REST
+                // decides this branch inline before announcing anything, so
+                // the outcome is always Completed (cleanup runs) or the
+                // entry was already removed by a parallel shutdown path.
+                let _ = executor.finish_unpublished(ctx.key()).await;
+                val
+            }
+        },
+        None => match outcome {
+            RequestTerminal::Publish(val) | RequestTerminal::RespondWithoutPublish(val) => val,
+        },
+    }
+}
+
+/// Create and run a new session. Extracts the optional request-lifecycle
+/// context from `X-Meerkat-Request-Id`, runs the typed inner body, and routes
+/// the `RequestTerminal` outcome through the canonical surface request
+/// executor seam.
+async fn create_session(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let executor = state.request_executor.clone();
+    let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
+    with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+/// Create and run a new session (typed-terminal inner body).
 async fn create_session_inner(
     state: &AppState,
     req: CreateSessionRequest,
     req_ctx: Option<RequestContext>,
-) -> RequestOutcome<Result<Json<SessionResponse>, ApiError>> {
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     // --- Validation (pre-stateful work) ---
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
-        return RequestOutcome::Unpublished(Err(e));
+        return RequestTerminal::RespondWithoutPublish(Err(e));
     }
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let skill_references = match canonical_skill_keys_for_state(
-        state,
-        req.skill_refs.clone(),
-        req.skill_references.clone(),
-    )
-    .await
+    let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
         && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
     {
-        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+            details: None,
+        }));
     }
 
     // --- Preclaim: session, runtime registration, MCP adapter ---
@@ -2340,7 +2525,7 @@ async fn create_session_inner(
         Ok(v) => v,
         Err(e) => {
             let message = format!("failed to prepare runtime bindings: {e}");
-            return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
         }
     };
 
@@ -2411,7 +2596,9 @@ async fn create_session_inner(
         if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+                details: None,
+            }));
         }
     }
 
@@ -2444,14 +2631,17 @@ async fn create_session_inner(
         override_mob: ToolCategoryOverride::Inherit,
         schedule_tools: None,
         mob_tool_authority_context: None,
-        preload_skills: req
-            .preload_skills
-            .clone()
-            .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect()),
+        preload_skills: match parse_preload_skill_keys(req.preload_skills.clone()) {
+            Ok(keys) => keys,
+            Err(err) => {
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+            }
+        },
         realm_id: Some(state.realm.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        connection_ref: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -2501,7 +2691,7 @@ async fn create_session_inner(
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
     {
-        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
     }
 
     let adapter = state.runtime_adapter.clone();
@@ -2523,7 +2713,7 @@ async fn create_session_inner(
                 }
                 _ => ApiError::Agent(err.to_string()),
             };
-            return RequestOutcome::Unpublished(Err(api_err));
+            return RequestTerminal::RespondWithoutPublish(Err(api_err));
         }
     };
 
@@ -2542,7 +2732,7 @@ async fn create_session_inner(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: keep_alive_override,
+                keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                 skill_references,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -2559,7 +2749,9 @@ async fn create_session_inner(
     {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+            details: None,
+        }));
     }
 
     let (outcome, handle) = match adapter
@@ -2570,7 +2762,7 @@ async fn create_session_inner(
         Err(err) => {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Published(Err(ApiError::InternalWithData {
+            return RequestTerminal::Publish(Err(ApiError::InternalWithData {
                 message: err.to_string(),
                 code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
                 details: json!({
@@ -2604,7 +2796,7 @@ async fn create_session_inner(
 
     match result {
         Ok(run_result) => {
-            RequestOutcome::Published(Ok(Json(run_result_to_response(run_result, &state.realm))))
+            RequestTerminal::Publish(Ok(Json(run_result_to_response(run_result, &state.realm))))
         }
         Err(err) => {
             // SESSION_CREATED_WITH_TURN_FAILURE: session exists and is preserved
@@ -2612,9 +2804,9 @@ async fn create_session_inner(
             // to the live session.
             let message = match err {
                 ApiError::Internal(msg) => msg,
-                other => return RequestOutcome::Published(Err(other)),
+                other => return RequestTerminal::Publish(Err(other)),
             };
-            RequestOutcome::Published(Err(ApiError::InternalWithData {
+            RequestTerminal::Publish(Err(ApiError::InternalWithData {
                 message,
                 code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
                 details: json!({
@@ -2995,26 +3187,42 @@ async fn append_system_context(
     })))
 }
 
-/// Continue an existing session (inner body returning RequestOutcome).
+/// Continue an existing session. Extracts the optional request-lifecycle
+/// context from `X-Meerkat-Request-Id`, runs the typed inner body, and routes
+/// the `RequestTerminal` outcome through the canonical surface request
+/// executor seam.
+async fn continue_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ContinueSessionRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let executor = state.request_executor.clone();
+    let outcome = Box::pin(continue_session_inner(&state, &id, req, req_ctx.clone())).await;
+    with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+/// Continue an existing session (typed-terminal inner body).
 async fn continue_session_inner(
     state: &AppState,
     id: &str,
     req: ContinueSessionRequest,
     req_ctx: Option<RequestContext>,
-) -> RequestOutcome<Result<Json<SessionResponse>, ApiError>> {
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
-        return RequestOutcome::Unpublished(Err(e));
+        return RequestTerminal::RespondWithoutPublish(Err(e));
     }
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
     let body_session_id = match resolve_session_id_for_state(&req.session_id, state) {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
     if body_session_id != path_session_id {
-        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(format!(
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(format!(
             "Session ID mismatch: path={} body={}",
             id, req.session_id
         ))));
@@ -3023,24 +3231,21 @@ async fn continue_session_inner(
 
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
-    let skill_references = match canonical_skill_keys_for_state(
-        state,
-        req.skill_refs.clone(),
-        req.skill_references.clone(),
-    )
-    .await
+    let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
         Ok(v) => v,
-        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
         && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
     {
-        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+            details: None,
+        }));
     }
 
     // Set up event forwarding: caller channel -> broadcast
@@ -3052,12 +3257,16 @@ async fn continue_session_inner(
         req.verbose,
     );
 
-    let loaded_session = match state.session_service.load_persisted(&session_id).await {
+    let loaded_session = match state
+        .session_service
+        .load_persisted_session(&session_id)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                 "Failed to load session: {e}"
             ))));
         }
@@ -3082,7 +3291,7 @@ async fn continue_session_inner(
     {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
             "keep_alive requires comms_name".to_string(),
         )));
     }
@@ -3100,7 +3309,7 @@ async fn continue_session_inner(
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(e));
+                return RequestTerminal::RespondWithoutPublish(Err(e));
             }
         }
         // If the MCP boundary appended notices, prepend as a text block
@@ -3122,7 +3331,7 @@ async fn continue_session_inner(
             None => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::NotFound(format!(
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::NotFound(format!(
                     "Session not found: {session_id}"
                 ))));
             }
@@ -3137,7 +3346,7 @@ async fn continue_session_inner(
                 let message = format!("failed to prepare runtime bindings: {e}");
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
             }
         };
         let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
@@ -3236,14 +3445,14 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                     "Failed to rebuild session: {e}"
                 ))));
             }
@@ -3282,7 +3491,7 @@ async fn continue_session_inner(
             if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
                     details: None,
                 }));
             }
@@ -3300,10 +3509,12 @@ async fn continue_session_inner(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: keep_alive_override,
+                        keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
-                        additional_instructions: req.additional_instructions.clone(),
+                        additional_instructions: resolve_turn_additional_instructions(
+                            req.additional_instructions.clone(),
+                        ),
                         ..Default::default()
                     },
                 ),
@@ -3314,7 +3525,9 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+                details: None,
+            }));
         }
         let (_outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
@@ -3324,7 +3537,9 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
+                    err.to_string(),
+                )));
             }
         };
         match handle {
@@ -3345,7 +3560,7 @@ async fn continue_session_inner(
             if keep_alive && comms_rt.is_none() {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::BadRequest(
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
                     "keep_alive requires a session created with comms_name".to_string(),
                 )));
             }
@@ -3357,7 +3572,7 @@ async fn continue_session_inner(
             {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                     "failed to persist keep_alive: {e}"
                 ))));
             }
@@ -3378,7 +3593,7 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
 
         // Install cancel action: interrupt the session.
@@ -3400,7 +3615,7 @@ async fn continue_session_inner(
             if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
                     details: None,
                 }));
             }
@@ -3411,10 +3626,12 @@ async fn continue_session_inner(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: keep_alive_override,
+                        keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
-                        additional_instructions: req.additional_instructions.clone(),
+                        additional_instructions: resolve_turn_additional_instructions(
+                            req.additional_instructions.clone(),
+                        ),
                         ..Default::default()
                     },
                 ),
@@ -3425,7 +3642,9 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+                details: None,
+            }));
         }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
@@ -3435,7 +3654,9 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
+                    err.to_string(),
+                )));
             }
         };
 
@@ -3464,7 +3685,7 @@ async fn continue_session_inner(
 
     match final_result {
         Ok(run_result) => {
-            RequestOutcome::Published(Ok(Json(run_result_to_response(run_result, &state.realm))))
+            RequestTerminal::Publish(Ok(Json(run_result_to_response(run_result, &state.realm))))
         }
         Err(err) => {
             if let ApiError::Internal(message) = &err
@@ -3477,7 +3698,7 @@ async fn continue_session_inner(
                 state.runtime_adapter.unregister_session(&session_id).await;
             }
             // Session exists for continue — this is a Published error.
-            RequestOutcome::Published(Err(err))
+            RequestTerminal::Publish(Err(err))
         }
     }
 }
@@ -3495,7 +3716,7 @@ async fn session_events(
     // to load_persisted() for inactive sessions.
     let session = state
         .session_service
-        .load_persisted(&session_id)
+        .load_persisted_session(&session_id)
         .await
         .map_err(|e| ApiError::Internal(format!("{e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {id}")))?;
@@ -5077,8 +5298,6 @@ mod tests {
 
                     skill_references: None,
                     flow_tool_overlay: None,
-                    additional_instructions: None,
-                    execution_kind: None,
                 },
             )
             .await
@@ -5284,7 +5503,6 @@ mod tests {
             max_tokens: None,
             hooks_override: None,
             skill_refs: None,
-            skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,
         };
@@ -5374,7 +5592,7 @@ mod tests {
         assert_eq!(payload["error"], "keep_alive requires comms_name");
 
         let session = session_service
-            .load_persisted(&created.session_id)
+            .load_persisted_session(&created.session_id)
             .await
             .expect("load should succeed")
             .expect("session should still exist");
@@ -5481,7 +5699,8 @@ mod tests {
             }),
         };
 
-        let response = run_result_to_response(result, "test-realm");
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let response = run_result_to_response(result, &realm);
         assert!(response.skill_diagnostics.is_some());
         assert_eq!(
             response
@@ -5494,7 +5713,7 @@ mod tests {
         );
         assert_eq!(
             response.session_ref.as_deref().expect("session_ref"),
-            format_session_ref("test-realm", &session_id)
+            format_session_ref(&realm, &session_id)
         );
     }
 

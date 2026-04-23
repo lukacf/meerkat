@@ -885,11 +885,7 @@ where
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
-    /// Runtime-backed auth lease handle (Phase 1.5-rev). When set, the runner
-    /// drives lease lifecycle transitions at each CallingLlm boundary and
-    /// emits `AUTH_REAUTH_REQUIRED` notices when a permanent refresh failure
-    /// occurs. `connection_ref_binding_key` identifies which binding the
-    /// session's LLM calls route through.
+    /// Runtime-backed auth lease handle (Phase 1.5-rev).
     pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
     /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary

@@ -543,10 +543,6 @@ impl AgentBuilder {
     }
 
     /// Set the runtime-backed auth lease handle for this build (Phase 1.5-rev).
-    ///
-    /// When set together with [`with_connection_ref_binding_key`], the runner
-    /// drives `AuthLeaseHandle` transitions at each CallingLlm boundary and
-    /// emits reauth notices when a permanent refresh failure occurs.
     pub fn with_auth_lease_handle(
         mut self,
         handle: Arc<dyn crate::handles::AuthLeaseHandle>,

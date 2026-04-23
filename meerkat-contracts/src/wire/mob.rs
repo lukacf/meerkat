@@ -447,12 +447,22 @@ pub struct MobCreateResult {
 }
 
 /// Minimal trusted peer spec for public mob wiring surfaces.
+///
+/// `pubkey` is the Ed25519 signing public key (32 bytes) required so the
+/// receiver can verify envelope signatures after trust registration.
+/// Serialized as a 32-element JSON array of numbers (matching
+/// `BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —
+/// the corresponding `TrustedPeerDescriptor::pubkey` will then be all
+/// zeros, which makes signature verification fail closed. Production
+/// clients MUST send the real pubkey.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireTrustedPeerSpec {
     pub name: String,
     pub peer_id: String,
     pub address: String,
+    #[serde(default)]
+    pub pubkey: [u8; 32],
 }
 
 /// Target for a mob wire/unwire call.

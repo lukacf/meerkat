@@ -82,7 +82,7 @@ pub struct AgentMobToolSurface {
     owner_bridge_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
     model: String,
-    /// Parent agent's comms name (for building TrustedPeerSpec when wiring helpers).
+    /// Parent agent's comms name (for building TrustedPeerDescriptor when wiring helpers).
     comms_name: Option<String>,
     /// Parent agent's comms peer ID (ed25519 public key).
     comms_peer_id: Option<String>,
@@ -480,7 +480,12 @@ impl AgentMobToolSurface {
             return false;
         };
 
-        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+        // Inproc delegation wiring: the parent and helper live on the same
+        // node, so identity authorization is the router's identity map, not
+        // envelope signatures. `test_only_unsigned` stamps a zero pubkey —
+        // signature verification would fail closed, which is the correct
+        // property here because the inproc transport bypasses it.
+        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             name.as_str(),
             peer_id.as_str(),
             format!("inproc://{name}"),
@@ -515,7 +520,9 @@ impl AgentMobToolSurface {
         if helper_comms_name == *name {
             return false;
         }
-        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+        // Same reasoning as `parent_spec` above: inproc transport, zero
+        // pubkey by design.
+        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             &helper_comms_name,
             helper_peer_id,
             format!("inproc://{helper_comms_name}"),
@@ -887,7 +894,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer);
+        let target = peer_target_from_args(args.peer)?;
         self.state
             .mob_wire(&mob_id, local, target)
             .await
@@ -904,7 +911,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer);
+        let target = peer_target_from_args(args.peer)?;
         self.state
             .mob_unwire(&mob_id, local, target)
             .await
@@ -1749,19 +1756,57 @@ struct ExternalPeerArg {
     name: String,
     peer_id: String,
     address: String,
+    /// Ed25519 signing public key (32 bytes). Defaults to zero — the
+    /// resulting descriptor will fail envelope signature verification,
+    /// which is the correct fail-closed property for agents that do
+    /// not supply a real key.
+    #[serde(default)]
+    pubkey: [u8; 32],
 }
 
-fn peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
+fn peer_target_from_args(
+    peer: WirePeerArg,
+) -> Result<meerkat_mob::PeerTarget, meerkat_core::error::ToolError> {
     match peer {
-        WirePeerArg::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
+        WirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
         WirePeerArg::External { external } => {
-            meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
-                name: external.name,
-                peer_id: external.peer_id,
-                address: external.address,
-            })
+            let name = meerkat_core::comms::PeerName::new(external.name.clone()).map_err(|e| {
+                meerkat_core::error::ToolError::invalid_arguments(
+                    "mob_wire",
+                    format!("invalid peer name '{}': {e}", external.name),
+                )
+            })?;
+            let peer_id = meerkat_core::comms::PeerId::parse(&external.peer_id).map_err(|e| {
+                meerkat_core::error::ToolError::invalid_arguments(
+                    "mob_wire",
+                    format!("invalid peer_id '{}': {e}", external.peer_id),
+                )
+            })?;
+            let address = parse_agent_peer_address(&external.address)
+                .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_wire", e))?;
+            Ok(meerkat_mob::PeerTarget::External(
+                meerkat_core::comms::TrustedPeerDescriptor {
+                    name,
+                    peer_id,
+                    address,
+                    pubkey: external.pubkey,
+                },
+            ))
         }
     }
+}
+
+fn parse_agent_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
+        "uds" => meerkat_core::comms::PeerTransport::Uds,
+        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 
 #[derive(Deserialize)]
@@ -1818,7 +1863,7 @@ mod tests {
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
         CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerReachability, SendError,
-        SendReceipt, TrustedPeerSpec,
+        SendReceipt, TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{InteractionSubscription, SubscribableInjector};
@@ -1904,7 +1949,7 @@ mod tests {
     struct TestCommsRuntime {
         name: String,
         key: String,
-        trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerSpec>>,
+        trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
         registry: Arc<TestCommsRegistry>,
@@ -1931,11 +1976,11 @@ mod tests {
             Some(self.key.clone())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             self.trusted
                 .write()
                 .await
-                .insert(peer.peer_id.clone(), peer);
+                .insert(peer.peer_id.as_str().to_string(), peer);
             Ok(())
         }
 

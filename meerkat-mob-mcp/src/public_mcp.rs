@@ -209,7 +209,6 @@ const fn default_limit() -> usize {
     100
 }
 
-
 /// W3-H: resolve a `RealtimeChannelTarget` to the concrete bridge session id
 /// the RPC query should operate on. `SessionTarget` returns its session id
 /// directly; `MobMember` looks up the current binding from the MobMachine's
@@ -668,11 +667,12 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_wire" => {
             let input: MobWireParams = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
+            let target = peer_target_from_wire(input.peer)?;
             state
                 .mob_wire(
                     &mob_id,
                     meerkat_mob::AgentIdentity::from(input.member.as_str()),
-                    peer_target_from_wire(input.peer),
+                    target,
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -681,11 +681,12 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_unwire" => {
             let input: MobUnwireParams = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
+            let target = peer_target_from_wire(input.peer)?;
             state
                 .mob_unwire(
                     &mob_id,
                     meerkat_mob::AgentIdentity::from(input.member.as_str()),
-                    peer_target_from_wire(input.peer),
+                    target,
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -912,17 +913,41 @@ fn content_input_from_wire(
     meerkat_core::types::ContentInput::try_from(input).map_err(McpToolError::invalid_params)
 }
 
-fn peer_target_from_wire(peer: MobPeerTarget) -> meerkat_mob::PeerTarget {
+fn peer_target_from_wire(peer: MobPeerTarget) -> Result<meerkat_mob::PeerTarget, McpToolError> {
     match peer {
-        MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
+        MobPeerTarget::Local(member_id) => Ok(meerkat_mob::PeerTarget::Local(member_id.into())),
         MobPeerTarget::External(spec) => {
-            meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
-                name: spec.name,
-                peer_id: spec.peer_id,
-                address: spec.address,
-            })
+            let name = meerkat_core::comms::PeerName::new(spec.name.clone()).map_err(|e| {
+                McpToolError::invalid_params(format!("invalid peer name '{}': {e}", spec.name))
+            })?;
+            let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id).map_err(|e| {
+                McpToolError::invalid_params(format!("invalid peer_id '{}': {e}", spec.peer_id))
+            })?;
+            let address =
+                parse_public_peer_address(&spec.address).map_err(McpToolError::invalid_params)?;
+            Ok(meerkat_mob::PeerTarget::External(
+                meerkat_core::comms::TrustedPeerDescriptor {
+                    name,
+                    peer_id,
+                    address,
+                    pubkey: spec.pubkey,
+                },
+            ))
         }
     }
+}
+
+fn parse_public_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
+        "uds" => meerkat_core::comms::PeerTransport::Uds,
+        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 
 fn runtime_mode_from_wire(mode: WireMobRuntimeMode) -> meerkat_mob::MobRuntimeMode {
@@ -1174,5 +1199,4 @@ mod tests {
         assert!(names.contains(&"meerkat_mob_create".to_string()));
         assert!(!names.contains(&"mob_create".to_string()));
     }
-
 }

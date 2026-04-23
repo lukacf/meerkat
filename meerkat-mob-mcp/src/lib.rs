@@ -23,7 +23,7 @@ use meerkat_contracts::{MobDefinitionInput, MobPeerTarget};
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
-use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
+use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
 use meerkat_core::service::{
@@ -1520,8 +1520,11 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Some(self.key.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-        self.trusted.write().await.insert(peer.peer_id);
+    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        self.trusted
+            .write()
+            .await
+            .insert(peer.peer_id.as_str().to_string());
         Ok(())
     }
 
@@ -2248,16 +2251,35 @@ impl WireActionArgs {
             match self.peer {
                 MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
                 MobPeerTarget::External(spec) => {
-                    meerkat_mob::PeerTarget::External(TrustedPeerSpec {
-                        name: spec.name,
-                        peer_id: spec.peer_id,
-                        address: spec.address,
+                    let name = meerkat_core::comms::PeerName::new(spec.name.clone())
+                        .map_err(|e| format!("invalid peer name '{}': {e}", spec.name))?;
+                    let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
+                        .map_err(|e| format!("invalid peer_id '{}': {e}", spec.peer_id))?;
+                    let address = parse_wire_peer_address(&spec.address)?;
+                    meerkat_mob::PeerTarget::External(TrustedPeerDescriptor {
+                        name,
+                        peer_id,
+                        address,
+                        pubkey: spec.pubkey,
                     })
                 }
             },
             self.action,
         ))
     }
+}
+
+fn parse_wire_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
+        "uds" => meerkat_core::comms::PeerTransport::Uds,
+        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 #[derive(Deserialize)]
 struct RunFlowArgs {
@@ -2503,8 +2525,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         json!({
                             "ok": true,
                             "agent_identity": spawn_result.agent_identity,
-                            "agent_runtime_id": spawn_result.agent_runtime_id,
-                            "fence_token": spawn_result.fence_token,
                         }),
                     )
                 } else {
@@ -2521,8 +2541,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     Ok(spawn_result) => json!({
                                         "ok": true,
                                         "agent_identity": spawn_result.agent_identity,
-                                        "agent_runtime_id": spawn_result.agent_runtime_id,
-                                        "fence_token": spawn_result.fence_token,
                                     }),
                                     Err(error) => json!({
                                         "ok": false,
@@ -2899,9 +2917,12 @@ mod tests {
 
         async fn add_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerSpec,
+            peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            self.trusted.write().await.insert(peer.peer_id);
+            self.trusted
+                .write()
+                .await
+                .insert(peer.peer_id.as_str().to_string());
             Ok(())
         }
 

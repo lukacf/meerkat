@@ -131,8 +131,9 @@ pub async fn build_agent_config(
     // always available. Skills are appended as extra_sections in
     // prompt assembly, which survives per-request system_prompt
     // overrides.
-    config.preload_skills = Some(vec![meerkat_core::skills::SkillId::from(
-        "mob-communication",
+    config.preload_skills = Some(vec![meerkat_core::skills::SkillKey::builtin(
+        meerkat_core::skills::SkillName::parse("mob-communication")
+            .expect("mob-communication is a valid builtin skill slug"),
     )]);
 
     // Mob lifecycle notifications are typed at peer ingress. Do not rely on

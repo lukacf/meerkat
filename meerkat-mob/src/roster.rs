@@ -751,7 +751,7 @@ mod tests {
         roster.wire_external(
             &MeerkatId::from("a"),
             &MeerkatId::from("remote-mob/worker/agent-b"),
-            TrustedPeerDescriptor::new(
+            TrustedPeerDescriptor::test_only_unsigned(
                 "remote-mob/worker/agent-b",
                 "ed25519:remote-b",
                 "inproc://remote-mob/worker/agent-b",

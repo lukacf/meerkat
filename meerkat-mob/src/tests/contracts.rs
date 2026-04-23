@@ -42,7 +42,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
     // Establish bidirectional trust
-    let peer_spec = TrustedPeerDescriptor::new(
+    let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
         &receiver_name,
         receiver.public_key().to_peer_id(),
         format!("inproc://{receiver_name}"),
@@ -52,7 +52,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         .await
         .expect("add sender->receiver trust");
 
-    let reverse_spec = TrustedPeerDescriptor::new(
+    let reverse_spec = TrustedPeerDescriptor::test_only_unsigned(
         &sender_name,
         sender.public_key().to_peer_id(),
         format!("inproc://{sender_name}"),
@@ -203,7 +203,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     // Establish bidirectional trust.
     CoreCommsRuntime::add_trusted_peer(
         sender.as_ref(),
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
             receiver.public_key().to_peer_id(),
             format!("inproc://{receiver_name}"),
@@ -214,7 +214,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     .unwrap();
     CoreCommsRuntime::add_trusted_peer(
         &receiver,
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &sender_name,
             sender.public_key().to_peer_id(),
             format!("inproc://{sender_name}"),
@@ -337,7 +337,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
 
     CoreCommsRuntime::add_trusted_peer(
         sender.as_ref(),
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &receiver_name,
             receiver.public_key().to_peer_id(),
             format!("inproc://{receiver_name}"),
@@ -350,7 +350,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     // senders at the receiver's inbox.
     CoreCommsRuntime::add_trusted_peer(
         &receiver,
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &sender_name,
             sender.public_key().to_peer_id(),
             format!("inproc://{sender_name}"),
@@ -452,7 +452,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
 
     CoreCommsRuntime::add_trusted_peer(
         responder.as_ref(),
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &originator_name,
             originator.public_key().to_peer_id(),
             format!("inproc://{originator_name}"),
@@ -468,7 +468,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     // the DSL transition on the sender side (responder) fires correctly.
     CoreCommsRuntime::add_trusted_peer(
         &originator,
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &responder_name,
             responder.public_key().to_peer_id(),
             format!("inproc://{responder_name}"),
@@ -566,7 +566,7 @@ async fn contract_mob_003_inproc_namespace_isolation() {
     );
 
     // Now add alpha_b as trusted peer of alpha_a (within the same namespace)
-    let spec = TrustedPeerDescriptor::new(
+    let spec = TrustedPeerDescriptor::test_only_unsigned(
         &alpha_b_name,
         alpha_b.public_key().to_peer_id(),
         format!("inproc://{alpha_b_name}"),
@@ -606,7 +606,7 @@ async fn contract_mob_004_add_trusted_peer_is_idempotent() {
     let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
 
     let make_spec = || {
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             &peer_name,
             peer.public_key().to_peer_id(),
             format!("inproc://{peer_name}"),
@@ -650,7 +650,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
     // Establish trust
-    let spec = TrustedPeerDescriptor::new(
+    let spec = TrustedPeerDescriptor::test_only_unsigned(
         &receiver_name,
         receiver.public_key().to_peer_id(),
         format!("inproc://{receiver_name}"),
@@ -664,7 +664,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     // untrusted senders with `Dropped { UntrustedSender }` (surfaced
     // upstream as `PeerOffline`) instead of silently returning `Ok(())`.
     // Mutual trust matches what real deployments set up.
-    let reverse_spec = TrustedPeerDescriptor::new(
+    let reverse_spec = TrustedPeerDescriptor::test_only_unsigned(
         &sender_name,
         sender.public_key().to_peer_id(),
         format!("inproc://{sender_name}"),
@@ -733,8 +733,12 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
     let peer_id = peer.public_key().to_peer_id();
     let backend_address = format!("https://backend.example.invalid/mesh/{peer_name}");
 
-    let spec = TrustedPeerDescriptor::new(&peer_name, peer_id.clone(), backend_address.clone())
-        .expect("valid trusted peer spec");
+    let spec = TrustedPeerDescriptor::test_only_unsigned(
+        &peer_name,
+        peer_id.clone(),
+        backend_address.clone(),
+    )
+    .expect("valid trusted peer spec");
     CoreCommsRuntime::add_trusted_peer(&runtime, spec)
         .await
         .expect("add trusted peer should accept backend-provided address");
@@ -1047,7 +1051,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
     let comms_b = service.comms(&sid_b).await.expect("comms for B");
 
     // Trust both sides so peer requests can flow.
-    let a_to_b = TrustedPeerDescriptor::new(
+    let a_to_b = TrustedPeerDescriptor::test_only_unsigned(
         &b_name,
         comms_b.public_key().to_peer_id(),
         format!("inproc://{b_name}"),
@@ -1057,7 +1061,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         .await
         .expect("trust a->b");
 
-    let b_to_a = TrustedPeerDescriptor::new(
+    let b_to_a = TrustedPeerDescriptor::test_only_unsigned(
         &a_name,
         comms_a.public_key().to_peer_id(),
         format!("inproc://{a_name}"),

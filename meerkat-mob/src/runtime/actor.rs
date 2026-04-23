@@ -332,7 +332,7 @@ impl MobActor {
         address: &str,
         context: &'static str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             address
                 .strip_prefix("inproc://")
                 .map(|value| value.split('?').next().unwrap_or(value).to_string())
@@ -966,6 +966,38 @@ impl MobActor {
         }
     }
 
+    async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
+        self.dsl_authority
+            .state
+            .member_kickoff_pending
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_starting
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_callback_pending
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_started
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_failed
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_cancelled
+            .remove(&agent_identity.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_error
+            .remove(&agent_identity.to_string());
+        self.roster.write().await.set_kickoff(agent_identity, None);
+    }
+
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
         if let Err(stop_error) = self.stop_all_autonomous_members().await {
             tracing::warn!(
@@ -1219,8 +1251,6 @@ impl MobActor {
 
                                 skill_references: None,
                                 flow_tool_overlay: None,
-                                additional_instructions: None,
-                                execution_kind: None,
                             },
                         )
                         .await
@@ -4950,15 +4980,17 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
-        self.apply_dsl_input(
+        if let Err(e) = self.apply_dsl_input(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                 agent_identity: dsl_identity,
                 releasing,
             },
             "destroy_remote_member_for_destroy_mark_retiring",
-        )
-        .map_err(|e| MobError::Internal(format!("Retire DSL rejected: {e}")))?;
+        ) {
+            outcome.errors.push(format!("Retire DSL rejected: {e}"));
+            return outcome;
+        }
 
         let ctx = self
             .disposal_context_from_entry(&agent_identity, &entry)
@@ -5281,7 +5313,7 @@ impl MobActor {
         };
         if !remote_bindings.is_empty() {
             let next_sup_spec: super::bridge_protocol::BridgePeerSpec =
-                meerkat_core::comms::TrustedPeerDescriptor::new(
+                meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
                     format!("{}/__mob_supervisor__", self.definition.id),
                     next.public_peer_id.clone(),
                     format!("inproc://{}/__mob_supervisor__", self.definition.id),
@@ -5906,8 +5938,6 @@ impl MobActor {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    additional_instructions: None,
-                    execution_kind: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 Ok(())

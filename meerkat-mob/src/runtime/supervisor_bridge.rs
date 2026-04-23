@@ -88,7 +88,7 @@ impl MobSupervisorBridge {
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             self.participant_name.clone(),
             authority.public_peer_id,
             format!("inproc://{}", self.participant_name),

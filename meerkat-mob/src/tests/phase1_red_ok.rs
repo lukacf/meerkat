@@ -206,7 +206,7 @@ async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_comple
             &op_id,
             OperationPeerHandle {
                 peer_name: "member-alpha".into(),
-                trusted_peer: TrustedPeerDescriptor::new(
+                trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
                     "member-alpha",
                     "member-alpha-id",
                     "inproc://member-alpha",

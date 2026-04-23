@@ -150,6 +150,20 @@ pub(crate) enum MobMachineCommand {
     ForceCancel {
         agent_identity: MeerkatId,
     },
+    /// Wire a local member to a peer target. D-track-b (#14) lands the
+    /// producer-wiring handler that authorizes and applies this command;
+    /// until then the handler returns `MobError::Internal`. Carried in
+    /// the command surface so the public `MobHandle::wire` method stays
+    /// on the one top-level machine-command seam.
+    Wire {
+        local: MeerkatId,
+        target: crate::runtime::PeerTarget,
+    },
+    /// Unwire a local member from a peer target. Mirror of `Wire`.
+    Unwire {
+        local: MeerkatId,
+        target: crate::runtime::PeerTarget,
+    },
 }
 
 /// Payload for [`MobMachineCommand::SubmitWork`].

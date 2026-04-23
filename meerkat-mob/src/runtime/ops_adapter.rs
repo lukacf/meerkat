@@ -454,7 +454,8 @@ impl MobOpsAdapter {
         match registry.peer_ready(
             &operation_id,
             OperationPeerHandle {
-                peer_name: peer_name.to_string(),
+                peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                    .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
                 trusted_peer,
             },
         ) {
@@ -612,7 +613,7 @@ mod tests {
             .mark_member_peer_ready(
                 &member_ref,
                 "mob-a/orchestrator/member-alpha",
-                TrustedPeerDescriptor::new(
+                TrustedPeerDescriptor::test_only_unsigned(
                     "mob-a/orchestrator/member-alpha",
                     "peer-member-alpha",
                     "inproc://member-alpha",

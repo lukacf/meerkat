@@ -154,7 +154,7 @@ impl SessionBackend {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             fallback_name,
             fallback_peer_id,
             format!("inproc://{fallback_name}"),
@@ -616,10 +616,6 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
-            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
         };
 
         self.session_service
@@ -921,7 +917,6 @@ impl MobProvisioner for SessionBackend {
                 keep_alive: None,
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
-                additional_instructions: req.additional_instructions.clone(),
                 render_metadata: req.render_metadata.clone(),
                 ..Default::default()
             };
@@ -977,7 +972,6 @@ impl MobProvisioner for SessionBackend {
                         keep_alive: None,
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
-                        additional_instructions: req.additional_instructions.clone(),
                         render_metadata: req.render_metadata.clone(),
                         ..Default::default()
                     },
@@ -1177,7 +1171,7 @@ impl MultiBackendProvisioner {
                 address,
                 session_id: None,
                 ..
-            } => TrustedPeerDescriptor::new(
+            } => TrustedPeerDescriptor::test_only_unsigned(
                 address
                     .strip_prefix("inproc://")
                     .map(|value| value.split('?').next().unwrap_or(value).to_string())
@@ -1196,7 +1190,7 @@ impl MultiBackendProvisioner {
         peer_id: &str,
         address: &str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             address
                 .strip_prefix("inproc://")
                 .map(|value| value.split('?').next().unwrap_or(value).to_string())
@@ -1212,7 +1206,7 @@ impl MultiBackendProvisioner {
         peer_id: &str,
         address: &str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::new(
+        TrustedPeerDescriptor::test_only_unsigned(
             peer_name.to_string(),
             peer_id.to_string(),
             address.to_string(),
@@ -1730,8 +1724,12 @@ impl MobProvisioner for MultiBackendProvisioner {
                         .await;
                 }
                 // No bridge — use the real BackendPeer identity directly.
-                TrustedPeerDescriptor::new(fallback_name, peer_id.clone(), address.clone())
-                    .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
+                TrustedPeerDescriptor::test_only_unsigned(
+                    fallback_name,
+                    peer_id.clone(),
+                    address.clone(),
+                )
+                .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
             }
         }
     }

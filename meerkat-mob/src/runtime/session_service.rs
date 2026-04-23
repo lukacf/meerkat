@@ -135,6 +135,33 @@ pub trait MobSessionService:
         Ok(None)
     }
 
+    /// Whether a listed session belongs to the given mob for reconciliation.
+    ///
+    /// Default: `false`. The wave-a demolition removed the comms-name matching
+    /// probe; wave-c was intended to land a runtime-aware replacement but did
+    /// not, so this remains a no-op default. Persistent services may override
+    /// to implement real reconciliation; the ephemeral default treats no
+    /// listed session as "belongs to mob".
+    async fn session_belongs_to_mob(
+        &self,
+        _session_id: &SessionId,
+        _mob_id: &crate::ids::MobId,
+    ) -> bool {
+        false
+    }
+
+    /// Load the persisted session snapshot when available.
+    ///
+    /// Default: `Ok(None)`. Matches the pre-demolition behavior where services
+    /// without durable persistence returned no snapshot, letting callers treat
+    /// the session as missing and fall through to recreate-from-roster paths.
+    async fn load_persisted_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        Ok(None)
+    }
+
     async fn apply_runtime_turn(
         &self,
         _session_id: &SessionId,

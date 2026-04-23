@@ -4,6 +4,10 @@ use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
+use crate::runtime::mob_member_lifecycle_authority::{
+    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
+    MobMemberLifecycleAuthority, MobMemberLifecycleInput,
+};
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,
@@ -79,6 +83,20 @@ fn map_runtime_realtime_attachment_status(
 pub struct MobMemberSnapshot {
     /// Current lifecycle status.
     pub status: MobMemberStatus,
+    /// Identity-native runtime ID for this incarnation.
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`
+    /// so external consumers use `agent_identity()` (derived from
+    /// `agent_runtime_id.identity`) as the public identity contract.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the current incarnation.
+    ///
+    /// Binding-era atom used by the bridge for stale-command rejection.
+    /// `pub(crate)` + `#[serde(skip)]` so it does not leak into
+    /// app-facing payloads.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
     /// Preview of the current bridge session's last committed assistant text.
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
@@ -235,11 +253,30 @@ pub enum MobMemberStatus {
 pub struct MemberRespawnReceipt {
     /// The member identity that was respawned.
     pub identity: AgentIdentity,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) previous_fence_token: FenceToken,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 impl MemberRespawnReceipt {
-    pub fn new(identity: AgentIdentity) -> Self {
-        Self { identity }
+    pub fn new(
+        identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        previous_fence_token: FenceToken,
+        fence_token: FenceToken,
+    ) -> Self {
+        Self {
+            identity,
+            agent_runtime_id,
+            previous_fence_token,
+            fence_token,
+        }
     }
 }
 
@@ -315,6 +352,12 @@ pub enum MobDestroyError {
 pub struct PreviousMemberCleanupReport {
     /// Stable member identity.
     pub identity: AgentIdentity,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
     /// Whether graceful retire was attempted.
     pub retire_attempted: bool,
     /// Error returned from the graceful retire attempt, when any.
@@ -429,6 +472,12 @@ pub struct MemberDeliveryReceipt {
     pub identity: AgentIdentity,
     /// How the message was handled.
     pub handling_mode: HandlingMode,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 /// Receipt confirming that a unit of work was accepted by the work lane.
@@ -437,6 +486,9 @@ pub struct MemberDeliveryReceipt {
 pub struct WorkDeliveryReceipt {
     /// The work reference for the submitted unit.
     pub work_ref: WorkRef,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) runtime_id: AgentRuntimeId,
 }
 
 /// Options for helper convenience spawns.
@@ -463,6 +515,16 @@ pub struct HelperResult {
     pub tokens_used: u64,
     /// Stable member identity for the helper run.
     pub agent_identity: AgentIdentity,
+    /// Identity-native runtime ID for this incarnation.
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the current incarnation.
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 /// Target for a wire operation from a local mob member.
@@ -1204,6 +1266,18 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+            MobMachineCommand::Wire {
+                local: _,
+                target: _,
+            }
+            | MobMachineCommand::Unwire {
+                local: _,
+                target: _,
+            } => Err(MobError::Internal(
+                "MobMachineCommand::{Wire,Unwire} handler lands with \
+                     D-track-b (#14) peer-projection producer wiring"
+                    .into(),
+            )),
         }
     }
 
@@ -1314,7 +1388,7 @@ impl MobHandle {
             .comms_runtime(bridge_session_id)
             .await?;
         let peers = comms.peers().await;
-        let peers_by_id: HashMap<&str, &PeerDirectoryEntry> = peers
+        let peers_by_id: HashMap<String, &PeerDirectoryEntry> = peers
             .iter()
             .map(|peer| (peer.peer_id.as_str(), peer))
             .collect();
@@ -1331,7 +1405,7 @@ impl MobHandle {
             let wired_peer_meerkat = MeerkatId::from(wired_peer);
             let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
                 peers_by_id
-                    .get(spec.peer_id.as_str())
+                    .get(&spec.peer_id.as_str())
                     .copied()
                     .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
             } else {

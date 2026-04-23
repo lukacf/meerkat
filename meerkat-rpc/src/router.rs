@@ -3572,7 +3572,7 @@ mod tests {
             meerkat::CommsRuntime::inproc_only("router-peer-response-sender")
                 .expect("sender comms runtime"),
         );
-        let sender_peer_id = sender.public_key().to_peer_id();
+        let sender_peer_id = sender.public_key().to_peer_id().to_string();
         let sender_addr = sender.advertised_address();
         let operator_peer_id = operator_comms.public_key().expect("worker peer id");
         let operator_addr = operator_comms

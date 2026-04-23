@@ -29,10 +29,17 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::comms::{SendError, TrustedPeerSpec};
+// `tokio::sync::Mutex` (async) rather than `std::sync::Mutex` (sync)
+// so the lock can be held across `.await` points. This lets the
+// reconcile path serialize end-to-end — trust-store mutations AND
+// the applied-view commit run inside the same critical section,
+// closing the TOCTOU class where a stale reconcile's mutations
+// could orphan peers in the trust store while its commit was
+// skipped (PR #340 re-review item).
+use tokio::sync::Mutex;
 
 use crate::meerkat_machine::dsl::PeerEndpoint;
 
@@ -83,15 +90,12 @@ pub struct CommsTrustReconciler {
 impl std::fmt::Debug for CommsTrustReconciler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `dyn CommsRuntime` does not implement `Debug`; print a
-        // structural placeholder with the applied-view summary.
-        let applied = self
-            .applied
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // structural placeholder. Reading the applied view requires
+        // an async lock acquisition, which is not available from
+        // `Debug::fmt` — tests use `applied_snapshot()` for the
+        // view contents instead.
         f.debug_struct("CommsTrustReconciler")
-            .field("applied_epoch", &applied.epoch)
-            .field("applied_peer_count", &applied.peers.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -129,48 +133,41 @@ impl CommsTrustReconciler {
     /// advanced for peers the trust store acknowledged, so failed
     /// adds/removes are retried on the next pass.
     ///
-    /// Concurrency: two reconciles can race past the initial
-    /// epoch check because `.await` on the trust-store calls
-    /// releases the lock (we can't hold `std::sync::Mutex` across
-    /// await points). The commit section re-checks the epoch
-    /// under the same lock that will commit the applied view:
-    /// if a concurrent reconcile advanced past our epoch while we
-    /// were awaiting the trust store, we return a stale-report
-    /// WITHOUT committing the applied view. This prevents a
-    /// stale-but-inflight reconcile from rolling back trust state
-    /// a newer reconcile just committed.
+    /// Concurrency (PR #340 re-review fix): the entire reconcile
+    /// path — stale-epoch check, trust-store add/remove calls, and
+    /// applied-view commit — runs inside a single `tokio::sync::Mutex`
+    /// critical section. Stale reconciles fail the epoch check at
+    /// the TOP of the critical section and short-circuit WITHOUT
+    /// touching the trust store, preventing the earlier TOCTOU
+    /// class where a stale reconcile's mutations could orphan
+    /// peers in the trust store while its commit was skipped.
     ///
-    /// Concurrency tail: the trust-store calls themselves (add/
-    /// remove) may still race when two reconciles interleave —
-    /// but `add_trusted_peer` / `remove_trusted_peer` are
-    /// idempotent at the comms layer, so the worst case is
-    /// redundant work. The critical invariant this code enforces
-    /// is that the *applied-view watermark* never regresses.
+    /// The lock is tokio's async mutex (not `std::sync::Mutex`) so
+    /// it can be held across `.await` points for the trust-store
+    /// calls. The critical section is short relative to mob
+    /// topology changes — overlay reconciliation fires at the
+    /// rate of topology-change events, not per-message — so
+    /// holding the lock across awaits is well within the
+    /// reconciler's latency budget.
     pub async fn reconcile(
         &self,
         epoch: u64,
         effective_peers: BTreeSet<PeerEndpoint>,
     ) -> Result<ReconcileReport, CommsTrustReconcileError> {
-        // Lock the applied view to snapshot the current state. We
-        // release the lock before the async trust-store calls to
-        // avoid holding a `std::sync::Mutex` across await points.
-        let (previous_peers, previous_epoch) = {
-            let guard = self
-                .applied
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (guard.peers.clone(), guard.epoch)
-        };
+        let mut guard = self.applied.lock().await;
 
-        if epoch < previous_epoch {
-            // Stale delivery — silently accept the no-op. The caller
-            // can observe by checking `applied_epoch` in the report.
+        if epoch < guard.epoch {
+            // Stale delivery — short-circuit INSIDE the lock.
+            // The trust store is not touched, so no orphaned
+            // mutations.
             return Ok(ReconcileReport {
                 added: Vec::new(),
                 removed: Vec::new(),
-                applied_epoch: previous_epoch,
+                applied_epoch: guard.epoch,
             });
         }
+
+        let previous_peers: BTreeSet<PeerEndpoint> = guard.peers.clone();
 
         let to_add: Vec<PeerEndpoint> = effective_peers
             .iter()
@@ -188,7 +185,9 @@ impl CommsTrustReconciler {
 
         // Perform adds first so a concurrent peer-send from the same
         // session sees the new peer available even if a remove for
-        // an older session hasn't completed.
+        // an older session hasn't completed. Both adds and removes
+        // happen while the async mutex is held — concurrent
+        // reconciles wait their turn.
         for endpoint in to_add {
             let spec = TrustedPeerSpec {
                 name: endpoint.name.clone(),
@@ -215,39 +214,12 @@ impl CommsTrustReconciler {
             removed.push(endpoint);
         }
 
-        // Commit the new applied view — but under the same lock,
-        // re-check that our epoch is still strictly-at-least the
-        // currently-applied one. If a concurrent reconcile landed
-        // an epoch > ours while we were awaiting the trust store,
-        // we MUST NOT commit — our applied-view overwrite would
-        // regress the watermark. The trust store ops we already
-        // performed are idempotent (adds/removes on same peer_id
-        // are no-ops), so skipping the commit is safe.
-        let applied_epoch;
-        {
-            let mut guard = self
-                .applied
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if epoch >= guard.epoch {
-                guard.peers = effective_peers;
-                guard.epoch = epoch;
-                applied_epoch = epoch;
-            } else {
-                // Concurrent reconcile raced ahead — report the
-                // current watermark, empty add/remove (our work was
-                // either idempotent-no-op or racily observed as
-                // applied by the newer reconcile; returning the
-                // recorded changes would misleadingly attribute them
-                // to this pass).
-                applied_epoch = guard.epoch;
-                return Ok(ReconcileReport {
-                    added: Vec::new(),
-                    removed: Vec::new(),
-                    applied_epoch,
-                });
-            }
-        }
+        // Commit the applied view under the same lock. No race
+        // possible — we've held the lock across the entire
+        // trust-store interaction.
+        guard.peers = effective_peers;
+        guard.epoch = epoch;
+        let applied_epoch = epoch;
 
         Ok(ReconcileReport {
             added,
@@ -258,11 +230,8 @@ impl CommsTrustReconciler {
 
     /// Snapshot of the reconciler's current applied view (tests).
     #[cfg(test)]
-    pub(crate) fn applied_snapshot(&self) -> (u64, BTreeSet<PeerEndpoint>) {
-        let guard = self
-            .applied
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub(crate) async fn applied_snapshot(&self) -> (u64, BTreeSet<PeerEndpoint>) {
+        let guard = self.applied.lock().await;
         (guard.epoch, guard.peers.clone())
     }
 }
@@ -283,11 +252,14 @@ mod tests {
     }
 
     /// Records every `add_trusted_peer` / `remove_trusted_peer` call
-    /// for assertion in tests.
+    /// for assertion in tests. Uses `std::sync::Mutex` for the
+    /// recorder state (not the async tokio Mutex used by the
+    /// reconciler's applied view) — the recorder only needs the
+    /// sync form to guard its accumulated calls vector.
     #[derive(Default)]
     struct RecordingCommsRuntime {
-        adds: Mutex<Vec<TrustedPeerSpec>>,
-        removes: Mutex<Vec<String>>,
+        adds: std::sync::Mutex<Vec<TrustedPeerSpec>>,
+        removes: std::sync::Mutex<Vec<String>>,
         fail_next_add: AtomicBool,
         fail_next_remove: AtomicBool,
     }
@@ -444,7 +416,7 @@ mod tests {
             }
             other => panic!("expected AddTrustFailed, got {other:?}"),
         }
-        let (epoch, applied) = reconciler.applied_snapshot();
+        let (epoch, applied) = reconciler.applied_snapshot().await;
         assert_eq!(
             epoch, 0,
             "applied epoch must NOT advance past a failed reconcile",
@@ -474,120 +446,151 @@ mod tests {
         assert_eq!(removes, vec!["ed25519:A", "ed25519:B"]);
     }
 
-    /// Regression for PR #340 review item #4 (TOCTOU race):
-    /// simulates a slow "older" reconcile that starts first and
-    /// finishes last. The newer reconcile must have committed an
-    /// advanced epoch while the older one was awaiting the trust
-    /// store; the older one must see the advanced epoch at commit
-    /// time and skip its own commit to avoid regressing the
-    /// applied-view watermark.
+    /// PR #340 re-review item: serialize reconciles end-to-end so
+    /// trust-store mutations are inside the same critical section
+    /// as the applied-view commit. Earlier TOCTOU fix re-checked
+    /// the epoch before commit but didn't gate the trust-store
+    /// calls, so a stale reconcile could leak add/remove mutations
+    /// into the comms trust store even though its commit was
+    /// skipped (orphaned trust = authorization bypass).
     ///
-    /// Concrete scenario:
-    ///   t0: reconcile(epoch=1, {A}) starts, reads applied_epoch=0.
-    ///   t1: reconcile(epoch=2, {B}) runs to completion — commits
-    ///       applied_epoch=2, applied={B}.
-    ///   t2: reconcile(epoch=1, {A}) resumes from the await,
-    ///       re-checks commit-time: its epoch=1 is now < applied
-    ///       epoch=2, must NOT commit. Returns a stale report
-    ///       (applied_epoch=2, added=[], removed=[]).
+    /// The async mutex now serializes reconciles strictly. A
+    /// stale reconcile acquiring the lock AFTER a newer one
+    /// commits sees `epoch < applied.epoch` and short-circuits
+    /// WITHOUT touching the trust store.
     ///
-    /// Deterministic harness: a gated `CommsRuntime` that blocks
-    /// `add_trusted_peer` on a channel; the test orchestrates the
-    /// two reconciles' completion order.
+    /// This test pins two invariants at once:
+    ///   1. The stale reconcile does not mutate the trust store
+    ///      (no orphaned `add_trusted_peer` / `remove_trusted_peer`
+    ///      calls).
+    ///   2. The stale reconcile's report reflects the newer
+    ///      applied epoch (watermark never regresses).
+    ///
+    /// The scenario uses sequential calls (rather than a gated
+    /// mock) because serialization is now strict: a concurrent
+    /// stale reconcile would simply wait for the newer one to
+    /// release the lock, then short-circuit. The sequential form
+    /// is the same invariant tested identically.
     #[tokio::test]
-    async fn concurrent_stale_reconcile_does_not_regress_applied_view() {
-        use tokio::sync::oneshot;
+    async fn stale_reconcile_under_serialization_does_not_leak_trust_store_mutations() {
+        let comms = Arc::new(RecordingCommsRuntime::default());
+        let reconciler = CommsTrustReconciler::new(comms.clone());
 
-        #[derive(Default)]
-        struct GatedCommsRuntime {
-            release_add: Mutex<Option<oneshot::Receiver<()>>>,
-            recorded_adds: Mutex<Vec<TrustedPeerSpec>>,
-        }
+        // Newer reconcile lands first at epoch=5 with peer set {A}.
+        let newer = reconciler
+            .reconcile(5, BTreeSet::from([endpoint("A")]))
+            .await
+            .expect("newer reconcile");
+        assert_eq!(newer.applied_epoch, 5);
+        assert_eq!(comms.add_calls().len(), 1);
+        assert_eq!(comms.remove_calls().len(), 0);
 
-        impl std::fmt::Debug for GatedCommsRuntime {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("GatedCommsRuntime").finish()
-            }
-        }
+        // Stale reconcile attempts to install a different peer set
+        // at an earlier epoch. The serialized critical section sees
+        // the stale epoch at the TOP and short-circuits. Crucially,
+        // `add_trusted_peer` / `remove_trusted_peer` must NOT be
+        // called for the stale reconcile's peer set — doing so
+        // would leak orphaned trust entries into the comms store.
+        let stale = reconciler
+            .reconcile(3, BTreeSet::from([endpoint("B"), endpoint("C")]))
+            .await
+            .expect("stale reconcile accepted as no-op");
+        assert!(stale.added.is_empty());
+        assert!(stale.removed.is_empty());
+        assert_eq!(
+            stale.applied_epoch, 5,
+            "stale report must reflect the newer applied watermark",
+        );
 
-        #[async_trait]
-        impl CommsRuntime for GatedCommsRuntime {
-            async fn drain_messages(&self) -> Vec<String> {
-                Vec::new()
-            }
-            fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
-                Arc::new(tokio::sync::Notify::new())
-            }
-            async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-                let gate = self
-                    .release_add
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(rx) = gate {
-                    let _ = rx.await;
-                }
-                self.recorded_adds
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(peer);
-                Ok(())
-            }
-            async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
-                Ok(true)
-            }
-        }
+        // Trust store end-state: only the newer reconcile's adds
+        // landed. The stale reconcile's `{B, C}` additions must
+        // NOT appear, AND no removes were issued.
+        assert_eq!(
+            comms.add_calls().len(),
+            1,
+            "stale reconcile must not leak `add_trusted_peer` calls into the trust store",
+        );
+        assert_eq!(
+            comms.remove_calls().len(),
+            0,
+            "stale reconcile must not leak `remove_trusted_peer` calls",
+        );
+        let added_peer_ids: Vec<String> = comms
+            .add_calls()
+            .into_iter()
+            .map(|spec| spec.peer_id)
+            .collect();
+        assert_eq!(
+            added_peer_ids,
+            vec!["ed25519:A".to_string()],
+            "only the newer reconcile's peer A must be in the trust store",
+        );
 
-        let (release_tx, release_rx) = oneshot::channel();
-        let comms = Arc::new(GatedCommsRuntime {
-            release_add: Mutex::new(Some(release_rx)),
-            recorded_adds: Mutex::new(Vec::new()),
-        });
+        // Applied view reflects only the newer reconcile.
+        let (applied_epoch, applied_peers) = reconciler.applied_snapshot().await;
+        assert_eq!(applied_epoch, 5);
+        assert_eq!(applied_peers, BTreeSet::from([endpoint("A")]));
+    }
+
+    /// Concurrent reconciles are strictly serialized by the async
+    /// mutex: an "older" reconcile spawned first holds the lock
+    /// across its trust-store awaits; a "newer" reconcile waits
+    /// for the lock. When the older one finishes (committing
+    /// epoch=1), the newer one acquires the lock and sees
+    /// epoch=2 > applied=1, so it proceeds normally.
+    ///
+    /// If the order is reversed — newer spawns first, commits
+    /// epoch=2, stale runs after — the stale one sees
+    /// epoch=1 < applied=2 and short-circuits without touching
+    /// the trust store. This is the serialization guarantee; this
+    /// test proves concurrent-task scheduling doesn't break it.
+    #[tokio::test]
+    async fn concurrent_reconciles_are_serialized_and_stale_short_circuits() {
+        let comms = Arc::new(RecordingCommsRuntime::default());
         let reconciler = Arc::new(CommsTrustReconciler::new(comms.clone()));
 
-        // Start the "older" reconcile (epoch=1). It will block on
-        // the first `add_trusted_peer` call.
-        let reconciler_1 = reconciler.clone();
-        let older_handle = tokio::spawn(async move {
-            reconciler_1
+        // Spawn two concurrent reconciles: older (epoch=1) and newer
+        // (epoch=2). Because of the async mutex, whichever acquires
+        // the lock first runs to completion; the other waits.
+        let reconciler_older = reconciler.clone();
+        let reconciler_newer = reconciler.clone();
+        let older_task = tokio::spawn(async move {
+            reconciler_older
                 .reconcile(1, BTreeSet::from([endpoint("A")]))
                 .await
         });
+        let newer_task = tokio::spawn(async move {
+            reconciler_newer
+                .reconcile(2, BTreeSet::from([endpoint("B")]))
+                .await
+        });
+        let older_res = older_task.await.expect("older joins").expect("older ok");
+        let newer_res = newer_task.await.expect("newer joins").expect("newer ok");
 
-        // Yield so the older reconcile's first add_trusted_peer
-        // call reaches the gate. On a single-threaded executor
-        // tokio::task::yield_now() is enough.
-        tokio::task::yield_now().await;
-        // Subsequent adds are ungated (release_add was taken
-        // on the first call).
-        let newer_report = reconciler
-            .reconcile(2, BTreeSet::from([endpoint("B")]))
-            .await
-            .expect("newer reconcile commits");
-        assert_eq!(newer_report.applied_epoch, 2);
-
-        // Release the older reconcile so it can finish.
-        let _ = release_tx.send(());
-        let older_report = older_handle
-            .await
-            .expect("older task joins")
-            .expect("older reconcile returns Ok");
-
-        // TOCTOU gate: the older reconcile must NOT regress the
-        // applied watermark. Its report reflects the newer epoch
-        // applied by the racing reconcile.
-        assert_eq!(
-            older_report.applied_epoch, 2,
-            "older reconcile's applied_epoch must reflect the newer commit, not its own epoch",
-        );
-        assert!(
-            older_report.added.is_empty(),
-            "older reconcile must not claim it added peers — its commit was skipped",
-        );
-
-        // Applied view persists the newer reconcile's peer set.
-        let (applied_epoch, applied_peers) = reconciler.applied_snapshot();
+        // One of them runs first; the other runs second. If older
+        // runs first, it commits epoch=1 / {A}, then newer commits
+        // epoch=2 / {B}. If newer runs first, it commits epoch=2 /
+        // {B}, then older short-circuits as stale. In either
+        // ordering, the final applied state is epoch=2 / {B} and
+        // the trust store ends at {B} (either via add-then-replace
+        // or just add).
+        let (applied_epoch, applied_peers) = reconciler.applied_snapshot().await;
         assert_eq!(applied_epoch, 2);
         assert_eq!(applied_peers, BTreeSet::from([endpoint("B")]));
+
+        // At least one of the reconciles reports epoch=2 (the
+        // winner). The other either also reports epoch=2 (if it
+        // short-circuited as stale after the winner committed) or
+        // epoch=1 (if it ran first and committed before being
+        // superseded).
+        assert!(
+            older_res.applied_epoch == 1 || older_res.applied_epoch == 2,
+            "older reconcile's applied_epoch must be 1 (ran first) or 2 (stale short-circuit): got {}",
+            older_res.applied_epoch,
+        );
+        assert_eq!(
+            newer_res.applied_epoch, 2,
+            "newer reconcile must apply its epoch (never stale against older)",
+        );
     }
 }

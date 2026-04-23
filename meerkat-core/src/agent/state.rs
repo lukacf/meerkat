@@ -3610,8 +3610,7 @@ mod tests {
         assert!(
             seen_ids
                 .iter()
-                .any(|id| id.to_string()
-                    == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
+                .any(|id| id.to_string() == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
             "expected canonical skill id to be forwarded to skill engine, saw: {seen_ids:?}"
         );
 

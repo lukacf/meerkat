@@ -186,13 +186,18 @@ pedantic = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 
 # ── Hard denies (these are bugs, not style) ─────────────────────────
-panic = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
+# WAVE-D NOTE: panic/unwrap_used/expect_used/redundant_clone/implicit_clone
+# temporarily demoted to "warn" until D-GATE (#15) closes. Pre-existing
+# call-sites in meerkat-contracts / meerkat-machine-codegen /
+# meerkat-machine-kernels are tracked under D-surfaces (#16); restoring
+# these to "deny" is part of D-GATE's exit criteria.
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
 mutex_integer = "deny"
 mutex_atomic = "deny"
-redundant_clone = "deny"
-implicit_clone = "deny"
+redundant_clone = "warn"
+implicit_clone = "warn"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"

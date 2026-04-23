@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    unused_imports
+)]
 
 //! B-2 deliverable: typed round-trip assertion for the canonical catalog.
 //!

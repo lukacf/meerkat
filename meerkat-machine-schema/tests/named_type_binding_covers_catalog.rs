@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    unused_imports
+)]
 
 //! Tripwire for wave-c (Section 1.5 #8). Flipped green by **existing
 //! B-4 validator** — this tripwire is a cheap backstop that the

@@ -107,13 +107,11 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
                 reason: e.to_string(),
             })?;
         let limit = input.limit.unwrap_or(DEFAULT_LIMIT).min(20);
-        let results = self
-            .store
-            .search(&input.query, limit)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
+        let results = self.store.search(&input.query, limit).await.map_err(|e| {
+            ToolError::ExecutionFailed {
                 message: e.to_string(),
-            })?;
+            }
+        })?;
         let items: Vec<Value> = results
             .into_iter()
             .map(|r| {

@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, unused_imports)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    unused_imports
+)]
 
 //! Structural-equivalence tripwire for the two `PeerEndpoint` twins.
 //!

@@ -19,6 +19,7 @@ use crate::machines::HopcroftArgs;
 use crate::machines::{SelectionArgs, VerifyArgs};
 use crate::ownership_ledger::OwnershipLedgerArgs;
 use crate::rmat_audit::RmatAuditArgs;
+use crate::seam_inventory::SeamInventoryArgs;
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask")]
@@ -40,7 +41,7 @@ enum Commands {
     #[command(name = "machine-check-drift")]
     CheckDrift(SelectionArgs),
     #[command(name = "seam-inventory")]
-    SeamInventory,
+    SeamInventory(SeamInventoryArgs),
     #[command(name = "protocol-codegen")]
     ProtocolCodegen,
     #[command(name = "rmat-audit")]
@@ -60,7 +61,7 @@ pub fn run() -> Result<()> {
         #[cfg(feature = "machine-authority")]
         Commands::Hopcroft(args) => machines::machine_hopcroft(args),
         Commands::CheckDrift(args) => machines::machine_check_drift(args),
-        Commands::SeamInventory => seam_inventory::run_seam_inventory(),
+        Commands::SeamInventory(args) => seam_inventory::run_seam_inventory(args),
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
         Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),

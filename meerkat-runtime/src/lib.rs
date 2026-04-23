@@ -27,6 +27,7 @@ pub mod auth_machine;
 pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_drain;
+pub mod comms_trust_reconcile;
 pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;

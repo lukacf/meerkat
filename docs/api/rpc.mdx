@@ -76,14 +76,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realtime/open_info` | Realtime | Get bootstrap metadata for opening a realtime channel |
 | `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
 | `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
-| `session/status` | Runtime | Read runtime-backed ingress state |
 | `session/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status for a session |
-| `session/realtime_attachment_statuses` | Runtime | Batch read realtime attachment statuses for many sessions |
-| `session/submit` | Runtime | Admit external work directly into runtime ingress |
-| `session/retire` | Runtime | Retire runtime-backed ingress |
-| `session/reset` | Runtime | Reset runtime-backed ingress |
-| `session/submission` | Runtime | Read runtime input lifecycle state |
-| `session/submissions` | Runtime | List runtime input lifecycle records |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
 | `mob/create` | Mob | Create a mob from a definition (mob feature) |
@@ -165,17 +158,12 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realm/get` | Realm | Get full realm connection set |
 
 <Note>
-`session/status`, `session/submit`, `session/retire`, `session/reset`, `session/submission`, `session/submissions` are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
-</Note>
-
-<Note>
 Realtime is a delivery mode of the session's LLM, driven by
 `ModelCapabilities.realtime`. To enable realtime audio on a session,
 create the session with a realtime-capable model (for example
 `gpt-realtime-1.5`); transport attach/detach is managed automatically by
-the runtime. Observe status via `session/realtime_attachment_status`
-(single) or `session/realtime_attachment_statuses` (batch). There is no
-caller-initiated attach/detach RPC.
+the runtime. Observe status via `session/realtime_attachment_status`.
+There is no caller-initiated attach/detach RPC.
 </Note>
 
 <Note>
@@ -246,8 +234,7 @@ Handshake. Returns server capabilities.
       "capabilities/get", "models/catalog",
       "skills/list", "skills/inspect",
       "realtime/open_info", "realtime/status", "realtime/capabilities",
-      "session/status", "session/realtime_attachment_status", "session/realtime_attachment_statuses", "session/submit", "session/retire", "session/reset",
-      "session/submission", "session/submissions",
+      "session/realtime_attachment_status",
       "session/stream_open", "session/stream_close",
       "mob/create", "mob/list", "mob/status",
       "mob/members", "mob/spawn", "mob/spawn_many",
@@ -884,39 +871,6 @@ Read the runtime-owned realtime attachment status projection for a session.
 Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime guide](/guides/realtime#attachment-states) for the full state table and mermaid transition diagram.
 
 `mob/member_status` responses include the same value under the `realtime_attachment_status` field for sessions bound to mob members.
-
-### session/realtime_attachment_statuses
-
-Batch read of realtime attachment status for multiple sessions in a single round trip. Useful for observing all members of a mob at once.
-
-<CodeGroup>
-```json Request
-{
-  "jsonrpc": "2.0",
-  "id": 23,
-  "method": "session/realtime_attachment_statuses",
-  "params": {
-    "session_ids": [
-      "01936f8a-7b2c-7000-8000-000000000001",
-      "01936f8a-7b2c-7000-8000-000000000002"
-    ]
-  }
-}
-```
-
-```json Response
-{
-  "jsonrpc": "2.0",
-  "id": 23,
-  "result": {
-    "statuses": [
-      {"session_id": "01936f8a-7b2c-7000-8000-000000000001", "status": "binding_ready"},
-      {"session_id": "01936f8a-7b2c-7000-8000-000000000002", "status": "unattached"}
-    ]
-  }
-}
-```
-</CodeGroup>
 
 ### Realtime bootstrap methods (`realtime/*`)
 

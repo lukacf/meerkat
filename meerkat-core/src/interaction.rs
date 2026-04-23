@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::comms::TrustedPeerSpec;
+use crate::comms::TrustedPeerDescriptor;
 use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Unique identifier for an interaction.
@@ -258,13 +258,13 @@ pub enum PeerIngressAuthorityPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressRuntimeSnapshot {
     /// This runtime's public peer identity.
-    pub self_peer_id: String,
+    pub self_peer_id: crate::comms::PeerId,
     /// Whether unauthenticated peer envelopes are rejected at ingress.
     pub auth_required: bool,
     /// Current phase of the peer-ingress authority.
     pub authority_phase: PeerIngressAuthorityPhase,
     /// Current trusted peer set visible to this runtime.
-    pub trusted_peers: Vec<TrustedPeerSpec>,
+    pub trusted_peers: Vec<TrustedPeerDescriptor>,
     /// Current length of the authority-owned typed peer submission queue.
     pub submission_queue_len: usize,
     /// Non-destructive snapshot of the queued ingress surface.

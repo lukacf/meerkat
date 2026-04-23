@@ -114,7 +114,11 @@ pub struct MobToolConfigInput {
 }
 
 /// Profile binding input: either an inline profile or a realm profile reference.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Not `Eq`: `Inline(MobProfileInput)` transitively carries float provider
+/// params (`temperature`, `top_p`) so `Eq` cannot be derived without
+/// losing fidelity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum MobProfileBindingInput {
@@ -127,7 +131,7 @@ pub enum MobProfileBindingInput {
     Inline(MobProfileInput),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobProfileInput {
@@ -148,6 +152,9 @@ pub struct MobProfileInput {
     pub max_inline_peer_notifications: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
+    /// Non-`Eq` field: `WireProviderParamsOverride` contains float scalars
+    /// (`temperature`, `top_p`) so the struct can't derive `Eq` without
+    /// losing fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
 }
@@ -392,7 +399,9 @@ const fn default_event_router_buffer_size() -> usize {
 /// bookkeeping fields such as internal owner/runtime bindings,
 /// `session_cleanup_policy`, `is_implicit`, and internal-only profile tool
 /// bundles are intentionally not part of this schema.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Not `Eq`: `profiles` transitively carries float provider params.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobDefinitionInput {

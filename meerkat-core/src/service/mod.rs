@@ -207,7 +207,7 @@ pub struct SessionBuildOptions {
     /// Scheduler remains surface-owned. This dispatcher only controls
     /// tool visibility/composition for the built agent.
     pub schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
-    pub preload_skills: Option<Vec<crate::skills::SkillId>>,
+    pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
@@ -522,7 +522,7 @@ pub struct MobToolsBuildArgs {
     /// `apply_session_effects` after merging tool-produced `SessionEffect`s.
     /// If `None`, mob tools fall back to `authority_context` as a static snapshot.
     pub effective_authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
-    /// Comms name of the owning agent (for building TrustedPeerSpec).
+    /// Comms name of the owning agent (for building `TrustedPeerDescriptor`).
     pub comms_name: Option<String>,
     /// Optional comms runtime for auto-wiring spawned members.
     pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,

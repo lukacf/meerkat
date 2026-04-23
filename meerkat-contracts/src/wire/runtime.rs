@@ -209,22 +209,13 @@ pub enum WirePersistedInput {
 /// Typed non-semantic opaque bag for wire fields that cannot be fully typed
 /// without blocking Wave B. Explicitly marked non-semantic and RMAT-exempt.
 ///
-/// Use of this type is a deliberate boundary marker: the content is
-/// passed through without interpretation. Any consumer that needs to
-/// interpret the content must promote the relevant structure into a
-/// proper typed variant in its own wave.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct StructuredProviderExtension {
-    /// Free-form provider namespace discriminator (e.g. `"anthropic"`).
-    pub namespace: String,
-    /// Opaque key identifying the extension within the namespace.
-    pub key: String,
-    /// Opaque body. Non-semantic — never pattern matched across the wire.
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    #[serde(default)]
-    pub body: String,
-}
+/// Re-exported from `meerkat_core::lifecycle::run_primitive` so the wire
+/// path (`meerkat_contracts::wire::runtime::StructuredProviderExtension`)
+/// is preserved for external callers while the canonical definition lives
+/// in core (C-1 / adversarial review flaw 5). Core needs to name the bag
+/// to project `ProviderTag::Unknown { bag }` from V3 legacy rows without a
+/// cross-crate cycle.
+pub use meerkat_core::lifecycle::run_primitive::StructuredProviderExtension;
 
 /// RPC-facing input state snapshot.
 ///
@@ -558,6 +549,10 @@ pub enum WireProviderTag {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_count: Option<u32>,
     },
+    /// Wire projection of `ProviderTag::Unknown { bag }` — the typed
+    /// escape hatch for V3 legacy-row provider knobs that don't (yet) map
+    /// to a typed variant.
+    Unknown { bag: StructuredProviderExtension },
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderTag {
@@ -573,6 +568,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
             Core::Gemini(t) => Self::Gemini {
                 candidate_count: t.candidate_count,
             },
+            Core::Unknown { bag } => Self::Unknown { bag },
         }
     }
 }
@@ -591,9 +587,10 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
             WireProviderTag::OpenAi { reasoning_effort } => Self::OpenAi(OpenAiProviderTag {
                 reasoning_effort: reasoning_effort.map(Into::into),
             }),
-            WireProviderTag::Gemini { candidate_count } => Self::Gemini(GeminiProviderTag {
-                candidate_count,
-            }),
+            WireProviderTag::Gemini { candidate_count } => {
+                Self::Gemini(GeminiProviderTag { candidate_count })
+            }
+            WireProviderTag::Unknown { bag } => Self::Unknown { bag },
         }
     }
 }
@@ -686,7 +683,9 @@ pub enum WireRuntimeExecutionKind {
     ResumePending,
 }
 
-impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind> for WireRuntimeExecutionKind {
+impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind>
+    for WireRuntimeExecutionKind
+{
     fn from(value: meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind) -> Self {
         use meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind as Core;
         match value {
@@ -696,7 +695,9 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind> for Wire
     }
 }
 
-impl From<WireRuntimeExecutionKind> for meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind {
+impl From<WireRuntimeExecutionKind>
+    for meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind
+{
     fn from(value: WireRuntimeExecutionKind) -> Self {
         match value {
             WireRuntimeExecutionKind::ContentTurn => Self::ContentTurn,
@@ -705,9 +706,7 @@ impl From<WireRuntimeExecutionKind> for meerkat_core::lifecycle::run_primitive::
     }
 }
 
-impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>
-    for WireRuntimeTurnMetadata
-{
+impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireRuntimeTurnMetadata {
     fn from(value: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata) -> Self {
         Self {
             handling_mode: value.handling_mode.map(Into::into),
@@ -727,9 +726,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>
     }
 }
 
-impl From<WireRuntimeTurnMetadata>
-    for meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata
-{
+impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
     fn from(value: WireRuntimeTurnMetadata) -> Self {
         use meerkat_core::lifecycle::run_primitive::ModelId;
         Self {

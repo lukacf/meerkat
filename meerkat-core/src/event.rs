@@ -408,7 +408,7 @@ pub enum AgentEvent {
     // === Skill Events ===
     /// Skills resolved for this turn.
     SkillsResolved {
-        skills: Vec<crate::skills::SkillId>,
+        skills: Vec<crate::skills::SkillKey>,
         injection_bytes: usize,
     },
 

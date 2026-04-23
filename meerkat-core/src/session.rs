@@ -1096,7 +1096,7 @@ pub struct SessionTooling {
     pub memory: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_skills: Option<Vec<crate::skills::SkillId>>,
+    pub active_skills: Option<Vec<crate::skills::SkillKey>>,
 }
 
 impl From<&Session> for SessionMeta {

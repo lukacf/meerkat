@@ -15,7 +15,7 @@ mod turn_state;
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope, TrustedPeerSpec,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
@@ -552,8 +552,8 @@ pub trait CommsRuntime: Send + Sync {
     /// Runtime-local advertised comms address, if available.
     ///
     /// This is the canonical address the runtime expects peers to use when
-    /// constructing a [`TrustedPeerSpec`]. Implementations that do not expose a
-    /// stable advertised address can return `None`.
+    /// constructing a [`TrustedPeerDescriptor`]. Implementations that do not
+    /// expose a stable advertised address can return `None`.
     fn advertised_address(&self) -> Option<String> {
         None
     }
@@ -569,7 +569,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Runtimes that manage trust dynamically should accept this as a mutable
     /// control-plane operation and return `SendError::Unsupported` if not
     /// available.
-    async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_trusted_peer not supported for this CommsRuntime".to_string(),
         ))
@@ -596,7 +596,10 @@ pub trait CommsRuntime: Send + Sync {
     /// peer in `comms.peers` / REST / RPC / MCP. The admission gate consults
     /// both the public and private trust sets; `resolve_peer_directory()`
     /// consults only the public set.
-    async fn add_private_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+    async fn add_private_trusted_peer(
+        &self,
+        _peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_private_trusted_peer not supported for this CommsRuntime".to_string(),
         ))
@@ -915,7 +918,9 @@ mod tests {
     use super::{
         CommsRuntime, DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS, InlinePeerNotificationPolicy,
     };
-    use crate::comms::{SendError, TrustedPeerSpec};
+    use crate::comms::{
+        PeerAddress, PeerId, PeerName, PeerTransport, SendError, TrustedPeerDescriptor,
+    };
     use async_trait::async_trait;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -942,10 +947,10 @@ mod tests {
             notify: Arc::new(Notify::new()),
         };
         assert!(<NoopCommsRuntime as CommsRuntime>::public_key(&runtime).is_none());
-        let peer = TrustedPeerSpec {
-            name: "peer-a".to_string(),
-            peer_id: "ed25519:test".to_string(),
-            address: "inproc://peer-a".to_string(),
+        let peer = TrustedPeerDescriptor {
+            peer_id: PeerId::new(),
+            name: PeerName::new("peer-a").expect("valid peer name"),
+            address: PeerAddress::new(PeerTransport::Inproc, "peer-a"),
         };
         let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));

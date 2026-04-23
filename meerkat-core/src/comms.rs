@@ -201,6 +201,28 @@ impl From<PeerName> for String {
     }
 }
 
+/// Routing-subset descriptor for a trusted peer — the identity fields that
+/// traverse the core seam.
+///
+/// Replaces the old stringly trusted-peer spec `{ name, peer_id, address }`
+/// with typed atoms: `PeerId` (routing key), `PeerName` (display slug),
+/// `PeerAddress` (transport + endpoint). Richer fields like
+/// wire-public-key, trust-store metadata, or reachability stay in
+/// `meerkat-comms::trust::TrustedPeer` — this descriptor is only the
+/// subset the core loop needs for routing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedPeerDescriptor {
+    /// Canonical runtime identity — the routing key. Never collides.
+    pub peer_id: PeerId,
+    /// Display-only slug for humans. Two peers may legitimately share a
+    /// name; their `peer_id` values still differ.
+    pub name: PeerName,
+    /// Typed transport atom + endpoint. Transport cannot be invented by
+    /// string concatenation at a call site.
+    pub address: PeerAddress,
+}
+
 /// One-way peer lifecycle notification kind.
 ///
 /// These notifications are control-plane topology updates, not correlated

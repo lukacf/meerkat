@@ -252,6 +252,6 @@ pub use auth::{
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingPolicy,
-    ConnectionRef, CredentialSourceSpec, CredentialStorageSpec, ProviderBinding,
-    ProviderBindingConfig, ProviderBindingError, RealmConfigSection, RealmConnectionSet,
+    ConnectionRef, CredentialSourceSpec, ProviderBinding, ProviderBindingConfig,
+    ProviderBindingError, RealmConfigSection, RealmConnectionSet,
 };

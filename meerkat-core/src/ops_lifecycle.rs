@@ -7,7 +7,7 @@ use crate::tokio::sync::oneshot;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::oneshot;
 
-use crate::comms::TrustedPeerSpec;
+use crate::comms::TrustedPeerDescriptor;
 use crate::lifecycle::{RunId, WaitRequestId};
 pub use crate::ops::{OperationId, OperationResult};
 use crate::types::SessionId;
@@ -63,8 +63,8 @@ impl OperationSpec {
 /// Peer-facing connection handoff surfaced once an operation is ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPeerHandle {
-    pub peer_name: String,
-    pub trusted_peer: TrustedPeerSpec,
+    pub peer_name: crate::comms::PeerName,
+    pub trusted_peer: TrustedPeerDescriptor,
 }
 
 /// Progress update for a long-running async operation.

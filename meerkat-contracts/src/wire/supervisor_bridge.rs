@@ -199,9 +199,11 @@ impl std::fmt::Display for BridgeMemberRuntimeState {
 
 /// Minimal trusted peer identity for supervisor bridge wire messages.
 ///
-/// Mirrors `meerkat_core::comms::TrustedPeerSpec` but is self-contained in
-/// the contracts crate so neither sender nor receiver needs a cross-crate
-/// dependency for deserialization.
+/// Mirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is
+/// self-contained in the contracts crate so neither sender nor receiver
+/// needs a cross-crate dependency for deserialization. Fields stay
+/// stringly at the wire boundary — the typed `PeerId`/`PeerName`/
+/// `PeerAddress` atoms are only re-hydrated on the receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgePeerSpec {
     pub name: String,
@@ -219,34 +221,53 @@ pub enum BridgePeerConnectivity {
     Unknown,
 }
 
-impl From<meerkat_core::comms::TrustedPeerSpec> for BridgePeerSpec {
-    fn from(spec: meerkat_core::comms::TrustedPeerSpec) -> Self {
+impl From<meerkat_core::comms::TrustedPeerDescriptor> for BridgePeerSpec {
+    fn from(spec: meerkat_core::comms::TrustedPeerDescriptor) -> Self {
         Self {
-            name: spec.name,
-            peer_id: spec.peer_id,
-            address: spec.address,
+            name: spec.name.as_str().to_string(),
+            peer_id: spec.peer_id.as_str(),
+            address: spec.address.to_string(),
         }
     }
 }
 
-impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
     type Error = String;
 
     fn try_from(spec: BridgePeerSpec) -> Result<Self, Self::Error> {
-        meerkat_core::comms::TrustedPeerSpec::new(spec.name, spec.peer_id, spec.address)
+        Self::try_from(&spec)
     }
 }
 
-impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
     type Error = String;
 
     fn try_from(spec: &BridgePeerSpec) -> Result<Self, Self::Error> {
-        meerkat_core::comms::TrustedPeerSpec::new(
-            spec.name.clone(),
-            spec.peer_id.clone(),
-            spec.address.clone(),
-        )
+        let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
+            .map_err(|e| format!("invalid peer_id: {e}"))?;
+        let name = meerkat_core::comms::PeerName::new(spec.name.clone())
+            .map_err(|e| format!("invalid peer name: {e}"))?;
+        let address = parse_peer_address(&spec.address)?;
+        Ok(meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id,
+            name,
+            address,
+        })
     }
+}
+
+fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    use meerkat_core::comms::{PeerAddress, PeerTransport};
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => PeerTransport::Inproc,
+        "uds" => PeerTransport::Uds,
+        "tcp" => PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(PeerAddress::new(transport, endpoint))
 }
 
 // ---------------------------------------------------------------------------

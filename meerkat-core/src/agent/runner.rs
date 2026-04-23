@@ -417,7 +417,10 @@ where
     }
 
     /// Snapshot the agent's live execution state for diagnostics and mapping.
-    pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
+    ///
+    /// Returns `None` when the agent has no runtime-backed turn-state
+    /// handle attached (standalone/ephemeral execution paths).
+    pub fn execution_snapshot(&self) -> Option<crate::AgentExecutionSnapshot> {
         let handle = self.turn_state_handle.as_deref()?;
         runtime_execution_snapshot(handle, self.applied_cursor)
     }

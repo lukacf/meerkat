@@ -94,18 +94,21 @@ where
     }
 
     fn turn_phase(&self) -> TurnPhase {
+        // No runtime-backed turn state ⇒ the agent is standalone/ephemeral
+        // and has not yet advanced past `Ready`.
         self.runtime_turn_authority_snapshot()
             .map(|snapshot| snapshot.turn_phase)
+            .unwrap_or(TurnPhase::Ready)
     }
 
     fn turn_cancel_after_boundary(&self) -> bool {
         self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.cancel_after_boundary)
+            .is_some_and(|snapshot| snapshot.cancel_after_boundary)
     }
 
     fn turn_has_barrier_ops(&self) -> bool {
         self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.has_barrier_ops)
+            .is_some_and(|snapshot| snapshot.has_barrier_ops)
     }
 
     fn turn_barrier_operation_ids(&self) -> Vec<crate::ops::OperationId> {
@@ -117,26 +120,29 @@ where
                     .filter_map(|id| parse_runtime_operation_id(id))
                     .collect()
             })
+            .unwrap_or_default()
     }
 
     fn turn_pending_ops_registered(&self) -> bool {
         self.runtime_turn_authority_snapshot()
-            .map(|snapshot| !snapshot.pending_op_refs.is_empty())
+            .is_some_and(|snapshot| !snapshot.pending_op_refs.is_empty())
     }
 
     fn turn_in_extraction_flow(&self) -> bool {
         self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.max_extraction_retries > 0)
+            .is_some_and(|snapshot| snapshot.max_extraction_retries > 0)
     }
 
     fn turn_terminal_outcome(&self) -> TurnTerminalOutcome {
         self.runtime_turn_authority_snapshot()
             .and_then(|snapshot| snapshot.terminal_outcome)
+            .unwrap_or(TurnTerminalOutcome::None)
     }
 
     fn turn_extraction_attempts(&self) -> u32 {
         self.runtime_turn_authority_snapshot()
             .map(|snapshot| u32::try_from(snapshot.extraction_attempts).unwrap_or(u32::MAX))
+            .unwrap_or(0)
     }
 
     /// Resolve the effective call timeout for this LLM call.
@@ -375,10 +381,10 @@ where
                 return Ok(());
             }
             TurnExecutionInput::PrimitiveApplied {
-                run_id,
-                admitted_content_shape,
-                vision_enabled,
-                image_tool_results_enabled,
+                run_id: _,
+                admitted_content_shape: _,
+                vision_enabled: _,
+                image_tool_results_enabled: _,
             } => handle.primitive_applied(),
             TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
                 handle.llm_returned_tool_calls(u64::from(*tool_count))
@@ -446,7 +452,24 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
+        let prev_phase = self.turn_phase();
         self.apply_turn_input_via_runtime_handle(&input)?;
+        let next_phase = self.turn_phase();
+
+        // Effects are derived from phase transitions only. The runtime
+        // authority owns all other side-effect decisions; core just
+        // surfaces the compaction tick on CallingLlm entry so the
+        // standalone compactor path still fires.
+        let mut effects = Vec::new();
+        if prev_phase != TurnPhase::CallingLlm && next_phase == TurnPhase::CallingLlm {
+            effects.push(TurnExecutionEffect::CheckCompaction);
+        }
+
+        Ok(TurnExecutionTransition {
+            prev_phase,
+            next_phase,
+            effects,
+        })
     }
 
     /// Execute side effects from a transition. Handles CheckCompaction
@@ -2094,8 +2117,8 @@ mod tests {
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::skills::{
-        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillId,
-        SkillKey, SkillName, SourceUuid,
+        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillKey,
+        SkillName, SourceUuid,
     };
     use crate::state::LoopState;
     use crate::tool_scope::{
@@ -2191,19 +2214,27 @@ mod tests {
     }
 
     struct RecordingSkillEngine {
-        seen_ids: Mutex<Vec<SkillId>>,
+        seen_keys: Mutex<Vec<SkillKey>>,
     }
 
     impl RecordingSkillEngine {
         fn new() -> Self {
             Self {
-                seen_ids: Mutex::new(Vec::new()),
+                seen_keys: Mutex::new(Vec::new()),
             }
         }
 
-        fn seen(&self) -> Vec<SkillId> {
-            self.seen_ids.lock().unwrap().clone()
+        fn seen(&self) -> Vec<SkillKey> {
+            self.seen_keys.lock().unwrap().clone()
         }
+    }
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        SkillKey::new(
+            SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid fixture source uuid"),
+            SkillName::parse(name).expect("valid fixture skill name"),
+        )
     }
 
     impl SkillEngine for RecordingSkillEngine {
@@ -2215,19 +2246,20 @@ mod tests {
 
         fn resolve_and_render(
             &self,
-            ids: &[SkillId],
+            keys: &[SkillKey],
         ) -> impl Future<Output = Result<Vec<ResolvedSkill>, crate::skills::SkillError>> + Send
         {
-            let ids = ids.to_vec();
+            let keys = keys.to_vec();
             async move {
-                let mut seen = self.seen_ids.lock().unwrap();
-                seen.extend_from_slice(&ids);
+                let mut seen = self.seen_keys.lock().unwrap();
+                seen.extend_from_slice(&keys);
                 drop(seen);
 
                 Ok(vec![ResolvedSkill {
-                    id: ids.first().cloned().unwrap_or_else(|| {
-                        SkillId("dc256086-0d2f-4f61-a307-320d4148107f/email-extractor".to_string())
-                    }),
+                    key: keys
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| fixture_skill_key("email-extractor")),
                     name: "email-extractor".to_string(),
                     rendered_body: "<skill>injected canonical skill</skill>".to_string(),
                     byte_size: 34,
@@ -2271,33 +2303,33 @@ mod tests {
 
         fn list_artifacts(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
         ) -> impl Future<
             Output = Result<Vec<crate::skills::SkillArtifact>, crate::skills::SkillError>,
         > + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
 
         fn read_artifact(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
             _artifact_path: &str,
         ) -> impl Future<
             Output = Result<crate::skills::SkillArtifactContent, crate::skills::SkillError>,
         > + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
 
         fn invoke_function(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
             _function_name: &str,
             _arguments: Value,
         ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
     }
 

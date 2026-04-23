@@ -148,18 +148,120 @@ pub enum TurnInstructionKind {
     Host,
 }
 
+/// Typed non-semantic opaque bag for per-turn provider knobs that cannot be
+/// fully typed without blocking a wave boundary. Explicitly marked
+/// non-semantic and RMAT-exempt.
+///
+/// Use of this type is a deliberate boundary marker: content is passed
+/// through without interpretation. Any consumer that needs to interpret the
+/// content must promote the relevant structure into a proper typed variant
+/// in its own wave.
+///
+/// Relocated from `meerkat_contracts::wire::runtime` into core so
+/// `ProviderTag::Unknown { bag }` can name the bag without a cross-crate
+/// cycle (adversarial review flaw 5). `meerkat-contracts` re-exports this
+/// type so the wire path is preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StructuredProviderExtension {
+    /// Free-form provider namespace discriminator (e.g. `"anthropic"`).
+    pub namespace: String,
+    /// Opaque key identifying the extension within the namespace.
+    pub key: String,
+    /// Opaque body. Non-semantic — never pattern matched across the wire.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    #[serde(default)]
+    pub body: String,
+}
+
 /// Provider-specific typed override payload carried on a single turn.
 ///
 /// Each provider family gets its own typed variant. Anything that does not
 /// fit a typed field belongs on the per-binding auth/backend profile, not
 /// on the per-turn override — the per-turn seam carries only scalars the
 /// runtime can route authoritatively.
+///
+/// `Unknown { bag }` is the typed escape hatch for V3 legacy-row
+/// deserialize (see C-TM-V3): the untyped `serde_json::Value` thinking
+/// carrier from pre-wave rows projects into `StructuredProviderExtension`
+/// rather than being silently dropped (persistence-migration.md §3.1,
+/// adversarial review flaw 5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ProviderTag {
     Anthropic(AnthropicProviderTag),
     OpenAi(OpenAiProviderTag),
     Gemini(GeminiProviderTag),
+    /// Opaque pass-through for legacy-row knobs that don't (yet) map to a
+    /// typed variant. Carries the namespaced bag so a later wave can
+    /// promote the structure to a typed variant without losing data.
+    Unknown {
+        bag: StructuredProviderExtension,
+    },
+}
+
+impl ProviderTag {
+    /// Project a legacy untyped per-turn value into a typed `ProviderTag`.
+    ///
+    /// V3 rows stored provider knobs as `serde_json::Value`. This helper
+    /// maps the well-known shapes onto typed variants (e.g. Anthropic's
+    /// `thinking: { budget_tokens: N }`) and falls through to
+    /// `Unknown { bag }` when the shape is unrecognised — lossless round-
+    /// trip instead of silent drop.
+    pub fn from_legacy_value(
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: &serde_json::Value,
+    ) -> Self {
+        let namespace = namespace.into();
+        let key = key.into();
+
+        // Anthropic `thinking: { type: "enabled", budget_tokens: N }` was
+        // the one V3 row shape most at risk of silent drop (persistence-
+        // migration.md §5 fixture #4). Project it directly.
+        if namespace == "anthropic" && key == "thinking" {
+            if let Some(budget) = value
+                .get("budget_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+            {
+                return Self::Anthropic(AnthropicProviderTag {
+                    thinking_budget_tokens: Some(budget),
+                });
+            }
+        }
+
+        // OpenAI `reasoning_effort: "low"|"medium"|"high"`.
+        if namespace == "openai" && key == "reasoning_effort" {
+            if let Some(effort) = value.as_str().and_then(|s| match s {
+                "low" => Some(ReasoningEffort::Low),
+                "medium" => Some(ReasoningEffort::Medium),
+                "high" => Some(ReasoningEffort::High),
+                _ => None,
+            }) {
+                return Self::OpenAi(OpenAiProviderTag {
+                    reasoning_effort: Some(effort),
+                });
+            }
+        }
+
+        // Gemini `candidate_count: N`.
+        if namespace == "gemini" && key == "candidate_count" {
+            if let Some(count) = value.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                return Self::Gemini(GeminiProviderTag {
+                    candidate_count: Some(count),
+                });
+            }
+        }
+
+        Self::Unknown {
+            bag: StructuredProviderExtension {
+                namespace,
+                key,
+                body: value.to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -332,22 +434,50 @@ impl RuntimeTurnMetadata {
     /// last-wins. Collection fields accumulate.
     pub fn merge(&mut self, other: Self) -> Result<(), TurnMetadataMergeConflict> {
         // Scalar: conflict-refusing merge.
-        merge_scalar(&mut self.handling_mode, other.handling_mode, "handling_mode")?;
-        merge_scalar(&mut self.flow_tool_overlay, other.flow_tool_overlay, "flow_tool_overlay")?;
+        merge_scalar(
+            &mut self.handling_mode,
+            other.handling_mode,
+            "handling_mode",
+        )?;
+        merge_scalar(
+            &mut self.flow_tool_overlay,
+            other.flow_tool_overlay,
+            "flow_tool_overlay",
+        )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;
-        merge_scalar(&mut self.provider_params, other.provider_params, "provider_params")?;
-        merge_scalar(&mut self.connection_ref, other.connection_ref, "connection_ref")?;
+        merge_scalar(
+            &mut self.provider_params,
+            other.provider_params,
+            "provider_params",
+        )?;
+        merge_scalar(
+            &mut self.connection_ref,
+            other.connection_ref,
+            "connection_ref",
+        )?;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
-        merge_scalar(&mut self.render_metadata, other.render_metadata, "render_metadata")?;
-        merge_scalar(&mut self.execution_kind, other.execution_kind, "execution_kind")?;
+        merge_scalar(
+            &mut self.render_metadata,
+            other.render_metadata,
+            "render_metadata",
+        )?;
+        merge_scalar(
+            &mut self.execution_kind,
+            other.execution_kind,
+            "execution_kind",
+        )?;
 
         // Collections: accumulate.
         if let Some(extra) = other.skill_references {
-            self.skill_references.get_or_insert_with(Vec::new).extend(extra);
+            self.skill_references
+                .get_or_insert_with(Vec::new)
+                .extend(extra);
         }
         if let Some(extra) = other.additional_instructions {
-            self.additional_instructions.get_or_insert_with(Vec::new).extend(extra);
+            self.additional_instructions
+                .get_or_insert_with(Vec::new)
+                .extend(extra);
         }
         Ok(())
     }

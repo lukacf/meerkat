@@ -457,8 +457,9 @@ mod tests {
     fn binding() -> ValidatedBinding {
         ValidatedBinding {
             connection_ref: ConnectionRef {
-                realm_id: "dev".into(),
-                binding_id: "default".into(),
+                realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                profile: None,
             },
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(

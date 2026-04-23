@@ -281,16 +281,17 @@ mod tests {
             app_context: None,
             shell_env: None,
             connection_ref: Some(WireConnectionRef {
-                realm_id: "dev".into(),
-                binding_id: "default_openai".into(),
+                realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
+                profile: None,
             }),
         };
         let json = serde_json::to_string(&params)?;
         assert!(json.contains("\"connection_ref\""));
-        assert!(json.contains("\"realm_id\":\"dev\""));
+        assert!(json.contains("\"realm\":\"dev\""));
         let parsed: CoreCreateParams = serde_json::from_str(&json)?;
         assert_eq!(
-            parsed.connection_ref.map(|r| r.binding_id),
+            parsed.connection_ref.map(|r| r.binding.as_str().to_owned()),
             Some("default_openai".to_string())
         );
         Ok(())

@@ -516,6 +516,7 @@ mod tests {
             name: "member-a".to_string(),
             peer_id: "peer-abc".to_string(),
             address: "tcp://127.0.0.1:7000".to_string(),
+            pubkey: [0u8; 32],
         }
     }
 
@@ -536,6 +537,7 @@ mod tests {
                 name: "member-b".to_string(),
                 peer_id: "peer-xyz".to_string(),
                 address: "tcp://127.0.0.1:7001".to_string(),
+                pubkey: [0u8; 32],
             },
         }
     }

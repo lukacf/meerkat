@@ -98,8 +98,8 @@ mod visibility;
 pub use composition::MeerkatConsumerSurface;
 
 pub use comms_drain::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerIngressOwner, SupervisorBinding,
-    SupervisorBindingStageError,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerEndpointStageError, PeerIngressOwner,
+    SupervisorBinding, SupervisorBindingStageError,
 };
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
@@ -165,6 +165,14 @@ struct RuntimeSessionEntry {
     /// could fall out of sync across a registration/unregistration
     /// boundary.
     drain_slot: CommsDrainSlot,
+    /// D-track-b: per-session trust reconciler consuming the DSL-owned
+    /// `CommsTrustReconcileRequested` effect. Lazily constructed on the
+    /// first `stage_*_peer_endpoint` / `stage_apply_mob_peer_overlay`
+    /// call so the reconciler is bound to the caller-supplied
+    /// [`CommsRuntime`] (the same runtime the session's drain is
+    /// bound to). Re-used across subsequent stager calls so the
+    /// applied-view epoch watermark is monotonically advanced.
+    trust_reconciler: Option<Arc<crate::comms_trust_reconcile::CommsTrustReconciler>>,
 }
 
 /// Capability bundle for an attached runtime loop.

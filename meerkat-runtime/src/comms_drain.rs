@@ -1552,6 +1552,14 @@ async fn try_handle_supervisor_bridge_command(
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
             }
+            // D-track-b: route WireMember through the DSL authority's
+            // peer-projection state. The stager helper applies
+            // `AddDirectPeerEndpoint`, emits
+            // `CommsTrustReconcileRequested`, and drives the session's
+            // `CommsTrustReconciler` to register the peer against the
+            // `CommsRuntime`'s trust store — no direct `add_trusted_peer`
+            // call here (closes the emitter→consumer gap from
+            // docs/wave-d-prep/track-b-producer-wiring.md).
             let peer_spec = match TrustedPeerDescriptor::try_from(payload.peer_spec) {
                 Ok(spec) => spec,
                 Err(error) => {
@@ -1565,7 +1573,11 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            match comms_runtime.add_trusted_peer(peer_spec).await {
+            let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer_spec);
+            match adapter
+                .stage_add_direct_peer_endpoint(session_id, endpoint, Arc::clone(comms_runtime))
+                .await
+            {
                 Ok(()) => {
                     send_bridge_response(
                         comms_runtime,
@@ -1599,11 +1611,30 @@ async fn try_handle_supervisor_bridge_command(
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
             }
-            match comms_runtime
-                .remove_trusted_peer(&payload.peer_spec.peer_id)
+            // D-track-b: mirror of WireMember — route UnwireMember
+            // through `RemoveDirectPeerEndpoint`. The DSL authority's
+            // peer-projection state is the source of truth; the trust
+            // store is a derived projection maintained by the
+            // reconciler.
+            let peer_spec = match TrustedPeerDescriptor::try_from(payload.peer_spec) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::InvalidPeerSpec,
+                        format!("unwire member failed: invalid trusted peer spec: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer_spec);
+            match adapter
+                .stage_remove_direct_peer_endpoint(session_id, endpoint, Arc::clone(comms_runtime))
                 .await
             {
-                Ok(_) => {
+                Ok(()) => {
                     send_bridge_response(
                         comms_runtime,
                         candidate,

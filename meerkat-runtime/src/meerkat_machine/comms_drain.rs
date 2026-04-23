@@ -886,3 +886,207 @@ impl std::fmt::Display for SupervisorBindingStageError {
 }
 
 impl std::error::Error for SupervisorBindingStageError {}
+
+impl MeerkatMachine {
+    /// D-track-b: stage an `AddDirectPeerEndpoint` DSL input and drive
+    /// the session-scoped trust reconciler.
+    ///
+    /// Closes the emitter→consumer gap documented in
+    /// `docs/wave-d-prep/track-b-producer-wiring.md`: the DSL owns the
+    /// declarative peer set (`direct_peer_endpoints` +
+    /// `mob_overlay_peer_endpoints`) and emits
+    /// `CommsTrustReconcileRequested`; the reconciler consumes that
+    /// effect and mechanically reconciles the underlying
+    /// [`meerkat_core::agent::CommsRuntime`] trust store.
+    ///
+    /// The caller supplies the session's `CommsRuntime` because the
+    /// reconciler's lifetime is rooted in it; when the session's first
+    /// stager call runs, the machine installs a
+    /// [`crate::comms_trust_reconcile::CommsTrustReconciler`] on the
+    /// `RuntimeSessionEntry` bound to this runtime. Subsequent stager
+    /// calls on the same session re-use that reconciler so the applied
+    /// view watermark is monotonically advanced across calls.
+    pub async fn stage_add_direct_peer_endpoint(
+        &self,
+        session_id: &SessionId,
+        endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                    endpoint,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// D-track-b: stage a `RemoveDirectPeerEndpoint` DSL input and
+    /// drive the session-scoped trust reconciler. See
+    /// [`Self::stage_add_direct_peer_endpoint`] for the architectural
+    /// contract.
+    pub async fn stage_remove_direct_peer_endpoint(
+        &self,
+        session_id: &SessionId,
+        endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
+                    endpoint,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// D-track-b: stage an `ApplyMobPeerOverlay` DSL input and drive
+    /// the session-scoped trust reconciler. Used by composition drivers
+    /// that recompute the mob-overlay peer set from the MobMachine
+    /// wiring graph.
+    pub async fn stage_apply_mob_peer_overlay(
+        &self,
+        session_id: &SessionId,
+        epoch: u64,
+        endpoints: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch,
+                    endpoints,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// Apply a peer-projection DSL input, sample the emitted
+    /// `CommsTrustReconcileRequested` effect under the same DSL lock,
+    /// and return the session-scoped reconciler with the post-transition
+    /// effective peer set `direct ∪ overlay`.
+    ///
+    /// The reconciler is driven OUTSIDE the `sessions` RwLock to avoid
+    /// blocking other adapter operations behind trust-store I/O; the
+    /// reconciler's own async mutex serializes concurrent reconcile
+    /// calls on the same session, so correctness holds without the
+    /// outer lock.
+    async fn stage_peer_projection_input(
+        &self,
+        session_id: &SessionId,
+        input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<
+        (
+            Arc<crate::comms_trust_reconcile::CommsTrustReconciler>,
+            u64,
+            BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+        ),
+        PeerEndpointStageError,
+    > {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
+
+        let (reconcile_epoch, effective_peers) = {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transition =
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                    .map_err(PeerEndpointStageError::Dsl)?;
+            let epoch = transition
+                .effects
+                .iter()
+                .find_map(|e| match e {
+                    crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+                        peer_projection_epoch,
+                    } => Some(*peer_projection_epoch),
+                    _ => None,
+                })
+                .ok_or(PeerEndpointStageError::MissingReconcileEffect)?;
+            // Effective peer set is the union of direct + overlay
+            // sampled inside the same DSL-lock critical section that
+            // just committed the transition. No interleaved mutation
+            // can slip between the commit and this read.
+            let effective: BTreeSet<_> = authority
+                .state
+                .direct_peer_endpoints
+                .iter()
+                .chain(authority.state.mob_overlay_peer_endpoints.iter())
+                .cloned()
+                .collect();
+            (epoch, effective)
+        };
+
+        let reconciler = entry
+            .trust_reconciler
+            .get_or_insert_with(|| {
+                Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
+                    comms_runtime,
+                ))
+            })
+            .clone();
+
+        Ok((reconciler, reconcile_epoch, effective_peers))
+    }
+}
+
+async fn drive_reconciler(
+    reconciler: &crate::comms_trust_reconcile::CommsTrustReconciler,
+    reconcile_epoch: u64,
+    effective_peers: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+) -> Result<(), PeerEndpointStageError> {
+    reconciler
+        .reconcile(reconcile_epoch, effective_peers)
+        .await
+        .map(|_report| ())
+        .map_err(PeerEndpointStageError::Reconcile)
+}
+
+/// Errors raised when staging a peer-projection input against the DSL
+/// and driving the session-scoped trust reconciler (D-track-b).
+#[derive(Debug)]
+pub enum PeerEndpointStageError {
+    /// The session is not registered with the runtime.
+    SessionNotRegistered,
+    /// The DSL mutator rejected the transition (e.g. duplicate endpoint,
+    /// stale overlay epoch, or per-phase guard failure).
+    Dsl(crate::meerkat_machine::dsl::MeerkatMachineTransitionError),
+    /// The DSL transition committed but did not emit
+    /// `CommsTrustReconcileRequested`. This indicates a contract
+    /// violation between the schema and the runtime — the three
+    /// peer-projection transitions are specified to emit the effect
+    /// unconditionally.
+    MissingReconcileEffect,
+    /// The reconciler failed to mechanically reconcile the trust
+    /// store.
+    Reconcile(crate::comms_trust_reconcile::CommsTrustReconcileError),
+}
+
+impl std::fmt::Display for PeerEndpointStageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotRegistered => write!(f, "session not registered with runtime"),
+            Self::Dsl(err) => write!(f, "DSL rejected peer-projection input: {err}"),
+            Self::MissingReconcileEffect => write!(
+                f,
+                "peer-projection DSL transition committed without emitting CommsTrustReconcileRequested"
+            ),
+            Self::Reconcile(err) => write!(f, "trust reconciliation failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerEndpointStageError {}

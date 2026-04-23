@@ -200,6 +200,14 @@ pub use service_factory::{
     build_persistent_service, build_persistent_service_with_runtime_adapter,
 };
 
+// Canonical staged-session lifecycle authority. See
+// `docs/wave-d-prep/d-j-staged-session-design.md`.
+mod staged_sessions;
+pub use staged_sessions::{
+    PromotingSlot, StagedLifecycleError, StagedPhase, StagedSessionInfo, StagedSessionRegistry,
+    StagedSlot,
+};
+
 // Session service
 pub use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,

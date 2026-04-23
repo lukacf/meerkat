@@ -730,8 +730,10 @@ mod tests {
                     tool_calls: vec![WireToolCall {
                         id: "tool-1".to_string(),
                         name: "search".to_string(),
-                        args: serde_json::value::RawValue::from_string(r#"{"q":"rust"}"#.to_string())
-                            .expect("fixture args literal is valid JSON"),
+                        args: serde_json::value::RawValue::from_string(
+                            r#"{"q":"rust"}"#.to_string(),
+                        )
+                        .expect("fixture args literal is valid JSON"),
                     }],
                     stop_reason: WireStopReason::ToolUse,
                 },

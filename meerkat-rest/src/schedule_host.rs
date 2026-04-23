@@ -179,7 +179,7 @@ impl RestScheduleContext {
         build_config.realm_id = create
             .realm_id
             .clone()
-            .or_else(|| Some(self.runtime.realm_id.clone()));
+            .or_else(|| Some(self.runtime.realm.to_string()));
         build_config.instance_id = create
             .instance_id
             .clone()
@@ -562,7 +562,7 @@ impl AppState {
 
     fn schedule_owner_id(&self) -> String {
         let instance = self.instance_id.as_deref().unwrap_or("rest");
-        format!("rest-scheduler:{}:{instance}", self.realm_id)
+        format!("rest-scheduler:{}:{instance}", self.realm)
     }
 }
 

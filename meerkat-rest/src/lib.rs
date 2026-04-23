@@ -132,7 +132,7 @@ pub struct AppState {
     pub schedule_service: ScheduleService,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
-    pub realm_id: String,
+    pub realm: meerkat_core::RealmId,
     pub instance_id: Option<String>,
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
@@ -169,7 +169,7 @@ struct RestRuntimeExecutorContext {
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    realm_id: String,
+    realm: meerkat_core::RealmId,
     instance_id: Option<String>,
     backend: String,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
@@ -214,7 +214,7 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
         let locator = bootstrap.realm.resolve_locator()?;
-        let realm_id = locator.realm_id;
+        let realm = locator.realm;
         let instance_id = bootstrap.realm.instance_id;
         let backend_hint = bootstrap
             .realm
@@ -224,10 +224,11 @@ impl AppState {
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
         let realms_root = locator.state_root;
         let (manifest, persistence) =
-            open_realm_persistence_in(&realms_root, &realm_id, backend_hint, origin_hint).await?;
+            open_realm_persistence_in(&realms_root, realm.as_str(), backend_hint, origin_hint)
+                .await?;
         let session_store = persistence.session_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm.as_str());
         let resolved_paths = meerkat_core::ConfigResolvedPaths {
             root: realm_paths.root.display().to_string(),
             manifest_path: realm_paths.manifest_path.display().to_string(),
@@ -240,7 +241,7 @@ impl AppState {
         let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
             base_config_store,
             meerkat_core::ConfigStoreMetadata {
-                realm_id: Some(realm_id.clone()),
+                realm_id: Some(realm.to_string()),
                 instance_id: instance_id.clone(),
                 backend: Some(manifest.backend.as_str().to_string()),
                 resolved_paths: Some(resolved_paths.clone()),
@@ -252,7 +253,7 @@ impl AppState {
         ));
         let lease = meerkat_store::start_realm_lease_in(
             &realms_root,
-            &realm_id,
+            realm.as_str(),
             instance_id.as_deref(),
             "rkat-rest",
         )
@@ -350,7 +351,7 @@ impl AppState {
             session_service,
             schedule_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
-            realm_id,
+            realm,
             instance_id,
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
@@ -388,7 +389,7 @@ impl AppState {
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),
-            realm_id: self.realm_id.clone(),
+            realm: self.realm.clone(),
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_runtime: self.config_runtime.clone(),
@@ -650,7 +651,7 @@ async fn apply_runtime_turn(
                         bindings,
                     )),
                     require_runtime_build_mode: true,
-                    realm_id: Some(context.realm_id.clone()),
+                    realm_id: Some(context.realm.to_string()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
                     config_generation: current_generation,
@@ -1860,7 +1861,6 @@ async fn post_external_event(
         ),
     }
     .map_err(IntoResponse::into_response)?;
-
 }
 
 /// Admit a correlated terminal peer response through the typed runtime ingress.
@@ -1917,7 +1917,6 @@ async fn post_peer_response_terminal(
         blocks: None,
         handling_mode: None,
     });
-
 }
 
 /// List skills with provenance information.
@@ -2195,16 +2194,16 @@ async fn drain_event_forwarder(session_id: &SessionId, forwarder: tokio::task::J
 /// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
 fn run_result_to_response(
     result: meerkat_core::types::RunResult,
-    realm_id: &str,
+    realm: &meerkat_core::RealmId,
 ) -> SessionResponse {
     let mut response: SessionResponse = result.into();
-    response.session_ref = Some(format_session_ref(realm_id, &response.session_id));
+    response.session_ref = Some(format_session_ref(realm, &response.session_id));
     response
 }
 
 fn callback_pending_api_error(
     session_id: &SessionId,
-    realm_id: &str,
+    realm: &meerkat_core::RealmId,
     tool_name: String,
     args: Value,
     session_created: bool,
@@ -2214,7 +2213,7 @@ fn callback_pending_api_error(
         code: "CALLBACK_PENDING".to_string(),
         details: json!({
             "session_id": session_id.to_string(),
-            "session_ref": format_session_ref(realm_id, session_id),
+            "session_ref": format_session_ref(realm, session_id),
             "session_created": session_created,
             "resumable": true,
             "tool_name": tool_name,
@@ -2226,7 +2225,7 @@ fn callback_pending_api_error(
 fn completion_outcome_to_api_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     session_id: &SessionId,
-    realm_id: &str,
+    realm: &meerkat_core::RealmId,
     session_created: bool,
 ) -> Result<meerkat_core::types::RunResult, ApiError> {
     match outcome {
@@ -2235,7 +2234,7 @@ fn completion_outcome_to_api_result(
             ApiError::Internal("turn completed without result".to_string()),
         ),
         meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
-            callback_pending_api_error(session_id, realm_id, tool_name, args, session_created),
+            callback_pending_api_error(session_id, realm, tool_name, args, session_created),
         ),
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(ApiError::Internal(format!("turn abandoned: {reason}")))
@@ -2249,12 +2248,12 @@ fn completion_outcome_to_api_result(
 fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
     let locator = SessionLocator::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
-    if let Some(realm) = locator.realm_id.as_deref()
-        && realm != state.realm_id
+    if let Some(locator_realm) = locator.realm_id.as_ref()
+        && locator_realm != &state.realm
     {
         return Err(ApiError::BadRequest(format!(
             "Session locator realm '{}' does not match active realm '{}'",
-            realm, state.realm_id
+            locator_realm, state.realm
         )));
     }
     Ok(locator.session_id)
@@ -2449,7 +2448,7 @@ async fn create_session_inner(
             .preload_skills
             .clone()
             .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect()),
-        realm_id: Some(state.realm_id.clone()),
+        realm_id: Some(state.realm.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
@@ -2576,7 +2575,7 @@ async fn create_session_inner(
                 code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
                 details: json!({
                     "session_id": session_id.to_string(),
-                    "session_ref": format_session_ref(&state.realm_id, &session_id),
+                    "session_ref": format_session_ref(&state.realm, &session_id),
                     "session_created": true,
                     "resumable": true,
                 }),
@@ -2585,12 +2584,9 @@ async fn create_session_inner(
     };
 
     let result = match handle {
-        Some(handle) => completion_outcome_to_api_result(
-            handle.wait().await,
-            &session_id,
-            &state.realm_id,
-            true,
-        ),
+        Some(handle) => {
+            completion_outcome_to_api_result(handle.wait().await, &session_id, &state.realm, true)
+        }
         None => {
             let existing_id = match &outcome {
                 meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -2607,10 +2603,9 @@ async fn create_session_inner(
     drain_event_forwarder(&session_id, forward_task).await;
 
     match result {
-        Ok(run_result) => RequestOutcome::Published(Ok(Json(run_result_to_response(
-            run_result,
-            &state.realm_id,
-        )))),
+        Ok(run_result) => {
+            RequestOutcome::Published(Ok(Json(run_result_to_response(run_result, &state.realm))))
+        }
         Err(err) => {
             // SESSION_CREATED_WITH_TURN_FAILURE: session exists and is preserved
             // for resumption. Do NOT tear down MCP or comms sidecars — they belong
@@ -2624,7 +2619,7 @@ async fn create_session_inner(
                 code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
                 details: json!({
                     "session_id": session_id.to_string(),
-                    "session_ref": format_session_ref(&state.realm_id, &session_id),
+                    "session_ref": format_session_ref(&state.realm, &session_id),
                     "session_created": true,
                     "resumable": true,
                 }),
@@ -2816,7 +2811,7 @@ async fn list_sessions(
     let wire_sessions: Vec<meerkat_contracts::WireSessionSummary> = sessions
         .into_iter()
         .map(|s| {
-            let session_ref = format_session_ref(&state.realm_id, &s.session_id);
+            let session_ref = format_session_ref(&state.realm, &s.session_id);
             let mut wire = meerkat_contracts::WireSessionSummary::from(s);
             wire.session_ref = Some(session_ref);
             wire
@@ -2847,7 +2842,7 @@ async fn get_session(
 
     Ok(Json(SessionDetailsResponse {
         session_id: view.state.session_id.to_string(),
-        session_ref: format_session_ref(&state.realm_id, &view.state.session_id),
+        session_ref: format_session_ref(&state.realm, &view.state.session_id),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
         message_count: view.state.message_count,
@@ -2882,7 +2877,7 @@ async fn get_session_history(
         })?;
 
     let mut wire: meerkat_contracts::WireSessionHistory = history.into();
-    wire.session_ref = Some(format_session_ref(&state.realm_id, &session_id));
+    wire.session_ref = Some(format_session_ref(&state.realm, &session_id));
     Ok(Json(wire))
 }
 
@@ -3183,7 +3178,7 @@ async fn continue_session_inner(
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
-            realm_id: Some(state.realm_id.clone()),
+            realm_id: Some(state.realm.to_string()),
             instance_id: state.instance_id.clone(),
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
@@ -3336,7 +3331,7 @@ async fn continue_session_inner(
             Some(handle) => completion_outcome_to_api_result(
                 handle.wait().await,
                 &session_id,
-                &state.realm_id,
+                &state.realm,
                 false,
             ),
             None => Err(ApiError::DuplicateInput {
@@ -3448,7 +3443,7 @@ async fn continue_session_inner(
             Some(handle) => completion_outcome_to_api_result(
                 handle.wait().await,
                 &session_id,
-                &state.realm_id,
+                &state.realm,
                 false,
             ),
             None => {
@@ -3468,10 +3463,9 @@ async fn continue_session_inner(
     drain_event_forwarder(&session_id, forward_task).await;
 
     match final_result {
-        Ok(run_result) => RequestOutcome::Published(Ok(Json(run_result_to_response(
-            run_result,
-            &state.realm_id,
-        )))),
+        Ok(run_result) => {
+            RequestOutcome::Published(Ok(Json(run_result_to_response(run_result, &state.realm))))
+        }
         Err(err) => {
             if let ApiError::Internal(message) = &err
                 && message.contains("runtime boundary commit failed")
@@ -5507,13 +5501,14 @@ mod tests {
     #[test]
     fn completion_outcome_to_api_result_surfaces_callback_pending_payload() {
         let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
         let err = completion_outcome_to_api_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
             },
             &session_id,
-            "test-realm",
+            &realm,
             false,
         )
         .expect_err("callback pending should map to an API error");
@@ -5532,7 +5527,7 @@ mod tests {
         assert_eq!(details["session_id"], session_id.to_string());
         assert_eq!(
             details["session_ref"],
-            format_session_ref("test-realm", &session_id)
+            format_session_ref(&realm, &session_id)
         );
         assert_eq!(details["resumable"], true);
         assert_eq!(details["tool_name"], "external_mock");
@@ -5970,7 +5965,6 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
-
     }
 
     /// Verify MCP routes are NOT registered when the feature is off.

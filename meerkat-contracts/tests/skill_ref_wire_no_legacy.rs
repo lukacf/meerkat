@@ -7,8 +7,7 @@ use meerkat_core::skills::{SkillKey, SkillName, SkillRef, SourceUuid};
 
 fn test_key(slug: &str) -> SkillKey {
     SkillKey {
-        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
-            .expect("valid uuid"),
+        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").expect("valid uuid"),
         skill_name: SkillName::parse(slug).expect("valid slug"),
     }
 }
@@ -19,10 +18,7 @@ fn structured_skill_ref_round_trips_as_tagged_object() {
     let r = SkillRef::Structured(key.clone());
     let json = serde_json::to_value(&r).expect("serialize");
     assert_eq!(json["kind"], "structured");
-    assert_eq!(
-        json["source_uuid"],
-        "dc256086-0d2f-4f61-a307-320d4148107f"
-    );
+    assert_eq!(json["source_uuid"], "dc256086-0d2f-4f61-a307-320d4148107f");
     assert_eq!(json["skill_name"], "email-extractor");
 
     let decoded: SkillRef = serde_json::from_value(json).expect("deserialize");
@@ -42,8 +38,7 @@ fn legacy_string_form_is_rejected_at_skill_ref_boundary() {
 
 #[test]
 fn skills_params_rejects_legacy_string_skill_refs() {
-    let legacy =
-        r#"{"skill_refs":["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]}"#;
+    let legacy = r#"{"skill_refs":["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]}"#;
     let res: Result<SkillsParams, _> = serde_json::from_str(legacy);
     assert!(
         res.is_err(),

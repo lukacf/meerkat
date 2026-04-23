@@ -1037,66 +1037,6 @@ pub struct ErrorResponse {
     pub details: Option<Value>,
 }
 
-enum RequestOutcome<T> {
-    Published(T),
-    Unpublished(T),
-}
-
-async fn with_request_lifecycle<T>(
-    executor: &SurfaceRequestExecutor,
-    ctx: Option<RequestContext>,
-    outcome: RequestOutcome<T>,
-) -> T {
-    match ctx {
-        Some(ctx) => match outcome {
-            RequestOutcome::Published(val) => {
-                // publish_and_complete rejects terminal phases (e.g. late
-                // cancel landed first). REST handlers don't spawn long-running
-                // tasks after announcing Published, so the only way this can
-                // fail in practice is shutdown racing, where we still want
-                // to return the caller's value.
-                let _ = executor.publish_and_complete(ctx.key());
-                val
-            }
-            RequestOutcome::Unpublished(val) => {
-                // CompleteOutcome is observed by RPC/MCP surfaces for the
-                // late-cancel branch; REST decides Unpublished inline so the
-                // outcome is always Completed (cleanup runs) or the entry was
-                // already removed by a parallel shutdown path.
-                let _ = executor.finish_unpublished(ctx.key()).await;
-                val
-            }
-        },
-        None => match outcome {
-            RequestOutcome::Published(val) | RequestOutcome::Unpublished(val) => val,
-        },
-    }
-}
-
-fn extract_request_context(
-    headers: &axum::http::HeaderMap,
-    executor: &SurfaceRequestExecutor,
-) -> Result<Option<RequestContext>, ApiError> {
-    let Some(header_value) = headers.get("x-meerkat-request-id") else {
-        return Ok(None);
-    };
-    let request_id = header_value
-        .to_str()
-        .map_err(|_| ApiError::BadRequest("X-Meerkat-Request-Id must be valid UTF-8".into()))?
-        .trim();
-    if request_id.is_empty() {
-        return Err(ApiError::BadRequest(
-            "X-Meerkat-Request-Id must not be empty".into(),
-        ));
-    }
-    match executor.try_begin_request(request_id, noop_request_action()) {
-        Ok(ctx) => Ok(Some(ctx)),
-        Err(RequestAlreadyExists) => Err(ApiError::DuplicateRequestId {
-            request_id: request_id.to_string(),
-        }),
-    }
-}
-
 /// Build the REST API router
 pub fn router(state: AppState) -> Router {
     let schedule_state = state.clone();
@@ -2483,18 +2423,6 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
     }
 }
 
-/// Create and run a new session (outer wrapper with request lifecycle).
-async fn create_session(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<CreateSessionRequest>,
-) -> Result<Json<SessionResponse>, ApiError> {
-    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
-    let executor = state.request_executor.clone();
-    let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
-    with_request_lifecycle(&executor, req_ctx, outcome).await
-}
-
 /// Create and run a new session (inner body returning RequestOutcome).
 async fn create_session_inner(
     state: &AppState,
@@ -3221,19 +3149,6 @@ async fn append_system_context(
         "session_id": session_id.to_string(),
         "status": result.status,
     })))
-}
-
-/// Continue an existing session (outer wrapper with request lifecycle).
-async fn continue_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<ContinueSessionRequest>,
-) -> Result<Json<SessionResponse>, ApiError> {
-    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
-    let executor = state.request_executor.clone();
-    let outcome = Box::pin(continue_session_inner(&state, &id, req, req_ctx.clone())).await;
-    with_request_lifecycle(&executor, req_ctx, outcome).await
 }
 
 /// Continue an existing session (inner body returning RequestOutcome).
@@ -6215,87 +6130,6 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
 
-        #[tokio::test]
-        async fn test_with_request_lifecycle_published_skips_cleanup() {
-            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
-            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let ctx = executor
-                .try_begin_request("pub-test", noop_request_action())
-                .unwrap();
-            ctx.set_unpublished_cleanup(request_action({
-                let count = Arc::clone(&cleanup_count);
-                move || {
-                    let count = Arc::clone(&count);
-                    async move {
-                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-            }));
-
-            let result: u32 =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(42u32))
-                    .await;
-            assert_eq!(result, 42);
-            assert_eq!(
-                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
-                0,
-                "Published path must not run cleanup"
-            );
-        }
-
-        #[tokio::test]
-        async fn test_with_request_lifecycle_unpublished_runs_cleanup() {
-            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
-            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let ctx = executor
-                .try_begin_request("unpub-test", noop_request_action())
-                .unwrap();
-            ctx.set_unpublished_cleanup(request_action({
-                let count = Arc::clone(&cleanup_count);
-                move || {
-                    let count = Arc::clone(&count);
-                    async move {
-                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-            }));
-
-            let result: u32 =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Unpublished(99u32))
-                    .await;
-            assert_eq!(result, 99);
-            assert_eq!(
-                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "Unpublished path must run cleanup"
-            );
-        }
-
-        #[tokio::test]
-        async fn test_post_commit_success_not_rewritten_to_cancelled() {
-            // Simulate: turn completes (Published), then cancel arrives.
-            // The success response must not be rewritten to 499.
-            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
-            let ctx = executor
-                .try_begin_request("commit-test", noop_request_action())
-                .unwrap();
-            let key = ctx.key().to_string();
-
-            // Simulate: turn completed successfully (Published).
-            let val: Result<u32, ApiError> =
-                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(Ok(200u32)))
-                    .await;
-            assert!(val.is_ok());
-            assert_eq!(val.unwrap(), 200);
-
-            // Cancel arrives after completion — entry is gone, so the typed
-            // NotFound outcome is returned (no rewriting, no side effects).
-            assert_eq!(
-                executor.cancel_request(&key).await,
-                meerkat::surface::CancelOutcome::NotFound,
-                "cancel after Published removal must report NotFound"
-            );
-        }
     }
 
     /// Verify MCP routes are NOT registered when the feature is off.

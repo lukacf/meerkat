@@ -710,25 +710,6 @@ impl MobActor {
         Ok(())
     }
 
-    /// Apply a DSL input and return the emitted effects for inspection by the
-    /// caller. Parallel to [`apply_dsl_input`] but surfaces the effect vector
-    /// so W3-H binding observers (wired in a follow-up PR) can consume
-    /// `MemberRealtimeBinding*` events without altering the canonical state
-    /// transition semantics.
-    fn apply_dsl_input_with_effects(
-        &mut self,
-        input: mob_dsl::MobMachineInput,
-        context: &str,
-    ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
-        let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
-            .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
-        if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
-            let _ = self.phase_watch_tx.send(self.state());
-        }
-        Ok(transition.effects)
-    }
-
     fn apply_dsl_signal(
         &mut self,
         signal: mob_dsl::MobMachineSignal,
@@ -3802,7 +3783,7 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
-        let spawn_effects = self.apply_dsl_input_with_effects(
+        if let Err(error) = self.apply_dsl_input(
             mob_dsl::MobMachineInput::Spawn {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
@@ -3813,8 +3794,7 @@ impl MobActor {
                 replacing,
             },
             "finalize_spawn_from_pending_dsl_spawn",
-        );
-        if let Err(error) = spawn_effects {
+        ) {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
@@ -4109,15 +4089,14 @@ impl MobActor {
                 .get(&dsl_identity)
                 .cloned()
         };
-        let retire_effects = self.apply_dsl_input_with_effects(
+        self.apply_dsl_input(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                 agent_identity: dsl_identity,
                 releasing,
             },
             "handle_retire_inner_mark_retiring",
-        );
-        retire_effects?;
+        )?;
 
         // Snapshot context and run disposal pipeline.
         let ctx = self
@@ -4937,15 +4916,15 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
-        let retire_effects = self.apply_dsl_input_with_effects(
+        self.apply_dsl_input(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                 agent_identity: dsl_identity,
                 releasing,
             },
             "destroy_remote_member_for_destroy_mark_retiring",
-        );
-        retire_effects.map_err(|e| MobError::Internal(format!("Retire DSL rejected: {e}")))?;
+        )
+        .map_err(|e| MobError::Internal(format!("Retire DSL rejected: {e}")))?;
 
         let ctx = self
             .disposal_context_from_entry(&agent_identity, &entry)

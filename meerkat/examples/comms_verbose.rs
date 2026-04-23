@@ -79,6 +79,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         }
         println!("╚══════════════════════════════════════════════════════════════╝");
 
+        let _ = provider_params;
         let request = LlmRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
@@ -86,7 +87,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
             max_tokens,
             temperature,
             stop_sequences: None,
-            provider_params: provider_params.cloned(),
+            provider_params: None,
         };
 
         let mut stream = self.client.stream(&request);

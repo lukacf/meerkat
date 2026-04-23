@@ -6,7 +6,7 @@
 //! payload. This test round-trips the three primitive variants and asserts
 //! that turn metadata + idempotency round-trip intact.
 
-use meerkat_contracts::{
+use meerkat_contracts::wire::runtime::{
     SessionAcceptInputParams, WireConversationAppend, WireConversationAppendRole,
     WireConversationContextAppend, WireRunPrimitive, WireRuntimeTurnMetadata, WireStagedRunInput,
 };

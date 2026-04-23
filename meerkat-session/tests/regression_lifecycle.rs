@@ -597,8 +597,6 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         event_tx: None,
         skill_references: None,
         flow_tool_overlay: None,
-        additional_instructions: None,
-        execution_kind: None,
     }
 }
 
@@ -1176,8 +1174,6 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
-                additional_instructions: None,
-                execution_kind: None,
             },
         )
         .await

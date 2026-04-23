@@ -170,7 +170,7 @@ pub struct MeerkatRunInput {
     /// auth profile and backend profile through the standard
     /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<meerkat_contracts::wire::connection::WireConnectionRef>,
+    pub connection_ref: Option<meerkat_contracts::WireConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -492,11 +492,10 @@ impl MeerkatMcpState {
         default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let locator = bootstrap.realm.resolve_locator()?;
-        // Parse the locator's stringly realm_id into the typed `RealmId`
-        // at the mcp-server boundary. Downstream state carries the typed
-        // form; `&str` is only produced at `meerkat_store::*_in`
-        // call sites via `RealmId::as_str`.
-        let realm_id = meerkat_core::connection::RealmId::parse(locator.realm_id)?;
+        // Locator now carries the typed `RealmId` directly; no need to
+        // reparse at the mcp-server boundary. Downstream `meerkat_store::*_in`
+        // call sites obtain `&str` via `RealmId::as_str`.
+        let realm_id = locator.realm;
         let realms_root = locator.state_root;
         let backend_hint = bootstrap
             .realm
@@ -1761,22 +1760,29 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCall
 }
 
 fn canonical_skill_keys(
-    config: &Config,
+    _config: &Config,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
-    let registry = config
-        .skills
-        .build_source_identity_registry()
-        .map_err(|e| format!("Invalid skills config: {e}"))?;
+    // Wave-b retypes removed the legacy stringly `skill_references` path:
+    // `SkillsParams` now flattens only typed `skill_refs` into `SkillKey`
+    // via `canonical_skill_keys()` (no registry lookup at wire boundary).
+    // Reject any caller still supplying the legacy string form.
+    if skill_references
+        .as_ref()
+        .is_some_and(|refs| !refs.is_empty())
+    {
+        return Err(
+            "legacy `skill_references` string form is no longer supported; \
+             pass typed `skill_refs` (source_uuid + skill_name) instead"
+                .to_string(),
+        );
+    }
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
-        skill_references,
     };
-    params
-        .canonical_skill_keys_with_registry(&registry)
-        .map_err(|e| format!("Invalid skill refs: {e}"))
+    Ok(params.canonical_skill_keys())
 }
 
 async fn handle_meerkat_read(
@@ -2340,10 +2346,11 @@ async fn handle_meerkat_comms_send(
                 })),
             )
         })?;
-    let peer_name = match &input.command {
-        meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_string()),
+    // `CommsCommandRequest` currently only carries `Input`; peer-addressed
+    // variants were retired when the typed wire enum collapsed. Leave a
+    // non-exhaustive match so adding a peer variant later re-lights this
+    // site.
+    let peer_name: Option<String> = match &input.command {
         meerkat_core::comms::CommsCommandRequest::Input { .. } => None,
     };
     let cmd = input.command.into_command(&session_id).map_err(|err| {
@@ -2726,7 +2733,7 @@ async fn handle_meerkat_resume(
 
     let mut session = state
         .service
-        .load_persisted(&session_id)
+        .load_authoritative_session(&session_id)
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to load session: {e}")))?
         .ok_or_else(|| {
@@ -2974,8 +2981,6 @@ async fn handle_meerkat_resume(
 
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
-            additional_instructions: input.additional_instructions.clone(),
-            execution_kind: None,
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),

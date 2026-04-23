@@ -542,16 +542,11 @@ impl MeerkatMachine {
                     .dsl_authority
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *authority,
                     dsl_input,
-                ) {
-                    tracing::warn!(
-                        %session_id,
-                        error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                        "DSL rejected drain exit notification; proceeding with slot cleanup"
-                    );
-                }
+                );
+                let _ = context;
             }
         }
         if std::env::var_os("RKAT_TRACE_COMMS_DRAIN_BIND").is_some() {
@@ -561,12 +556,6 @@ impl MeerkatMachine {
                 respawnable = is_respawnable,
                 "comms drain exited"
             );
-        }
-
-        let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id) {
-            slot.handle.take(); // clean up finished handle
-            slot.mark_task_exited(reason);
         }
     }
 

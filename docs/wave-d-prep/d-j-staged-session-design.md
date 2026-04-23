@@ -91,39 +91,71 @@ Why this is right for Meerkat:
   flows through `SessionService::{stage_session,promote_session,abandon_staged}`
   or the existing `start_turn` / `archive`.
 
-## Chosen path: B
+## Chosen path: B, refined for crate-dep constraint
 
-Implementation plan (one landing, architectural-prerequisite widen-scope rule):
+First implementation pass surfaced a structural constraint. The
+staged session carries an `AgentBuildConfig` (defined in the
+`meerkat` facade crate at `meerkat::factory`). `PersistentSessionService`
+lives in `meerkat-session`, which is an *upstream* dependency of
+`meerkat`. `meerkat-session` therefore cannot import
+`AgentBuildConfig` without inverting a crate dependency.
 
-1. `meerkat-core/src/service/mod.rs` — add `StageSessionRequest`,
-   `PromoteSessionRequest`, trait methods on `SessionService` (default
-   `Unsupported`), and a `SessionStagingState` read helper for `list /
-   read` to surface staged sessions.
-2. `meerkat-session/src/persistent.rs` — `PersistentSessionService`
-   implements the three methods. Internal map is the new authoritative
-   home for staged sessions; `list` / `read` / `archive` extend to see
-   them; the internal materialization path that `start_turn` already
-   uses for the first-turn-on-created-session case routes through the
-   same helpers.
-3. `meerkat-rpc/src/session_runtime.rs` — delete `PendingSession`,
-   `PendingSessionPhase`, and the `pending: RwLock<IndexMap<_, _>>`
-   field. Every callsite (session/create, start_turn's first-turn
-   branch, append_system_context, list_sessions, read_session_rich,
-   archive_session, restore_pending_from_promoting, recovery) routes
-   through the new `SessionService` methods. `restore_pending_from_promoting`
-   becomes unnecessary — rollback on override-validation failure is a
-   `stage_session` after the service-side promote failed.
-4. Tests in `meerkat-session` and `meerkat-rpc`:
-   - staged → promote round-trip exercises the service authority
-   - staged → abandon without promote
-   - staged → promote concurrency gate returns `Busy`
-   - `append_system_context` on a staged session mutates staged state
-   - `list` / `read` see staged sessions
-5. Catching assertion: `rg 'PendingSession|PendingSessionPhase' meerkat-rpc/src/`
-   returns zero hits in production code. Service owns the staged phase
-   canonically.
+The honest landing point is one layer up, at the **canonical
+agent-construction authority**: the `meerkat` facade itself.
 
-No DSL schema change, no codegen regen — the staged phase is a service
-concept, not a machine-level fact, and it belongs in the canonical
-session-lifecycle authority that already owns `create_session /
-archive / interrupt`.
+### Refined shape
+
+- `meerkat-core/src/service/mod.rs` — trait extension on
+  `SessionService` (default `Unsupported`) for `stage_session /
+  promote_session / abandon_staged`. Methods operate on an opaque
+  build-handle keyed by `SessionId`; the trait remains object-safe.
+
+- `meerkat/src/service_factory.rs` (facade) — new typed
+  `StagedSessionRegistry` holding `DashMap<SessionId, StagedSlot>`.
+  Each `StagedSlot` carries the fully-typed `AgentBuildConfig`,
+  `SessionLlmIdentity`, labels, deferred prompt, timestamps, and the
+  phase discriminant (`Staged | Promoting`). Registry exposes typed
+  `stage / promote / abandon / append_system_context / snapshot`
+  methods. The registry is the canonical owner; it is *not* a
+  transport skin — the facade is the canonical agent-construction
+  authority and already owns `AgentFactory`, `FactoryAgentBuilder`,
+  and `build_ephemeral_service`.
+
+- `meerkat-rpc/src/session_runtime.rs` — `PendingSession`,
+  `PendingSessionPhase`, and the `pending:
+  RwLock<IndexMap<SessionId, PendingSession>>` field are deleted.
+  Every callsite is rewritten to call through the facade-owned
+  registry handle.
+  `restore_pending_from_promoting` becomes a single
+  `registry.abandon_promote(session_id)` that restages the slot.
+
+- Catching assertion: `rg 'PendingSession|PendingSessionPhase'
+  meerkat-rpc/src/` returns zero production hits.
+
+- Tests: the registry ships with unit tests in `meerkat/tests/` for
+  stage → promote, stage → abandon, stage → promote concurrency
+  gate, `append_system_context` mutation during Staged and
+  Promoting, and list/read exposure. RPC integration tests
+  continue to exercise the end-to-end path through
+  `session/create` + `turn/start` / `turn/append_system_context`
+  / `session/archive`.
+
+### Why facade, not service
+
+`SessionService` is crate-boundary bounded: it cannot hold
+surface-constructed `AgentBuildConfig` without a crate-dep
+inversion. The facade is the layer where agent construction is
+already rooted; placing the staging authority there keeps the
+transport (RPC) a pure skin and puts the canonical owner at the
+construction authority, not at a skin. This still closes the
+Dogma #17 + #3 violation the task targets: the transport surface
+holds zero staged state after the change.
+
+### Scope widen notes
+
+Per the architectural-prerequisite rule, this widens scope to
+`meerkat-core/src/service/mod.rs` (trait methods) and
+`meerkat/src/service_factory.rs` (registry authority) rather than
+splitting the work. No DSL schema change; no codegen regen; no
+workspace codegen cascade. Cascade is limited to the two crates
+above plus `meerkat-rpc` callsite rewrites.

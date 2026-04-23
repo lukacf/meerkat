@@ -292,45 +292,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             ),
         ],
         route_target_selectors: vec![],
-        driver: Some(CompositionDriver {
-            // Track-B (R5) Commit 4: the first real consumer of the
-            // composition-driver execution framework (Commit 1). The
-            // driver watches MobMachine's identity-level wiring +
-            // session-binding effects plus MeerkatMachine's local-
-            // endpoint changes, and dispatches `ApplyMobPeerOverlay`
-            // to each bound session so the identity-level wiring
-            // graph is projected onto endpoint-level peer sets.
-            name: "RecomputeMobPeerOverlay".into(),
-            rust: CompositionDriverRustBinding {
-                module_path: "meerkat-runtime/src/generated/recompute_mob_peer_overlay_driver.rs"
-                    .into(),
-                driver_type: "RecomputeMobPeerOverlayDriver".into(),
-                store_plan_type: "RecomputeMobPeerOverlayStorePlan".into(),
-                work_type: "RecomputeMobPeerOverlayWork".into(),
-                decision_type: "RecomputeMobPeerOverlayDecision".into(),
-                required_imports: vec!["use meerkat_runtime::composition_dispatch::*;".into()],
-            },
-            watched_effects: vec![
-                WatchedEffect {
-                    producer_instance: "mob".into(),
-                    effect_variant: "WiringGraphChanged".into(),
-                },
-                WatchedEffect {
-                    producer_instance: "mob".into(),
-                    effect_variant: "MemberSessionBindingChanged".into(),
-                },
-                WatchedEffect {
-                    producer_instance: "meerkat".into(),
-                    effect_variant: "LocalEndpointChanged".into(),
-                },
-            ],
-            dispatch_routes: vec![DriverDispatchRoute {
-                name: "apply_mob_peer_overlay".into(),
-                target_instance: "meerkat".into(),
-                target_kind: RouteTargetKind::Input,
-                input_variant: "ApplyMobPeerOverlay".into(),
-            }],
-        }),
+        driver: None,
         transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],

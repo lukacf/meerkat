@@ -51,7 +51,6 @@ fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
             provider: "anthropic".into(),
             auth_method: auth_method.into(),
             source: CredentialSourceSpec::PlatformDefault,
-            storage: None,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()

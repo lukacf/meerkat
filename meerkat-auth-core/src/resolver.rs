@@ -253,8 +253,8 @@ pub async fn resolve_external_authorizer(
         binding,
         envelope,
         format!(
-            "external:{}:{}",
-            binding.connection_ref, binding.auth_profile.id
+            "external:{}:{}:{}",
+            binding.connection_ref.realm, binding.connection_ref.binding, binding.auth_profile.id
         ),
     )
 }
@@ -381,9 +381,7 @@ fn enforce_metadata_requirements(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::{
-        AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider,
-    };
+    use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
     };
@@ -452,8 +450,10 @@ mod tests {
     fn binding() -> ValidatedBinding {
         ValidatedBinding {
             connection_ref: ConnectionRef {
-                realm_id: "dev".into(),
-                binding_id: "default".into(),
+                realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+                binding: meerkat_core::connection::BindingId::parse("default")
+                    .expect("valid binding"),
+                profile: None,
             },
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(

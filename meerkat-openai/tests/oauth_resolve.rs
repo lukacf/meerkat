@@ -42,7 +42,6 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
             provider: "openai".into(),
             auth_method: auth_method.into(),
             source: CredentialSourceSpec::PlatformDefault,
-            storage: None,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()

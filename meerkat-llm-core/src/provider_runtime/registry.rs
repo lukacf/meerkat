@@ -9,6 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use meerkat_core::connection::{BindingId, RealmId};
 use meerkat_core::{AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope};
 
 use crate::LlmClient;
@@ -169,9 +170,14 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        let realm_ref = RealmId::parse(realm.realm_id.clone())
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        let binding_ref = BindingId::parse(binding.id.clone())
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
         let connection_ref = meerkat_core::ConnectionRef {
-            realm_id: realm.realm_id.clone(),
-            binding_id: binding.id.clone(),
+            realm: realm_ref,
+            binding: binding_ref,
+            profile: None,
         };
         let runtime = self
             .runtimes

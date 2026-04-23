@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use meerkat_llm_core::LlmError;
@@ -12,6 +13,14 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+
+/// Extract the typed Gemini provider tag from a request.
+fn gemini_tag(request: &LlmRequest) -> Option<&GeminiProviderTag> {
+    match request.provider_params.as_ref()? {
+        ProviderTag::Gemini(t) => Some(t),
+        _ => None,
+    }
+}
 
 /// Client for Google Gemini API
 pub struct GeminiClient {
@@ -273,41 +282,33 @@ impl GeminiClient {
             body["generationConfig"]["temperature"] = Value::Number(num);
         }
 
-        // Extract provider-specific parameters from both formats:
-        // 1. Legacy flat format: {"thinking_budget": 10000, "top_k": 40}
-        // 2. Typed GeminiParams: {"thinking": {"include_thoughts": true, "thinking_budget": 10000}, "top_k": 40, "top_p": 0.95}
-        if let Some(ref params) = request.provider_params {
-            // Handle thinking config
-            let thinking_budget = params.get("thinking_budget").or_else(|| {
-                params
-                    .get("thinking")
-                    .and_then(|t| t.get("thinking_budget"))
-            });
+        if let Some(tag) = gemini_tag(request) {
+            // Thinking: typed GeminiThinkingConfig with nested thinking_budget,
+            // or flat tag.thinking_budget for V3-legacy rows.
+            let thinking_budget = tag
+                .thinking
+                .as_ref()
+                .and_then(|cfg| cfg.thinking_budget)
+                .or(tag.thinking_budget);
 
             if let Some(budget) = thinking_budget {
                 body["generationConfig"]["thinkingConfig"] = serde_json::json!({
-                    "thinkingBudget": budget
+                    "thinkingBudget": budget,
                 });
             }
 
-            // Handle top_k
-            if let Some(top_k) = params.get("top_k") {
-                body["generationConfig"]["topK"] = top_k.clone();
+            if let Some(top_k) = tag.top_k {
+                body["generationConfig"]["topK"] = Value::Number(serde_json::Number::from(top_k));
             }
 
-            // Handle top_p (only in typed params)
-            if let Some(top_p) = params.get("top_p") {
-                body["generationConfig"]["topP"] = top_p.clone();
+            if let Some(top_p) = tag.top_p
+                && let Some(n) = serde_json::Number::from_f64(top_p as f64)
+            {
+                body["generationConfig"]["topP"] = Value::Number(n);
             }
 
-            // Handle structured output configuration
-            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
-            if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
-                    .map_err(|e| LlmError::InvalidRequest {
-                        message: format!("Invalid structured_output schema: {e}"),
-                    })?;
-                let compiled = Self::compile_schema_for_gemini(&output_schema).map_err(|e| {
+            if let Some(output_schema) = tag.structured_output.as_ref() {
+                let compiled = Self::compile_schema_for_gemini(output_schema).map_err(|e| {
                     LlmError::InvalidRequest {
                         message: e.to_string(),
                     }
@@ -338,19 +339,18 @@ impl GeminiClient {
             }]);
         }
 
-        // Inject provider-native google_search tool from provider_params.
-        // google_search is a separate tools array element alongside functionDeclarations.
-        // Bool(false) and Null are treated as explicit disable; only objects are injected.
+        // Inject provider-native google_search tool from typed tag.
         let mut has_server_side_tool = false;
-        if let Some(ref params) = request.provider_params
-            && let Some(gs) = params.get("google_search")
-            && gs.is_object()
-        {
-            has_server_side_tool = true;
-            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                Some(arr) => arr.push(serde_json::json!({"google_search": gs})),
-                None => {
-                    body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})]);
+        if let Some(gs) = gemini_tag(request).and_then(|t| t.google_search.as_ref()) {
+            let gs_value = gs.as_value();
+            if gs_value.is_object() {
+                has_server_side_tool = true;
+                match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                    Some(arr) => arr.push(serde_json::json!({"google_search": gs_value})),
+                    None => {
+                        body["tools"] =
+                            Value::Array(vec![serde_json::json!({"google_search": gs_value})]);
+                    }
                 }
             }
         }
@@ -1110,7 +1110,7 @@ mod tests {
             "gemini-1.5-pro",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking_budget", 10000);
+        .with_gemini_tag_merge(|t| t.thinking_budget = Some(10000));
 
         let body = client.build_request_body(&request)?;
 
@@ -1133,7 +1133,7 @@ mod tests {
             "gemini-1.5-pro",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("top_k", 40);
+        .with_gemini_tag_merge(|t| t.top_k = Some(40));
 
         let body = client.build_request_body(&request)?;
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
@@ -1151,8 +1151,8 @@ mod tests {
             "gemini-1.5-pro",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("top_k", 50)
-        .with_provider_param("thinking_budget", 5000);
+        .with_gemini_tag_merge(|t| t.top_k = Some(50))
+        .with_gemini_tag_merge(|t| t.thinking_budget = Some(5000));
 
         let body = client.build_request_body(&request)?;
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
@@ -1430,14 +1430,14 @@ mod tests {
             "gemini-3-pro-preview",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_gemini_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema,
                 "name": "person",
                 "strict": true
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1535,7 +1535,10 @@ mod tests {
             "gemini-3-pro-preview",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("structured_output", serde_json::json!({"schema": schema}));
+        .with_gemini_tag_merge(|t| {
+            t.structured_output =
+                serde_json::from_value::<OutputSchema>(serde_json::json!({"schema": schema})).ok();
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1699,16 +1702,16 @@ mod tests {
             "gemini-3-pro-preview",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_gemini_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": {
                     "type": "object",
                     "allOf": [{"type": "object"}]
                 },
                 "compat": "strict"
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let err = client
             .build_request_body(&request)
@@ -2585,7 +2588,13 @@ mod tests {
             "A test tool",
             serde_json::json!({"type": "object", "properties": {}}),
         ))])
-        .with_provider_params(serde_json::json!({"google_search": {}}));
+        .with_gemini_tag_merge(|t| {
+            t.google_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request)?;
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(
@@ -2616,7 +2625,13 @@ mod tests {
             "gemini-1.5-pro",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_params(serde_json::json!({"google_search": {}}));
+        .with_gemini_tag_merge(|t| {
+            t.google_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request)?;
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1, "should have only google_search");

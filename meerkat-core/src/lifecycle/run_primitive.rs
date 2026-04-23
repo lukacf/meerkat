@@ -201,13 +201,11 @@ pub enum ProviderTag {
 }
 
 impl ProviderTag {
-    /// Project a legacy untyped per-turn value into a typed `ProviderTag`.
-    ///
-    /// V3 rows stored provider knobs as `serde_json::Value`. This helper
-    /// maps the well-known shapes onto typed variants (e.g. Anthropic's
-    /// `thinking: { budget_tokens: N }`) and falls through to
-    /// `Unknown { bag }` when the shape is unrecognised — lossless round-
-    /// trip instead of silent drop.
+    /// Project a single-key legacy untyped per-turn value into a typed
+    /// `ProviderTag`. Used by V3-row persistence projectors (C-TM-V3)
+    /// where each key/value was stored separately. Multi-key JSON blobs
+    /// at the provider-runtime boundary project through the per-provider
+    /// `from_legacy_value` associated functions instead.
     pub fn from_legacy_value(
         namespace: impl Into<String>,
         key: impl Into<String>,
@@ -216,9 +214,6 @@ impl ProviderTag {
         let namespace = namespace.into();
         let key = key.into();
 
-        // Anthropic `thinking: { type: "enabled", budget_tokens: N }` was
-        // the one V3 row shape most at risk of silent drop (persistence-
-        // migration.md §5 fixture #4). Project it directly.
         if namespace == "anthropic" && key == "thinking" {
             if let Some(budget) = value
                 .get("budget_tokens")
@@ -226,12 +221,14 @@ impl ProviderTag {
                 .and_then(|v| u32::try_from(v).ok())
             {
                 return Self::Anthropic(AnthropicProviderTag {
-                    thinking_budget_tokens: Some(budget),
+                    thinking: Some(AnthropicThinkingConfig::Enabled {
+                        budget_tokens: budget,
+                    }),
+                    ..Default::default()
                 });
             }
         }
 
-        // OpenAI `reasoning_effort: "low"|"medium"|"high"`.
         if namespace == "openai" && key == "reasoning_effort" {
             if let Some(effort) = value.as_str().and_then(|s| match s {
                 "low" => Some(ReasoningEffort::Low),
@@ -241,15 +238,16 @@ impl ProviderTag {
             }) {
                 return Self::OpenAi(OpenAiProviderTag {
                     reasoning_effort: Some(effort),
+                    ..Default::default()
                 });
             }
         }
 
-        // Gemini `candidate_count: N`.
         if namespace == "gemini" && key == "candidate_count" {
             if let Some(count) = value.as_u64().and_then(|v| u32::try_from(v).ok()) {
                 return Self::Gemini(GeminiProviderTag {
                     candidate_count: Some(count),
+                    ..Default::default()
                 });
             }
         }
@@ -264,23 +262,531 @@ impl ProviderTag {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Opaque provider-native JSON body carried verbatim from caller to
+/// provider. Used for pass-through sub-shapes (web search config,
+/// provider-native custom compaction edits, OpenAI-compatible
+/// `chat_template_kwargs`/`thinking`/`reasoning` forwards) where the
+/// exact wire shape varies across downstream providers (Anthropic /
+/// DeepSeek / OpenRouter / custom proxies) and the runtime deliberately
+/// does not parse the body — it simply forwards it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct OpaqueProviderBody {
+    /// Serialized JSON body. Callers that have a `serde_json::Value`
+    /// should use [`OpaqueProviderBody::from_value`]. Providers reading
+    /// the body call [`OpaqueProviderBody::as_value`] to recover a
+    /// `Value` for wire emission.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub body: String,
+}
+
+impl OpaqueProviderBody {
+    pub fn from_value(v: &serde_json::Value) -> Self {
+        Self {
+            body: v.to_string(),
+        }
+    }
+
+    pub fn as_value(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Typed shape of Anthropic's extended-thinking knob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicThinkingConfig {
+    /// Opus 4.6 adaptive thinking — provider picks the budget.
+    Adaptive,
+    /// Explicit budget — model emits at most `budget_tokens` tokens of
+    /// reasoning before the assistant text.
+    Enabled { budget_tokens: u32 },
+}
+
+/// Typed shape of Anthropic's response-effort knob (Opus 4.6+).
+/// `XHigh` is the Opus 4.7 extended-high effort level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+    XHigh,
+}
+
+/// Typed shape of Anthropic's data-residency knob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnthropicInferenceGeo {
+    Us,
+    Global,
+    /// Caller-provided region string — providers may accept region codes
+    /// this typed variant does not yet enumerate.
+    Other {
+        region: String,
+    },
+}
+
+/// Typed shape of Anthropic's context-window opt-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicContextWindow {
+    /// 1M-token beta context window (2025-08-07 beta header).
+    OneMegabyte,
+}
+
+/// Typed shape of Anthropic's automatic-compaction knob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnthropicCompactionConfig {
+    /// `"auto"` — provider picks trigger and instructions.
+    Auto,
+    /// Caller-provided edit body merged into the compact edit shape.
+    /// Fields like `trigger` / `instructions` are preserved verbatim.
+    Custom { edit: OpaqueProviderBody },
+}
+
+/// Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AnthropicProviderTag {
+    /// Extended-thinking configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<AnthropicThinkingConfig>,
+    /// Legacy flat `thinking_budget_tokens` — preserved for V3
+    /// persistence round-trip (single-key legacy projector) and for
+    /// callers that cannot express the full `thinking` shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<u32>,
+    /// Provider-native web-search tool body, injected alongside
+    /// `tools` at the provider-runtime boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<OpaqueProviderBody>,
+    /// Override top-k sampling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    /// Response-effort knob (Opus 4.6+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<AnthropicEffort>,
+    /// Structured-output schema (forces JSON-schema output envelope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<crate::OutputSchema>,
+    /// Data-residency override for inference routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<AnthropicInferenceGeo>,
+    /// Automatic compaction configuration (Opus 4.6, beta).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AnthropicCompactionConfig>,
+    /// Context-window opt-in (1M beta).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<AnthropicContextWindow>,
+    /// Internal override: force-enable temperature for this request even
+    /// when the model profile says unsupported. Used by proxied /
+    /// custom deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_temperature_override: Option<bool>,
 }
 
+/// Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OpenAiProviderTag {
+    /// Reasoning-effort level for o-series and GPT-5 models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Deterministic-sampling seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Frequency penalty (-2.0 .. 2.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty (-2.0 .. 2.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    /// Provider-native web-search tool body, injected alongside `tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<OpaqueProviderBody>,
+    /// Structured-output schema (forces `text.format.json_schema`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<crate::OutputSchema>,
+    /// OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):
+    /// full `reasoning` body forwarded verbatim alongside
+    /// `reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<OpaqueProviderBody>,
+    /// OpenAI-compatible endpoints: `chat_template_kwargs` passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<OpaqueProviderBody>,
+    /// OpenAI-compatible endpoints: vendor-specific `thinking` body
+    /// forwarded verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<OpaqueProviderBody>,
+    /// Internal override: force-enable temperature for this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_temperature_override: Option<bool>,
+    /// Internal override: force-enable reasoning payload for this
+    /// request (used by client_compatible endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_override: Option<bool>,
 }
 
+/// Typed shape of Gemini's thinking knob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GeminiThinkingConfig {
+    /// Whether reasoning output is included in the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+    /// Reasoning token budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+}
+
+/// Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GeminiProviderTag {
+    /// Thinking configuration (Gemini 3+ models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<GeminiThinkingConfig>,
+    /// Legacy flat `thinking_budget` — preserved for V3 persistence
+    /// round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+    /// Top-K sampling override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    /// Top-P (nucleus) sampling override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Structured-output schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<crate::OutputSchema>,
+    /// Provider-native google_search grounding tool body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_search: Option<OpaqueProviderBody>,
+    /// Number of candidate completions (runtime/persistence knob, not
+    /// read by the Gemini client today — preserved for V3 round-trip).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<u32>,
 }
+
+impl AnthropicProviderTag {
+    /// Project a raw per-turn JSON object into a typed Anthropic tag.
+    /// Unknown keys are preserved: the first unknown key surfaces as a
+    /// `Err` so the caller can decide to return a typed error rather
+    /// than silently drop. The runtime caller wraps any `Err` into
+    /// `ProviderTag::Unknown { bag }` so wire round-trip stays lossless.
+    pub fn from_legacy_value(value: &serde_json::Value) -> Result<Self, LegacyProviderParamsError> {
+        let Some(obj) = value.as_object() else {
+            if value.is_null() {
+                return Ok(Self::default());
+            }
+            return Err(LegacyProviderParamsError::NotAnObject);
+        };
+        let mut tag = Self::default();
+        for (k, v) in obj.iter() {
+            match k.as_str() {
+                "thinking" => {
+                    if v.get("type").and_then(|t| t.as_str()) == Some("adaptive") {
+                        tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+                    } else if let Some(budget) = v
+                        .get("budget_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok())
+                    {
+                        tag.thinking = Some(AnthropicThinkingConfig::Enabled {
+                            budget_tokens: budget,
+                        });
+                    } else {
+                        return Err(LegacyProviderParamsError::unknown_shape("thinking"));
+                    }
+                }
+                "thinking_budget" => {
+                    let budget =
+                        v.as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| {
+                                LegacyProviderParamsError::unknown_shape("thinking_budget")
+                            })?;
+                    tag.thinking_budget_tokens = Some(budget);
+                }
+                "top_k" => {
+                    let top_k = match v {
+                        serde_json::Value::Number(n) => n
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| LegacyProviderParamsError::unknown_shape("top_k"))?,
+                        serde_json::Value::String(s) => s
+                            .parse::<u32>()
+                            .map_err(|_| LegacyProviderParamsError::unknown_shape("top_k"))?,
+                        _ => return Err(LegacyProviderParamsError::unknown_shape("top_k")),
+                    };
+                    tag.top_k = Some(top_k);
+                }
+                "effort" => {
+                    let effort = match v.as_str() {
+                        Some("low") => AnthropicEffort::Low,
+                        Some("medium") => AnthropicEffort::Medium,
+                        Some("high") => AnthropicEffort::High,
+                        Some("max") => AnthropicEffort::Max,
+                        Some("xhigh") => AnthropicEffort::XHigh,
+                        _ => return Err(LegacyProviderParamsError::unknown_shape("effort")),
+                    };
+                    tag.effort = Some(effort);
+                }
+                "structured_output" => {
+                    let schema =
+                        serde_json::from_value::<crate::OutputSchema>(v.clone()).map_err(|e| {
+                            LegacyProviderParamsError::InvalidStructuredOutput {
+                                reason: e.to_string(),
+                            }
+                        })?;
+                    tag.structured_output = Some(schema);
+                }
+                "inference_geo" => {
+                    let geo = match v.as_str() {
+                        Some("us") => AnthropicInferenceGeo::Us,
+                        Some("global") => AnthropicInferenceGeo::Global,
+                        Some(other) => AnthropicInferenceGeo::Other {
+                            region: other.to_string(),
+                        },
+                        None => {
+                            return Err(LegacyProviderParamsError::unknown_shape("inference_geo"));
+                        }
+                    };
+                    tag.inference_geo = Some(geo);
+                }
+                "compaction" => {
+                    if v.as_str() == Some("auto") {
+                        tag.compaction = Some(AnthropicCompactionConfig::Auto);
+                    } else if v.is_object() {
+                        tag.compaction = Some(AnthropicCompactionConfig::Custom {
+                            edit: OpaqueProviderBody::from_value(v),
+                        });
+                    } else {
+                        return Err(LegacyProviderParamsError::unknown_shape("compaction"));
+                    }
+                }
+                "context" => match v.as_str() {
+                    Some("1m") => tag.context = Some(AnthropicContextWindow::OneMegabyte),
+                    _ => return Err(LegacyProviderParamsError::unknown_shape("context")),
+                },
+                "web_search" => {
+                    if v.is_object() {
+                        tag.web_search = Some(OpaqueProviderBody::from_value(v));
+                    } else if !v.is_boolean() && !v.is_null() {
+                        return Err(LegacyProviderParamsError::unknown_shape("web_search"));
+                    }
+                }
+                "__meerkat_supports_temperature" => {
+                    tag.supports_temperature_override = v.as_bool();
+                }
+                other => {
+                    return Err(LegacyProviderParamsError::UnknownKey {
+                        key: other.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(tag)
+    }
+}
+
+impl OpenAiProviderTag {
+    pub fn from_legacy_value(value: &serde_json::Value) -> Result<Self, LegacyProviderParamsError> {
+        let Some(obj) = value.as_object() else {
+            if value.is_null() {
+                return Ok(Self::default());
+            }
+            return Err(LegacyProviderParamsError::NotAnObject);
+        };
+        let mut tag = Self::default();
+        for (k, v) in obj.iter() {
+            match k.as_str() {
+                "reasoning_effort" => {
+                    let effort = match v.as_str() {
+                        Some("low") => ReasoningEffort::Low,
+                        Some("medium") => ReasoningEffort::Medium,
+                        Some("high") => ReasoningEffort::High,
+                        _ => {
+                            return Err(LegacyProviderParamsError::unknown_shape(
+                                "reasoning_effort",
+                            ));
+                        }
+                    };
+                    tag.reasoning_effort = Some(effort);
+                }
+                "seed" => {
+                    tag.seed = v.as_i64();
+                }
+                "frequency_penalty" => {
+                    let f = v.as_f64().ok_or_else(|| {
+                        LegacyProviderParamsError::unknown_shape("frequency_penalty")
+                    })?;
+                    tag.frequency_penalty = Some(f as f32);
+                }
+                "presence_penalty" => {
+                    let f = v.as_f64().ok_or_else(|| {
+                        LegacyProviderParamsError::unknown_shape("presence_penalty")
+                    })?;
+                    tag.presence_penalty = Some(f as f32);
+                }
+                "web_search" => {
+                    if v.is_object() {
+                        tag.web_search = Some(OpaqueProviderBody::from_value(v));
+                    } else if !v.is_boolean() && !v.is_null() {
+                        return Err(LegacyProviderParamsError::unknown_shape("web_search"));
+                    }
+                }
+                "structured_output" => {
+                    let schema =
+                        serde_json::from_value::<crate::OutputSchema>(v.clone()).map_err(|e| {
+                            LegacyProviderParamsError::InvalidStructuredOutput {
+                                reason: e.to_string(),
+                            }
+                        })?;
+                    tag.structured_output = Some(schema);
+                }
+                "reasoning" => {
+                    if v.is_object() {
+                        tag.reasoning = Some(OpaqueProviderBody::from_value(v));
+                    }
+                }
+                "chat_template_kwargs" => {
+                    if v.is_object() {
+                        tag.chat_template_kwargs = Some(OpaqueProviderBody::from_value(v));
+                    }
+                }
+                "thinking" => {
+                    if v.is_object() {
+                        tag.thinking = Some(OpaqueProviderBody::from_value(v));
+                    }
+                }
+                "__meerkat_supports_temperature" => {
+                    tag.supports_temperature_override = v.as_bool();
+                }
+                "__meerkat_supports_reasoning" => {
+                    tag.supports_reasoning_override = v.as_bool();
+                }
+                other => {
+                    return Err(LegacyProviderParamsError::UnknownKey {
+                        key: other.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(tag)
+    }
+}
+
+impl GeminiProviderTag {
+    pub fn from_legacy_value(value: &serde_json::Value) -> Result<Self, LegacyProviderParamsError> {
+        let Some(obj) = value.as_object() else {
+            if value.is_null() {
+                return Ok(Self::default());
+            }
+            return Err(LegacyProviderParamsError::NotAnObject);
+        };
+        let mut tag = Self::default();
+        for (k, v) in obj.iter() {
+            match k.as_str() {
+                "thinking" => {
+                    let cfg = serde_json::from_value::<GeminiThinkingConfig>(v.clone())
+                        .map_err(|_| LegacyProviderParamsError::unknown_shape("thinking"))?;
+                    tag.thinking = Some(cfg);
+                }
+                "thinking_budget" => {
+                    let b = v
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| {
+                            LegacyProviderParamsError::unknown_shape("thinking_budget")
+                        })?;
+                    tag.thinking_budget = Some(b);
+                }
+                "top_k" => {
+                    let n = v
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| LegacyProviderParamsError::unknown_shape("top_k"))?;
+                    tag.top_k = Some(n);
+                }
+                "top_p" => {
+                    let f = v
+                        .as_f64()
+                        .ok_or_else(|| LegacyProviderParamsError::unknown_shape("top_p"))?;
+                    tag.top_p = Some(f as f32);
+                }
+                "structured_output" => {
+                    let schema =
+                        serde_json::from_value::<crate::OutputSchema>(v.clone()).map_err(|e| {
+                            LegacyProviderParamsError::InvalidStructuredOutput {
+                                reason: e.to_string(),
+                            }
+                        })?;
+                    tag.structured_output = Some(schema);
+                }
+                "google_search" => {
+                    if v.is_object() {
+                        tag.google_search = Some(OpaqueProviderBody::from_value(v));
+                    } else if !v.is_boolean() && !v.is_null() {
+                        return Err(LegacyProviderParamsError::unknown_shape("google_search"));
+                    }
+                }
+                "candidate_count" => {
+                    let n = v
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| {
+                            LegacyProviderParamsError::unknown_shape("candidate_count")
+                        })?;
+                    tag.candidate_count = Some(n);
+                }
+                other => {
+                    return Err(LegacyProviderParamsError::UnknownKey {
+                        key: other.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(tag)
+    }
+}
+
+/// Error returned by the per-provider `from_legacy_value` projectors
+/// when an untyped legacy JSON shape cannot be mapped onto a typed
+/// variant. Callers that must preserve the legacy body losslessly wrap
+/// it into `ProviderTag::Unknown { bag: StructuredProviderExtension }`
+/// instead of silently dropping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyProviderParamsError {
+    NotAnObject,
+    UnknownKey { key: String },
+    UnknownShape { field: &'static str },
+    InvalidStructuredOutput { reason: String },
+}
+
+impl LegacyProviderParamsError {
+    fn unknown_shape(field: &'static str) -> Self {
+        Self::UnknownShape { field }
+    }
+}
+
+impl std::fmt::Display for LegacyProviderParamsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnObject => f.write_str("legacy provider-params value is not an object"),
+            Self::UnknownKey { key } => write!(f, "unknown legacy provider-params key: {key}"),
+            Self::UnknownShape { field } => {
+                write!(f, "legacy provider-params shape invalid for field {field}")
+            }
+            Self::InvalidStructuredOutput { reason } => {
+                write!(f, "structured_output deserialize failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LegacyProviderParamsError {}
 
 /// Typed projection of OpenAI's reasoning-effort knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -988,5 +1494,70 @@ mod tests {
         let json = serde_json::to_value(&ctx).unwrap();
         let parsed: ConversationContextAppend = serde_json::from_value(json).unwrap();
         assert_eq!(ctx, parsed);
+    }
+
+    #[test]
+    fn anthropic_from_legacy_value_projects_multi_key_blob() {
+        let v = serde_json::json!({
+            "thinking": {"type": "adaptive"},
+            "top_k": 40,
+            "effort": "max",
+            "inference_geo": "global",
+            "context": "1m",
+            "compaction": "auto",
+            "__meerkat_supports_temperature": true,
+        });
+        let tag = AnthropicProviderTag::from_legacy_value(&v).expect("projects");
+        assert_eq!(tag.thinking, Some(AnthropicThinkingConfig::Adaptive));
+        assert_eq!(tag.top_k, Some(40));
+        assert_eq!(tag.effort, Some(AnthropicEffort::Max));
+        assert_eq!(tag.inference_geo, Some(AnthropicInferenceGeo::Global));
+        assert_eq!(tag.context, Some(AnthropicContextWindow::OneMegabyte));
+        assert_eq!(tag.compaction, Some(AnthropicCompactionConfig::Auto));
+        assert_eq!(tag.supports_temperature_override, Some(true));
+    }
+
+    #[test]
+    fn anthropic_from_legacy_value_unknown_key_errs() {
+        let v = serde_json::json!({"unknown_key": 1});
+        let err = AnthropicProviderTag::from_legacy_value(&v).unwrap_err();
+        assert!(matches!(err, LegacyProviderParamsError::UnknownKey { .. }));
+    }
+
+    #[test]
+    fn openai_from_legacy_value_projects_reasoning_and_penalties() {
+        let v = serde_json::json!({
+            "reasoning_effort": "high",
+            "seed": 42,
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.3,
+        });
+        let tag = OpenAiProviderTag::from_legacy_value(&v).expect("projects");
+        assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(tag.seed, Some(42));
+        assert!(matches!(tag.frequency_penalty, Some(v) if (v - 0.5).abs() < 1e-6));
+        assert!(matches!(tag.presence_penalty, Some(v) if (v - 0.3).abs() < 1e-6));
+    }
+
+    #[test]
+    fn gemini_from_legacy_value_projects_thinking_and_top_knobs() {
+        let v = serde_json::json!({
+            "thinking": {"include_thoughts": true, "thinking_budget": 8000},
+            "top_k": 40,
+            "top_p": 0.95,
+        });
+        let tag = GeminiProviderTag::from_legacy_value(&v).expect("projects");
+        let thinking = tag.thinking.expect("thinking present");
+        assert_eq!(thinking.include_thoughts, Some(true));
+        assert_eq!(thinking.thinking_budget, Some(8000));
+        assert_eq!(tag.top_k, Some(40));
+        assert!(matches!(tag.top_p, Some(v) if (v - 0.95).abs() < 1e-6));
+    }
+
+    #[test]
+    fn opaque_provider_body_round_trip() {
+        let v = serde_json::json!({"max_uses": 5, "allowed_domains": ["example.com"]});
+        let body = OpaqueProviderBody::from_value(&v);
+        assert_eq!(body.as_value(), v);
     }
 }

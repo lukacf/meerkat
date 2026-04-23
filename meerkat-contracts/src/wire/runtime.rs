@@ -584,13 +584,16 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 thinking_budget_tokens,
             } => Self::Anthropic(AnthropicProviderTag {
                 thinking_budget_tokens,
+                ..Default::default()
             }),
             WireProviderTag::OpenAi { reasoning_effort } => Self::OpenAi(OpenAiProviderTag {
                 reasoning_effort: reasoning_effort.map(Into::into),
+                ..Default::default()
             }),
-            WireProviderTag::Gemini { candidate_count } => {
-                Self::Gemini(GeminiProviderTag { candidate_count })
-            }
+            WireProviderTag::Gemini { candidate_count } => Self::Gemini(GeminiProviderTag {
+                candidate_count,
+                ..Default::default()
+            }),
             WireProviderTag::Unknown { bag } => Self::Unknown { bag },
         }
     }

@@ -66,23 +66,17 @@ impl OpenAiCompatibleClient {
     }
 
     fn request_with_remote_model(&self, request: &LlmRequest) -> LlmRequest {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
         let mut request = request.clone();
         request.model = self.remote_model.clone();
-        let mut provider_params = request
-            .provider_params
-            .take()
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(obj) = provider_params.as_object_mut() {
-            obj.insert(
-                crate::OpenAiClient::INTERNAL_SUPPORTS_TEMPERATURE.to_string(),
-                Value::Bool(self.supports_temperature),
-            );
-            obj.insert(
-                crate::OpenAiClient::INTERNAL_SUPPORTS_REASONING.to_string(),
-                Value::Bool(self.supports_reasoning),
-            );
-        }
-        request.provider_params = Some(provider_params);
+        let mut tag = match request.provider_params.take() {
+            Some(ProviderTag::OpenAi(t)) => t,
+            Some(_) => OpenAiProviderTag::default(),
+            None => OpenAiProviderTag::default(),
+        };
+        tag.supports_temperature_override = Some(self.supports_temperature);
+        tag.supports_reasoning_override = Some(self.supports_reasoning);
+        request.provider_params = Some(ProviderTag::OpenAi(tag));
         request
     }
 
@@ -143,38 +137,41 @@ impl OpenAiCompatibleClient {
             );
         }
 
-        if let Some(params) = &request.provider_params {
+        if let Some(tag) = crate::client::openai_tag(request) {
+            use meerkat_core::lifecycle::run_primitive::ReasoningEffort as TypedReasoningEffort;
             if self.supports_reasoning {
-                if let Some(reasoning) = params.get("reasoning")
-                    && reasoning.is_object()
-                {
-                    body["reasoning"] = reasoning.clone();
+                if let Some(reasoning) = tag.reasoning.as_ref() {
+                    let v = reasoning.as_value();
+                    if v.is_object() {
+                        body["reasoning"] = v;
+                    }
                 }
-                if let Some(reasoning_effort) = params.get("reasoning_effort") {
+                if let Some(effort) = tag.reasoning_effort {
+                    let s = match effort {
+                        TypedReasoningEffort::Low => "low",
+                        TypedReasoningEffort::Medium => "medium",
+                        TypedReasoningEffort::High => "high",
+                    };
                     if !body["reasoning"].is_object() {
                         body["reasoning"] = serde_json::json!({});
                     }
-                    body["reasoning"]["effort"] = reasoning_effort.clone();
-                    body["reasoning_effort"] = reasoning_effort.clone();
+                    body["reasoning"]["effort"] = Value::String(s.to_string());
+                    body["reasoning_effort"] = Value::String(s.to_string());
                 }
                 if self.supports_thinking
-                    && let Some(chat_template_kwargs) = params.get("chat_template_kwargs")
+                    && let Some(chat_template_kwargs) = tag.chat_template_kwargs.as_ref()
                 {
-                    body["chat_template_kwargs"] = chat_template_kwargs.clone();
+                    body["chat_template_kwargs"] = chat_template_kwargs.as_value();
                 }
                 if self.supports_thinking
-                    && let Some(thinking) = params.get("thinking")
+                    && let Some(thinking) = tag.thinking.as_ref()
                 {
-                    body["thinking"] = thinking.clone();
+                    body["thinking"] = thinking.as_value();
                 }
             }
-            if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
-                    .map_err(|e| LlmError::InvalidRequest {
-                        message: format!("Invalid structured_output schema: {e}"),
-                    })?;
+            if let Some(output_schema) = tag.structured_output.as_ref() {
                 let compiled =
-                    self.compile_schema(&output_schema)
+                    self.compile_schema(output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
@@ -875,12 +872,20 @@ mod tests {
             "gemma-4-31b",
             vec![Message::User(UserMessage::text("hello".to_string()))],
         )
-        .with_provider_param("reasoning_effort", "medium")
-        .with_provider_param(
-            "chat_template_kwargs",
-            serde_json::json!({ "enable_thinking": true }),
-        )
-        .with_provider_param("thinking", serde_json::json!({ "type": "enabled" }));
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::Medium);
+            t.chat_template_kwargs = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"enable_thinking": true}),
+                ),
+            );
+            t.thinking = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "enabled"}),
+                ),
+            );
+        });
 
         let body = client
             .build_chat_completions_body(&request)
@@ -944,20 +949,12 @@ mod tests {
         let translated = client.request_with_remote_model(&request);
 
         assert_eq!(translated.model, "gemma4:e2b");
-        assert_eq!(
-            translated
-                .provider_params
-                .as_ref()
-                .and_then(|params| params.get(crate::OpenAiClient::INTERNAL_SUPPORTS_TEMPERATURE)),
-            Some(&Value::Bool(true))
-        );
-        assert_eq!(
-            translated
-                .provider_params
-                .as_ref()
-                .and_then(|params| params.get(crate::OpenAiClient::INTERNAL_SUPPORTS_REASONING)),
-            Some(&Value::Bool(true))
-        );
+        let tag = match translated.provider_params.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(t)) => t,
+            other => panic!("expected OpenAi variant, got {other:?}"),
+        };
+        assert_eq!(tag.supports_temperature_override, Some(true));
+        assert_eq!(tag.supports_reasoning_override, Some(true));
     }
 
     #[test]

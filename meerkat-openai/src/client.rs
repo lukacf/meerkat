@@ -5,6 +5,9 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::lifecycle::run_primitive::{
+    OpenAiProviderTag, ProviderTag, ReasoningEffort as TypedReasoningEffort,
+};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason, Usage,
@@ -17,6 +20,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
+
+/// Extract the typed OpenAI provider tag from a request.
+pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
+    match request.provider_params.as_ref()? {
+        ProviderTag::OpenAi(t) => Some(t),
+        _ => None,
+    }
+}
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
@@ -36,9 +47,6 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
-    pub(crate) const INTERNAL_SUPPORTS_TEMPERATURE: &str = "__meerkat_supports_temperature";
-    pub(crate) const INTERNAL_SUPPORTS_REASONING: &str = "__meerkat_supports_reasoning";
-
     fn model_supports_temperature(model: &str) -> bool {
         meerkat_core::model_profile::openai::supports_temperature(model)
     }
@@ -48,20 +56,14 @@ impl OpenAiClient {
     }
 
     fn request_supports_temperature(request: &LlmRequest) -> bool {
-        request
-            .provider_params
-            .as_ref()
-            .and_then(|params| params.get(Self::INTERNAL_SUPPORTS_TEMPERATURE))
-            .and_then(Value::as_bool)
+        openai_tag(request)
+            .and_then(|t| t.supports_temperature_override)
             .unwrap_or_else(|| Self::model_supports_temperature(&request.model))
     }
 
     fn request_supports_reasoning_payload(request: &LlmRequest) -> bool {
-        request
-            .provider_params
-            .as_ref()
-            .and_then(|params| params.get(Self::INTERNAL_SUPPORTS_REASONING))
-            .and_then(Value::as_bool)
+        openai_tag(request)
+            .and_then(|t| t.supports_reasoning_override)
             .unwrap_or_else(|| Self::model_supports_reasoning_payload(&request.model))
     }
 
@@ -174,44 +176,48 @@ impl OpenAiClient {
             body["tools"] = Value::Array(tools);
         }
 
-        // Inject provider-native web search tool from provider_params.
-        // Bool(false) and Null are treated as explicit disable; only objects are injected.
-        if let Some(ref params) = request.provider_params
-            && let Some(ws) = params.get("web_search")
-            && ws.is_object()
-        {
-            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                Some(arr) => arr.push(ws.clone()),
-                None => body["tools"] = Value::Array(vec![ws.clone()]),
+        // Inject provider-native web search tool from typed tag.
+        if let Some(web_search) = openai_tag(request).and_then(|t| t.web_search.as_ref()) {
+            let ws_value = web_search.as_value();
+            if ws_value.is_object() {
+                match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                    Some(arr) => arr.push(ws_value),
+                    None => body["tools"] = Value::Array(vec![ws_value]),
+                }
             }
         }
 
-        // Extract OpenAI-specific parameters from provider_params
-        if let Some(params) = &request.provider_params {
-            if reasoning_enabled && let Some(reasoning_effort) = params.get("reasoning_effort") {
-                body["reasoning"]["effort"] = reasoning_effort.clone();
+        if let Some(tag) = openai_tag(request) {
+            if reasoning_enabled {
+                if let Some(effort) = tag.reasoning_effort {
+                    let s = match effort {
+                        TypedReasoningEffort::Low => "low",
+                        TypedReasoningEffort::Medium => "medium",
+                        TypedReasoningEffort::High => "high",
+                    };
+                    body["reasoning"]["effort"] = Value::String(s.to_string());
+                }
             }
 
-            if let Some(seed) = params.get("seed") {
-                body["seed"] = seed.clone();
+            if let Some(seed) = tag.seed {
+                body["seed"] = Value::Number(seed.into());
             }
 
-            if let Some(frequency_penalty) = params.get("frequency_penalty") {
-                body["frequency_penalty"] = frequency_penalty.clone();
+            if let Some(fp) = tag.frequency_penalty
+                && let Some(n) = serde_json::Number::from_f64(fp as f64)
+            {
+                body["frequency_penalty"] = Value::Number(n);
             }
 
-            if let Some(presence_penalty) = params.get("presence_penalty") {
-                body["presence_penalty"] = presence_penalty.clone();
+            if let Some(pp) = tag.presence_penalty
+                && let Some(n) = serde_json::Number::from_f64(pp as f64)
+            {
+                body["presence_penalty"] = Value::Number(n);
             }
 
-            // Handle structured output configuration
-            if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
-                    .map_err(|e| LlmError::InvalidRequest {
-                        message: format!("Invalid structured_output schema: {e}"),
-                    })?;
+            if let Some(output_schema) = tag.structured_output.as_ref() {
                 let compiled =
-                    self.compile_schema(&output_schema)
+                    self.compile_schema(output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
@@ -1159,7 +1165,9 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("reasoning_effort", "high");
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+        });
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -1186,7 +1194,9 @@ mod tests {
             "gpt-4.1-mini",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("reasoning_effort", "high");
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+        });
 
         let body = client.build_request_body(&request).expect("build request");
         assert!(body.get("reasoning").is_none());
@@ -1200,9 +1210,11 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3)
-        .with_provider_param(OpenAiClient::INTERNAL_SUPPORTS_TEMPERATURE, true)
-        .with_provider_param(OpenAiClient::INTERNAL_SUPPORTS_REASONING, true)
-        .with_provider_param("reasoning_effort", "high");
+        .with_openai_tag_merge(|t| t.supports_temperature_override = Some(true))
+        .with_openai_tag_merge(|t| t.supports_reasoning_override = Some(true))
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+        });
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -1328,7 +1340,7 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("seed", 12345);
+        .with_openai_tag_merge(|t| t.seed = Some(12345));
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -1342,11 +1354,12 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("frequency_penalty", 0.5);
+        .with_openai_tag_merge(|t| t.frequency_penalty = Some(0.5));
 
         let body = client.build_request_body(&request).expect("build request");
 
-        assert_eq!(body["frequency_penalty"], 0.5);
+        let fp = body["frequency_penalty"].as_f64().expect("fp numeric");
+        assert!((fp - 0.5).abs() < 1e-6, "fp drift: {fp}");
     }
 
     #[test]
@@ -1356,29 +1369,12 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("presence_penalty", 0.8);
+        .with_openai_tag_merge(|t| t.presence_penalty = Some(0.8));
 
         let body = client.build_request_body(&request).expect("build request");
 
-        assert_eq!(body["presence_penalty"], 0.8);
-    }
-
-    #[test]
-    fn test_unknown_provider_params_are_ignored() {
-        let client = OpenAiClient::new("test-key".to_string());
-        let request = LlmRequest::new(
-            "gpt-5.2",
-            vec![Message::User(UserMessage::text("test".to_string()))],
-        )
-        .with_provider_param("unknown_param", "some_value")
-        .with_provider_param("another_unknown", 123)
-        .with_provider_param("seed", 42);
-
-        let body = client.build_request_body(&request).expect("build request");
-
-        assert!(body.get("unknown_param").is_none());
-        assert!(body.get("another_unknown").is_none());
-        assert_eq!(body["seed"], 42);
+        let pp = body["presence_penalty"].as_f64().expect("pp numeric");
+        assert!((pp - 0.8).abs() < 1e-6, "pp drift: {pp}");
     }
 
     #[test]
@@ -1420,17 +1416,21 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("reasoning_effort", "high")
-        .with_provider_param("seed", 999)
-        .with_provider_param("frequency_penalty", 0.3)
-        .with_provider_param("presence_penalty", 0.4);
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+        })
+        .with_openai_tag_merge(|t| t.seed = Some(999))
+        .with_openai_tag_merge(|t| t.frequency_penalty = Some(0.3))
+        .with_openai_tag_merge(|t| t.presence_penalty = Some(0.4));
 
         let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["seed"], 999);
-        assert_eq!(body["frequency_penalty"], 0.3);
-        assert_eq!(body["presence_penalty"], 0.4);
+        let fp = body["frequency_penalty"].as_f64().expect("fp numeric");
+        assert!((fp - 0.3).abs() < 1e-6, "fp drift: {fp}");
+        let pp = body["presence_penalty"].as_f64().expect("pp numeric");
+        assert!((pp - 0.4).abs() < 1e-6, "pp drift: {pp}");
     }
 
     #[test]
@@ -1497,14 +1497,14 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_openai_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema,
                 "name": "person",
                 "strict": true
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -1527,12 +1527,12 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_openai_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -1601,14 +1601,14 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_openai_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema,
                 "name": "person",
                 "strict": true
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request).expect("build request");
         let compiled = &body["text"]["format"]["schema"];
@@ -1656,13 +1656,13 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_openai_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema,
                 "strict": true
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request).expect("build request");
         let compiled = &body["text"]["format"]["schema"];
@@ -1698,13 +1698,13 @@ mod tests {
             "gpt-5.2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
+        .with_openai_tag_merge(|t| {
+            t.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
                 "schema": schema,
                 "strict": false
-            }),
-        );
+            }))
+            .ok();
+        });
 
         let body = client.build_request_body(&request).expect("build request");
         let compiled = &body["text"]["format"]["schema"];
@@ -2590,9 +2590,13 @@ mod tests {
             "A test tool",
             serde_json::json!({"type": "object"}),
         ))])
-        .with_provider_params(serde_json::json!({
-            "web_search": {"type": "web_search"}
-        }));
+        .with_openai_tag_merge(|t| {
+            t.web_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request).expect("build request");
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 2, "should have regular tool + web_search");
@@ -2607,9 +2611,13 @@ mod tests {
             "gpt-4.1-mini",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_params(serde_json::json!({
-            "web_search": {"type": "web_search"}
-        }));
+        .with_openai_tag_merge(|t| {
+            t.web_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request).expect("build request");
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1);

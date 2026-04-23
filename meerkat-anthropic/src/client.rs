@@ -4,6 +4,10 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::lifecycle::run_primitive::{
+    AnthropicCompactionConfig, AnthropicContextWindow, AnthropicEffort, AnthropicInferenceGeo,
+    AnthropicProviderTag, AnthropicThinkingConfig, ProviderTag,
+};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage};
 use meerkat_llm_core::LlmError;
@@ -124,21 +128,24 @@ impl AnthropicClientBuilder {
     }
 }
 
-impl AnthropicClient {
-    /// Runtime override: force-enable temperature for this request even if the
-    /// model profile says unsupported. Useful for proxied or custom deployments.
-    pub(crate) const INTERNAL_SUPPORTS_TEMPERATURE: &'static str = "__meerkat_supports_temperature";
+/// Extract the typed Anthropic provider tag from a request, or `None` if
+/// the request does not carry one (callers pass a different variant or
+/// leave `provider_params` empty).
+fn anthropic_tag(request: &LlmRequest) -> Option<&AnthropicProviderTag> {
+    match request.provider_params.as_ref()? {
+        ProviderTag::Anthropic(t) => Some(t),
+        _ => None,
+    }
+}
 
+impl AnthropicClient {
     fn model_supports_temperature(model: &str) -> bool {
         meerkat_core::model_profile::anthropic::supports_temperature(model)
     }
 
     fn request_supports_temperature(request: &LlmRequest) -> bool {
-        request
-            .provider_params
-            .as_ref()
-            .and_then(|params| params.get(Self::INTERNAL_SUPPORTS_TEMPERATURE))
-            .and_then(Value::as_bool)
+        anthropic_tag(request)
+            .and_then(|t| t.supports_temperature_override)
             .unwrap_or_else(|| Self::model_supports_temperature(&request.model))
     }
 
@@ -421,84 +428,59 @@ impl AnthropicClient {
             body["tools"] = Value::Array(tools);
         }
 
-        // Inject provider-native web search tool from provider_params.
-        // Bool(false) and Null are treated as explicit disable; only objects are injected.
-        if let Some(ref params) = request.provider_params
-            && let Some(ws) = params.get("web_search")
-            && ws.is_object()
-        {
-            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                Some(arr) => arr.push(ws.clone()),
-                None => body["tools"] = Value::Array(vec![ws.clone()]),
+        // Inject provider-native web search tool from the typed tag.
+        if let Some(web_search) = anthropic_tag(request).and_then(|t| t.web_search.as_ref()) {
+            let ws_value = web_search.as_value();
+            if ws_value.is_object() {
+                match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                    Some(arr) => arr.push(ws_value),
+                    None => body["tools"] = Value::Array(vec![ws_value]),
+                }
             }
         }
 
-        // Extract provider-specific params
-        if let Some(ref params) = request.provider_params {
-            // Handle thinking config from three formats:
-            // 1. Adaptive (Opus 4.6): {"thinking": {"type": "adaptive"}}
-            // 2. Legacy flat format: {"thinking_budget": 10000}
-            // 3. Typed enabled: {"thinking": {"type": "enabled", "budget_tokens": 10000}}
-            if let Some(thinking) = params.get("thinking") {
-                if thinking.get("type").and_then(|t| t.as_str()) == Some("adaptive") {
-                    // Opus 4.6 adaptive thinking — pass through directly
-                    body["thinking"] = serde_json::json!({"type": "adaptive"});
-                } else if let Some(budget) = thinking
-                    .get("budget_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    // Explicit enabled format with budget
-                    body["thinking"] = serde_json::json!({
+        if let Some(tag) = anthropic_tag(request) {
+            // Thinking: typed enum captures adaptive vs enabled;
+            // legacy flat `thinking_budget_tokens` maps to enabled.
+            if let Some(cfg) = tag.thinking.as_ref() {
+                body["thinking"] = match cfg {
+                    AnthropicThinkingConfig::Adaptive => serde_json::json!({"type": "adaptive"}),
+                    AnthropicThinkingConfig::Enabled { budget_tokens } => serde_json::json!({
                         "type": "enabled",
-                        "budget_tokens": budget
-                    });
-                }
-            } else if let Some(budget) = params
-                .get("thinking_budget")
-                .and_then(serde_json::Value::as_u64)
-            {
-                // Legacy flat format
+                        "budget_tokens": budget_tokens,
+                    }),
+                };
+            } else if let Some(budget) = tag.thinking_budget_tokens {
                 body["thinking"] = serde_json::json!({
                     "type": "enabled",
-                    "budget_tokens": budget
+                    "budget_tokens": budget,
                 });
             }
 
-            // top_k must be a number - coerce strings from CLI --param
-            if let Some(top_k) = params.get("top_k") {
-                let numeric_top_k = match top_k {
-                    Value::Number(_) => Some(top_k.clone()),
-                    Value::String(s) => s.parse::<u64>().ok().map(|n| Value::Number(n.into())),
-                    _ => None,
-                };
-                if let Some(v) = numeric_top_k {
-                    body["top_k"] = v;
-                }
+            if let Some(top_k) = tag.top_k {
+                body["top_k"] = Value::Number(serde_json::Number::from(top_k));
             }
 
-            // Handle effort parameter (GA on Opus 4.6, no beta header needed)
-            // Format: {"effort": "low"|"medium"|"high"|"max"}
-            if let Some(effort) = params.get("effort").and_then(|v| v.as_str()) {
-                // Ensure output_config exists (may already be set by structured output below)
+            if let Some(effort) = tag.effort {
+                let effort_str = match effort {
+                    AnthropicEffort::Low => "low",
+                    AnthropicEffort::Medium => "medium",
+                    AnthropicEffort::High => "high",
+                    AnthropicEffort::Max => "max",
+                    AnthropicEffort::XHigh => "xhigh",
+                };
                 if body.get("output_config").is_none() {
                     body["output_config"] = serde_json::json!({});
                 }
-                body["output_config"]["effort"] = Value::String(effort.to_string());
+                body["output_config"]["effort"] = Value::String(effort_str.to_string());
             }
 
-            // Handle structured output configuration
-            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
-            if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
-                    .map_err(|e| LlmError::InvalidRequest {
-                        message: format!("Invalid structured_output schema: {e}"),
-                    })?;
+            if let Some(output_schema) = tag.structured_output.as_ref() {
                 let compiled =
-                    self.compile_schema(&output_schema)
+                    self.compile_schema(output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
-                // Ensure output_config exists (may already have effort set above)
                 if body.get("output_config").is_none() {
                     body["output_config"] = serde_json::json!({});
                 }
@@ -508,30 +490,33 @@ impl AnthropicClient {
                 });
             }
 
-            // Handle inference_geo for data residency (Opus 4.6+)
-            // Format: {"inference_geo": "us"} or {"inference_geo": "global"}
-            if let Some(geo) = params.get("inference_geo").and_then(|v| v.as_str()) {
-                body["inference_geo"] = Value::String(geo.to_string());
+            if let Some(geo) = tag.inference_geo.as_ref() {
+                let geo_str = match geo {
+                    AnthropicInferenceGeo::Us => "us".to_string(),
+                    AnthropicInferenceGeo::Global => "global".to_string(),
+                    AnthropicInferenceGeo::Other { region } => region.clone(),
+                };
+                body["inference_geo"] = Value::String(geo_str);
             }
 
-            // Handle compaction (Opus 4.6, beta)
-            // Format: {"compaction": "auto"} or {"compaction": {"trigger": 150000}}
-            if let Some(compaction) = params.get("compaction") {
-                if compaction.as_str() == Some("auto") {
-                    body["context_management"] = serde_json::json!({
-                        "edits": [{"type": "compact_20260112"}]
-                    });
-                } else if compaction.is_object() {
-                    // Allow passing full compaction config: {"trigger": 150000, "instructions": "..."}
-                    let mut edit = serde_json::json!({"type": "compact_20260112"});
-                    if let Some(obj) = compaction.as_object() {
-                        for (k, v) in obj {
-                            edit[k] = v.clone();
-                        }
+            if let Some(compaction) = tag.compaction.as_ref() {
+                match compaction {
+                    AnthropicCompactionConfig::Auto => {
+                        body["context_management"] = serde_json::json!({
+                            "edits": [{"type": "compact_20260112"}]
+                        });
                     }
-                    body["context_management"] = serde_json::json!({
-                        "edits": [edit]
-                    });
+                    AnthropicCompactionConfig::Custom { edit } => {
+                        let mut edit_value = serde_json::json!({"type": "compact_20260112"});
+                        if let Some(obj) = edit.as_value().as_object() {
+                            for (k, v) in obj {
+                                edit_value[k] = v.clone();
+                            }
+                        }
+                        body["context_management"] = serde_json::json!({
+                            "edits": [edit_value]
+                        });
+                    }
                 }
             }
         }
@@ -640,9 +625,9 @@ impl LlmClient for AnthropicClient {
                 betas.push("structured-outputs-2025-11-13");
             }
 
-            // 1M context window (opt-in via provider_params)
-            if let Some(ref params) = request.provider_params
-                && params.get("context").and_then(|v| v.as_str()) == Some("1m")
+            // 1M context window (opt-in via typed AnthropicProviderTag.context)
+            if anthropic_tag(request).and_then(|t| t.context)
+                == Some(AnthropicContextWindow::OneMegabyte)
             {
                 betas.push("context-1m-2025-08-07");
             }
@@ -1352,7 +1337,7 @@ mod tests {
             "claude-sonnet-4-5",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking_budget", 10000);
+        .with_anthropic_tag_merge(|t| t.thinking_budget_tokens = Some(10000));
 
         let body = client.build_request_body(&request)?;
 
@@ -1377,7 +1362,7 @@ mod tests {
             "claude-sonnet-4-20250514",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking_budget", 10000);
+        .with_anthropic_tag_merge(|t| t.thinking_budget_tokens = Some(10000));
 
         let body = client.build_request_body(&request)?;
 
@@ -1435,7 +1420,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3)
-        .with_provider_param(AnthropicClient::INTERNAL_SUPPORTS_TEMPERATURE, true);
+        .with_anthropic_tag_merge(|t| t.supports_temperature_override = Some(true));
 
         let body = client.build_request_body(&request)?;
         assert!(
@@ -1453,7 +1438,7 @@ mod tests {
             "claude-sonnet-4-20250514",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("top_k", 40);
+        .with_anthropic_tag_merge(|t| t.top_k = Some(40));
 
         let body = client.build_request_body(&request)?;
 
@@ -1528,51 +1513,6 @@ mod tests {
         );
     }
 
-    /// Regression: CLI --param passes top_k as string; must coerce to number
-    /// Previously: `--param top_k=40` sent `"top_k": "40"` which Anthropic rejects
-    #[test]
-    fn test_regression_top_k_string_coercion() -> Result<(), Box<dyn std::error::Error>> {
-        let client = AnthropicClient::new("test-key".to_string())?;
-
-        // Simulate CLI --param which passes values as strings
-        let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage::text("test".to_string()))],
-        )
-        .with_provider_param("top_k", "40"); // String, not number!
-
-        let body = client.build_request_body(&request)?;
-
-        // Should be coerced to a number
-        assert!(
-            body["top_k"].is_number(),
-            "top_k should be a number, not string"
-        );
-        assert_eq!(body["top_k"], 40);
-        Ok(())
-    }
-
-    /// Regression: non-numeric string values for top_k should be ignored
-    #[test]
-    fn test_regression_top_k_invalid_string_ignored() -> Result<(), Box<dyn std::error::Error>> {
-        let client = AnthropicClient::new("test-key".to_string())?;
-
-        let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage::text("test".to_string()))],
-        )
-        .with_provider_param("top_k", "not_a_number");
-
-        let body = client.build_request_body(&request)?;
-
-        // Invalid string should be ignored (no top_k in body)
-        assert!(
-            body.get("top_k").is_none(),
-            "invalid top_k should be ignored"
-        );
-        Ok(())
-    }
-
     #[test]
     fn test_usage_merge_preserves_input_tokens() {
         let mut usage = Usage::default();
@@ -1618,18 +1558,16 @@ mod tests {
             "required": ["name", "age"]
         });
 
+        let output_schema: OutputSchema = serde_json::from_value(serde_json::json!({
+            "schema": schema,
+            "name": "person",
+            "strict": true
+        }))?;
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param(
-            "structured_output",
-            serde_json::json!({
-                "schema": schema,
-                "name": "person",
-                "strict": true
-            }),
-        );
+        .with_anthropic_tag_merge(|t| t.structured_output = Some(output_schema));
 
         let body = client.build_request_body(&request)?;
 
@@ -1776,7 +1714,10 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
+        .with_anthropic_tag_merge(|t| {
+            t.thinking =
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive)
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1798,7 +1739,9 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("effort", "medium");
+        .with_anthropic_tag_merge(|t| {
+            t.effort = Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::Medium)
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1818,7 +1761,7 @@ mod tests {
             "claude-opus-4-7",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("effort", "xhigh");
+        .with_anthropic_tag_merge(|t| t.effort = Some(AnthropicEffort::XHigh));
 
         let body = client.build_request_body(&request)?;
 
@@ -1839,18 +1782,19 @@ mod tests {
             "required": ["name"]
         });
 
-        let mut request = LlmRequest::new(
+        let output_schema: OutputSchema = serde_json::from_value(serde_json::json!({
+            "schema": schema,
+            "name": "output",
+            "strict": true
+        }))?;
+        let request = LlmRequest::new(
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
-        );
-        request.provider_params = Some(serde_json::json!({
-            "effort": "high",
-            "structured_output": {
-                "schema": schema,
-                "name": "output",
-                "strict": true
-            }
-        }));
+        )
+        .with_anthropic_tag_merge(|t| {
+            t.effort = Some(AnthropicEffort::High);
+            t.structured_output = Some(output_schema);
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1871,7 +1815,10 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
+        .with_anthropic_tag_merge(|t| {
+            t.thinking =
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive)
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1894,7 +1841,7 @@ mod tests {
             "claude-sonnet-4-5",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("thinking_budget", 10000);
+        .with_anthropic_tag_merge(|t| t.thinking_budget_tokens = Some(10000));
 
         let body = client.build_request_body(&request)?;
 
@@ -1911,7 +1858,10 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("inference_geo", "us");
+        .with_anthropic_tag_merge(|t| {
+            t.inference_geo =
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo::Us)
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1927,7 +1877,10 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_provider_param("compaction", "auto");
+        .with_anthropic_tag_merge(|t| {
+            t.compaction =
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig::Auto)
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -1941,15 +1894,20 @@ mod tests {
     fn test_build_request_body_compaction_with_trigger() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
-        let mut request = LlmRequest::new(
+        let custom_edit_body = serde_json::json!({
+            "trigger": {"type": "input_tokens", "value": 100_000}
+        });
+        let request = LlmRequest::new(
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
-        );
-        request.provider_params = Some(serde_json::json!({
-            "compaction": {
-                "trigger": {"type": "input_tokens", "value": 100_000}
-            }
-        }));
+        )
+        .with_anthropic_tag_merge(|t| {
+            t.compaction = Some(AnthropicCompactionConfig::Custom {
+                edit: meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &custom_edit_body,
+                ),
+            });
+        });
 
         let body = client.build_request_body(&request)?;
 
@@ -2380,9 +2338,13 @@ mod tests {
             vec![Message::User(UserMessage::text("hi".to_string()))],
         );
         request.tools = vec![tool];
-        request.provider_params = Some(serde_json::json!({
-            "web_search": {"type": "web_search_20250305", "name": "web_search"}
-        }));
+        request = request.with_anthropic_tag_merge(|t| {
+            t.web_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search_20250305", "name": "web_search"}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request)?;
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 2, "should have regular tool + web_search");
@@ -2397,9 +2359,13 @@ mod tests {
             "claude-sonnet-4-6",
             vec![Message::User(UserMessage::text("hi".to_string()))],
         );
-        request.provider_params = Some(serde_json::json!({
-            "web_search": {"type": "web_search_20250305", "name": "web_search"}
-        }));
+        request = request.with_anthropic_tag_merge(|t| {
+            t.web_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search_20250305", "name": "web_search"}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request)?;
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1);
@@ -2434,9 +2400,13 @@ mod tests {
             "claude-sonnet-4-6",
             vec![Message::User(UserMessage::text("hi".to_string()))],
         );
-        request.provider_params = Some(serde_json::json!({
-            "web_search": {"type": "web_search_20250305", "name": "web_search"}
-        }));
+        request = request.with_anthropic_tag_merge(|t| {
+            t.web_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search_20250305", "name": "web_search"}),
+                ),
+            );
+        });
         let body = client.build_request_body(&request)?;
         assert!(
             body.get("web_search").is_none(),

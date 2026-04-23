@@ -46,11 +46,14 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             thinking_budget_tokens: Some(2048),
             provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
                 thinking_budget_tokens: Some(2048),
+                ..Default::default()
             })),
         }),
         connection_ref: Some(ConnectionRef {
-            realm_id: "dev".into(),
-            binding_id: "default_anthropic".into(),
+            realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::connection::BindingId::parse("default_anthropic")
+                .expect("valid binding"),
+            profile: None,
         }),
         keep_alive: Some(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
@@ -79,6 +82,7 @@ fn provider_tag_openai_round_trips() {
         provider_params: Some(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                 reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
             })),
             ..Default::default()
         }),
@@ -96,6 +100,7 @@ fn provider_tag_gemini_round_trips() {
         provider_params: Some(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag {
                 candidate_count: Some(4),
+                ..Default::default()
             })),
             ..Default::default()
         }),
@@ -191,15 +196,17 @@ fn merge_scalar_conflict_refuses_provider() {
 fn merge_scalar_conflict_refuses_connection_ref() {
     let mut left = RuntimeTurnMetadata {
         connection_ref: Some(ConnectionRef {
-            realm_id: "dev".into(),
-            binding_id: "a".into(),
+            realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::connection::BindingId::parse("a").expect("valid binding"),
+            profile: None,
         }),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
         connection_ref: Some(ConnectionRef {
-            realm_id: "dev".into(),
-            binding_id: "b".into(),
+            realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::connection::BindingId::parse("b").expect("valid binding"),
+            profile: None,
         }),
         ..Default::default()
     };

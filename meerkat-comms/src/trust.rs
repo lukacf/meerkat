@@ -1,9 +1,11 @@
 //! Trust management for Meerkat comms.
 
+use std::collections::BTreeMap;
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
+use meerkat_core::comms::{PeerAddress, PeerId, PeerName};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -19,6 +21,154 @@ pub enum TrustError {
     Json(#[from] serde_json::Error),
     #[error("Invalid peer ID: {0}")]
     InvalidPeerId(#[from] IdentityError),
+    /// A [`TrustStore`] insert was rejected because the [`PeerId`] already
+    /// resolves to a different entry. Duplicate [`PeerName`] is legal; a
+    /// duplicate [`PeerId`] is structurally impossible by design.
+    #[error("duplicate peer id: {peer_id}")]
+    DuplicatePeerId { peer_id: PeerId },
+}
+
+/// Error resolving a [`PeerName`] to a routing-key [`PeerId`].
+///
+/// Two entries may legitimately share a name; the resolver refuses to guess.
+/// Callers that receive `Ambiguous` must disambiguate by other means (ask the
+/// user, narrow by label, use the [`PeerId`] directly) — the router itself
+/// never collapses ambiguous names onto a single routing key.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum TrustResolveError {
+    #[error("no trusted peer with name {0:?}")]
+    NotFound(PeerName),
+    #[error("ambiguous peer name {name:?}: {} candidates", candidates.len())]
+    Ambiguous {
+        name: PeerName,
+        candidates: Vec<PeerId>,
+    },
+}
+
+/// A single entry in a [`TrustStore`]: everything we know about one trusted
+/// peer, keyed in the store by its canonical [`PeerId`].
+///
+/// `name` is display metadata only — the store intentionally allows multiple
+/// entries to share a `name`. Routing is by `peer_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustEntry {
+    /// Canonical routing identity (the store key).
+    pub peer_id: PeerId,
+    /// Display-only slug. Not unique across entries.
+    pub name: PeerName,
+    /// Signing public key for admission / verification.
+    pub pubkey: PubKey,
+    /// Typed transport address.
+    pub address: PeerAddress,
+    /// Discovery metadata (description, labels).
+    pub meta: PeerMeta,
+}
+
+/// Trust store keyed by canonical [`PeerId`].
+///
+/// Wave-B V5 dogma: `PeerName` is **not** a routing key. Duplicate `PeerName`
+/// across entries is legal — duplicate `PeerId` is a hard error. Reverse
+/// lookups by name go through [`resolve_name`](Self::resolve_name) which
+/// returns a typed ambiguity error when the name maps to more than one entry.
+///
+/// This type is the dogma-pure replacement for the legacy [`TrustedPeers`]
+/// `Vec<TrustedPeer>` collection. The two are intentionally parallel for
+/// Wave-B: consumers still own `TrustedPeers` in Wave-B's allowlist, but all
+/// new code keys trust by `PeerId` through this store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustStore {
+    entries: BTreeMap<PeerId, TrustEntry>,
+}
+
+impl TrustStore {
+    /// Create an empty trust store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a new trust entry. Returns an error if a different entry with
+    /// the same [`PeerId`] already exists.
+    ///
+    /// Use [`upsert`](Self::upsert) if replacing an existing entry is the
+    /// intended behaviour.
+    pub fn insert(&mut self, entry: TrustEntry) -> Result<(), TrustError> {
+        if self.entries.contains_key(&entry.peer_id) {
+            return Err(TrustError::DuplicatePeerId {
+                peer_id: entry.peer_id,
+            });
+        }
+        self.entries.insert(entry.peer_id, entry);
+        Ok(())
+    }
+
+    /// Insert or replace a trust entry keyed by [`PeerId`].
+    ///
+    /// Unlike [`insert`](Self::insert), duplicate `PeerId` is not an error —
+    /// the existing entry is returned.
+    pub fn upsert(&mut self, entry: TrustEntry) -> Option<TrustEntry> {
+        self.entries.insert(entry.peer_id, entry)
+    }
+
+    /// Number of trusted peers.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True if no peers are trusted.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Look up a trust entry by its canonical [`PeerId`].
+    pub fn get(&self, peer_id: &PeerId) -> Option<&TrustEntry> {
+        self.entries.get(peer_id)
+    }
+
+    /// True if a peer is trusted.
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.entries.contains_key(peer_id)
+    }
+
+    /// Remove a trust entry by [`PeerId`]. Returns the removed entry if
+    /// present.
+    pub fn remove(&mut self, peer_id: &PeerId) -> Option<TrustEntry> {
+        self.entries.remove(peer_id)
+    }
+
+    /// Iterate over all trust entries.
+    pub fn entries(&self) -> impl Iterator<Item = &TrustEntry> {
+        self.entries.values()
+    }
+
+    /// Resolve a display [`PeerName`] to its canonical [`PeerId`].
+    ///
+    /// Returns [`TrustResolveError::NotFound`] if no entry has this name,
+    /// or [`TrustResolveError::Ambiguous`] if more than one entry shares
+    /// the name. The store does **not** pick one for you — duplicate names
+    /// are a discovery concern, not a routing concern.
+    pub fn resolve_name(&self, name: &PeerName) -> Result<PeerId, TrustResolveError> {
+        let mut hits = self
+            .entries
+            .values()
+            .filter(|e| &e.name == name)
+            .map(|e| e.peer_id);
+        let first = match hits.next() {
+            Some(id) => id,
+            None => return Err(TrustResolveError::NotFound(name.clone())),
+        };
+        let mut candidates = vec![first];
+        for extra in hits {
+            candidates.push(extra);
+        }
+        if candidates.len() == 1 {
+            Ok(first)
+        } else {
+            Err(TrustResolveError::Ambiguous {
+                name: name.clone(),
+                candidates,
+            })
+        }
+    }
 }
 
 /// A trusted peer in the network.
@@ -147,6 +297,25 @@ impl TrustedPeers {
         let len_before = self.peers.len();
         self.peers.retain(|p| &p.pubkey != pubkey);
         self.peers.len() != len_before
+    }
+
+    /// Insert or replace a peer, keyed by `pubkey`.
+    pub fn upsert(&mut self, peer: TrustedPeer) {
+        if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
+            *existing = peer;
+        } else {
+            self.peers.push(peer);
+        }
+    }
+
+    /// Lookup helper used by tests and legacy callers.
+    ///
+    /// **Do not call this for routing decisions.** Name-keyed lookup is a
+    /// V5-dogma violation — use [`TrustStore::resolve_name`] or store by
+    /// [`PeerId`] at the call site. This method is retained only for
+    /// display-side callers during the Wave-B cutover.
+    pub fn get_by_name(&self, name: &str) -> Option<&TrustedPeer> {
+        self.peers.iter().find(|p| p.name == name)
     }
 }
 

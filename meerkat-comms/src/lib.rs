@@ -43,7 +43,7 @@ pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
-pub use trust::{TrustError, TrustedPeer, TrustedPeers};
+pub use trust::{TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeer, TrustedPeers};
 pub use types::{Envelope, InboxItem, MessageKind, Status};
 
 // Re-export high-level components

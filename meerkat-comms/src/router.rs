@@ -19,14 +19,15 @@ use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-use crate::identity::{Keypair, Signature};
+use crate::identity::Keypair;
 use crate::inbox::InboxSender;
-use crate::inproc::{InprocRegistry, InprocSendError};
+use crate::inproc::InprocSendError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
-use crate::transport::{PeerAddr, TransportError};
+use crate::transport::TransportError;
 use crate::trust::{TrustedPeer, TrustedPeers};
-use crate::types::{Envelope, MessageKind, Status};
+use crate::types::{Envelope, MessageKind};
+use meerkat_core::comms::PeerId;
 
 pub const DEFAULT_ACK_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = crate::transport::MAX_PAYLOAD_SIZE;
@@ -64,6 +65,14 @@ pub enum SendError {
     /// as "peer unreachable".
     #[error("Peer dropped envelope at admission: {reason:?}")]
     AdmissionDropped { reason: crate::inbox::DropReason },
+    /// Routing by [`PeerId`] landed in Wave-B V5 as a typed signature but
+    /// transport dispatch is reinstated in Wave-C. Until then, callers that
+    /// reach the router-level send path receive this typed error rather
+    /// than `PeerOffline` so the "not yet wired" condition is observable
+    /// at the call site instead of silently masquerading as a live peer
+    /// being unreachable.
+    #[error("router send path is awaiting Wave-C transport dispatcher")]
+    DispatcherPending,
 }
 
 #[inline]
@@ -242,47 +251,24 @@ impl Router {
         }
     }
 
-    pub async fn send_request(
-        &self,
-        peer_name: &str,
-        intent: String,
-        params: serde_json::Value,
-        handling_mode: meerkat_core::types::HandlingMode,
-    ) -> Result<Uuid, SendError> {
-        self.send(
-            peer_name,
-            MessageKind::Request {
-                intent,
-                params,
-                handling_mode: Some(handling_mode),
-            },
-        )
-        .await
-    }
-
-    pub async fn send_response(
-        &self,
-        peer_name: &str,
-        in_reply_to: Uuid,
-        status: Status,
-        result: serde_json::Value,
-    ) -> Result<Uuid, SendError> {
-        // Transitional: this low-level router API still sends responses with no
-        // explicit handling_mode override. The intended higher-level contract is
-        // that send_response may default to the original request's handling
-        // mode, but that semantic default is not machine-backed on this branch
-        // and will be revisited when the machine/DSL seam owns correlated peer
-        // request-response policy end to end.
-        self.send(
-            peer_name,
-            MessageKind::Response {
-                in_reply_to,
-                status,
-                result,
-                handling_mode: None,
-            },
-        )
-        .await
+    /// Canonical send: routing identity is a [`PeerId`], never a [`PeerName`].
+    ///
+    /// Wave-B V5: `PeerName` is display metadata; it is not safe as a routing
+    /// key (duplicate names are legal). Callers that hold only a name must
+    /// resolve it to a `PeerId` via [`TrustStore::resolve_name`] at the
+    /// boundary and handle the typed
+    /// [`TrustResolveError::Ambiguous`](crate::trust::TrustResolveError::Ambiguous)
+    /// case explicitly — the router will not guess.
+    ///
+    /// Transport dispatch (inproc / uds / tcp fan-out, signing, ack waiting)
+    /// is reinstated in Wave-C. In Wave-B the signature exists and is the
+    /// sole entry point, but calls return [`SendError::DispatcherPending`]
+    /// until Wave-C lands — this way the presence of the dead code path is
+    /// visible at runtime rather than masquerading as a reachable peer.
+    pub async fn send(&self, dest: PeerId, kind: MessageKind) -> Result<Uuid, SendError> {
+        // The `dest`/`kind` values are the typed inputs Wave-C will consume.
+        let _ = (dest, kind);
+        Err(SendError::DispatcherPending)
     }
 }
 

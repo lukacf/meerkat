@@ -98,15 +98,46 @@ struct InteractionStream {
 
 struct ResolvedPeer {
     name: PeerName,
-    peer_id: String,
-    address: String,
+    peer_id: meerkat_core::comms::PeerId,
+    address: meerkat_core::comms::PeerAddress,
     source: PeerDirectorySource,
     meta: crate::PeerMeta,
 }
 
 impl ResolvedPeer {
     fn reachability_key(&self) -> ReachabilityKey {
-        ReachabilityKey::new(self.name.as_str(), self.peer_id.as_str())
+        ReachabilityKey::new(self.name.as_str(), &self.peer_id.as_str())
+    }
+}
+
+/// Derive a stable [`meerkat_core::comms::PeerId`] from a signing pubkey.
+///
+/// Wave-B V5 dogma: `PeerId` is the runtime routing identity and distinct
+/// from the cryptographic pubkey. Until a runtime-managed UUID directory is
+/// wired (Wave-C), we derive the UUID deterministically from the pubkey
+/// bytes via UUID v5 so every surface that resolves the same peer sees the
+/// same `PeerId`, and callers can go round-trip pubkey → PeerId → pubkey by
+/// looking up in the trust store.
+fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> meerkat_core::comms::PeerId {
+    // RFC 4122 namespace for Meerkat peer identities. Arbitrary fixed UUID;
+    // any stable choice works as long as it never changes.
+    const NS: uuid::Uuid = uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
+    meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::new_v5(&NS, pubkey.as_bytes()))
+}
+
+fn parse_peer_address(raw: &str) -> meerkat_core::comms::PeerAddress {
+    use meerkat_core::comms::{PeerAddress, PeerTransport};
+    if let Some(rest) = raw.strip_prefix("inproc://") {
+        PeerAddress::new(PeerTransport::Inproc, rest)
+    } else if let Some(rest) = raw.strip_prefix("uds://") {
+        PeerAddress::new(PeerTransport::Uds, rest)
+    } else if let Some(rest) = raw.strip_prefix("tcp://") {
+        PeerAddress::new(PeerTransport::Tcp, rest)
+    } else {
+        // Unknown scheme: default to TCP so legacy callers remain addressable.
+        // Wave-C will tighten this into a typed parse error at the ingress
+        // boundary so no unknown-scheme peers enter the directory.
+        PeerAddress::new(PeerTransport::Tcp, raw)
     }
 }
 
@@ -1775,8 +1806,8 @@ impl CommsRuntime {
                 };
                 on_peer(ResolvedPeer {
                     name,
-                    peer_id: peer.pubkey.to_peer_id(),
-                    address: peer.addr.clone(),
+                    peer_id: peer_id_from_pubkey(&peer.pubkey),
+                    address: parse_peer_address(&peer.addr),
                     source,
                     meta: peer.meta.clone(),
                 });
@@ -1809,8 +1840,11 @@ impl CommsRuntime {
             }
             on_peer(ResolvedPeer {
                 name,
-                peer_id: inproc.pubkey.to_peer_id(),
-                address: format!("inproc://{peer_name_str}"),
+                peer_id: peer_id_from_pubkey(&inproc.pubkey),
+                address: meerkat_core::comms::PeerAddress::new(
+                    meerkat_core::comms::PeerTransport::Inproc,
+                    peer_name_str.clone(),
+                ),
                 source: PeerDirectorySource::Inproc,
                 meta: inproc.meta.clone(),
             });

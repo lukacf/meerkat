@@ -10,7 +10,153 @@ use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use uuid::Uuid;
 
+/// Canonical runtime identity for a peer.
+///
+/// `PeerId` is the routing key: the router and trust store key by `PeerId`,
+/// never by `PeerName`. Two peers may legitimately share a display `PeerName`
+/// (per the Wave-B V5 dogma note), but their `PeerId`s never collide — the
+/// underlying UUID is globally unique.
+///
+/// Constructed either freshly (`PeerId::new`) for a peer minted locally,
+/// or parsed from a hyphenated UUID (`PeerId::parse`) when we've been given
+/// an identity over the wire.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PeerId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
+
+impl PeerId {
+    /// Mint a new `PeerId` with a fresh UUID v7 (time-ordered).
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Wrap an existing UUID.
+    pub const fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Parse a hyphenated UUID string into a `PeerId`.
+    pub fn parse(s: &str) -> Result<Self, PeerIdError> {
+        Uuid::parse_str(s)
+            .map(Self)
+            .map_err(|source| PeerIdError::Invalid {
+                input: s.to_string(),
+                source,
+            })
+    }
+
+    /// Hyphenated UUID string form.
+    pub fn as_str(&self) -> String {
+        self.0.to_string()
+    }
+
+    /// Borrow the underlying UUID.
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for PeerId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Error parsing a [`PeerId`] from a string.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum PeerIdError {
+    #[error("invalid peer id {input:?}: {source}")]
+    Invalid {
+        input: String,
+        #[source]
+        source: uuid::Error,
+    },
+}
+
+/// Typed transport atom for a peer address.
+///
+/// Replaces the old free-form `address: String` on `PeerDirectoryEntry` so
+/// callers cannot accidentally invent new transports by string concatenation
+/// at a call site.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PeerTransport {
+    /// In-process routing within this runtime (no network hop).
+    Inproc,
+    /// Unix domain socket.
+    Uds,
+    /// TCP endpoint.
+    Tcp,
+}
+
+impl PeerTransport {
+    /// Stable short code used as the URI scheme half of a peer address.
+    pub const fn as_scheme(&self) -> &'static str {
+        match self {
+            Self::Inproc => "inproc",
+            Self::Uds => "uds",
+            Self::Tcp => "tcp",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_scheme())
+    }
+}
+
+/// Typed peer address: transport atom plus endpoint string.
+///
+/// The `endpoint` is transport-specific (path for `Uds`, `host:port` for
+/// `Tcp`, agent name for `Inproc`) but is carried as a validated `String`
+/// so the transport atom can be branched on without re-parsing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PeerAddress {
+    pub transport: PeerTransport,
+    pub endpoint: String,
+}
+
+impl PeerAddress {
+    pub fn new(transport: PeerTransport, endpoint: impl Into<String>) -> Self {
+        Self {
+            transport,
+            endpoint: endpoint.into(),
+        }
+    }
+
+    pub const fn transport(&self) -> PeerTransport {
+        self.transport
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+impl std::fmt::Display for PeerAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}://{}", self.transport.as_scheme(), self.endpoint)
+    }
+}
+
+/// Display-only slug for a peer.
+///
+/// `PeerName` is **not** a routing key after Wave-B V5: the router resolves
+/// sends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`
+/// is retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can
+/// render a recognisable handle next to the opaque id.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerName(String);
@@ -157,53 +303,6 @@ impl CommsCommandRequest {
                 stream: stream.unwrap_or(InputStreamMode::None),
                 allow_self_session: allow_self_session.unwrap_or(false),
             },
-            CommsCommandRequest::PeerMessage {
-                to,
-                body,
-                blocks,
-                handling_mode,
-            } => CommsCommand::PeerMessage {
-                to,
-                body: body.unwrap_or_default(),
-                blocks,
-                handling_mode: handling_mode.unwrap_or_default(),
-            },
-            CommsCommandRequest::PeerRequest {
-                to,
-                intent,
-                params,
-                body,
-                handling_mode,
-                stream,
-            } => CommsCommand::PeerRequest {
-                to,
-                intent,
-                params: match (params, body) {
-                    (Some(p), _) => p,
-                    (None, Some(body)) => serde_json::json!({ "body": body }),
-                    (None, None) => serde_json::Value::Object(Default::default()),
-                },
-                handling_mode: handling_mode.unwrap_or_default(),
-                stream: stream.unwrap_or(InputStreamMode::None),
-            },
-            CommsCommandRequest::PeerResponse {
-                to,
-                in_reply_to,
-                status,
-                result,
-                handling_mode,
-            } => {
-                if status == ResponseStatus::Accepted && handling_mode.is_some() {
-                    return Err(CommsCommandError::HandlingModeForbiddenForAcceptedResponse);
-                }
-                CommsCommand::PeerResponse {
-                    to,
-                    in_reply_to,
-                    status,
-                    result: result.unwrap_or(serde_json::Value::Null),
-                    handling_mode,
-                }
-            }
         })
     }
 
@@ -211,9 +310,6 @@ impl CommsCommandRequest {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Input { .. } => "input",
-            Self::PeerMessage { .. } => "peer_message",
-            Self::PeerRequest { .. } => "peer_request",
-            Self::PeerResponse { .. } => "peer_response",
         }
     }
 }
@@ -375,9 +471,15 @@ pub enum PeerReachabilityReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDirectoryEntry {
+    /// Canonical runtime identity — the routing key.
+    pub peer_id: PeerId,
+    /// Display-only slug. Multiple entries may share a name; none share a
+    /// `peer_id`.
     pub name: PeerName,
-    pub peer_id: String,
-    pub address: String,
+    /// Typed transport atom + endpoint. Replaces the prior free-form
+    /// `address: String` so the transport cannot be invented by string
+    /// concatenation at a call site.
+    pub address: PeerAddress,
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<String>,
     pub capabilities: serde_json::Value,
@@ -504,9 +606,9 @@ mod tests {
     #[test]
     fn peer_directory_entry_fields() -> Result<(), String> {
         let entry = PeerDirectoryEntry {
+            peer_id: PeerId::new(),
             name: PeerName::new("agent")?,
-            peer_id: "ed25519:abc".to_string(),
-            address: "inproc://agent".to_string(),
+            address: PeerAddress::new(PeerTransport::Inproc, "agent"),
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec!["peer_message".to_string()],
             capabilities: Value::Object(serde_json::Map::default()),
@@ -515,99 +617,31 @@ mod tests {
             meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");
+        assert_eq!(entry.address.transport(), PeerTransport::Inproc);
+        assert_eq!(entry.address.endpoint(), "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);
         Ok(())
     }
 
     #[test]
-    fn trusted_peer_spec_requires_valid_name() {
-        let invalid = TrustedPeerSpec::new("", "ed25519:abc", "inproc://a");
-        assert!(invalid.is_err());
+    fn peer_id_parse_round_trip() {
+        let id = PeerId::new();
+        let parsed = PeerId::parse(&id.as_str()).expect("parse");
+        assert_eq!(id, parsed);
     }
 
     #[test]
-    fn trusted_peer_spec_keeps_peer_id_and_address() -> Result<(), String> {
-        let spec = TrustedPeerSpec::new("alice", "ed25519:abc", "inproc://alice")?;
-        assert_eq!(spec.name, "alice");
-        assert_eq!(spec.peer_id, "ed25519:abc");
-        assert_eq!(spec.address, "inproc://alice");
-        Ok(())
-    }
-
-    // -- peer_request body→params promotion tests (PR #156 port) --
-
-    fn peer_request_cmd(
-        params: Option<Value>,
-        body: Option<String>,
-    ) -> Result<CommsCommand, CommsCommandError> {
-        let req = CommsCommandRequest::PeerRequest {
-            to: PeerName::new("bob").expect("peer name"),
-            intent: "greet".to_string(),
-            params,
-            body,
-            handling_mode: None,
-            stream: None,
-        };
-        req.into_command(&crate::types::SessionId::new())
-    }
-
-    #[test]
-    fn peer_request_with_params_only() {
-        let cmd = peer_request_cmd(Some(serde_json::json!({"key": "value"})), None).unwrap();
-        match cmd {
-            CommsCommand::PeerRequest { params, .. } => {
-                assert_eq!(params["key"], "value");
-            }
-            other => panic!("expected PeerRequest, got {other:?}"),
+    fn peer_id_parse_rejects_garbage() {
+        let err = PeerId::parse("not-a-uuid").expect_err("parse must reject");
+        match err {
+            PeerIdError::Invalid { input, .. } => assert_eq!(input, "not-a-uuid"),
         }
     }
 
     #[test]
-    fn peer_request_with_body_only_promotes_to_params() {
-        let cmd = peer_request_cmd(None, Some("hello world".to_string())).unwrap();
-        match cmd {
-            CommsCommand::PeerRequest { params, .. } => {
-                assert_eq!(
-                    params["body"], "hello world",
-                    "body should be promoted into params.body when params is absent"
-                );
-            }
-            other => panic!("expected PeerRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn peer_request_with_both_prefers_params() {
-        let cmd = peer_request_cmd(
-            Some(serde_json::json!({"explicit": true})),
-            Some("ignored body".to_string()),
-        )
-        .unwrap();
-        match cmd {
-            CommsCommand::PeerRequest { params, .. } => {
-                assert_eq!(params["explicit"], true);
-                assert!(
-                    params.get("body").is_none(),
-                    "body should not be promoted when params is present"
-                );
-            }
-            other => panic!("expected PeerRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn peer_request_with_neither_gives_empty_object() {
-        let cmd = peer_request_cmd(None, None).unwrap();
-        match cmd {
-            CommsCommand::PeerRequest { params, .. } => {
-                assert!(params.is_object(), "params should be an object");
-                assert!(
-                    params.as_object().unwrap().is_empty(),
-                    "params should be empty when both body and params are absent"
-                );
-            }
-            other => panic!("expected PeerRequest, got {other:?}"),
-        }
+    fn peer_address_display() {
+        let addr = PeerAddress::new(PeerTransport::Tcp, "127.0.0.1:4200");
+        assert_eq!(addr.to_string(), "tcp://127.0.0.1:4200");
     }
 
     #[test]
@@ -617,39 +651,6 @@ mod tests {
         assert_eq!(serialized.as_str(), Some("reserve_interaction"));
         assert_eq!(serde_json::from_value::<InputStreamMode>(serialized)?, mode);
         Ok(())
-    }
-
-    #[test]
-    fn peer_response_accepted_with_handling_mode_rejected() {
-        let req = CommsCommandRequest::PeerResponse {
-            to: PeerName::new("peer-1").expect("peer"),
-            in_reply_to: InteractionId(uuid::Uuid::now_v7()),
-            status: ResponseStatus::Accepted,
-            result: None,
-            handling_mode: Some(HandlingMode::Steer),
-        };
-        let err = req
-            .into_command(&crate::SessionId::new())
-            .expect_err("accepted response with handling_mode must be rejected");
-        assert_eq!(
-            err,
-            CommsCommandError::HandlingModeForbiddenForAcceptedResponse
-        );
-    }
-
-    #[test]
-    fn peer_response_completed_with_handling_mode_accepted() {
-        let req = CommsCommandRequest::PeerResponse {
-            to: PeerName::new("peer-1").expect("peer"),
-            in_reply_to: InteractionId(uuid::Uuid::now_v7()),
-            status: ResponseStatus::Completed,
-            result: None,
-            handling_mode: Some(HandlingMode::Steer),
-        };
-        assert!(
-            req.into_command(&crate::SessionId::new()).is_ok(),
-            "completed response with handling_mode=steer should be accepted"
-        );
     }
 
     #[test]

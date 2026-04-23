@@ -7,8 +7,8 @@ use std::fs;
 use super::*;
 #[cfg(feature = "machine-authority")]
 use meerkat_machine_schema::{
-    EnumSchema, InitSchema, InputMatch, MachineSchema, RustBinding, StateSchema, TransitionSchema,
-    TriggerKind, VariantSchema,
+    EnumSchema, InitSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema,
+    VariantSchema,
 };
 use tempfile::tempdir;
 
@@ -284,8 +284,27 @@ color="white";
 #[cfg(feature = "machine-authority")]
 #[test]
 fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
+    use meerkat_machine_schema::TriggerMatch;
+    use meerkat_machine_schema::identity::{
+        EnumVariantId, FieldId, InputVariantId, MachineId, PhaseId, TransitionId,
+    };
+
+    fn vid(s: &str) -> EnumVariantId {
+        EnumVariantId::parse(s).expect("valid enum variant slug")
+    }
+    fn pid(s: &str) -> PhaseId {
+        PhaseId::parse(s).expect("valid phase slug")
+    }
+    fn tid(s: &str) -> TransitionId {
+        TransitionId::parse(s).expect("valid transition slug")
+    }
+    fn ivid(s: &str) -> InputVariantId {
+        InputVariantId::parse(s).expect("valid input variant slug")
+    }
+    let _: Option<FieldId> = None;
+
     let schema = MachineSchema {
-        machine: "TestMachine".into(),
+        machine: MachineId::parse("TestMachine").expect("valid machine slug"),
         version: 1,
         rust: RustBinding {
             crate_name: "test".into(),
@@ -296,43 +315,43 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
                 name: "Phase".into(),
                 variants: vec![
                     VariantSchema {
-                        name: "Idle".into(),
+                        name: vid("Idle"),
                         fields: vec![],
                     },
                     VariantSchema {
-                        name: "Attached".into(),
+                        name: vid("Attached"),
                         fields: vec![],
                     },
                     VariantSchema {
-                        name: "Running".into(),
+                        name: vid("Running"),
                         fields: vec![],
                     },
                     VariantSchema {
-                        name: "Stopped".into(),
+                        name: vid("Stopped"),
                         fields: vec![],
                     },
                 ],
             },
             fields: vec![],
             init: InitSchema {
-                phase: "Idle".into(),
+                phase: pid("Idle"),
                 fields: vec![],
             },
-            terminal_phases: vec!["Stopped".into()],
+            terminal_phases: vec![pid("Stopped")],
         },
         inputs: EnumSchema {
             name: "Input".into(),
             variants: vec![
                 VariantSchema {
-                    name: "Ping".into(),
+                    name: vid("Ping"),
                     fields: vec![],
                 },
                 VariantSchema {
-                    name: "Start".into(),
+                    name: vid("Start"),
                     fields: vec![],
                 },
                 VariantSchema {
-                    name: "Retire".into(),
+                    name: vid("Retire"),
                     fields: vec![],
                 },
             ],
@@ -351,73 +370,69 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         invariants: vec![],
         transitions: vec![
             TransitionSchema {
-                name: "PingIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: TriggerKind::Input,
-                    variant: "Ping".into(),
+                name: tid("PingIdle"),
+                from: vec![pid("Idle")],
+                on: TriggerMatch::Input {
+                    variant: ivid("Ping"),
                     bindings: vec![],
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Idle".into(),
+                to: pid("Idle"),
                 emit: vec![],
             },
             TransitionSchema {
-                name: "PingAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: TriggerKind::Input,
-                    variant: "Ping".into(),
+                name: tid("PingAttached"),
+                from: vec![pid("Attached")],
+                on: TriggerMatch::Input {
+                    variant: ivid("Ping"),
                     bindings: vec![],
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Idle".into(),
+                to: pid("Idle"),
                 emit: vec![],
             },
             TransitionSchema {
-                name: "StartIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: TriggerKind::Input,
-                    variant: "Start".into(),
+                name: tid("StartIdle"),
+                from: vec![pid("Idle")],
+                on: TriggerMatch::Input {
+                    variant: ivid("Start"),
                     bindings: vec![],
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Running".into(),
+                to: pid("Running"),
                 emit: vec![],
             },
             TransitionSchema {
-                name: "RetireIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: TriggerKind::Input,
-                    variant: "Retire".into(),
+                name: tid("RetireIdle"),
+                from: vec![pid("Idle")],
+                on: TriggerMatch::Input {
+                    variant: ivid("Retire"),
                     bindings: vec![],
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Idle".into(),
+                to: pid("Idle"),
                 emit: vec![],
             },
             TransitionSchema {
-                name: "RetireAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: TriggerKind::Input,
-                    variant: "Retire".into(),
+                name: tid("RetireAttached"),
+                from: vec![pid("Attached")],
+                on: TriggerMatch::Input {
+                    variant: ivid("Retire"),
                     bindings: vec![],
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Stopped".into(),
+                to: pid("Stopped"),
                 emit: vec![],
             },
         ],
         effect_dispositions: vec![],
         ci_step_limit: None,
+        named_types: vec![],
     };
 
     let rows = schema_input_rows_for_pair(&schema, "Idle", "Attached");

@@ -16,7 +16,10 @@ fn registry_selection_accepts_canonical_machine_name_and_slug() {
         })
         .expect("selection by name");
     assert_eq!(by_name.machines.len(), 1);
-    assert_eq!(by_name.machines[0].schema.machine, "MeerkatMachine");
+    assert_eq!(
+        by_name.machines[0].schema.machine.as_str(),
+        "MeerkatMachine"
+    );
 
     let by_slug = registry
         .select(&SelectionArgs {
@@ -26,7 +29,10 @@ fn registry_selection_accepts_canonical_machine_name_and_slug() {
         })
         .expect("selection by slug");
     assert_eq!(by_slug.machines.len(), 1);
-    assert_eq!(by_slug.machines[0].schema.machine, "MeerkatMachine");
+    assert_eq!(
+        by_slug.machines[0].schema.machine.as_str(),
+        "MeerkatMachine"
+    );
 }
 
 #[test]

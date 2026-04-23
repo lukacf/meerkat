@@ -159,6 +159,7 @@ machine! {
         transition Release {
             on input Release
             to Released
+            emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
         }
     }
 }

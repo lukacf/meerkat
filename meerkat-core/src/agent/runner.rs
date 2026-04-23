@@ -725,7 +725,7 @@ where
 
     fn apply_run_result_text_patch(&mut self, text: &str) {
         use super::state::rewrite_assistant_text;
-        let messages = self.session.messages_mut();
+        let messages = self.session.messages_mut_internal();
         if let Some(last_assistant) = messages
             .iter_mut()
             .rev()

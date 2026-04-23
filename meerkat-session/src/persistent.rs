@@ -15,7 +15,7 @@ use meerkat_core::Session;
 use meerkat_core::SessionDeferredTurnState;
 use meerkat_core::SessionSystemContextState;
 use meerkat_core::error::AgentError;
-use meerkat_core::image_content::{externalize_deferred_turn_state, externalize_messages_from};
+use meerkat_core::image_content::externalize_deferred_turn_state;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -168,9 +168,7 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
             return;
         }
         let mut persisted = session.clone();
-        if let Err(e) =
-            externalize_messages_from(self.blob_store.as_ref(), persisted.messages_mut(), 0).await
-        {
+        if let Err(e) = persisted.externalize_media(self.blob_store.as_ref(), 0).await {
             tracing::warn!("Host-mode checkpoint blob externalization failed: {e}");
             return;
         }
@@ -625,7 +623,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut session: Session,
     ) -> Result<Session, SessionError> {
-        externalize_messages_from(self.blob_store.as_ref(), session.messages_mut(), 0)
+        session
+            .externalize_media(self.blob_store.as_ref(), 0)
             .await
             .map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(

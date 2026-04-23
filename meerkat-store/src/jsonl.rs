@@ -346,6 +346,13 @@ impl JsonlStore {
 #[async_trait]
 impl SessionStore for JsonlStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
+        // boundary before the JSONL row is rewritten on disk.
+        let previous = self
+            .load_impl(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        meerkat_core::session_store::append_only_save_guard(session, previous.as_ref())?;
         self.save_impl(session)
             .await
             .map_err(into_session_store_error)

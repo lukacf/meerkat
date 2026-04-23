@@ -36,6 +36,11 @@ impl Default for MemoryStore {
 impl SessionStore for MemoryStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         let mut sessions = self.sessions.write().await;
+        // F1 closure (wave-c C-H1): same shrink-guard as persistent
+        // backends so behaviour is uniform across `SessionStore`
+        // implementations.
+        let previous = sessions.get(session.id());
+        meerkat_core::session_store::append_only_save_guard(session, previous)?;
         sessions.insert(session.id().clone(), session.clone());
         Ok(())
     }

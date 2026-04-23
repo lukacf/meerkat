@@ -524,7 +524,7 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            *self.session.messages_mut() = outcome.new_messages;
+                            *self.session.messages_mut_internal() = outcome.new_messages;
                             self.session.record_usage(outcome.summary_usage.clone());
                             self.budget.record_usage(&outcome.summary_usage);
                             self.last_input_tokens = 0;
@@ -727,7 +727,7 @@ where
                     //
                     //    Strip prior synthetic AuthReauthRequired notices
                     //    so the notice always reflects current DSL state.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
                     });
 
@@ -747,7 +747,7 @@ where
                     // 3. Manage [MCP_PENDING] notice lifecycle.
                     //    Always strip prior synthetic notices to avoid stale state.
                     //    Uses starts_with on a strict prefix to avoid matching user text.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::McpPending)
                     });
                     // Prefer the DSL-authoritative handshake state (Phase 5G /
@@ -769,7 +769,7 @@ where
                     }
 
                     // 3b. Background shell job completion notices via CompletionFeed.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob)
                     });
                     // Feed path: ops-lifecycle-tracked completions from the runtime.

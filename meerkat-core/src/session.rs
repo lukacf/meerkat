@@ -522,13 +522,22 @@ impl Session {
         self.version
     }
 
-    /// Get all messages
+    /// Get all messages.
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
-    /// Get mutable access to messages (triggers CoW if Arc is shared)
-    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+    /// Mutable access to the message buffer — *append-only witness escape hatch*.
+    ///
+    /// Intentionally `pub(crate)`: the only legitimate mutations of the
+    /// message history within a single `SessionId` are `push` / `push_batch`
+    /// (extend) and the two in-crate rewrite operations used by the agent
+    /// loop (compaction-summary replacement, synthetic-notice stripping).
+    /// Cross-crate consumers must route in-place content rewrites through
+    /// the typed proxy [`Session::externalize_media`]; shrink or replace
+    /// operations must go through [`Session::fork_at`] which rotates
+    /// `SessionId` (F1/F7 closure from the state-scope audit).
+    pub(crate) fn messages_mut_internal(&mut self) -> &mut Vec<Message> {
         Arc::make_mut(&mut self.messages)
     }
 
@@ -560,6 +569,25 @@ impl Session {
         let inner = Arc::make_mut(&mut self.messages);
         inner.extend(messages);
         self.updated_at = SystemTime::now();
+    }
+
+    /// Rewrite inline media payloads in-place as `BlobRef` pointers.
+    ///
+    /// Message count is invariant across this operation — `externalize`
+    /// only swaps inline image/media bytes for opaque blob references.
+    /// This is the cross-crate-legitimate rewrite operation that used
+    /// to require public `messages_mut()`; post-C-H1 callers in
+    /// `meerkat-session` go through this typed method.
+    ///
+    /// Does not touch `updated_at` — externalization is bookkeeping, not
+    /// a semantic session mutation.
+    pub async fn externalize_media(
+        &mut self,
+        blob_store: &dyn crate::BlobStore,
+        start: usize,
+    ) -> Result<(), crate::blob::BlobStoreError> {
+        let messages = Arc::make_mut(&mut self.messages);
+        crate::image_content::externalize_messages_from(blob_store, messages, start).await
     }
 
     /// Explicitly update the timestamp

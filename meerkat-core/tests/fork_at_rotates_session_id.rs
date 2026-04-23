@@ -20,16 +20,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use meerkat_core::types::Session;
+use meerkat_core::Session;
 
 #[test]
 fn fork_at_returns_distinct_session_id() {
     let session = Session::new();
-    let parent_id = session.id.clone();
+    let parent_id = session.id().clone();
     let forked = session.fork_at(0);
 
     assert_ne!(
-        forked.id, parent_id,
+        forked.id(),
+        &parent_id,
         "Session::fork_at must rotate SessionId (F7 closure, C-H1). \
          A fork of a session is a new identity, not a same-session truncation."
     );

@@ -100,11 +100,22 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .map(|variant| typed_id("InputVariantId", variant))
         .collect();
 
+    // TriggerMatch is defined in `crate::machine::TriggerMatch` but is not
+    // re-exported at the schema crate root (owned by B-1's lib.rs — out of
+    // the B-2 allowlist). Emit an explicit import so macro-generated code
+    // resolves the typed sum without depending on the glob re-export.
+    let trigger_match_import = if def.rust_crate == "self" {
+        quote! { use #schema_crate::machine::TriggerMatch; }
+    } else {
+        quote! { use #schema_crate::TriggerMatch; }
+    };
+
     quote! {
         impl #state_name {
             pub fn schema() -> #schema_crate::MachineSchema {
                 use #schema_crate::*;
                 use #schema_crate::identity::*;
+                #trigger_match_import
 
                 MachineSchema {
                     machine: #machine_id,

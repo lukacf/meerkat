@@ -33,7 +33,7 @@ pub struct SemanticCoverageEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineCoverageManifest {
-    pub machine: String,
+    pub machine: crate::identity::MachineId,
     pub code_anchors: Vec<CodeAnchor>,
     pub scenarios: Vec<ScenarioCoverage>,
     pub transition_coverage: Vec<SemanticCoverageEntry>,
@@ -43,7 +43,7 @@ pub struct MachineCoverageManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionCoverageManifest {
-    pub composition: String,
+    pub composition: crate::identity::CompositionId,
     pub code_anchors: Vec<CodeAnchor>,
     pub scenarios: Vec<ScenarioCoverage>,
     pub route_coverage: Vec<SemanticCoverageEntry>,
@@ -301,7 +301,7 @@ fn machine_manifest_from_schema(
             .transitions
             .iter()
             .map(|transition| SemanticCoverageEntry {
-                name: transition.name.clone(),
+                name: transition.name.as_str().to_owned(),
                 anchor_ids: anchor_ids.clone(),
                 scenario_ids: scenario_ids.clone(),
             })
@@ -311,7 +311,7 @@ fn machine_manifest_from_schema(
             .variants
             .iter()
             .map(|effect| SemanticCoverageEntry {
-                name: effect.name.clone(),
+                name: effect.name.as_str().to_owned(),
                 anchor_ids: anchor_ids.clone(),
                 scenario_ids: scenario_ids.clone(),
             })
@@ -350,7 +350,7 @@ fn composition_manifest_from_schema(
             .routes
             .iter()
             .map(|route| SemanticCoverageEntry {
-                name: route.name.clone(),
+                name: route.name.as_str().to_owned(),
                 anchor_ids: anchor_ids.clone(),
                 scenario_ids: scenario_ids.clone(),
             })

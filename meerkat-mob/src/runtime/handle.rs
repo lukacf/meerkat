@@ -543,6 +543,17 @@ pub struct HelperResult {
     pub(crate) fence_token: FenceToken,
 }
 
+impl HelperResult {
+    /// Typed helper for external consumers (CLI, mob-mcp, rpc surface) that
+    /// legitimately need the binding-era atoms to drive work-lane calls.
+    /// Keeps the fields `pub(crate)` + `#[serde(skip)]` so they never leak
+    /// through Serialize/Debug-derived paths. Mirrors
+    /// `MobMemberListEntry::binding_atoms`.
+    pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
+        (self.agent_runtime_id.clone(), self.fence_token)
+    }
+}
+
 /// Target for a wire operation from a local mob member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

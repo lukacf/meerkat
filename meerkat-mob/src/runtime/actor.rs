@@ -2656,6 +2656,22 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::Wire {
+                    local,
+                    target,
+                    reply_tx,
+                } => {
+                    let result = self.handle_wire(local, target).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::Unwire {
+                    local,
+                    target,
+                    reply_tx,
+                } => {
+                    let result = self.handle_unwire(local, target).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::CancelAllWork {
                     runtime_id,
                     fence_token,
@@ -4120,6 +4136,171 @@ impl MobActor {
         drop(roster);
 
         self.provisioner.interrupt_member(&member_ref).await
+    }
+
+    /// D-wire-handler (#26): forward a wire command to the MobMachine DSL.
+    ///
+    /// Thin shell forward: normalizes `(local, target)` into a
+    /// `WiringEdge::new(local, target)` and submits
+    /// `MobMachineInput::WireMembers { edge }` to the DSL authority. On
+    /// DSL acceptance, records `MobEventKind::MembersWired { a, b }` to
+    /// the event store as observability (mirroring the DSL's emitted
+    /// `EmitWiringLifecycleNotice` effect).
+    ///
+    /// Idempotent: the DSL's `edge_not_already_wired` guard rejects a
+    /// second wire of the same edge. Per-dogma #1 (one semantic fact,
+    /// one owner) that rejection is a no-op success here — the edge is
+    /// already in the authority — and no new event is recorded.
+    ///
+    /// External peer targets ([`PeerTarget::External`]) are NOT supported
+    /// on this path: external peer wiring was shell-authority in Wave A
+    /// (`TrustedPeerSpec` round-trips through the event store) and was
+    /// deleted in commit `0ad584cde`. Restoring it is scope-deferred;
+    /// callers receive [`MobError::WiringError`] with a documented reason.
+    async fn handle_wire(
+        &mut self,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
+    ) -> Result<(), MobError> {
+        let peer_identity = match target {
+            super::handle::PeerTarget::Local(id) => id,
+            super::handle::PeerTarget::External(_) => {
+                return Err(MobError::WiringError(
+                    "external peer wiring requires supervisor-owned trust authority; \
+                     scope-deferred beyond Wave D (deleted by 0ad584cde as shell-authority violation)"
+                        .into(),
+                ));
+            }
+        };
+
+        let local_identity = AgentIdentity::from(local.as_str());
+        if local_identity == peer_identity {
+            return Err(MobError::WiringError(format!(
+                "wire requires distinct members (got '{local}')"
+            )));
+        }
+
+        // Project domain identities into the DSL bridging type.
+        let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
+        let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
+        let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
+
+        // Submit the DSL input. The `edge_not_already_wired` guard makes
+        // re-wiring an existing edge a no-op success (idempotent).
+        match self.apply_dsl_input(
+            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+            "wire_members",
+        ) {
+            Ok(()) => {
+                // DSL accepted the new edge — record observability event.
+                // Project edge endpoints back into the domain
+                // `AgentIdentity` for the public event surface.
+                self.events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersWired {
+                            a: AgentIdentity::from(edge.a.0.as_str()),
+                            b: AgentIdentity::from(edge.b.0.as_str()),
+                        },
+                    })
+                    .await?;
+                Ok(())
+            }
+            Err(MobError::Internal(message)) if message.contains("wire_members") => {
+                // DSL rejection. `edge_not_already_wired` guard → idempotent
+                // success (the edge is already in the authority, so the
+                // semantic intent is satisfied without a new event).
+                // Other rejections (phase mismatch etc.) propagate as
+                // WiringError for caller visibility.
+                if self
+                    .dsl_authority
+                    .state
+                    .wiring_edges
+                    .iter()
+                    .any(|existing| existing == &edge)
+                {
+                    Ok(())
+                } else {
+                    Err(MobError::WiringError(format!(
+                        "wire rejected by MobMachine DSL: {message}"
+                    )))
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// D-wire-handler (#26): forward an unwire command to the MobMachine DSL.
+    ///
+    /// Mirror of [`handle_wire`]: submits
+    /// `MobMachineInput::UnwireMembers { edge }` and records
+    /// `MobEventKind::MembersUnwired { a, b }` on acceptance. DSL
+    /// rejection on the `edge_currently_wired` guard is treated as
+    /// idempotent success (the edge is already absent from the authority).
+    async fn handle_unwire(
+        &mut self,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
+    ) -> Result<(), MobError> {
+        let peer_identity = match target {
+            super::handle::PeerTarget::Local(id) => id,
+            super::handle::PeerTarget::External(_) => {
+                return Err(MobError::WiringError(
+                    "external peer unwiring requires supervisor-owned trust authority; \
+                     scope-deferred beyond Wave D (deleted by 0ad584cde as shell-authority violation)"
+                        .into(),
+                ));
+            }
+        };
+
+        let local_identity = AgentIdentity::from(local.as_str());
+        if local_identity == peer_identity {
+            return Err(MobError::WiringError(format!(
+                "unwire requires distinct peers (got '{local}')"
+            )));
+        }
+
+        let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
+        let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
+        let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
+
+        match self.apply_dsl_input(
+            mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
+            "unwire_members",
+        ) {
+            Ok(()) => {
+                self.events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersUnwired {
+                            a: AgentIdentity::from(edge.a.0.as_str()),
+                            b: AgentIdentity::from(edge.b.0.as_str()),
+                        },
+                    })
+                    .await?;
+                Ok(())
+            }
+            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
+                // `edge_currently_wired` guard → idempotent no-op when the
+                // edge is already absent.
+                if !self
+                    .dsl_authority
+                    .state
+                    .wiring_edges
+                    .iter()
+                    .any(|existing| existing == &edge)
+                {
+                    Ok(())
+                } else {
+                    Err(MobError::WiringError(format!(
+                        "unwire rejected by MobMachine DSL: {message}"
+                    )))
+                }
+            }
+            Err(other) => Err(other),
+        }
     }
 
     ///

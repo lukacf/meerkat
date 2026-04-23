@@ -294,6 +294,35 @@ pub enum MobEventKind {
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
     },
+    /// Bidirectional wiring edge established between two local members.
+    ///
+    /// DSL-emit-driven observability: the shell records this variant on
+    /// successful `MobMachineInput::WireMembers` acceptance, mirroring the
+    /// DSL's `EmitWiringLifecycleNotice { kind: Wired, edge }` effect. The
+    /// DSL authority (`wiring_edges` in `MobMachine`) is the single source
+    /// of truth; this event is observability only, never authority.
+    ///
+    /// Fields use the normalized `(a, b)` edge ordering (`a <= b`) produced
+    /// by `WiringEdge::new`, so equal edges yield equal events regardless
+    /// of caller argument order.
+    MembersWired {
+        /// First member of the edge (lexicographically smaller identity).
+        a: AgentIdentity,
+        /// Second member of the edge.
+        b: AgentIdentity,
+    },
+    /// Bidirectional wiring edge removed between two local members.
+    ///
+    /// DSL-emit-driven observability counterpart of [`Self::MembersWired`].
+    /// Emitted by the shell on successful `MobMachineInput::UnwireMembers`
+    /// acceptance, mirroring `EmitWiringLifecycleNotice { kind: Unwired }`.
+    /// Uses the same normalized `(a, b)` edge ordering.
+    MembersUnwired {
+        /// First member of the edge (lexicographically smaller identity).
+        a: AgentIdentity,
+        /// Second member of the edge.
+        b: AgentIdentity,
+    },
     /// A task was created on the shared task board.
     TaskCreated {
         /// Unique task identifier.
@@ -705,6 +734,22 @@ mod tests {
             run_id,
             step_id,
             escalated_to: escalated_identity,
+        });
+    }
+
+    #[test]
+    fn test_members_wired_roundtrip() {
+        roundtrip(&MobEventKind::MembersWired {
+            a: AgentIdentity::from("l-1"),
+            b: AgentIdentity::from("w-2"),
+        });
+    }
+
+    #[test]
+    fn test_members_unwired_roundtrip() {
+        roundtrip(&MobEventKind::MembersUnwired {
+            a: AgentIdentity::from("l-1"),
+            b: AgentIdentity::from("w-2"),
         });
     }
 

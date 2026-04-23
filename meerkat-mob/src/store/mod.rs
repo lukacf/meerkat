@@ -89,7 +89,7 @@ impl SupervisorAuthorityRecord {
         let keypair = meerkat_comms::Keypair::generate();
         Self {
             secret_key: keypair.secret_bytes(),
-            public_peer_id: keypair.public_key().to_peer_id(),
+            public_peer_id: keypair.public_key().to_peer_id().as_str(),
             epoch: 0,
             protocol_version,
         }

@@ -323,6 +323,29 @@ pub(super) enum MobCommand {
         agent_identity: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Wire a local mob member to a peer target.
+    ///
+    /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority
+    /// via `MobMachineInput::WireMembers { edge }`. This command is the
+    /// thin shell forward: the actor normalizes `(local, target)` into a
+    /// `WiringEdge`, applies the DSL input, and records
+    /// `MobEventKind::MembersWired` on acceptance. No shell-side
+    /// reconciliation of comms trust edges or peer-added notifications is
+    /// performed here (those were shell-authority patterns deleted in
+    /// Wave A and not restored in Wave D).
+    Wire {
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Unwire a local mob member from a peer target. Mirror of `Wire`.
+    /// Forwards to `MobMachineInput::UnwireMembers { edge }` and records
+    /// `MobEventKind::MembersUnwired` on acceptance.
+    Unwire {
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
         reply_tx: oneshot::Sender<()>,

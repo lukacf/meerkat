@@ -195,7 +195,7 @@ impl Serialize for TrustedPeer {
         // but at the struct level we always include it for forward compat.
         let mut s = serializer.serialize_struct("TrustedPeer", 4)?;
         s.serialize_field("name", &self.name)?;
-        s.serialize_field("pubkey", &self.pubkey.to_peer_id())?;
+        s.serialize_field("pubkey", &self.pubkey.to_pubkey_string())?;
         s.serialize_field("addr", &self.addr)?;
         s.serialize_field("meta", &self.meta)?;
         s.end()
@@ -217,7 +217,8 @@ impl<'de> Deserialize<'de> for TrustedPeer {
             meta: PeerMeta,
         }
         let helper = TrustedPeerHelper::deserialize(deserializer)?;
-        let pubkey = PubKey::from_peer_id(&helper.pubkey).map_err(serde::de::Error::custom)?;
+        let pubkey =
+            PubKey::from_pubkey_string(&helper.pubkey).map_err(serde::de::Error::custom)?;
         Ok(TrustedPeer {
             name: helper.name,
             pubkey,

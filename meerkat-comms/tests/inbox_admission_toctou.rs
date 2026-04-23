@@ -17,20 +17,12 @@ use meerkat_comms::identity::{Keypair, Signature};
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
-use meerkat_core::comms::{PeerAddress, PeerId, PeerName, PeerTransport, TrustedPeerDescriptor};
+use meerkat_core::comms::{PeerAddress, PeerName, PeerTransport, TrustedPeerDescriptor};
 use uuid::Uuid;
-
-/// Derive the UUIDv5 `PeerId` from a signing pubkey the same way the
-/// router and trust store do internally (mirrors
-/// `meerkat_comms::router::peer_id_from_pubkey`, which is `pub(crate)`).
-fn peer_id_for(pubkey: &meerkat_comms::identity::PubKey) -> PeerId {
-    const NS: uuid::Uuid = uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
-    PeerId::from_uuid(uuid::Uuid::new_v5(&NS, pubkey.as_bytes()))
-}
 
 fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> TrustedPeerDescriptor {
     TrustedPeerDescriptor {
-        peer_id: peer_id_for(pubkey),
+        peer_id: pubkey.to_peer_id(),
         name: PeerName::new(name.to_string()).expect("valid peer name"),
         address: PeerAddress::new(PeerTransport::Inproc, name),
         pubkey: *pubkey.as_bytes(),
@@ -113,7 +105,7 @@ async fn revoked_sender_is_rejected_at_admission() {
     .expect("seed trust");
     let removed = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
         &receiver,
-        &sender.public_key().to_peer_id(),
+        &sender.public_key().to_pubkey_string(),
     )
     .await
     .expect("revoke trust");
@@ -199,7 +191,7 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
                 if i % 2 == 0 {
                     let _ = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
                         receiver_for_task.as_ref(),
-                        &sender_for_task.public_key().to_peer_id(),
+                        &sender_for_task.public_key().to_pubkey_string(),
                     )
                     .await;
                 } else {

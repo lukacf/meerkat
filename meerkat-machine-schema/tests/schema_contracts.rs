@@ -394,8 +394,13 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         "CancelFlow",
         "CancelWork",
         "CancelAllWork",
-        "Wire",
-        "Unwire",
+        // D-wire-handler (#26): DSL inputs are pair-valued
+        // (`WireMembers`/`UnwireMembers` taking a `WiringEdge`), not
+        // per-member. The `MobMachineCommand::Wire`/`Unwire` shell
+        // commands forward to these inputs after normalizing
+        // `(local, target)` into an edge.
+        "WireMembers",
+        "UnwireMembers",
         "SubmitWork",
         "TaskCreate",
         "TaskUpdate",
@@ -551,8 +556,9 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
         "Retire",
         "Respawn",
         "RetireAll",
-        "Wire",
-        "Unwire",
+        // D-wire-handler (#26): see note in `mob_machine_absorbs_flow_orchestrator...`.
+        "WireMembers",
+        "UnwireMembers",
         "SubmitWork",
         "CancelAllWork",
         "Stop",
@@ -658,8 +664,10 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
         "Retire",
         "Respawn",
         "RetireAll",
-        "Wire",
-        "Unwire",
+        // D-wire-handler (#26): DSL transitions cover `WireMembersRunning`
+        // and `UnwireMembersRunning` keyed by `WiringEdge`.
+        "WireMembers",
+        "UnwireMembers",
         "SubmitWork",
         "CancelAllWork",
         "Stop",

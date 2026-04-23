@@ -109,7 +109,7 @@ impl IngressClassificationContext {
                 let from_name = from_peer.unwrap_or_else(|| {
                     InprocRegistry::global()
                         .get_name_by_pubkey(&envelope.from)
-                        .unwrap_or_else(|| envelope.from.to_peer_id())
+                        .unwrap_or_else(|| envelope.from.to_pubkey_string())
                 });
 
                 let (raw_kind, class, lifecycle_peer, request_id, auth_exempt) = match &envelope
@@ -594,7 +594,10 @@ mod tests {
             .classify(&item)
             .expect("bind_member should remain admissible");
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
-        assert_eq!(result.from_peer, Some(sender.public_key().to_peer_id()));
+        assert_eq!(
+            result.from_peer,
+            Some(sender.public_key().to_pubkey_string())
+        );
     }
 
     #[test]

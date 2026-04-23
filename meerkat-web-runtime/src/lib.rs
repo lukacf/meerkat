@@ -2063,7 +2063,7 @@ fn build_inproc_trusted_peer(
     name: &str,
     pubkey_str: &str,
 ) -> Result<meerkat_core::comms::TrustedPeerDescriptor, JsValue> {
-    let pubkey = meerkat_comms::identity::PubKey::from_peer_id(pubkey_str)
+    let pubkey = meerkat_comms::identity::PubKey::from_pubkey_string(pubkey_str)
         .map_err(|e| err_str("wire_error", format!("invalid pubkey `{pubkey_str}`: {e}")))?;
     let peer_id = meerkat_comms::router::peer_id_from_pubkey(&pubkey);
     let peer_name = meerkat_core::comms::PeerName::new(name)

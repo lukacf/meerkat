@@ -494,19 +494,18 @@ impl Inbox {
         })
     }
 
-    /// Test-only: ask the queue's shared trust set whether `peer_id` is
+    /// Test-only: ask the queue's shared trust set whether `pubkey` is
     /// currently trusted. The queue does not own a local copy — this
     /// reads from the same `Arc<RwLock<TrustedPeers>>` that the router
     /// mutates and that the classifier consults.
     #[cfg(test)]
-    pub(crate) fn peer_authority_trusts_peer_for_test(&self, peer_id: &str) -> Option<bool> {
-        let pubkey = match crate::identity::PubKey::from_peer_id(peer_id) {
-            Ok(pk) => pk,
-            Err(_) => return Some(false),
-        };
+    pub(crate) fn peer_authority_trusts_peer_for_test(
+        &self,
+        pubkey: &crate::identity::PubKey,
+    ) -> Option<bool> {
         self.classified_queue
             .as_ref()
-            .map(|queue| queue.lock().trusted_peers.read().is_trusted(&pubkey))
+            .map(|queue| queue.lock().trusted_peers.read().is_trusted(pubkey))
     }
 }
 

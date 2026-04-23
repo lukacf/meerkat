@@ -197,6 +197,14 @@ machine! {
             // snapshot.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
+            // D-wiring-observability (#27): pair-valued notice emitted from
+            // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
+            // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
+            // the `WiringEdge` so external observers (event store,
+            // telemetry) can reconstruct which identity pair was wired or
+            // unwired. Separate from `EmitMemberLifecycleNotice` because
+            // wiring is pair-valued, not per-member.
+            EmitWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: WiringEdge },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -217,6 +225,7 @@ machine! {
         disposition EmitTaskNotice => external,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
+        disposition EmitWiringLifecycleNotice => external,
 
         // =====================================================================
         // Invariants
@@ -250,6 +259,7 @@ machine! {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
         transition UnwireMembersRunning {
@@ -262,6 +272,7 @@ machine! {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
         // =====================================================================
@@ -1451,6 +1462,17 @@ pub enum MemberLifecycleKind {
     Respawned,
     Completed,
     Destroyed,
+}
+
+/// Typed wiring lifecycle notice kind for
+/// `MobMachineEffect::EmitWiringLifecycleNotice`. Pair-valued (edge-keyed)
+/// counterpart to `MemberLifecycleKind` (member-keyed). Emitted alongside
+/// `WiringGraphChanged` by `WireMembers`/`UnwireMembers` transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WiringLifecycleKind {
+    #[default]
+    Wired,
+    Unwired,
 }
 
 /// Undirected wiring edge between two identities. Callers MUST normalize

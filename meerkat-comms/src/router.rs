@@ -29,29 +29,14 @@ use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::PeerId;
 
-/// Namespace for deriving a stable [`PeerId`] from a signing pubkey.
-///
-/// Mirrors [`crate::runtime::comms_runtime::peer_id_from_pubkey`] so the
-/// router and runtime agree on the UUIDv5 derivation used to round-trip
-/// between `PubKey` and `PeerId`.
-const PEER_ID_UUID_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
-
 /// Derive the canonical [`PeerId`] for a signing [`crate::identity::PubKey`].
 ///
-/// Callers that hold only a [`PeerId`] and need to route through the trust
-/// store use this together with [`TrustedPeers::find_by_peer_id`] (which
-/// performs the linear match under the store read lock).
-///
-/// Exposed publicly so out-of-crate consumers (wasm web runtime, future
-/// embedded hosts) that construct [`meerkat_core::comms::TrustedPeerDescriptor`]
-/// from a pubkey-string round-trip against the same UUIDv5 namespace the
-/// router uses internally.
+/// Thin wrapper over [`crate::identity::PubKey::to_peer_id`] — kept for
+/// callers that prefer the free-function form. The UUIDv5 namespace lives
+/// with [`crate::identity::PubKey`] so it travels with the type being
+/// hashed.
 pub fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> PeerId {
-    PeerId::from_uuid(uuid::Uuid::new_v5(
-        &PEER_ID_UUID_NAMESPACE,
-        pubkey.as_bytes(),
-    ))
+    pubkey.to_peer_id()
 }
 
 pub const DEFAULT_ACK_TIMEOUT_SECS: u64 = 30;

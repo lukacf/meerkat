@@ -128,11 +128,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitTaskNotice`
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
+- `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 
 ## Invariants
 - `bindings_require_known_identity`
 
 ## Transitions
+### `WireMembersRunning`
+- From: `Running`
+- On: `WireMembers`(edge)
+- Guards:
+  - `edge_not_already_wired`
+- Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `UnwireMembersRunning`
+- From: `Running`
+- On: `UnwireMembers`(edge)
+- Guards:
+  - `edge_currently_wired`
+- Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `BindMemberSessionRunning`
+- From: `Running`
+- On: `BindMemberSession`(agent_identity, session_id)
+- Guards:
+  - `identity_has_runtime`
+  - `no_prior_session_binding`
+- Emits: `MemberSessionBindingChanged`
+- To: `Running`
+
+### `RotateMemberSessionRunning`
+- From: `Running`
+- On: `RotateMemberSession`(agent_identity, old_session_id, new_session_id)
+- Guards:
+  - `identity_has_runtime`
+  - `prior_session_binding_present`
+  - `old_session_id_matches_current`
+- Emits: `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ReleaseMemberSessionRunning`
+- From: `Running`
+- On: `ReleaseMemberSession`(agent_identity, session_id)
+- Guards:
+  - `prior_session_binding_present`
+  - `session_id_matches_current`
+- Emits: `MemberSessionBindingChanged`
+- To: `Running`
+
 ### `SpawnRunningFresh`
 - From: `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)

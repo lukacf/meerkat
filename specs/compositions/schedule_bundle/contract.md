@@ -8,6 +8,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Routes
 - `revision_supersede_enters_occurrence_authority`: `schedule`.`SupersedePendingOccurrences` -> `occurrence`.`Supersede` [Immediate]
+- `occurrence_supersede_ack_returns_to_schedule`: `occurrence`.`OccurrencesSuperseded` -> `schedule`.`ConfirmOccurrencesSuperseded` [Immediate]
 
 ## Target Selectors
 - `(none)`
@@ -24,6 +25,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Structural Requirements
 - `schedule_revision_supersede_route_present` — revision-affecting schedule edits enter occurrence authority through the explicit supersede route
+- `occurrence_supersede_ack_route_present` — the occurrence authority's supersede-consumption ack returns to the schedule authority through the reciprocal route so the schedule observes completion
 
 ## Behavioral Invariants
 - `superseded_occurrence_originates_from_schedule_revision` — pending future occurrences are superseded only by the schedule revision route rather than by ad hoc shell mutation

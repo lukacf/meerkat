@@ -135,6 +135,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BindSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
 - `RevokeSupervisor`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgePublished`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgePublishFailed`(peer_id: String, epoch: u64, reason: String)
+- `SupervisorTrustEdgeRevoked`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgeRevokeFailed`(peer_id: String, epoch: u64, reason: String)
 - `PublishLocalEndpoint`(endpoint: PeerEndpoint)
 - `ClearLocalEndpoint`
 - `AddDirectPeerEndpoint`(endpoint: PeerEndpoint)
@@ -191,7 +195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
-- `PostAdmissionSignal`(signal: String)
+- `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
 - `CompletionResolved`
@@ -3655,6 +3659,186 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RevokeSupervisorStopped`
 - From: `Stopped`
 - On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgePublishedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgePublishedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgePublishedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgePublishedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgePublishedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgePublishFailedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgePublishFailedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgePublishFailedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgePublishFailedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgePublishFailedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgeRevokedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgeRevokedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgeRevokedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgeRevokedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgeRevokedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgeRevokeFailedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgeRevokeFailedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgeRevokeFailedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgeRevokeFailedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgeRevokeFailedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
   - `supervisor_bound`
   - `peer_id_matches_current`

@@ -93,6 +93,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `Release`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
 - On: `Release`()
+- Emits: `EmitLifecycleEvent`
 - To: `Released`
 
 ## Coverage

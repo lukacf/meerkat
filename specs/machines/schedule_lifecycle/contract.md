@@ -15,6 +15,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `missing_target_policy`: `MissingTargetPolicy`
 - `planning_cursor_utc_ms`: `Option<u64>`
 - `next_occurrence_ordinal`: `u64`
+- `superseded_ack_ids`: `Set<OccurrenceId>`
 
 ## Inputs
 - `Create`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy)
@@ -23,6 +24,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Pause`(at_utc_ms: u64)
 - `Resume`(at_utc_ms: u64)
 - `Delete`(at_utc_ms: u64)
+- `ConfirmOccurrencesSuperseded`(occurrence_id: OccurrenceId, superseding_revision: u64)
 
 ## Signals
 
@@ -85,6 +87,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Paused`
 - On: `Delete`(at_utc_ms)
 - Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
+- To: `Deleted`
+
+### `DeleteDeleted`
+- From: `Deleted`
+- On: `Delete`(at_utc_ms)
+- To: `Deleted`
+
+### `ConfirmOccurrencesSupersededActive`
+- From: `Active`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
+- To: `Active`
+
+### `ConfirmOccurrencesSupersededPaused`
+- From: `Paused`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
+- To: `Paused`
+
+### `ConfirmOccurrencesSupersededDeleted`
+- From: `Deleted`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
 - To: `Deleted`
 
 ## Coverage

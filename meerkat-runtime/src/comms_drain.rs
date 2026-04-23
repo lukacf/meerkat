@@ -1845,7 +1845,7 @@ mod tests {
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
         let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
             "peer-added".to_string(),
-            peer.public_key().to_peer_id(),
+            peer.public_key().to_peer_id().as_str(),
             "inproc://peer-added".to_string(),
         )
         .unwrap();
@@ -1883,7 +1883,7 @@ mod tests {
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
         let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
             "peer-removed".to_string(),
-            peer.public_key().to_peer_id(),
+            peer.public_key().to_peer_id().as_str(),
             "inproc://peer-removed".to_string(),
         )
         .unwrap();
@@ -2314,7 +2314,7 @@ mod tests {
         adapter.register_session(session_id.clone()).await;
         let current_supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id(),
+            supervisor_runtime.public_key().to_peer_id().as_str(),
             "inproc://mob/__mob_supervisor__",
         )
         .expect("valid supervisor spec");
@@ -3333,7 +3333,7 @@ mod tests {
         adapter.register_session(session_id.clone()).await;
         let supervisor = TrustedPeerDescriptor::test_only_unsigned(
             "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id(),
+            supervisor_runtime.public_key().to_peer_id().as_str(),
             "inproc://mob/__mob_supervisor__",
         )
         .unwrap();

@@ -1292,18 +1292,24 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::Wire {
-                local: _,
-                target: _,
+            MobMachineCommand::Wire { local, target } => {
+                self.send_actor_command(|reply_tx| MobCommand::Wire {
+                    local,
+                    target,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
-            | MobMachineCommand::Unwire {
-                local: _,
-                target: _,
-            } => Err(MobError::Internal(
-                "MobMachineCommand::{Wire,Unwire} handler lands with \
-                     D-track-b (#14) peer-projection producer wiring"
-                    .into(),
-            )),
+            MobMachineCommand::Unwire { local, target } => {
+                self.send_actor_command(|reply_tx| MobCommand::Unwire {
+                    local,
+                    target,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
+            }
         }
     }
 

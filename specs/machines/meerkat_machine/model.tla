@@ -4250,6 +4250,206 @@ RevokeSupervisorStopped(peer_id, epoch) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
 
 
+SupervisorTrustEdgePublishedIdle(peer_id, epoch) ==
+    /\ phase = "Idle"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishedAttached(peer_id, epoch) ==
+    /\ phase = "Attached"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishedRunning(peer_id, epoch) ==
+    /\ phase = "Running"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishedRetired(peer_id, epoch) ==
+    /\ phase = "Retired"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishedStopped(peer_id, epoch) ==
+    /\ phase = "Stopped"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishFailedIdle(peer_id, epoch, reason) ==
+    /\ phase = "Idle"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishFailedAttached(peer_id, epoch, reason) ==
+    /\ phase = "Attached"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishFailedRunning(peer_id, epoch, reason) ==
+    /\ phase = "Running"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishFailedRetired(peer_id, epoch, reason) ==
+    /\ phase = "Retired"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgePublishFailedStopped(peer_id, epoch, reason) ==
+    /\ phase = "Stopped"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokedIdle(peer_id, epoch) ==
+    /\ phase = "Idle"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokedAttached(peer_id, epoch) ==
+    /\ phase = "Attached"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokedRunning(peer_id, epoch) ==
+    /\ phase = "Running"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokedRetired(peer_id, epoch) ==
+    /\ phase = "Retired"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokedStopped(peer_id, epoch) ==
+    /\ phase = "Stopped"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokeFailedIdle(peer_id, epoch, reason) ==
+    /\ phase = "Idle"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokeFailedAttached(peer_id, epoch, reason) ==
+    /\ phase = "Attached"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokeFailedRunning(peer_id, epoch, reason) ==
+    /\ phase = "Running"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokeFailedRetired(peer_id, epoch, reason) ==
+    /\ phase = "Retired"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+SupervisorTrustEdgeRevokeFailedStopped(peer_id, epoch, reason) ==
+    /\ phase = "Stopped"
+    /\ (supervisor_binding_kind = "Bound")
+    /\ (supervisor_bound_peer_id = Some(peer_id))
+    /\ (supervisor_bound_epoch = Some(epoch))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
 OpsBarrierSatisfiedAttached(operation_ids) ==
     /\ phase = "Attached"
     /\ (session_id # None)
@@ -4839,6 +5039,26 @@ Next ==
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorRunning(peer_id, epoch)
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorRetired(peer_id, epoch)
     \/ \E peer_id \in StringValues : \E epoch \in 0..2 : RevokeSupervisorStopped(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgePublishedIdle(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgePublishedAttached(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgePublishedRunning(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgePublishedRetired(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgePublishedStopped(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgePublishFailedIdle(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgePublishFailedAttached(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgePublishFailedRunning(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgePublishFailedRetired(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgePublishFailedStopped(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgeRevokedIdle(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgeRevokedAttached(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgeRevokedRunning(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgeRevokedRetired(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : SupervisorTrustEdgeRevokedStopped(peer_id, epoch)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgeRevokeFailedIdle(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgeRevokeFailedAttached(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgeRevokeFailedRunning(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgeRevokeFailedRetired(peer_id, epoch, reason)
+    \/ \E peer_id \in StringValues : \E epoch \in 0..2 : \E reason \in StringValues : SupervisorTrustEdgeRevokeFailedStopped(peer_id, epoch, reason)
     \/ \E operation_ids \in SetOfOperationIdValues : OpsBarrierSatisfiedAttached(operation_ids)
     \/ \E operation_ids \in SetOfOperationIdValues : OpsBarrierSatisfiedRunning(operation_ids)
     \/ \E endpoint \in PeerEndpointValues : PublishLocalEndpointIdle(endpoint)

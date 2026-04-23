@@ -229,13 +229,13 @@ pub struct TrustedPeerDescriptor {
 }
 
 impl TrustedPeerDescriptor {
-    /// Parse string-shaped identity fields into a typed descriptor with
-    /// a **zero Ed25519 signing pubkey**.
+    /// Build a descriptor with a **zero Ed25519 signing pubkey** from
+    /// typed identity atoms.
     ///
     /// The zero-pubkey default is **test-only** — envelope signature
     /// verification trivially fails against it. In-process `inproc`
     /// tests use this shape because the router identity map is what
-    /// authorizes the peer; production paths must construct
+    /// authorizes the peer; production paths construct
     /// `TrustedPeerDescriptor` via the struct literal with an explicit
     /// pubkey (or use [`Self::with_pubkey`] to stamp one onto a
     /// test-built descriptor). The loud name keeps the hazard surface

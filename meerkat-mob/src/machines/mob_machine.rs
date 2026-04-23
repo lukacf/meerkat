@@ -598,6 +598,35 @@ impl std::fmt::Display for MemberLifecycleKind {
     }
 }
 
+/// Typed wiring lifecycle notice kind for
+/// [`MobMachineEffect::EmitWiringLifecycleNotice`]. Pair-valued (edge-keyed)
+/// counterpart to [`MemberLifecycleKind`] (member-keyed). Emitted alongside
+/// [`MobMachineEffect::WiringGraphChanged`] by `WireMembers`/`UnwireMembers`
+/// transitions so external observers can reconstruct which identity pair
+/// was wired or unwired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WiringLifecycleKind {
+    #[default]
+    Wired,
+    Unwired,
+}
+
+impl WiringLifecycleKind {
+    /// Stable discriminant for logging / wire surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wired => "wired",
+            Self::Unwired => "unwired",
+        }
+    }
+}
+
+impl std::fmt::Display for WiringLifecycleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Typed kickoff-notice intent. Replaces the former literal-string `intent`
 /// field on [`MobMachineEffect::EmitKickoffLifecycleNotice`] — closed mirror
 /// of [`KickoffPhase`] with an additional `Started` intent variant for the
@@ -1047,6 +1076,14 @@ machine! {
             // snapshot.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
+            // D-wiring-observability (#27): pair-valued notice emitted from
+            // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
+            // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
+            // the `WiringEdge` so external observers (event store,
+            // telemetry) can reconstruct which identity pair was wired or
+            // unwired. Separate from `EmitMemberLifecycleNotice` because
+            // wiring is pair-valued, not per-member.
+            EmitWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: WiringEdge },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -1070,6 +1107,7 @@ machine! {
         disposition EmitKickoffLifecycleNotice => external,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
+        disposition EmitWiringLifecycleNotice => external,
 
         // =====================================================================
         // Invariants
@@ -1625,6 +1663,7 @@ machine! {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
         transition UnwireMembersRunning {
@@ -1637,6 +1676,7 @@ machine! {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
         // =====================================================================

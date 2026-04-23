@@ -5,57 +5,6 @@ use crate::identity::{
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
-// ---------------------------------------------------------------------------
-// `From<&str>` / `From<String>` for identity newtypes.
-//
-// Wave-b V1 retypes every kernel-level identity field from `String` to a
-// slug-validated newtype. Both hand-authored catalog code (e.g. the
-// compositions module) and the `machine!` proc macro (`meerkat-machine-dsl`)
-// construct schema instances with `"literal".into()` over what were previously
-// `String` fields. `parse()` returns `Result`, which is intentional at wire
-// boundaries; at schema-construction time the strings are compile-time known
-// slugs, so we provide the infallible `From<&str>` / `From<String>` surface
-// and panic only on a developer bug (an invalid slug literal in code the
-// macro compiled, or an invalid string passed by a catalog hand-author).
-//
-// The orphan rule is satisfied because the identity newtypes live in the same
-// crate. We implement the infallible surface here (inside `machine.rs`)
-// rather than on `identity.rs` so the validated `parse()` API on that module
-// remains the single surface for untrusted input.
-// ---------------------------------------------------------------------------
-macro_rules! infallible_from_for_identity {
-    ($($id:ident),* $(,)?) => {
-        $(
-            impl From<&str> for $id {
-                fn from(s: &str) -> Self {
-                    Self::parse(s)
-                        .unwrap_or_else(|err| panic!("invalid {}: {err}", stringify!($id)))
-                }
-            }
-            impl From<String> for $id {
-                fn from(s: String) -> Self {
-                    Self::parse(s.clone())
-                        .unwrap_or_else(|err| panic!("invalid {}: {err}", stringify!($id)))
-                }
-            }
-        )*
-    };
-}
-
-infallible_from_for_identity!(
-    MachineId,
-    InputVariantId,
-    SignalVariantId,
-    EffectVariantId,
-    PhaseId,
-    FieldId,
-    TransitionId,
-    NamedTypeId,
-    EnumTypeId,
-    EnumVariantId,
-    ProtocolId,
-);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineSchema {
     pub machine: MachineId,
@@ -163,26 +112,28 @@ impl MachineSchema {
                     });
                 }
             }
-            match transition.on.kind {
-                TriggerKind::Input if !input_variants.contains(transition.on.variant.as_str()) => {
+            match &transition.on {
+                TriggerMatch::Input { variant, .. }
+                    if !input_variants.contains(variant.as_str()) =>
+                {
                     return Err(MachineSchemaError::UnknownInputVariant {
-                        variant: transition.on.variant.clone(),
+                        variant: variant.as_str().to_owned(),
                     });
                 }
-                TriggerKind::Signal
-                    if !signal_variants.contains(transition.on.variant.as_str()) =>
+                TriggerMatch::Signal { variant, .. }
+                    if !signal_variants.contains(variant.as_str()) =>
                 {
                     return Err(MachineSchemaError::UnknownSignalVariant {
-                        variant: transition.on.variant.clone(),
+                        variant: variant.as_str().to_owned(),
                     });
                 }
                 _ => {}
             }
-            if transition.on.kind == TriggerKind::Input
-                && surface_only_inputs.contains(transition.on.variant.as_str())
+            if let TriggerMatch::Input { variant, .. } = &transition.on
+                && surface_only_inputs.contains(variant.as_str())
             {
                 return Err(MachineSchemaError::SurfaceOnlyInputHasTransition {
-                    variant: transition.on.variant.clone(),
+                    variant: variant.as_str().to_owned(),
                     transition: transition.name.as_str().to_owned(),
                 });
             }
@@ -193,7 +144,7 @@ impl MachineSchema {
             }
 
             let bindings = unique_names(
-                transition.on.bindings.iter().map(AsRef::as_ref),
+                transition.on.bindings().iter().map(AsRef::as_ref),
                 "transition binding",
             )?;
 
@@ -439,18 +390,52 @@ pub enum TriggerKind {
     Signal,
 }
 
-/// Trigger match for a transition.
+/// Typed trigger match for a transition — the variant ID is carried at the
+/// right level of the sum discriminator.
 ///
-/// `variant` is semantically an [`InputVariantId`] when `kind == TriggerKind::Input`
-/// and a [`SignalVariantId`] when `kind == TriggerKind::Signal`. The macro-generated
-/// DSL cannot emit a typed sum here (see B-2 completion notes); the full
-/// `InputTriggerMatch` / `SignalTriggerMatch` split is a B-4 deliverable that
-/// requires coordinated macro changes. `bindings` is already typed.
+/// Each transition fires on either an input or a signal; the `TriggerMatch`
+/// sum threads the correct typed identity through each arm so there is no
+/// stringly-typed `variant` field anywhere in the schema. The DSL macro
+/// emits the concrete arm at expansion time — `Input { variant:
+/// InputVariantId::parse(...) }` or `Signal { variant:
+/// SignalVariantId::parse(...) }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerMatch {
-    pub kind: TriggerKind,
-    pub variant: String,
-    pub bindings: Vec<FieldId>,
+pub enum TriggerMatch {
+    Input {
+        variant: InputVariantId,
+        bindings: Vec<FieldId>,
+    },
+    Signal {
+        variant: SignalVariantId,
+        bindings: Vec<FieldId>,
+    },
+}
+
+impl TriggerMatch {
+    /// Structural trigger kind (convenience projection for validators that
+    /// still consult the `kind`/`variant` split).
+    pub fn kind(&self) -> TriggerKind {
+        match self {
+            Self::Input { .. } => TriggerKind::Input,
+            Self::Signal { .. } => TriggerKind::Signal,
+        }
+    }
+
+    /// Untyped slug accessor for the matched variant. Use [`TriggerMatch`]
+    /// directly when you need the typed identity.
+    pub fn variant_str(&self) -> &str {
+        match self {
+            Self::Input { variant, .. } => variant.as_str(),
+            Self::Signal { variant, .. } => variant.as_str(),
+        }
+    }
+
+    /// Typed bindings introduced by the destructure pattern.
+    pub fn bindings(&self) -> &[FieldId] {
+        match self {
+            Self::Input { bindings, .. } | Self::Signal { bindings, .. } => bindings,
+        }
+    }
 }
 
 pub type InputMatch = TriggerMatch;
@@ -1254,7 +1239,9 @@ mod tests {
     #[test]
     fn rejects_unknown_surface_only_inputs() {
         let mut schema = meerkat_machine();
-        schema.surface_only_inputs.push("DoesNotExist".into());
+        schema
+            .surface_only_inputs
+            .push(crate::identity::InputVariantId::parse("DoesNotExist").expect("slug"));
 
         assert_eq!(
             schema.validate(),
@@ -1267,11 +1254,13 @@ mod tests {
     #[test]
     fn rejects_surface_only_inputs_with_transitions() {
         let mut schema = meerkat_machine();
-        schema.surface_only_inputs.push("RegisterSession".into());
+        schema
+            .surface_only_inputs
+            .push(crate::identity::InputVariantId::parse("RegisterSession").expect("slug"));
         let transition = schema
             .transitions
             .iter()
-            .find(|transition| transition.on.variant == "RegisterSession")
+            .find(|transition| transition.on.variant_str() == "RegisterSession")
             .map(|transition| transition.name.as_str().to_owned())
             .unwrap_or_default();
         assert!(

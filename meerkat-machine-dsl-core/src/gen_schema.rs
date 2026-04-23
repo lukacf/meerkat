@@ -3,6 +3,27 @@ use quote::quote;
 
 use crate::ast::{ExprDef, MachineDef, TransitionDef, UpdateDef};
 
+/// Emit `IdName::parse(#slug).expect("DSL slug must be a valid identifier: <slug>")`.
+///
+/// Every kernel-level identity in `meerkat-machine-schema::identity` uses a
+/// validated `parse()` constructor that returns `Result<Self, IdentityError>`.
+/// The DSL macro, however, is operating on compile-time-known string literals
+/// that the AST parser has already validated as Rust identifiers — so `parse()`
+/// cannot fail here without a developer bug (an invalid literal that the AST
+/// parser mis-classified). The `expect()` surface is the explicit "DSL
+/// construction-time developer bug" signal; it is never reachable from wire
+/// input.
+///
+/// Using `expect()` instead of an infallible `From<&str>` impl keeps the
+/// identity newtypes honest: `From` stays infallible for types where it is
+/// defined at all, and all validation flows through the one canonical
+/// `parse()` seam on `identity.rs`.
+fn typed_id(ty: &str, slug: &str) -> TokenStream {
+    let ty_ident = syn::Ident::new(ty, proc_macro2::Span::call_site());
+    let msg = format!("DSL slug must be a valid {ty}: `{slug}`");
+    quote! { #ty_ident::parse(#slug).expect(#msg) }
+}
+
 /// Belt-and-suspenders: emit a `compile_error!` token if a non-literal
 /// arithmetic amount ever reaches codegen. `validate::validate_arithmetic_amount`
 /// already rejects these, but this keeps the codegen total — it never silently
@@ -68,13 +89,25 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         quote! { meerkat_machine_schema }
     };
 
+    let machine_id = typed_id("MachineId", &machine_name);
+    let init_phase_id = typed_id("PhaseId", &init_phase);
+    let terminal_phase_ids: Vec<TokenStream> = terminal_phases
+        .iter()
+        .map(|phase| typed_id("PhaseId", phase))
+        .collect();
+    let surface_only_ids: Vec<TokenStream> = surface_only
+        .iter()
+        .map(|variant| typed_id("InputVariantId", variant))
+        .collect();
+
     quote! {
         impl #state_name {
             pub fn schema() -> #schema_crate::MachineSchema {
                 use #schema_crate::*;
+                use #schema_crate::identity::*;
 
                 MachineSchema {
-                    machine: #machine_name.into(),
+                    machine: #machine_id,
                     version: #version,
                     rust: RustBinding {
                         crate_name: #rust_crate.into(),
@@ -87,16 +120,16 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                         },
                         fields: vec![#(#state_fields),*],
                         init: InitSchema {
-                            phase: #init_phase.into(),
+                            phase: #init_phase_id,
                             fields: vec![#(#init_fields),*],
                         },
-                        terminal_phases: vec![#(#terminal_phases.into()),*],
+                        terminal_phases: vec![#(#terminal_phase_ids),*],
                     },
                     inputs: EnumSchema {
                         name: #input_name.into(),
                         variants: vec![#(#input_variants),*],
                     },
-                    surface_only_inputs: vec![#(#surface_only.into()),*],
+                    surface_only_inputs: vec![#(#surface_only_ids),*],
                     signals: EnumSchema {
                         name: #signal_name.into(),
                         variants: vec![#(#signal_variants),*],
@@ -122,8 +155,9 @@ fn gen_variants(idents: &[syn::Ident]) -> Vec<TokenStream> {
         .iter()
         .map(|v| {
             let name = v.to_string();
+            let name_id = typed_id("EnumVariantId", &name);
             quote! {
-                VariantSchema { name: #name.into(), fields: vec![] }
+                VariantSchema { name: #name_id, fields: vec![] }
             }
         })
         .collect()
@@ -154,11 +188,13 @@ fn gen_type_ref(ty: &crate::ast::TypeDef) -> TokenStream {
         }
         crate::ast::TypeDef::Named(ident) => {
             let name = ident.to_string();
-            quote! { TypeRef::Named(#name.into()) }
+            let id = typed_id("NamedTypeId", &name);
+            quote! { TypeRef::Named(#id) }
         }
         crate::ast::TypeDef::Enum(ident) => {
             let name = ident.to_string();
-            quote! { TypeRef::Enum(#name.into()) }
+            let id = typed_id("EnumTypeId", &name);
+            quote! { TypeRef::Enum(#id) }
         }
     }
 }
@@ -171,9 +207,10 @@ fn gen_state_fields(def: &MachineDef) -> Vec<TokenStream> {
         .filter(|f| Some(f.name.to_string()) != phase_field_name)
         .map(|f| {
             let name = f.name.to_string();
+            let id = typed_id("FieldId", &name);
             let ty = gen_type_ref(&f.ty);
             quote! {
-                FieldSchema { name: #name.into(), ty: #ty }
+                FieldSchema { name: #id, ty: #ty }
             }
         })
         .collect()
@@ -187,9 +224,10 @@ fn gen_init_fields(def: &MachineDef) -> Vec<TokenStream> {
 
     for init in &def.init_fields {
         let name = init.name.to_string();
+        let id = typed_id("FieldId", &name);
         let expr = gen_schema_expr(&init.value);
         fields.push(quote! {
-            FieldInit { field: #name.into(), expr: #expr }
+            FieldInit { field: #id, expr: #expr }
         });
     }
     fields
@@ -266,7 +304,8 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
         ExprDef::EmptyMap => quote! { Expr::EmptyMap },
         ExprDef::Field(name) => {
             let n = name.to_string();
-            quote! { Expr::Field(#n.into()) }
+            let id = typed_id("FieldId", &n);
+            quote! { Expr::Field(#id) }
         }
         ExprDef::Binding(name) => {
             let n = name.to_string();
@@ -275,12 +314,15 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
         ExprDef::CurrentPhase => quote! { Expr::CurrentPhase },
         ExprDef::Phase(variant) => {
             let v = variant.to_string();
-            quote! { Expr::Phase(#v.into()) }
+            let id = typed_id("PhaseId", &v);
+            quote! { Expr::Phase(#id) }
         }
         ExprDef::NamedVariant { enum_name, variant } => {
             let e = enum_name.to_string();
             let v = variant.to_string();
-            quote! { Expr::NamedVariant { enum_name: #e.into(), variant: #v.into() } }
+            let e_id = typed_id("EnumTypeId", &e);
+            let v_id = typed_id("EnumVariantId", &v);
+            quote! { Expr::NamedVariant { enum_name: #e_id, variant: #v_id } }
         }
         ExprDef::Not(inner) => {
             let inner_e = gen_schema_expr(inner);
@@ -469,19 +511,21 @@ fn gen_enum_variants(enum_def: &crate::ast::EnumDef) -> Vec<TokenStream> {
         .iter()
         .map(|v| {
             let name = v.name.to_string();
+            let name_id = typed_id("EnumVariantId", &name);
             if v.fields.is_empty() {
-                quote! { VariantSchema { name: #name.into(), fields: vec![] } }
+                quote! { VariantSchema { name: #name_id, fields: vec![] } }
             } else {
                 let fields: Vec<_> = v
                     .fields
                     .iter()
                     .map(|f| {
                         let fname = f.name.to_string();
+                        let fid = typed_id("FieldId", &fname);
                         let fty = gen_type_ref(&f.ty);
-                        quote! { FieldSchema { name: #fname.into(), ty: #fty } }
+                        quote! { FieldSchema { name: #fid, ty: #fty } }
                     })
                     .collect();
-                quote! { VariantSchema { name: #name.into(), fields: vec![#(#fields),*] } }
+                quote! { VariantSchema { name: #name_id, fields: vec![#(#fields),*] } }
             }
         })
         .collect()
@@ -499,8 +543,9 @@ fn gen_helpers(def: &MachineDef) -> Vec<TokenStream> {
                 .iter()
                 .map(|p| {
                     let pname = p.name.to_string();
+                    let pid = typed_id("FieldId", &pname);
                     let pty = gen_type_ref(&p.ty);
-                    quote! { FieldSchema { name: #pname.into(), ty: #pty } }
+                    quote! { FieldSchema { name: #pid, ty: #pty } }
                 })
                 .collect();
             quote! {
@@ -533,17 +578,15 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
         .iter()
         .map(|t| {
             let name = t.name.to_string();
+            let name_id = typed_id("TransitionId", &name);
             let to = t.to_phase.to_string();
+            let to_id = typed_id("PhaseId", &to);
             let variant = t.trigger.variant.to_string();
-            let kind = match t.trigger.kind {
-                crate::ast::TriggerKindDef::Input => quote! { TriggerKind::Input },
-                crate::ast::TriggerKindDef::Signal => quote! { TriggerKind::Signal },
-            };
-            let bindings: Vec<_> = t
+            let typed_bindings: Vec<TokenStream> = t
                 .trigger
                 .bindings
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|b| typed_id("FieldId", &b.to_string()))
                 .collect();
 
             // Guards — strip phase-field references (they're in `from` instead)
@@ -570,23 +613,46 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 .iter()
                 .map(|e| {
                     let evariant = e.variant.to_string();
+                    let evariant_id = typed_id("EffectVariantId", &evariant);
                     let fields: Vec<_> = e
                         .fields
                         .iter()
                         .map(|(fname, fval)| {
                             let fn_str = fname.to_string();
+                            let fid = typed_id("FieldId", &fn_str);
                             let val = gen_schema_expr_for(def, fval);
-                            quote! { (#fn_str.into(), #val) }
+                            quote! { (#fid, #val) }
                         })
                         .collect();
                     quote! {
                         EffectEmit {
-                            variant: #evariant.into(),
+                            variant: #evariant_id,
                             fields: indexmap::IndexMap::from([#(#fields),*]),
                         }
                     }
                 })
                 .collect();
+
+            // T-b: emit the typed TriggerMatch sum. The macro knows the
+            // trigger kind at expansion time, so the compiler sees a typed
+            // `InputVariantId` or `SignalVariantId` discrimination in the
+            // emitted tokens — no stringly-typed fallthrough.
+            let trigger_match = match t.trigger.kind {
+                crate::ast::TriggerKindDef::Input => {
+                    let variant_id = typed_id("InputVariantId", &variant);
+                    quote! { TriggerMatch::Input {
+                        variant: #variant_id,
+                        bindings: vec![#(#typed_bindings),*],
+                    } }
+                }
+                crate::ast::TriggerKindDef::Signal => {
+                    let variant_id = typed_id("SignalVariantId", &variant);
+                    quote! { TriggerMatch::Signal {
+                        variant: #variant_id,
+                        bindings: vec![#(#typed_bindings),*],
+                    } }
+                }
+            };
 
             // Derive `from` phases from guard expressions. `validate` has
             // already refused to compile the machine if any transition's
@@ -594,21 +660,23 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
             // via a `compile_error!` belt-and-suspenders for defense in
             // depth if someone bypasses validate in the future.
             match derive_from_phases(def, t) {
-                Ok(from_phases) => quote! {
-                    TransitionSchema {
-                        name: #name.into(),
-                        from: vec![#(#from_phases.into()),*],
-                        on: InputMatch {
-                            kind: #kind,
-                            variant: #variant.into(),
-                            bindings: vec![#(#bindings.into()),*],
-                        },
-                        guards: #guards,
-                        updates: vec![#(#updates),*],
-                        to: #to.into(),
-                        emit: vec![#(#effects),*],
+                Ok(from_phases) => {
+                    let from_phase_ids: Vec<TokenStream> = from_phases
+                        .iter()
+                        .map(|phase| typed_id("PhaseId", phase))
+                        .collect();
+                    quote! {
+                        TransitionSchema {
+                            name: #name_id,
+                            from: vec![#(#from_phase_ids),*],
+                            on: #trigger_match,
+                            guards: #guards,
+                            updates: vec![#(#updates),*],
+                            to: #to_id,
+                            emit: vec![#(#effects),*],
+                        }
                     }
-                },
+                }
                 Err(msg) => {
                     let err = format!(
                         "internal error: from-phase derivation failed at schema codegen \
@@ -628,67 +696,76 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
             match u {
                 UpdateDef::Assign { field, value } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let v = gen_schema_expr(value);
-                    quote! { Update::Assign { field: #f.into(), expr: #v } }
+                    quote! { Update::Assign { field: #fid, expr: #v } }
                 }
                 UpdateDef::Increment { field, amount } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     // `validate::validate_arithmetic_amount` has already rejected
                     // non-literal amounts. If one slips through, emit a
                     // `compile_error!` rather than silently coerce to 1.
                     match amount {
                         crate::ast::ExprDef::U64(v) => {
-                            quote! { Update::Increment { field: #f.into(), amount: #v } }
+                            quote! { Update::Increment { field: #fid, amount: #v } }
                         }
                         _ => non_literal_amount_compile_error(&f, "Increment"),
                     }
                 }
                 UpdateDef::Decrement { field, amount } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     match amount {
                         crate::ast::ExprDef::U64(v) => {
-                            quote! { Update::Decrement { field: #f.into(), amount: #v } }
+                            quote! { Update::Decrement { field: #fid, amount: #v } }
                         }
                         _ => non_literal_amount_compile_error(&f, "Decrement"),
                     }
                 }
                 UpdateDef::SetInsert { field, value } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let v = gen_schema_expr(value);
-                    quote! { Update::SetInsert { field: #f.into(), value: #v } }
+                    quote! { Update::SetInsert { field: #fid, value: #v } }
                 }
                 UpdateDef::SetRemove { field, value } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let v = gen_schema_expr(value);
-                    quote! { Update::SetRemove { field: #f.into(), value: #v } }
+                    quote! { Update::SetRemove { field: #fid, value: #v } }
                 }
                 UpdateDef::MapInsert { field, key, value } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let k = gen_schema_expr(key);
                     let v = gen_schema_expr(value);
-                    quote! { Update::MapInsert { field: #f.into(), key: #k, value: #v } }
+                    quote! { Update::MapInsert { field: #fid, key: #k, value: #v } }
                 }
                 UpdateDef::MapRemove { field, key } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let k = gen_schema_expr(key);
-                    quote! { Update::MapRemove { field: #f.into(), key: #k } }
+                    quote! { Update::MapRemove { field: #fid, key: #k } }
                 }
                 UpdateDef::MapIncrement { field, key, amount } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let k = gen_schema_expr(key);
                     match amount {
                         crate::ast::ExprDef::U64(v) => {
-                            quote! { Update::MapIncrement { field: #f.into(), key: #k, amount: #v } }
+                            quote! { Update::MapIncrement { field: #fid, key: #k, amount: #v } }
                         }
                         _ => non_literal_amount_compile_error(&f, "MapIncrement"),
                     }
                 }
                 UpdateDef::MapDecrement { field, key, amount } => {
                     let f = field.to_string();
+                    let fid = typed_id("FieldId", &f);
                     let k = gen_schema_expr(key);
                     match amount {
                         crate::ast::ExprDef::U64(v) => {
-                            quote! { Update::MapDecrement { field: #f.into(), key: #k, amount: #v } }
+                            quote! { Update::MapDecrement { field: #fid, key: #k, amount: #v } }
                         }
                         _ => non_literal_amount_compile_error(&f, "MapDecrement"),
                     }
@@ -1447,17 +1524,21 @@ fn is_phase_ref(def: &MachineDef, expr: &ExprDef) -> bool {
 fn gen_dispositions(def: &MachineDef) -> Vec<TokenStream> {
     def.dispositions.iter().map(|d| {
         let effect = d.effect.to_string();
+        let effect_id = typed_id("EffectVariantId", &effect);
         let kind = match &d.kind {
             crate::ast::DispositionKind::Local => quote! { EffectDisposition::Local },
             crate::ast::DispositionKind::External => quote! { EffectDisposition::External },
             crate::ast::DispositionKind::Routed(machines) => {
-                let names: Vec<_> = machines.iter().map(std::string::ToString::to_string).collect();
-                quote! { EffectDisposition::Routed { consumer_machines: vec![#(#names.into()),*] } }
+                let consumer_ids: Vec<TokenStream> = machines
+                    .iter()
+                    .map(|m| typed_id("MachineId", &m.to_string()))
+                    .collect();
+                quote! { EffectDisposition::Routed { consumer_machines: vec![#(#consumer_ids),*] } }
             }
         };
         quote! {
             EffectDispositionRule {
-                effect_variant: #effect.into(),
+                effect_variant: #effect_id,
                 disposition: #kind,
                 handoff_protocol: None,
             }

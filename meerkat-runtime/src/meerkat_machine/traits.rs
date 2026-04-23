@@ -176,6 +176,32 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             ))),
         }
     }
+
+    /// Wave-c C-9c R4: fully-projected public channel status. Reads DSL
+    /// state (attachment + reconnect-progress) and returns a
+    /// ready-to-serialize `RealtimeChannelStatus` with real
+    /// `attempt_count` / `next_retry_at` / `deadline_at` sourced from the
+    /// overlay-projected fields, not hard-coded defaults.
+    async fn realtime_channel_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::RuntimeRealtimeChannelStatus {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::RealtimeChannelStatus(status) => Ok(status),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::realtime_channel_status: {other:?}"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

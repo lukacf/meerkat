@@ -120,13 +120,8 @@ pub async fn handle_realtime_status(
         Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
     };
 
-    match adapter.realtime_attachment_status(&session_id).await {
-        Ok(status) => RpcResponse::success(
-            id,
-            RealtimeStatusResult {
-                status: status.into(),
-            },
-        ),
+    match adapter.realtime_channel_status(&session_id).await {
+        Ok(status) => RpcResponse::success(id, RealtimeStatusResult { status }),
         Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
 }

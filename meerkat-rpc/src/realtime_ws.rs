@@ -1871,6 +1871,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 *current_session_id = new_session_id;
                                                 pending_turn = RealtimePendingTurn::default();
                                                 reconnect_overlay.clear();
+                                                clear_reconnect_progress_in_dsl(
+                                                    &state.runtime,
+                                                    binding.as_ref(),
+                                                )
+                                                .await;
                                                 (
                                                     session_context_handle,
                                                     product_turn_handle,
@@ -1981,6 +1986,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         if matches!(role, meerkat_contracts::RealtimeChannelRole::Primary) =>
                                     {
                                         if let Some(status) = reconnect_overlay.begin_if_needed(now, now_utc) {
+                                            project_reconnect_progress_to_dsl(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                                &status,
+                                            )
+                                            .await;
                                             let _ = emit_status_update(
                                                 &mut socket,
                                                 &mut last_visible_status,
@@ -2003,6 +2014,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 close_reason,
                                             } = exhausted
                                             {
+                                                project_reconnect_progress_to_dsl(
+                                                    &state.runtime,
+                                                    binding.as_ref(),
+                                                    &status,
+                                                )
+                                                .await;
                                                 let _ = emit_status_update(
                                                     &mut socket,
                                                     &mut last_visible_status,
@@ -2063,6 +2080,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         && projection != meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired
                                                     {
                                                         reconnect_overlay.clear();
+                                                        clear_reconnect_progress_in_dsl(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                        )
+                                                        .await;
                                                         let _ = emit_status_update(
                                                             &mut socket,
                                                             &mut last_visible_status,
@@ -2080,6 +2102,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         error.message.clone(),
                                                     ) {
                                                         RealtimeReconnectFailure::RetryScheduled(status) => {
+                                                            project_reconnect_progress_to_dsl(
+                                                                &state.runtime,
+                                                                binding.as_ref(),
+                                                                &status,
+                                                            )
+                                                            .await;
                                                             let _ = emit_status_update(
                                                                 &mut socket,
                                                                 &mut last_visible_status,
@@ -2094,6 +2122,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             error,
                                                             close_reason,
                                                         } => {
+                                                            project_reconnect_progress_to_dsl(
+                                                                &state.runtime,
+                                                                binding.as_ref(),
+                                                                &status,
+                                                            )
+                                                            .await;
                                                             let _ = emit_status_update(
                                                                 &mut socket,
                                                                 &mut last_visible_status,
@@ -2125,6 +2159,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                     }
                                     Ok(projection) => {
                                         reconnect_overlay.clear();
+                                        clear_reconnect_progress_in_dsl(
+                                            &state.runtime,
+                                            binding.as_ref(),
+                                        )
+                                        .await;
                                         let _ = emit_status_update(
                                             &mut socket,
                                             &mut last_visible_status,
@@ -2614,6 +2653,72 @@ async fn cleanup_realtime_binding(
         .detach_live(binding.current_session_id())
         .await
         .map_err(|err| runtime_error_frame(err, "detach"))
+}
+
+/// Wave-c C-9c R4: project the realtime-WS reconnect-overlay's current
+/// `RealtimeChannelStatus` shape into DSL state so RPC/MCP
+/// `realtime/status` responders read real retry-budget data. Best-effort
+/// — failures log at `debug!` and do not break the overlay's own
+/// direct-emit status frame path.
+async fn project_reconnect_progress_to_dsl(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+    status: &RealtimeChannelStatus,
+) {
+    let Some(binding) = binding else {
+        return;
+    };
+    let session_id = binding.current_session_id().clone();
+    let next_retry_at_ms = status
+        .next_retry_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok());
+    let deadline_at_ms = status
+        .deadline_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok());
+    if let Err(err) = runtime
+        .runtime_adapter()
+        .project_realtime_reconnect_progress(
+            &session_id,
+            u64::from(status.attempt_count),
+            next_retry_at_ms,
+            deadline_at_ms,
+        )
+        .await
+    {
+        tracing::debug!(
+            ?err,
+            session_id = %session_id,
+            "C-9c R4: project_realtime_reconnect_progress failed; RPC/MCP status will see stale data until next overlay tick"
+        );
+    }
+}
+
+/// Wave-c C-9c R4: clear the DSL's reconnect-progress fields when the
+/// overlay exits its active cycle (successful reconnect, operator detach,
+/// non-reconnecting transition).
+async fn clear_reconnect_progress_in_dsl(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+) {
+    let Some(binding) = binding else {
+        return;
+    };
+    let session_id = binding.current_session_id().clone();
+    if let Err(err) = runtime
+        .runtime_adapter()
+        .clear_realtime_reconnect_progress(&session_id)
+        .await
+    {
+        tracing::debug!(
+            ?err,
+            session_id = %session_id,
+            "C-9c R4: clear_realtime_reconnect_progress failed"
+        );
+    }
 }
 
 async fn current_binding_projection(

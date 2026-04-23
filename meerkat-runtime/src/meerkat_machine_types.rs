@@ -414,6 +414,15 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeRealtimeAttachmentStatus {
         session_id: SessionId,
     },
+    /// Wave-c C-9c R4: fully-projected public channel status. Returns the
+    /// bare `RealtimeAttachmentStatus` plus the overlay-tracked
+    /// `ReconnectProgress` (if any) read from DSL state, collapsed into a
+    /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
+    /// `realtime/status` RPC handler and the MCP `meerkat_realtime_status`
+    /// tool so they no longer hand-compose a partial projection.
+    RuntimeRealtimeChannelStatus {
+        session_id: SessionId,
+    },
     LoadBoundaryReceipt {
         runtime_id: LogicalRuntimeId,
         run_id: LifecycleRunId,
@@ -478,6 +487,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
     RealtimeAttachmentStatus(RealtimeAttachmentStatus),
+    RealtimeChannelStatus(RealtimeChannelStatus),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineLegacyRunPrepared),
 }

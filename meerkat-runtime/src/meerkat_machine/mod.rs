@@ -712,6 +712,7 @@ impl MeerkatMachine {
             | MeerkatMachineCommand::Destroy { .. }
             | MeerkatMachineCommand::RuntimeState { .. }
             | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
+            | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
             | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
                 .execute_meerkat_machine_control_command(command)
                 .await

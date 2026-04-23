@@ -436,6 +436,24 @@ impl MeerkatMachine {
                     status,
                 ))
             }
+            MeerkatMachineCommand::RuntimeRealtimeChannelStatus { session_id } => {
+                let sessions = self.sessions.read().await;
+                let entry = sessions.get(&session_id).ok_or_else(|| {
+                    RuntimeControlPlaneError::NotFound(LogicalRuntimeId::new(
+                        session_id.to_string(),
+                    ))
+                })?;
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let status = project_realtime_attachment_status(&authority.state);
+                let reconnect = project_realtime_reconnect_progress(&authority.state);
+                let channel_status = status.to_channel_status(reconnect.as_ref());
+                Ok(MeerkatMachineCommandResult::RealtimeChannelStatus(
+                    channel_status,
+                ))
+            }
             MeerkatMachineCommand::LoadBoundaryReceipt {
                 runtime_id,
                 run_id,
@@ -479,4 +497,41 @@ fn project_realtime_attachment_status(
         RealtimeBindingState::BindingReady => RealtimeAttachmentStatus::BindingReady,
         RealtimeBindingState::ReplacementPending => RealtimeAttachmentStatus::ReplacementPending,
     }
+}
+
+/// Wave-c C-9c R4: project the DSL's reconnect-progress fields onto the
+/// shell-facing `ReconnectProgress` struct. Returns `None` when the
+/// overlay has cleared (`attempt_count == 0` and no pending retry) —
+/// the default state for a binding that isn't actively reconnecting.
+fn project_realtime_reconnect_progress(
+    state: &super::dsl::MeerkatMachineState,
+) -> Option<crate::meerkat_machine_types::ReconnectProgress> {
+    use chrono::{DateTime, Utc};
+    use crate::meerkat_machine_types::ReconnectProgress;
+
+    let attempt_count_u64 = state.realtime_reconnect_attempt_count;
+    let next_retry_at_ms = state.realtime_reconnect_next_retry_at_ms;
+    let deadline_at_ms = state.realtime_reconnect_deadline_at_ms;
+
+    if attempt_count_u64 == 0 && next_retry_at_ms.is_none() && deadline_at_ms.is_none() {
+        return None;
+    }
+
+    fn ms_to_utc(ms: Option<u64>) -> Option<DateTime<Utc>> {
+        ms.and_then(|ms| {
+            let secs = i64::try_from(ms / 1_000).ok()?;
+            let nanos = u32::try_from((ms % 1_000) * 1_000_000).ok()?;
+            DateTime::<Utc>::from_timestamp(secs, nanos)
+        })
+    }
+
+    // Surface clamp: `RealtimeChannelStatus.attempt_count` is u32 on the wire;
+    // any DSL-side overflow pegs at u32::MAX rather than wrapping.
+    let attempt_count = u32::try_from(attempt_count_u64).unwrap_or(u32::MAX);
+
+    Some(ReconnectProgress::new(
+        attempt_count,
+        ms_to_utc(next_retry_at_ms),
+        ms_to_utc(deadline_at_ms),
+    ))
 }

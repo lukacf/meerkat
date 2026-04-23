@@ -696,6 +696,52 @@ impl MeerkatMachine {
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
     }
 
+    /// Wave-c C-9c R4: project the realtime-WS reconnect-overlay progress
+    /// (attempt count, next retry deadline) into DSL state so RPC/MCP
+    /// `realtime/status` queries surface real retry-budget data instead of
+    /// hard-coded `0`/`1` defaults.
+    ///
+    /// `next_retry_at_ms` / `deadline_at_ms` are milliseconds since the
+    /// Unix epoch (shell converts from `chrono::DateTime<Utc>` at the
+    /// emission site; the DSL stays chrono-free).
+    pub async fn project_realtime_reconnect_progress(
+        &self,
+        session_id: &SessionId,
+        attempt_count: u64,
+        next_retry_at_ms: Option<u64>,
+        deadline_at_ms: Option<u64>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ProjectRealtimeReconnectProgress {
+                attempt_count,
+                next_retry_at_ms,
+                deadline_at_ms,
+            },
+            "ProjectRealtimeReconnectProgress",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Wave-c C-9c R4: clear the reconnect-progress fields. Shell fires
+    /// this when the overlay cycle ends — successful reconnect (DSL
+    /// moves back to `BindingReady`) or operator detach.
+    pub async fn clear_realtime_reconnect_progress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ClearRealtimeReconnectProgress,
+            "ClearRealtimeReconnectProgress",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
     /// Begin a live attachment and return the authority token minted by the
     /// DSL transition. Subsequent provider callbacks present this token and
     /// the DSL validates their `authority_epoch` before mutating state.

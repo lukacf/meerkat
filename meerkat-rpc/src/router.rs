@@ -5022,6 +5022,85 @@ mod tests {
         assert_eq!(result["status"]["state"], "opening");
     }
 
+    /// Wave-c C-9c R4 catching assertion: after the reconnect overlay
+    /// projects its progress into DSL state via
+    /// `project_realtime_reconnect_progress`, a `realtime/status` RPC
+    /// response must surface the overlay-tracked `attempt_count` —
+    /// not the pre-R4 hard-coded `0`/`1` default.
+    #[tokio::test]
+    async fn realtime_status_surfaces_real_reconnect_attempt_count_not_hard_coded_default() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime reconnect progress",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+
+        // Drive the session into a reconnecting state. `intent=true`
+        // plus `RequireRealtimeReattach` puts the DSL into
+        // `ReattachRequired`, which `project_realtime_attachment_status`
+        // projects to `RealtimeAttachmentStatus::ReattachRequired`
+        // (surface state = `Reconnecting`).
+        let adapter = router.runtime_adapter();
+        adapter
+            .project_realtime_attachment_intent(&parsed_session_id, true)
+            .await
+            .expect("intent projection should succeed");
+        adapter
+            .require_realtime_attachment_reattach(&parsed_session_id)
+            .await
+            .expect("RequireRealtimeReattach should succeed");
+
+        // Simulate the realtime-WS overlay projecting its 5th-attempt
+        // state into the DSL. Without R4 wiring, the RPC responder
+        // reads `attempt_count = 1`; with R4 wiring, it must read 5.
+        adapter
+            .project_realtime_reconnect_progress(
+                &parsed_session_id,
+                5,
+                Some(1_700_000_000_000),
+                Some(1_700_000_030_000),
+            )
+            .await
+            .expect("reconnect-progress projection should succeed");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/status",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = &result_value(&response)["status"];
+        assert_eq!(status["state"], "reconnecting");
+        assert_eq!(
+            status["attempt_count"], 5,
+            "realtime/status must surface the overlay-projected attempt_count, \
+             not the pre-C-9c `1` hard-coded default — got {status:?}"
+        );
+        assert!(
+            status["next_retry_at"].is_string(),
+            "realtime/status must surface next_retry_at from the overlay projection, \
+             got {status:?}"
+        );
+    }
+
     #[tokio::test]
     async fn realtime_capabilities_returns_conservative_phase_one_metadata() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;

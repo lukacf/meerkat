@@ -966,6 +966,25 @@ impl MobMcpState {
             .map_err(|err| SessionError::Unsupported(err.to_string()))
     }
 
+    /// Wave-c C-9c R4: fully-projected public channel status for MCP
+    /// `meerkat_realtime_status`. Reads DSL state (attachment +
+    /// reconnect-progress) through the runtime adapter.
+    pub async fn realtime_session_realtime_channel_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::RealtimeChannelStatus, SessionError> {
+        self.realtime_validate_session_target(session_id).await?;
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            SessionError::Unsupported(
+                "runtime adapter unavailable for realtime channel status inspection".to_string(),
+            )
+        })?;
+        adapter
+            .realtime_channel_status(session_id)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))
+    }
+
     pub async fn mob_wait_kickoff(
         &self,
         mob_id: &MobId,

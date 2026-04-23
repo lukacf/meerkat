@@ -262,6 +262,13 @@ mod tests {
             Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached)
         }
 
+        async fn realtime_channel_status(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
+            Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached.into())
+        }
+
         async fn retire_runtime(
             &self,
             _session_id: &SessionId,
@@ -352,6 +359,13 @@ mod tests {
                 _session_id: &SessionId,
             ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, RuntimeDriverError> {
                 Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired)
+            }
+
+            async fn realtime_channel_status(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired.into())
             }
 
             async fn retire_runtime(

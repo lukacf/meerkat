@@ -253,12 +253,10 @@ async fn realtime_status_payload(
 ) -> Result<RealtimeStatusResult, McpToolError> {
     let session_id = resolve_target_session_id(state, &params.target).await?;
     let status = state
-        .realtime_session_realtime_attachment_status(&session_id)
+        .realtime_session_realtime_channel_status(&session_id)
         .await
         .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-    Ok(RealtimeStatusResult {
-        status: status.into(),
-    })
+    Ok(RealtimeStatusResult { status })
 }
 
 pub fn public_tool_names() -> &'static [&'static str] {

@@ -251,7 +251,7 @@ pub use auth::{
     ResolvedAuthEnvelope, ResolvedAuthKind,
 };
 pub use connection::{
-    AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingPolicy,
-    ConnectionRef, CredentialSourceSpec, ProviderBinding, ProviderBindingConfig,
-    ProviderBindingError, RealmConfigSection, RealmConnectionSet,
+    AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,
+    ConnectionRef, CredentialSourceSpec, IdentityError, ProfileId, ProviderBinding,
+    ProviderBindingConfig, ProviderBindingError, RealmConfigSection, RealmConnectionSet, RealmId,
 };

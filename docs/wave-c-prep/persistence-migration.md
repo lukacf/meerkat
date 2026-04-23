@@ -81,16 +81,12 @@ carry `ConnectionRef` indirectly when it is present in the session
 snapshot echoed back in events. `.rkat/` is derived and disposable
 (`CLAUDE.md` rule); replaying the event store regenerates it.
 
-### 1.4 Wire-only shapes (not persisted but cross-process)
+### 1.4 Wire-only shapes (cross-process, not persisted)
 `WireInputState` (`meerkat-contracts/src/wire/runtime.rs:235-260`) and
-`WireRuntimeTurnMetadata` (same file, added in commit `18e12d3a4`) are
-**wire projections** only. The B-9 V8 commit (`5fb027af1`) explicitly
-notes: "Runtime-side projection of the rich internal shapes into the
-typed enums is wave-c plumbing; for now these fields ride through as
-None (no untyped payload leaks either way)." They are not on the
-persistence path. However, a pre-wave-b deployment running a
-`rkat-rpc` client talking to a newer server could send v0 wire frames
-— captured below under "mixed deployment".
+`WireRuntimeTurnMetadata` (same file, commit `18e12d3a4`) are wire
+projections only — commit `5fb027af1` explicitly defers the
+runtime-side typed projection to wave-c. Not on the persistence
+path; mixed-deployment concerns are captured under risk 3.
 
 ## 2. Versioning strategy
 
@@ -130,96 +126,64 @@ Concretely:
 
 ## 3. v0 → v1 migration matrix
 
-Read-path migrations live behind `serde_json::Value`-typed "envelope"
-readers in `meerkat-session::persistent::migrations::{session,input_state}`
-(new module, wave-c). Each envelope reads a Value, inspects the
-version discriminator, and dispatches.
+Read-path migrations live in a new
+`meerkat-session::persistent::migrations` submodule. Each entry
+point reads a `serde_json::Value`, inspects the version
+discriminator, dispatches.
 
-### 3.1 `SessionMetadata.provider_params` — `Value` → `ProviderParamsOverride`
-- v0 shape: `serde_json::Value::Object({...})` with any of
-  `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
-  `thinking_budget_tokens`, plus arbitrary provider-specific keys.
-- v1 target: `ProviderParamsOverride`
-  (`run_primitive.rs:218-231`) — six typed fields, plus
-  `provider_tag: Option<ProviderTag>`.
-- Mapping: pick known keys by literal name into the typed slot; type
-  coerce numbers (`reasoning` string → `ReasoningMode` enum). Unknown
-  keys move into `ProviderTag` variant matching the session's
-  `Provider` (Anthropic/OpenAI/Gemini). If the session has no
-  resolvable Provider, unknown keys go to a `ProviderTag::Unknown
-  { bag: StructuredProviderExtension }` — which does NOT exist on the
-  core type today (only on wire). **Wave-c must add it on core** or
-  drop unknown v0 keys with a `tracing::warn!`; I recommend the
-  former so nothing is lost silently.
-- Fallback for fully unrecognizable value (non-object, e.g. a bare
-  string): log + `None`, mark session with metadata flag
-  `provider_params_v0_drop = true`, retain original under
-  `legacy_provider_params_v0: Value`.
-- Fails to map: no. Worst case is a provider-tag dump.
+### 3.1 `provider_params`: `Value` → `ProviderParamsOverride`
+v0 is any `Value::Object` keyed by `temperature`, `top_p`,
+`max_output_tokens`, `reasoning`, `thinking_budget_tokens`, plus
+arbitrary provider-specific keys. v1 target
+(`run_primitive.rs:218-231`) has six typed fields + `provider_tag:
+Option<ProviderTag>`.
 
-### 3.2 `SessionMetadata.connection_ref`
-- v0 inner: `{realm_id: String, binding_id: String, profile:
-  Option<String>}`.
-- v1 inner: `{realm: RealmId, binding: BindingId, profile:
-  Option<ProfileId>}` where each newtype validates a slug regex
-  (`connection.rs:86-90`; tests at `connection.rs:610-616` reject
-  empty / `bad space` / `bad:colon`).
-- Mapping: read v0 field names, call `RealmId::parse` /
-  `BindingId::parse` / `ProfileId::parse`.
-- Ambiguity: v0 `realm_id` could legally contain characters that v1
-  slug validation rejects. Mitigation: on parse failure, slugify
-  (lowercase, `[^a-z0-9_.-]` → `_`) and retain original under
-  `legacy_connection_ref: {realm_id, binding_id, profile}` — mark
-  session as needing operator review. Do NOT silently drop the
-  connection: a resume that lands on the wrong realm would cause
-  credential bleed (`session.rs:908-916` explicitly calls this out).
-- Fail-to-map: if after slugification the newtype still refuses, the
-  session is loaded with `connection_ref = None` and will re-resolve
-  against env defaults on resume, which is the pre-existing
-  behavior for sessions that never had a realm.
+Mapping: pull known keys by name (number-coerce, lowercase-string →
+`ReasoningMode`). Unknown keys move into `ProviderTag` variant
+matching the session's `Provider`. If provider is unresolvable,
+unknown keys go to `ProviderTag::Unknown { bag:
+StructuredProviderExtension }` — which **currently exists only on
+wire**; wave-c must add it on core or accept silent drops. Preferred:
+add on core. Non-object v0 values (bare numeric/string) → `None` +
+retain original under metadata flag `legacy_provider_params_v0`. No
+session fails to map outright.
+
+### 3.2 `ConnectionRef`
+v0 inner `{realm_id, binding_id, profile}` strings → v1
+`{realm: RealmId, binding: BindingId, profile: Option<ProfileId>}`,
+each validated via slug regex (`connection.rs:86-90`; rejects empty,
+space, `:`). On parse failure, slugify
+(lowercase, `[^a-z0-9_.-]` → `_`), retain original under
+`legacy_connection_ref`, mark session for operator review. A
+silent-drop here causes cross-realm credential bleed
+(`session.rs:908-916`). Worst case: after slugification the newtype
+still refuses → `connection_ref = None`, session re-resolves against
+env defaults on resume (pre-existing behavior for pre-realm sessions).
 
 ### 3.3 `RuntimeTurnMetadata` (inside `StoredInputState.persisted_input`)
 - `provider_params`: same rule as §3.1.
-- `model: Option<String>` → `Option<ModelId>`: `ModelId::new(s)`;
-  on slug failure, keep as `Unknown("{raw}")` via a new ModelId
-  escape hatch, OR drop to `None` with trace. Preferred: drop to
-  `None` — the turn was already admitted on v0 and its model is
-  effectively frozen in the conversation history; the override
-  only mattered for a *future* retry.
-- `provider: Option<String>` → `Option<Provider>`: use
-  `Provider::parse_strict` (existed pre-wave-b). Unknown → `None` +
-  trace. Hardest case: gemini-preview strings that worked pre-strict.
-  Tracked in fixture 5.4.
+- `model: Option<String>` → `Option<ModelId>` via `ModelId::new`; on
+  slug failure, drop to `None` + trace (the turn was already admitted
+  on v0; the override only mattered for a *future* retry).
+- `provider: Option<String>` → `Option<Provider>` via
+  `Provider::parse_strict`. Unknown → `None` + trace.
 - `additional_instructions: Option<Vec<String>>` →
-  `Option<Vec<TurnInstruction>>`: lift each `String` to
-  `TurnInstruction { kind: TurnInstructionKind::AppendUser, body:
-  s }` (the default kind — confirm which kind in wave-c; v0
-  semantics were "append as additional user/system guidance"; the
-  conservative choice is whichever kind the active code path
-  treated a bare string as).
-- NEW fields `connection_ref`, `keep_alive`: absent in v0 JSON;
-  default `None` via `#[serde(default)]`. No migration needed.
+  `Option<Vec<TurnInstruction>>`: lift each `String` to a default
+  `TurnInstruction` kind (wave-c locks the exact kind against the v0
+  shell semantics of a bare string).
+- NEW `connection_ref`, `keep_alive`: absent in v0; default `None`
+  via `#[serde(default)]`. No migration work.
 
-### 3.4 `ConnectionRef` inside `RuntimeTurnMetadata` on v0
-- Not applicable — v0 `RuntimeTurnMetadata` did not carry
-  `connection_ref` (it was introduced in B-6). v0 rows deserialize
-  with the new `Option<ConnectionRef>` field as `None` via
-  `serde(default)`.
+### 3.4 Unknown / extra fields
+Neither `InputStateSerde` nor `SessionMetadata` sets
+`deny_unknown_fields`. Extras drop silently. Wave-c will NOT flip
+this — the migration envelope handles known-delta fields; serde's
+lenient default covers the rest.
 
-### 3.5 Extra / unknown fields
-All serde helpers use implicit `#[serde(deny_unknown_fields)]`?
-No — `InputStateSerde` and `SessionMetadata` do **not** set it. Extra
-fields are silently dropped on read. Wave-c will NOT flip this; the
-explicit migration envelope handles known-delta fields and leaves the
-rest to serde's lenient default.
-
-### 3.6 Sessions that fail to map
-A v0 session whose `provider` is an unreachable string (e.g. the old
-`perplexity` provider, deleted in a prior wave) cannot re-resolve on
-resume. Migration leaves it as `None`; the session-factory resume
-path already surfaces "provider missing" as a typed error, which is
-the correct operator signal. No session is outright discarded by the
-migrator.
+### 3.5 Irrecoverable sessions
+None are outright discarded. A v0 `provider` string that no longer
+maps just loads as `provider=None`; the session-factory resume path
+surfaces the typed "provider missing" error naturally.
 
 ## 4. Write-side strategy
 
@@ -308,66 +272,49 @@ re-emit from the wire types and do not see the persistence envelope.
 
 ## 7. Risk register
 
-1. **v0 row in prod that can't be migrated.** Symptom: load returns
-   `SessionError::Agent(InternalError)` from the serde bail at
-   `persistent.rs:394-400` / `395` and `persistent.rs:739`.
-   Catching assertion: compat test 11 (unknown provider string) + an
-   integration test that loads every fixture file and asserts
-   `load()` is `Ok(Some(_))`. Belt-and-braces: wrap the v0→v1
-   translation in `fn migrate(value: Value) -> Result<Session,
-   SessionMigrationError>` and emit `SessionMigrationError::Partial`
-   with the retained legacy payload instead of ever returning `Err`
-   from `load()`. A partially-migrated session is always better than
-   an unloadable one.
+1. **v0 row in prod that can't be migrated.** Symptom: `load()`
+   returns `SessionError::Agent(InternalError)` from the serde bail at
+   `persistent.rs:395` / `739`. Mitigation: wrap translation in
+   `fn migrate(Value) -> Result<Session, SessionMigrationError>` and
+   emit `SessionMigrationError::Partial` (legacy payload retained)
+   rather than failing load. Catching assertion: a compat test that
+   loads every fixture and asserts `Ok(Some(_))`; plus fixture 11
+   (unknown provider string).
 
-2. **Roll-back after v1 writes.** A v1.5 deployment is rolled back to
-   v0 binary; the SQLite rows are v1. v0 serde will reject v1
-   `provider_params: {kind: "openai", ...}` on the
-   `SessionMetadata.provider_params: Value` field because it is a
-   Value — actually it's fine, serde_json::Value accepts any JSON,
-   and `default_version()` hides the v2 marker. The subtle failure is
-   `RealmId`/`BindingId` newtypes being structural, so v0 binaries
-   that expect `{realm_id, binding_id}` choke on v1 `{realm,
-   binding}`. Catching assertion: a `cargo test -p meerkat-store
-   --test rollback_v1_to_v0` that serialises a v1 Session, strips
-   the migrator, and attempts v0 deserialisation — expect loud
-   failure, not silent corruption. Operator guidance: no rollback
-   across wave-c without `rkat debug export-sessions` first.
+2. **Roll-back after v1 writes.** `RealmId`/`BindingId` newtypes are
+   structural, so v0 binaries that expect `{realm_id, binding_id}`
+   choke on v1 `{realm, binding}`. Catching assertion: `cargo test -p
+   meerkat-store --test rollback_v1_to_v0` — serialises v1 Session,
+   attempts v0 deserialise, expects loud failure (not silent
+   corruption). Operator policy: no rollback across wave-c without
+   `rkat debug export-sessions` first.
 
-3. **Shared deployment running mixed v0/v1 readers.** Two
-   `SqliteSessionStore` handles against the same DB (e.g. CLI
-   process + RPC daemon), one pre-wave-c, one post. The v1 writer
-   upgrades on save; the v0 reader then hits case 2. Same catching
-   test. Mitigation: wave-c release notes require all `rkat*`
-   binaries to upgrade in lockstep; enforce by stamping the DB with a
-   schema-header row (`PRAGMA user_version = 2`) — but this requires
-   a DDL bump and is out of scope if the row-level versioning is
-   adequate. Recommended: add `user_version = 2` PRAGMA in wave-c as
-   belt-and-braces; old binaries open the file and log an explicit
-   "DB is newer than this binary" rather than hitting a parse error
-   deep inside serde.
+3. **Mixed v0/v1 readers against the same DB.** Two
+   `SqliteSessionStore` handles (CLI + RPC daemon), one pre- one
+   post-wave-c. v1 writer upgrades on save; v0 reader then hits risk
+   2. Mitigation: stamp the DB with `PRAGMA user_version = 2`; old
+   binaries refuse to open and log "DB newer than binary" rather than
+   hitting a parse error deep inside serde. Lockstep upgrade in
+   release notes.
 
-4. **Fixture miss most likely to bite.** The v0 `provider_params`
-   variant used by a real-world `meerkat-mob` member whose owner
-   typed raw Anthropic extended-thinking overrides. The production
-   shape is `{thinking: {type: "enabled", budget_tokens: 32000}}`,
-   not the simpler `thinking_budget_tokens: u32` v1 promises.
-   Catching assertion: fixture 3 plus a dedicated mob-spawn
-   integration test `test_v0_mob_member_with_anthropic_thinking` that
-   replays a real production payload captured from `meerkat-mob`
-   tests. Without it, we ship a silently-dropped field.
+4. **Fixture miss most likely to bite.** Real-world
+   `meerkat-mob` member with Anthropic extended-thinking overrides:
+   `{thinking: {type:"enabled", budget_tokens:32000}}`, not the flat
+   `thinking_budget_tokens: u32` v1 offers. Fixture 4 above covers
+   it; belt-and-braces: a mob-spawn integration test
+   `test_v0_mob_member_with_anthropic_thinking` replaying a real
+   payload captured from `meerkat-mob` tests.
 
-5. **`realm_id` vs `connection_ref.realm` double-write drift.**
+5. **`realm_id` vs `connection_ref.realm` drift.**
    `SessionMetadata.realm_id: Option<String>` (session.rs:871) and
    `SessionMetadata.connection_ref.realm: RealmId` are redundant
-   post-wave-b. A v0 session with `realm_id = "dev"` and no
-   `connection_ref` must derive `connection_ref.realm` from it — or
+   post-wave-b. A v0 session with `realm_id="dev"` and no
+   `connection_ref` must derive `connection_ref.realm` from it; else
    every resume lands on env defaults. Catching assertion: compat
-   test that asserts post-load `connection_ref.realm.as_str() ==
-   session_metadata.realm_id.unwrap()` when both exist, and
-   post-load `connection_ref = Some(_)` when only `realm_id` was
-   present on v0. Wave-c cleanup candidate: delete `realm_id` as a
-   top-level field in a follow-up wave.
+   test asserting post-load `connection_ref.realm.as_str() ==
+   realm_id.unwrap()` when both exist; post-load
+   `connection_ref = Some(_)` when only `realm_id` was set on v0.
+   Wave-c+1 cleanup: delete the redundant top-level `realm_id`.
 
 ---
 

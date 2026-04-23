@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
+use crate::connection::ConnectionRef;
+use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
 use crate::types::{HandlingMode, RenderMetadata};
@@ -90,8 +92,184 @@ pub enum RuntimeExecutionKind {
     ResumePending,
 }
 
-/// An input staged for application at a run boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Opaque model identifier carried by a per-turn override.
+///
+/// A bare string here is a failure of the typed-metadata invariant: validation
+/// against the catalog happens at the runtime boundary before `ModelId` is
+/// constructed. Construct via [`ModelId::new`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelId(String);
+
+impl ModelId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Keep-alive policy for a materialized session during a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepAlivePolicy {
+    #[serde(with = "duration_seconds")]
+    pub ttl: std::time::Duration,
+    pub policy: KeepAliveMode,
+}
+
+/// Keep-alive mode: pinned (caller-owned) or policy-driven (runtime sweeps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAliveMode {
+    Pinned,
+    PolicyDriven,
+}
+
+/// Single additional instruction attached to a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnInstruction {
+    pub kind: TurnInstructionKind,
+    pub body: String,
+}
+
+/// Typed category of [`TurnInstruction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnInstructionKind {
+    User,
+    System,
+    Host,
+}
+
+/// Provider-specific typed override payload carried on a single turn.
+///
+/// Each provider family gets its own typed variant. Anything that does not
+/// fit a typed field belongs on the per-binding auth/backend profile, not
+/// on the per-turn override — the per-turn seam carries only scalars the
+/// runtime can route authoritatively.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderTag {
+    Anthropic(AnthropicProviderTag),
+    OpenAi(OpenAiProviderTag),
+    Gemini(GeminiProviderTag),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AnthropicProviderTag {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct OpenAiProviderTag {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GeminiProviderTag {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_count: Option<u32>,
+}
+
+/// Typed projection of OpenAI's reasoning-effort knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+/// Typed mode for generalized reasoning emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    /// Reasoning output is emitted inline to the caller.
+    Emit,
+    /// Reasoning is performed but not emitted.
+    Silent,
+    /// Reasoning is disabled entirely for this turn.
+    Off,
+}
+
+/// Typed per-turn provider parameter overrides.
+///
+/// Replaces the legacy untyped `serde_json::Value` bag. Every knob exposed
+/// by the runtime on a per-turn seam must have a typed field here. Anything
+/// provider-specific enough to not fit goes on [`ProviderTag`]; anything
+/// that is fundamentally per-binding (not per-turn) lives on the auth /
+/// backend profile and never traverses this seam.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProviderParamsOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tag: Option<ProviderTag>,
+}
+
+impl ProviderParamsOverride {
+    pub fn is_empty(&self) -> bool {
+        self.temperature.is_none()
+            && self.top_p.is_none()
+            && self.max_output_tokens.is_none()
+            && self.reasoning.is_none()
+            && self.thinking_budget_tokens.is_none()
+            && self.provider_tag.is_none()
+    }
+}
+
+/// Error returned when [`merge_batch_turn_metadata`] sees two distinct scalar
+/// overrides for the same field in a single batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnMetadataMergeConflict {
+    pub field: &'static str,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for TurnMetadataMergeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "batch turn-metadata scalar conflict on field `{}`: {}",
+            self.field, self.reason
+        )
+    }
+}
+
+impl std::error::Error for TurnMetadataMergeConflict {}
+
+/// Canonical per-turn runtime metadata carried alongside a
+/// [`StagedRunInput`]. This is the typed seam consumed by the core layer —
+/// `serde_json::Value` does not appear anywhere in this shape.
+///
+/// Construction in the runtime crate MUST go through the single canonical
+/// `for_input(&Input)` constructor. Other code paths that previously built
+/// a `RuntimeTurnMetadata` literal are updated to call `for_input` or be
+/// deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,17 +278,24 @@ pub struct RuntimeTurnMetadata {
     pub skill_references: Option<Vec<SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Additional instructions for this turn, typed by role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
+    pub additional_instructions: Option<Vec<TurnInstruction>>,
     /// Override model for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<ModelId>,
     /// Override provider for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Override provider-specific parameters for this turn.
+    pub provider: Option<Provider>,
+    /// Override provider-specific parameters for this turn (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<ProviderParamsOverride>,
+    /// Explicit connection reference this turn must resolve against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<ConnectionRef>,
+    /// Keep-alive policy for materialized resources for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<KeepAlivePolicy>,
     /// Optional normalized rendering metadata for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
@@ -124,8 +309,90 @@ pub struct RuntimeTurnMetadata {
     pub execution_kind: Option<RuntimeExecutionKind>,
 }
 
+impl RuntimeTurnMetadata {
+    /// True when every field is `None` — used to skip serializing empty
+    /// metadata carriers on the wire.
+    pub fn is_empty(&self) -> bool {
+        self.handling_mode.is_none()
+            && self.skill_references.is_none()
+            && self.flow_tool_overlay.is_none()
+            && self.additional_instructions.is_none()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.provider_params.is_none()
+            && self.connection_ref.is_none()
+            && self.keep_alive.is_none()
+            && self.render_metadata.is_none()
+            && self.execution_kind.is_none()
+    }
+
+    /// Merge another metadata carrier into this one. Scalar conflicts (two
+    /// inputs in a batch disagreeing on `model`, `provider`, `connection_ref`,
+    /// etc.) return a typed [`TurnMetadataMergeConflict`] rather than
+    /// last-wins. Collection fields accumulate.
+    pub fn merge(&mut self, other: Self) -> Result<(), TurnMetadataMergeConflict> {
+        // Scalar: conflict-refusing merge.
+        merge_scalar(&mut self.handling_mode, other.handling_mode, "handling_mode")?;
+        merge_scalar(&mut self.flow_tool_overlay, other.flow_tool_overlay, "flow_tool_overlay")?;
+        merge_scalar(&mut self.model, other.model, "model")?;
+        merge_scalar(&mut self.provider, other.provider, "provider")?;
+        merge_scalar(&mut self.provider_params, other.provider_params, "provider_params")?;
+        merge_scalar(&mut self.connection_ref, other.connection_ref, "connection_ref")?;
+        merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
+        merge_scalar(&mut self.render_metadata, other.render_metadata, "render_metadata")?;
+        merge_scalar(&mut self.execution_kind, other.execution_kind, "execution_kind")?;
+
+        // Collections: accumulate.
+        if let Some(extra) = other.skill_references {
+            self.skill_references.get_or_insert_with(Vec::new).extend(extra);
+        }
+        if let Some(extra) = other.additional_instructions {
+            self.additional_instructions.get_or_insert_with(Vec::new).extend(extra);
+        }
+        Ok(())
+    }
+}
+
+fn merge_scalar<T: PartialEq>(
+    lhs: &mut Option<T>,
+    rhs: Option<T>,
+    field: &'static str,
+) -> Result<(), TurnMetadataMergeConflict> {
+    match (lhs.as_ref(), rhs) {
+        (_, None) => Ok(()),
+        (None, Some(v)) => {
+            *lhs = Some(v);
+            Ok(())
+        }
+        (Some(existing), Some(new)) => {
+            if *existing == new {
+                Ok(())
+            } else {
+                Err(TurnMetadataMergeConflict {
+                    field,
+                    reason: "two inputs in one batch set distinct scalar overrides",
+                })
+            }
+        }
+    }
+}
+
+mod duration_seconds {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(value: &Duration, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_u64(value.as_secs())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
+        let secs = u64::deserialize(de)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
 /// An input staged for application at a run boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StagedRunInput {
     /// When to apply this input.
     pub boundary: RunApplyBoundary,
@@ -149,7 +416,7 @@ pub struct StagedRunInput {
 /// Core does not know about Input, InputState, PolicyDecision, or any
 /// runtime-layer types. It only sees this.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "primitive_type", rename_all = "snake_case")]
 // StagedInput is intentionally large — it carries the full
 // RuntimeTurnMetadata (model/provider/connection_ref overrides,
@@ -520,7 +787,10 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
-                keep_alive: Some(true),
+                keep_alive: Some(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(30),
+                    policy: KeepAliveMode::Pinned,
+                }),
                 ..Default::default()
             }),
         };

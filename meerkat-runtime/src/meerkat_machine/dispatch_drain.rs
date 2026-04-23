@@ -100,11 +100,12 @@ impl MeerkatMachine {
             MeerkatMachineCommand::AbortAll => {
                 // Stage StopDrain for each session whose drain is Running.
                 let session_ids: Vec<meerkat_core::types::SessionId> = {
-                    let slots = self.comms_drain_slots.read().await;
-                    slots
+                    let sessions = self.sessions.read().await;
+                    sessions
                         .iter()
-                        .filter(|(_, slot)| {
-                            slot.phase == crate::meerkat_machine::CommsDrainPhase::Running
+                        .filter(|(_, entry)| {
+                            entry.drain_slot.phase
+                                == crate::meerkat_machine::CommsDrainPhase::Running
                         })
                         .map(|(sid, _)| sid.clone())
                         .collect()
@@ -112,9 +113,9 @@ impl MeerkatMachine {
                 for sid in &session_ids {
                     self.stage_drain_stop_dsl(sid).await;
                 }
-                let mut slots = self.comms_drain_slots.write().await;
-                for (_, slot) in slots.iter_mut() {
-                    abort_slot(slot);
+                let mut sessions = self.sessions.write().await;
+                for (_, entry) in sessions.iter_mut() {
+                    abort_slot(&mut entry.drain_slot);
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
@@ -127,18 +128,21 @@ impl MeerkatMachine {
                 }
                 // Stage StopDrain if drain is Running.
                 let drain_is_running = {
-                    let slots = self.comms_drain_slots.read().await;
-                    slots
+                    let sessions = self.sessions.read().await;
+                    sessions
                         .get(&session_id)
-                        .map(|s| s.phase == crate::meerkat_machine::CommsDrainPhase::Running)
+                        .map(|entry| {
+                            entry.drain_slot.phase
+                                == crate::meerkat_machine::CommsDrainPhase::Running
+                        })
                         .unwrap_or(false)
                 };
                 if drain_is_running {
                     self.stage_drain_stop_dsl(&session_id).await;
                 }
-                let mut slots = self.comms_drain_slots.write().await;
-                if let Some(slot) = slots.get_mut(&session_id) {
-                    abort_slot(slot);
+                let mut sessions = self.sessions.write().await;
+                if let Some(entry) = sessions.get_mut(&session_id) {
+                    abort_slot(&mut entry.drain_slot);
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
@@ -150,35 +154,44 @@ impl MeerkatMachine {
                     });
                 }
                 let handle = {
-                    let mut slots = self.comms_drain_slots.write().await;
-                    slots
+                    let mut sessions = self.sessions.write().await;
+                    sessions
                         .get_mut(&session_id)
-                        .and_then(|slot| slot.handle.take())
+                        .and_then(|entry| entry.drain_slot.handle.take())
                 };
                 if let Some(handle) = handle {
                     let _ = handle.await;
                 }
-                let mut slots = self.comms_drain_slots.write().await;
-                if let Some(slot) = slots.get_mut(&session_id)
-                    && slot.phase == crate::meerkat_machine::CommsDrainPhase::Running
-                {
-                    // Stage DSL DrainExitedClean for safety net before
-                    // mutating the slot. Determine respawnable based on
-                    // mode + Failed reason (safety net always uses Failed).
-                    let is_respawnable =
-                        slot.mode == Some(crate::meerkat_machine::CommsDrainMode::PersistentHost);
-                    drop(slots);
+                // Re-read post-await to safety-net a panicked task that
+                // never notified the authority. Record the stage-if-running
+                // decision under the same lock acquisition so authority
+                // and slot updates stay ordered: DSL input first, then
+                // mark the slot exited. Dropping and re-acquiring the
+                // write guard between DSL and slot mutation preserves the
+                // pre-collapse pattern where the sibling map was touched
+                // after the `sessions` lock was released.
+                let is_respawnable = {
+                    let sessions = self.sessions.read().await;
+                    sessions.get(&session_id).and_then(|entry| {
+                        (entry.drain_slot.phase == crate::meerkat_machine::CommsDrainPhase::Running)
+                            .then_some(
+                                entry.drain_slot.mode
+                                    == Some(crate::meerkat_machine::CommsDrainMode::PersistentHost),
+                            )
+                    })
+                };
+                if let Some(is_respawnable) = is_respawnable {
+                    let dsl_input = if is_respawnable {
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedRespawnable
+                    } else {
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedClean
+                    };
+                    let context = if is_respawnable {
+                        "DrainExitedRespawnable(safety)"
+                    } else {
+                        "DrainExitedClean(safety)"
+                    };
                     {
-                        let dsl_input = if is_respawnable {
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedRespawnable
-                        } else {
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedClean
-                        };
-                        let context = if is_respawnable {
-                            "DrainExitedRespawnable(safety)"
-                        } else {
-                            "DrainExitedClean(safety)"
-                        };
                         let mut sessions = self.sessions.write().await;
                         if let Some(entry) = sessions.get_mut(&session_id) {
                             let mut authority = entry
@@ -202,9 +215,9 @@ impl MeerkatMachine {
                         "comms_drain: task exited without notifying authority (likely panicked), \
                          submitting Failed safety net"
                     );
-                    let mut slots = self.comms_drain_slots.write().await;
-                    if let Some(slot) = slots.get_mut(&session_id) {
-                        slot.mark_task_exit_if_running_for_safety(
+                    let mut sessions = self.sessions.write().await;
+                    if let Some(entry) = sessions.get_mut(&session_id) {
+                        entry.drain_slot.mark_task_exit_if_running_for_safety(
                             crate::meerkat_machine::DrainExitReason::Failed,
                         );
                     }

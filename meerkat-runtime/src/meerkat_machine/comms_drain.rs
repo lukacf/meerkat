@@ -392,33 +392,32 @@ impl MeerkatMachine {
             None => return false,
         };
 
-        let sessions = self.sessions.read().await;
-        if !sessions.contains_key(session_id) {
-            tracing::warn!(
-                %session_id,
-                "refusing to spawn comms drain for unregistered session"
-            );
-            return false;
-        }
-        // Keep the session read guard while mutating drain slots so unregister
-        // cannot race between registration check and slot publication.
-        let mut slots = self.comms_drain_slots.write().await;
-        let slot = slots
-            .entry(session_id.clone())
-            .or_insert_with(CommsDrainSlot::new);
-
-        let needs_rebind = slot.begin_rebind(mode, comms.clone());
-        let needs_spawn = if needs_rebind {
-            false
-        } else {
-            slot.begin_running(mode, comms.clone())
+        // Wave-c C-H2: drain slot now lives on `RuntimeSessionEntry`, so
+        // one `sessions.write()` lock suffices for the "session exists +
+        // start the slot" gate. No separate drain-slots map to keep in
+        // sync with `sessions`.
+        let (needs_rebind, needs_spawn) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                tracing::warn!(
+                    %session_id,
+                    "refusing to spawn comms drain for unregistered session"
+                );
+                return false;
+            };
+            let slot = &mut entry.drain_slot;
+            let needs_rebind = slot.begin_rebind(mode, comms.clone());
+            let needs_spawn = if needs_rebind {
+                false
+            } else {
+                slot.begin_running(mode, comms.clone())
+            };
+            (needs_rebind, needs_spawn)
         };
 
         if !needs_rebind && !needs_spawn {
             return false;
         }
-        drop(slots);
-        drop(sessions);
 
         if needs_spawn {
             // Stage DSL SpawnDrain only when the machine is transitioning from
@@ -444,11 +443,8 @@ impl MeerkatMachine {
                         error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
                         "DSL rejected SpawnDrain; skipping drain spawn"
                     );
-                    let mut slots = self.comms_drain_slots.write().await;
-                    if let Some(slot) = slots.get_mut(session_id) {
-                        slot.phase = CommsDrainPhase::Stopped;
-                        slot.bound_runtime = None;
-                    }
+                    entry.drain_slot.phase = CommsDrainPhase::Stopped;
+                    entry.drain_slot.bound_runtime = None;
                     return false;
                 }
             } else {
@@ -456,11 +452,6 @@ impl MeerkatMachine {
                     %session_id,
                     "refusing to spawn comms drain for unregistered session"
                 );
-                let mut slots = self.comms_drain_slots.write().await;
-                if let Some(slot) = slots.get_mut(session_id) {
-                    slot.phase = CommsDrainPhase::Stopped;
-                    slot.bound_runtime = None;
-                }
                 return false;
             }
         } else if needs_rebind {
@@ -480,12 +471,11 @@ impl MeerkatMachine {
             comms.clone(),
             idle_timeout,
         );
-        let mut slots = self.comms_drain_slots.write().await;
-        let slot = slots
-            .entry(session_id.clone())
-            .or_insert_with(CommsDrainSlot::new);
-        slot.handle = Some(handle);
-        slot.mark_task_spawned();
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.drain_slot.handle = Some(handle);
+            entry.drain_slot.mark_task_spawned();
+        }
 
         true
     }
@@ -520,9 +510,10 @@ impl MeerkatMachine {
         // Determine whether this is a clean exit or a respawnable exit
         // based on the slot's current mode and the exit reason.
         let is_respawnable = {
-            let slots = self.comms_drain_slots.read().await;
-            slots.get(session_id).is_some_and(|s| {
-                s.mode == Some(CommsDrainMode::PersistentHost) && reason == DrainExitReason::Failed
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).is_some_and(|entry| {
+                entry.drain_slot.mode == Some(CommsDrainMode::PersistentHost)
+                    && reason == DrainExitReason::Failed
             })
         };
         {

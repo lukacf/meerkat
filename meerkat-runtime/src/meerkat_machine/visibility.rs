@@ -321,8 +321,9 @@ impl MeerkatMachine {
             }
         };
         let drain = {
-            let slots = self.comms_drain_slots.read().await;
-            if let Some(slot) = slots.get(session_id) {
+            let sessions = self.sessions.read().await;
+            if let Some(entry) = sessions.get(session_id) {
+                let slot = &entry.drain_slot;
                 MeerkatDrainSnapshot {
                     slot_present: true,
                     phase: Some(slot.phase),

@@ -159,6 +159,16 @@ struct RuntimeSessionEntry {
     /// including several Maps/Sets) so holding a reference to a
     /// `RuntimeSessionEntry` does not bloat async future sizes.
     dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+    /// Per-session comms drain lifecycle slot.
+    ///
+    /// Collapsed from the sibling `MeerkatMachine.comms_drain_slots:
+    /// RwLock<HashMap<SessionId, CommsDrainSlot>>` in wave-c C-H2 (F5 in
+    /// docs/wave-c-prep/state-scope-audit.md) — keeping the slot here
+    /// makes "session exists" a single HashMap insertion and eliminates
+    /// the class of bugs where the sibling map and the session map
+    /// could fall out of sync across a registration/unregistration
+    /// boundary.
+    drain_slot: CommsDrainSlot,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -416,8 +426,6 @@ pub struct MeerkatMachine {
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
-    /// Per-session comms drain lifecycle.
-    comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Canonical owner of "this session id is currently active" — replaces
@@ -446,7 +454,6 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: None,
             blob_store: None,
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }
@@ -459,7 +466,6 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(blob_store),
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }
@@ -477,7 +483,6 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: None,
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }

@@ -124,10 +124,11 @@ async fn spawn_test_comms_drain(
     idle_timeout: Duration,
 ) {
     adapter.register_session(session_id.clone()).await;
-    let mut slots = adapter.comms_drain_slots.write().await;
-    let slot = slots
-        .entry(session_id.clone())
-        .or_insert_with(CommsDrainSlot::new);
+    let mut sessions = adapter.sessions.write().await;
+    let entry = sessions
+        .get_mut(&session_id)
+        .expect("register_session must have created the entry");
+    let slot = &mut entry.drain_slot;
     slot.mode = Some(mode);
     slot.phase = CommsDrainPhase::Starting;
     slot.handle = Some(crate::comms_drain::spawn_comms_drain(
@@ -143,15 +144,15 @@ async fn current_phase(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
 ) -> Option<CommsDrainPhase> {
-    let slots = adapter.comms_drain_slots.read().await;
-    slots.get(session_id).map(|slot| slot.phase)
+    let sessions = adapter.sessions.read().await;
+    sessions.get(session_id).map(|entry| entry.drain_slot.phase)
 }
 
 async fn handle_present(adapter: &Arc<MeerkatMachine>, session_id: &SessionId) -> bool {
-    let slots = adapter.comms_drain_slots.read().await;
-    slots
+    let sessions = adapter.sessions.read().await;
+    sessions
         .get(session_id)
-        .and_then(|slot| slot.handle.as_ref())
+        .and_then(|entry| entry.drain_slot.handle.as_ref())
         .is_some()
 }
 
@@ -252,10 +253,12 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
 
     adapter.unregister_session(&session_id).await;
 
-    let slots = adapter.comms_drain_slots.read().await;
+    // Wave-c C-H2: the drain slot is now owned by RuntimeSessionEntry,
+    // so "slot removed" is structurally equivalent to "session removed".
+    let sessions = adapter.sessions.read().await;
     assert!(
-        !slots.contains_key(&session_id),
-        "unregister must remove the comms drain slot entirely"
+        !sessions.contains_key(&session_id),
+        "unregister must remove the session entry (which owns the comms drain slot)"
     );
 }
 

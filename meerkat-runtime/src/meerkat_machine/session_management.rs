@@ -52,6 +52,7 @@ impl MeerkatMachine {
             phase: RegistrationPhase::Queuing,
             detached_wake: None,
             dsl_authority,
+            drain_slot: CommsDrainSlot::new(),
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -233,6 +234,7 @@ impl MeerkatMachine {
                             phase: RegistrationPhase::Queuing,
                             detached_wake: None,
                             dsl_authority,
+                            drain_slot: CommsDrainSlot::new(),
                         },
                     );
                     (driver, completions, recovered_ops)
@@ -461,11 +463,12 @@ impl MeerkatMachine {
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
         let entry = {
             let mut sessions = self.sessions.write().await;
-            let mut slots = self.comms_drain_slots.write().await;
-            // Remove + abort drain slot before dropping session binding so
-            // slot keys remain a subset of registered-session keys.
-            if let Some(mut slot) = slots.remove(session_id) {
-                abort_slot(&mut slot);
+            // Abort the drain slot inline before removing the entry — the
+            // slot is now owned by the entry itself (wave-c C-H2), so the
+            // "slot keys are a subset of registered-session keys" invariant
+            // is structural rather than enforced by ordering.
+            if let Some(entry) = sessions.get_mut(session_id) {
+                abort_slot(&mut entry.drain_slot);
             }
             sessions.remove(session_id)
         };

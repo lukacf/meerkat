@@ -10,7 +10,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Subsystem | State Cells | Semantic Operations | Coupling Invariants | Open State Cells | Open Operations | Open Invariants |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| runtime | 7 | 21 | 5 | 0 | 0 | 0 |
+| runtime | 7 | 21 | 4 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
 | mob | 6 | 41 | 3 | 0 | 0 | 0 |
 | auth | 1 | 8 | 0 | 0 | 0 | 0 |
@@ -42,7 +42,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | Path | Symbol | Class | Status | Anchor | Contract |
 | --- | --- | --- | --- | --- | --- |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
-| `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine.comms_drain_slots` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + drain-control region` | src: `registered session keys + comms drain lifecycle slot allocation`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
+| `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.drain_slot` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + drain-control region` | src: `per-session comms drain lifecycle slot co-owned by the registered-session entry`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `MeerkatMachine control + admission + input-lifecycle regions` | - |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.phase` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.completions` | `capability-handle` | `closed` | `InputLifecycle terminal wait plumbing` | - |
@@ -79,7 +79,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
-| `runtime_session_drain_subset` | `MeerkatMachine.sessions`, `MeerkatMachine.comms_drain_slots` | `closed` | `registered-session contract + MeerkatMachine drain-control region` |
 | `runtime_attachment_alignment` | `RuntimeSessionEntry.phase`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
 | `runtime_queue_projection_alignment` | `MeerkatMachine.admission.queue`, `EphemeralRuntimeDriver.queue`, `EphemeralRuntimeDriver.steer_queue` | `closed` | `MeerkatMachine admission region` |
 | `runtime_comms_bridge_projection_alignment` | `MeerkatMachine.peer_ingress.classified_interactions`, `RuntimeCommsBridge.runtime_input_projection` | `closed` | `MeerkatMachine peer-ingress classification + RuntimeCommsBridge projection contract` |

@@ -1934,17 +1934,17 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-runtime/src/meerkat_machine/mod.rs",
-            "MeerkatMachine.comms_drain_slots",
+            "RuntimeSessionEntry.drain_slot",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
             "MeerkatMachine registered-session contract + drain-control region",
             Some(contract(
-                "registered session keys + comms drain lifecycle slot allocation",
+                "per-session comms drain lifecycle slot co-owned by the registered-session entry",
                 "register/unregister/destroy + drain lifecycle transitions + control installation",
                 StalenessPolicy::Forbidden,
             )),
             EntryStatus::Closed,
-            "drain slots are capability reachability only; unregister aborts and removes slots before dropping session binding, and spawn/control updates ignore unregistered sessions",
+            "wave-c C-H2 collapse: drain slots now live on RuntimeSessionEntry so slot presence is structurally identical to session registration — the subset invariant with MeerkatMachine.sessions is vacuous by construction; unregister aborts the slot before removing the entry",
         ),
         state_entry!(
             "meerkat-runtime/src/meerkat_machine/mod.rs",
@@ -2304,10 +2304,10 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "unregister_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "comms_drain_slots"],
+            &["sessions", "drain_slot"],
             "registered-session contract + MeerkatMachine drain-control region",
             &["session removed and no drain remains live or suppressing"],
-            &["drain slots subset session registrations"],
+            &["drain slot is owned by session entry (wave-c C-H2)"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
@@ -2371,7 +2371,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "update_peer_ingress_context",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["comms_drain_slots"],
+            &["drain_slot"],
             "MeerkatMachine drain-control region",
             &["drain spawn follows handoff protocol and updates slot projection"],
             &["no live drain without registered session"],
@@ -2382,7 +2382,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "notify_comms_drain_exited",
             BoundaryKind::ManualCallback,
             "MeerkatMachine",
-            &["comms_drain_slots"],
+            &["drain_slot"],
             "MeerkatMachine drain-control region",
             &["exit feedback closes drain lifecycle and updates slot projection"],
             &["drain protocol closure and liveness remain satisfied"],
@@ -2393,7 +2393,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "abort_comms_drains",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["comms_drain_slots"],
+            &["drain_slot"],
             "MeerkatMachine drain-control region",
             &["abort requests transition all tracked drains through canonical abort protocol"],
             &["no slot remains in running state after abort completion"],
@@ -2404,7 +2404,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "abort_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["comms_drain_slots"],
+            &["drain_slot"],
             "MeerkatMachine drain-control region",
             &["single-session abort request follows canonical drain abort protocol"],
             &["aborted drain slot cannot retain stale running state"],
@@ -2415,7 +2415,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "wait_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["comms_drain_slots"],
+            &["drain_slot"],
             "MeerkatMachine drain-control region",
             &["wait path preserves canonical drain terminalization and safety-net exit reporting"],
             &["drain phase cannot remain Running after joined completion path"],
@@ -3397,18 +3397,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
 
 fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
     vec![
-        invariant(
-            "runtime_session_drain_subset",
-            Subsystem::Runtime,
-            &[
-                "MeerkatMachine.sessions",
-                "MeerkatMachine.comms_drain_slots",
-            ],
-            "keys(comms_drain_slots) subset keys(sessions)",
-            "registered-session contract + MeerkatMachine drain-control region",
-            "shell synchronization + drain lifecycle protocol + ownership-ledger",
-            EntryStatus::Closed,
-        ),
+        // Wave-c C-H2: the historical `runtime_session_drain_subset`
+        // invariant (`keys(comms_drain_slots) subset keys(sessions)`) was
+        // collapsed by moving `CommsDrainSlot` into `RuntimeSessionEntry`.
+        // The drain slot is now a field of the entry, so the subset
+        // relationship is structural and the invariant is vacuous — it
+        // has been deleted rather than restated.
         invariant(
             "runtime_attachment_alignment",
             Subsystem::Runtime,

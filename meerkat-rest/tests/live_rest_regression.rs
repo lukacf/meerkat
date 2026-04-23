@@ -4,7 +4,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use meerkat::surface::wire_runtime_bindings;
 use meerkat::{
     AgentFactory, Config, FactoryAgentBuilder, LlmClient, MemoryStore, PersistenceBundle,
     PersistentSessionService, SessionStore,
@@ -64,7 +63,6 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
     let (session_store_inner, runtime_store, blob_store) = persistence.into_parts();
     let mut session_service =
         PersistentSessionService::new(builder, 100, session_store_inner, runtime_store, blob_store);
-    wire_runtime_bindings(&mut session_service, &runtime_adapter);
     let session_service = Arc::new(session_service);
     #[cfg(feature = "mob")]
     let mob_state = wire_mob_tools(
@@ -98,7 +96,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
             meerkat::MemoryScheduleStore::default(),
         )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
-        realm_id: "test-realm".to_string(),
+        realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

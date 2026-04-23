@@ -5,7 +5,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures::stream;
 use http_body_util::BodyExt;
-use meerkat::surface::wire_runtime_bindings;
 use meerkat::{
     AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistenceBundle,
     PersistentSessionService, SessionStore,
@@ -98,7 +97,6 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     let (session_store, runtime_store, blob_store) = persistence.into_parts();
     let mut session_service =
         PersistentSessionService::new(builder, 100, session_store, runtime_store, blob_store);
-    wire_runtime_bindings(&mut session_service, &runtime_adapter);
     let session_service = Arc::new(session_service);
     #[cfg(feature = "mob")]
     let mob_state = wire_mob_tools(
@@ -131,7 +129,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
             meerkat::MemoryScheduleStore::default(),
         )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
-        realm_id: "phase1-rest".to_string(),
+        realm: meerkat_core::RealmId::parse("phase1-rest").expect("valid realm"),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

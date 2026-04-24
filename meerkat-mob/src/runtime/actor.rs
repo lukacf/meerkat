@@ -763,9 +763,24 @@ impl MobActor {
     /// `flush_routed_effects` at the next async boundary.
     fn queue_routed_effects_from(&mut self, effects: &[mob_dsl::MobMachineEffect]) {
         for effect in effects {
+            if Self::is_placeholder_session_routed_effect(effect) {
+                continue;
+            }
             if let Some(seam_effect) = super::composition::lift_routed_effect(effect) {
                 self.pending_routed_effects.push(seam_effect);
             }
+        }
+    }
+
+    fn is_placeholder_session_routed_effect(effect: &mob_dsl::MobMachineEffect) -> bool {
+        match effect {
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding { session_id, .. }
+            | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
+            | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id } => {
+                session_id.0.is_empty()
+            }
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. } => false,
+            _ => false,
         }
     }
 
@@ -4400,6 +4415,69 @@ impl MobActor {
         // WiringError with zero side effects.
         let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "wire").await?;
         let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "wire").await?;
+        if let (
+            WiringEndpoint::PeerOnly {
+                spec: local_spec,
+                binding: local_binding,
+            },
+            WiringEndpoint::PeerOnly {
+                spec: peer_spec,
+                binding: peer_binding,
+            },
+        ) = (&local_endpoint, &peer_endpoint)
+        {
+            let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+            if let Err(error) = self
+                .wire_peer_only_recipient(
+                    local_spec,
+                    Some(local_binding),
+                    peer_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
+                    .await;
+                return Err(error);
+            }
+            if let Err(error) = self
+                .wire_peer_only_recipient(
+                    peer_spec,
+                    Some(peer_binding),
+                    local_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                self.rollback_peer_only_wire(&edge, dsl_added, &["local"], local_spec, peer_spec)
+                    .await;
+                return Err(error);
+            }
+            let event = NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MembersWired {
+                    a: AgentIdentity::from(edge.a.0.as_str()),
+                    b: AgentIdentity::from(edge.b.0.as_str()),
+                },
+            };
+            let stored = match self.events.append(event).await {
+                Ok(stored) => stored,
+                Err(error) => {
+                    self.rollback_peer_only_wire(
+                        &edge,
+                        dsl_added,
+                        &["local", "peer"],
+                        local_spec,
+                        peer_spec,
+                    )
+                    .await;
+                    return Err(MobError::from(error));
+                }
+            };
+            self.roster.write().await.apply_event(&stored);
+            return Ok(());
+        }
         let (local_comms, local_spec) = match local_endpoint {
             WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
             WiringEndpoint::PeerOnly { .. } => {
@@ -4544,6 +4622,88 @@ impl MobActor {
         };
         self.roster.write().await.apply_event(&stored);
         Ok(())
+    }
+
+    fn apply_wire_members_idempotent(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+    ) -> Result<bool, MobError> {
+        match self.apply_dsl_input(
+            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+            "wire_members",
+        ) {
+            Ok(()) => Ok(true),
+            Err(MobError::Internal(message)) if message.contains("wire_members") => {
+                if self
+                    .dsl_authority
+                    .state
+                    .wiring_edges
+                    .iter()
+                    .any(|existing| existing == edge)
+                {
+                    Ok(false)
+                } else {
+                    Err(MobError::WiringError(format!(
+                        "wire rejected by MobMachine DSL: {message}"
+                    )))
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    async fn rollback_peer_only_wire(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        dsl_added: bool,
+        installed_sides: &[&str],
+        local_spec: &TrustedPeerDescriptor,
+        peer_spec: &TrustedPeerDescriptor,
+    ) {
+        if installed_sides.contains(&"local")
+            && let Err(error) = self
+                .unwire_peer_only_recipient(
+                    local_spec,
+                    None,
+                    peer_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                %error,
+                "peer-only wire rollback: failed to unwire local recipient"
+            );
+        }
+        if installed_sides.contains(&"peer")
+            && let Err(error) = self
+                .unwire_peer_only_recipient(
+                    peer_spec,
+                    None,
+                    local_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                %error,
+                "peer-only wire rollback: failed to unwire peer recipient"
+            );
+        }
+        if dsl_added
+            && let Err(error) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
+                "peer_only_wire_rollback",
+            )
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                %error,
+                "peer-only wire rollback: failed to revert DSL wire"
+            );
+        }
     }
 
     /// Unwind side effects from a failed local-local wire. Best-effort:
@@ -6344,10 +6504,12 @@ impl MobActor {
                 .collect::<Vec<_>>()
         };
         if !remote_bindings.is_empty() {
+            let next_public_key = next.keypair().public_key();
             let next_sup_spec: super::bridge_protocol::BridgePeerSpec =
-                meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+                meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
                     format!("{}/__mob_supervisor__", self.definition.id),
                     next.public_peer_id.clone(),
+                    *next_public_key.as_bytes(),
                     format!("inproc://{}/__mob_supervisor__", self.definition.id),
                 )
                 .map_err(|error| {
@@ -7679,19 +7841,14 @@ impl MobActor {
 
         match &entry.member_ref {
             MemberRef::BackendPeer { peer_id, .. } => {
-                let spec = self
-                    .provisioner
-                    .trusted_peer_spec(&entry.member_ref, &comms_name, peer_id)
-                    .await?;
-                Ok(WiringEndpoint::PeerOnly {
-                    spec,
-                    binding: Self::runtime_binding_for_entry(entry).ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "{context} requires external runtime binding for '{}'",
-                            entry.agent_identity
-                        ))
-                    })?,
-                })
+                let binding = Self::runtime_binding_for_entry(entry).ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "{context} requires external runtime binding for '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
+                let spec = Self::peer_only_spec_for_binding(&binding, context)?;
+                Ok(WiringEndpoint::PeerOnly { spec, binding })
             }
             MemberRef::Session { .. } => Err(MobError::WiringError(format!(
                 "{context} requires comms runtime for '{}'",

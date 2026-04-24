@@ -88,9 +88,11 @@ impl MobSupervisorBridge {
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
-        TrustedPeerDescriptor::test_only_unsigned(
+        let public_key = authority.keypair().public_key();
+        TrustedPeerDescriptor::unsigned_with_pubkey(
             self.participant_name.clone(),
             authority.public_peer_id,
+            *public_key.as_bytes(),
             format!("inproc://{}", self.participant_name),
         )
         .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))

@@ -212,6 +212,27 @@ impl Roster {
                     entry.wired_to.remove(a);
                 }
             }
+            MobEventKind::ExternalPeerWired { local, spec } => {
+                // External wire: project the descriptor into the local
+                // member's `external_peer_specs` and add the external
+                // peer's name (as AgentIdentity) to `wired_to`. Resume
+                // path replays these events to reinstate trust without
+                // consulting a live comms runtime.
+                if let Some(entry) = self.entries.get_mut(local) {
+                    let external_identity = AgentIdentity::from(spec.name.as_str());
+                    entry.wired_to.insert(external_identity.clone());
+                    entry
+                        .external_peer_specs
+                        .insert(external_identity, spec.clone());
+                }
+            }
+            MobEventKind::ExternalPeerUnwired { local, peer_name } => {
+                if let Some(entry) = self.entries.get_mut(local) {
+                    let external_identity = AgentIdentity::from(peer_name.as_str());
+                    entry.wired_to.remove(&external_identity);
+                    entry.external_peer_specs.remove(&external_identity);
+                }
+            }
             MobEventKind::MobReset => {
                 self.entries.clear();
             }

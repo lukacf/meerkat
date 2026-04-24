@@ -1513,6 +1513,8 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
             MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::MembersUnwired { .. } => "MembersUnwired",
+            MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
+            MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
             MobEventKind::TaskCreated { .. } => "TaskCreated",
             MobEventKind::TaskUpdated { .. } => "TaskUpdated",
             MobEventKind::FlowStarted { .. } => "FlowStarted",
@@ -9797,86 +9799,11 @@ async fn test_unwire_external_removes_trust_and_projection() {
     );
 }
 
-// Rejection-assertion tripwires for external peer wiring.
-//
-// External peer wiring is scope-deferred until supervisor-owned trust
-// authority is restored (see `MobActor::handle_wire` / `handle_unwire` in
-// `actor.rs`: `PeerTarget::External(_)` arm returns `MobError::WiringError`
-// with message `"external peer wiring requires supervisor-owned trust
-// authority; scope-deferred beyond Wave D ..."`). The two tests below pin
-// that current contract: `handle.wire` / `handle.unwire` with an External
-// target MUST return `WiringError` containing `"scope-deferred"`.
-//
-// When supervisor-owned trust authority lands and external wiring is
-// restored, both tests will fail loudly, pointing whoever restores the
-// feature at the exact sites that need to be flipped back to positive-path
-// assertions (wire succeeds; unwire succeeds; `MobEventKind::MembersUnwired`
-// or the restored `ExternalPeer*` variant appears in the event ledger).
-#[tokio::test]
-async fn test_wire_external_rejects_with_scope_deferred_wiring_error() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
-        .await
-        .expect("spawn lead");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
-        "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
-        "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
-
-    let err = handle
-        .wire(
-            AgentIdentity::from("l-1"),
-            PeerTarget::External(external.clone()),
-        )
-        .await
-        .expect_err(
-            "external peer wiring is scope-deferred until supervisor-owned trust authority \
-             is restored; handle.wire(PeerTarget::External) MUST reject with WiringError",
-        );
-    match &err {
-        MobError::WiringError(msg) => assert!(
-            msg.contains("scope-deferred"),
-            "expected scope-deferred rejection, got: {msg}"
-        ),
-        other => panic!("expected MobError::WiringError, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn test_unwire_external_rejects_with_scope_deferred_wiring_error() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
-        .await
-        .expect("spawn lead");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
-        "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
-        "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
-
-    let err = handle
-        .unwire(
-            AgentIdentity::from("l-1"),
-            PeerTarget::External(external.clone()),
-        )
-        .await
-        .expect_err(
-            "external peer unwiring is scope-deferred until supervisor-owned trust authority \
-             is restored; handle.unwire(PeerTarget::External) MUST reject with WiringError",
-        );
-    match &err {
-        MobError::WiringError(msg) => assert!(
-            msg.contains("scope-deferred"),
-            "expected scope-deferred rejection, got: {msg}"
-        ),
-        other => panic!("expected MobError::WiringError, got: {other:?}"),
-    }
-}
+// External peer wiring was previously scope-deferred (rejection-assertion
+// tripwires fired `WiringError` containing `"scope-deferred"`). The
+// feature was restored in #31 D-external-peer; the positive-path
+// assertions live in `test_wire_external_adds_trusted_peer_and_tracks_projection`
+// and `test_unwire_external_removes_trust_and_projection` above.
 
 #[tokio::test]
 async fn test_wire_emits_peers_wired_event() {

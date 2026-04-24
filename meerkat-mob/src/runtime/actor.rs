@@ -4235,11 +4235,10 @@ impl MobActor {
     /// one owner) that rejection is a no-op success here — the edge is
     /// already in the authority — and no new event is recorded.
     ///
-    /// External peer targets ([`PeerTarget::External`]) are NOT supported
-    /// on this path: external peer wiring was shell-authority in Wave A
-    /// (`TrustedPeerSpec` round-trips through the event store) and was
-    /// deleted in commit `0ad584cde`. Restoring it is scope-deferred;
-    /// callers receive [`MobError::WiringError`] with a documented reason.
+    /// External peer targets ([`PeerTarget::External`]) are handled on a
+    /// separate path ([`Self::handle_wire_external`]) because they carry a
+    /// full [`TrustedPeerDescriptor`] that has to round-trip through the
+    /// event log so resume can reinstate trust deterministically.
     async fn handle_wire(
         &mut self,
         local: MeerkatId,
@@ -4247,12 +4246,8 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let peer_identity = match target {
             super::handle::PeerTarget::Local(id) => id,
-            super::handle::PeerTarget::External(_) => {
-                return Err(MobError::WiringError(
-                    "external peer wiring requires supervisor-owned trust authority; \
-                     scope-deferred beyond Wave D (deleted by 0ad584cde as shell-authority violation)"
-                        .into(),
-                ));
+            super::handle::PeerTarget::External(descriptor) => {
+                return self.handle_wire_external(local, descriptor).await;
             }
         };
 
@@ -4332,13 +4327,42 @@ impl MobActor {
         target: super::handle::PeerTarget,
     ) -> Result<(), MobError> {
         let peer_identity = match target {
-            super::handle::PeerTarget::Local(id) => id,
-            super::handle::PeerTarget::External(_) => {
-                return Err(MobError::WiringError(
-                    "external peer unwiring requires supervisor-owned trust authority; \
-                     scope-deferred beyond Wave D (deleted by 0ad584cde as shell-authority violation)"
-                        .into(),
-                ));
+            super::handle::PeerTarget::Local(id) => {
+                // If the peer is not in the roster but is tracked as an
+                // external peer spec on the local member, route through
+                // the external unwire path. Callers commonly unwire an
+                // external peer by name (projected as an `AgentIdentity`
+                // Local target) rather than passing the full descriptor.
+                let external_peer = {
+                    let roster = self.roster.read().await;
+                    match roster.get(&local) {
+                        Some(local_entry)
+                            if roster.get(&MeerkatId::from(id.as_str())).is_none() =>
+                        {
+                            local_entry.external_peer_specs.contains_key(&id)
+                        }
+                        _ => false,
+                    }
+                };
+                if external_peer {
+                    let peer_name = meerkat_core::comms::PeerName::new(id.as_str().to_string())
+                        .map_err(|error| {
+                            MobError::WiringError(format!(
+                                "unwire external peer has invalid peer name: {error}",
+                            ))
+                        })?;
+                    return self.handle_unwire_external(local, peer_name).await;
+                }
+                id
+            }
+            super::handle::PeerTarget::External(descriptor) => {
+                let peer_name = meerkat_core::comms::PeerName::new(descriptor.name.clone())
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "unwire external peer has invalid peer name: {error}",
+                        ))
+                    })?;
+                return self.handle_unwire_external(local, peer_name).await;
             }
         };
 
@@ -4391,6 +4415,165 @@ impl MobActor {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// D-external-peer (#31): wire a local member to an external trusted peer.
+    ///
+    /// Shell-mechanical trust install followed by an `ExternalPeerWired`
+    /// event append and roster projection. The event round-trips the full
+    /// [`TrustedPeerDescriptor`] so resume can reinstate trust
+    /// deterministically without a live comms runtime.
+    ///
+    /// Unlike local↔local wiring, external wiring is shell-authority over
+    /// the shape of trusted peers on the local session runtime only: the
+    /// MobMachine DSL has no opinion about external peer identities today.
+    /// Local↔local wiring still flows through [`Self::handle_wire`]'s
+    /// DSL-driven path.
+    ///
+    /// Idempotent: a second wire of the same (local, external_name) edge
+    /// with the same descriptor is treated as a no-op success.
+    async fn handle_wire_external(
+        &mut self,
+        local: MeerkatId,
+        spec: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let local_identity = AgentIdentity::from(local.as_str());
+        let external_identity = AgentIdentity::from(spec.name.as_str());
+        if local_identity == external_identity {
+            return Err(MobError::WiringError(format!(
+                "wire requires distinct members (got '{local}')"
+            )));
+        }
+
+        // Look up the local member's roster entry and session binding.
+        let (member_ref, already_wired_with_same_spec) = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(&local)
+                .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
+            let already = entry
+                .external_peer_specs
+                .get(&external_identity)
+                .map(|existing| existing == &spec)
+                .unwrap_or(false);
+            (entry.member_ref.clone(), already)
+        };
+
+        if already_wired_with_same_spec {
+            return Ok(());
+        }
+
+        // Resolve the local session's comms runtime for trust install.
+        let comms = self.provisioner_comms(&member_ref).await.ok_or_else(|| {
+            MobError::WiringError(format!(
+                "wire requires comms runtime for '{local}' (external peer wire)"
+            ))
+        })?;
+
+        // Install trust on the local's session comms runtime.
+        comms.add_trusted_peer(spec.clone()).await?;
+
+        // Append ExternalPeerWired — if the append fails, compensate by
+        // rolling back the trust install so failure leaves no side effect.
+        let event = NewMobEvent {
+            mob_id: self.definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::ExternalPeerWired {
+                local: local_identity,
+                spec: spec.clone(),
+            },
+        };
+        let stored = match self.events.append(event).await {
+            Ok(stored) => stored,
+            Err(append_err) => {
+                if let Err(rollback_err) = comms.remove_trusted_peer(&spec.peer_id.as_str()).await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        local = %local,
+                        error = %rollback_err,
+                        "failed to rollback external trust install after event append failure"
+                    );
+                }
+                return Err(MobError::from(append_err));
+            }
+        };
+
+        // Mirror the event through the roster projection — same pattern
+        // as MembersWired in `handle_wire`.
+        self.roster.write().await.apply_event(&stored);
+        Ok(())
+    }
+
+    /// D-external-peer (#31): unwire a local member from an external trusted peer.
+    ///
+    /// Mirror of [`Self::handle_wire_external`]: removes trust from the
+    /// local session comms runtime, appends `ExternalPeerUnwired`, and
+    /// projects through the roster.
+    ///
+    /// Idempotent: unwiring an already-absent external peer is a no-op
+    /// success.
+    async fn handle_unwire_external(
+        &mut self,
+        local: MeerkatId,
+        peer_name: meerkat_core::comms::PeerName,
+    ) -> Result<(), MobError> {
+        let local_identity = AgentIdentity::from(local.as_str());
+        let external_identity = AgentIdentity::from(peer_name.as_str());
+
+        // Look up the prior descriptor so we can compensate on append
+        // failure. Idempotent: absent spec → no-op success.
+        let (member_ref, prior_spec) = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(&local)
+                .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
+            let prior = entry.external_peer_specs.get(&external_identity).cloned();
+            (entry.member_ref.clone(), prior)
+        };
+
+        let Some(prior_spec) = prior_spec else {
+            // Idempotent no-op: nothing to unwire.
+            return Ok(());
+        };
+
+        let comms = self.provisioner_comms(&member_ref).await.ok_or_else(|| {
+            MobError::WiringError(format!(
+                "unwire requires comms runtime for '{local}' (external peer unwire)"
+            ))
+        })?;
+
+        // Remove trust on the local session runtime.
+        let _ = comms
+            .remove_trusted_peer(&prior_spec.peer_id.as_str())
+            .await?;
+
+        let event = NewMobEvent {
+            mob_id: self.definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::ExternalPeerUnwired {
+                local: local_identity,
+                peer_name: peer_name.clone(),
+            },
+        };
+        let stored = match self.events.append(event).await {
+            Ok(stored) => stored,
+            Err(append_err) => {
+                // Restore trust on append failure so the unwire is a full
+                // no-op from the caller's perspective.
+                if let Err(rollback_err) = comms.add_trusted_peer(prior_spec.clone()).await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        local = %local,
+                        error = %rollback_err,
+                        "failed to rollback external trust removal after event append failure"
+                    );
+                }
+                return Err(MobError::from(append_err));
+            }
+        };
+
+        self.roster.write().await.apply_event(&stored);
+        Ok(())
     }
 
     ///

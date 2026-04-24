@@ -12,7 +12,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
-use meerkat_core::comms::TrustedPeerDescriptor;
+use meerkat_core::comms::{PeerName, TrustedPeerDescriptor};
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
@@ -322,6 +322,33 @@ pub enum MobEventKind {
         a: AgentIdentity,
         /// Second member of the edge.
         b: AgentIdentity,
+    },
+    /// A local member was wired to an external trusted peer.
+    ///
+    /// Restored post-#31 D-external-peer: external peer wiring carries the
+    /// full [`TrustedPeerDescriptor`] through the event log so roster
+    /// projection and resume can reinstate trust without consulting any
+    /// live comms runtime. `local` is the local session-backed member that
+    /// initiated the wire; `spec` is the full descriptor used to install
+    /// trust on the local's session comms runtime.
+    ExternalPeerWired {
+        /// Local member that initiated the wire.
+        local: AgentIdentity,
+        /// Full trusted peer descriptor installed as trust on the local
+        /// member's comms runtime.
+        spec: TrustedPeerDescriptor,
+    },
+    /// A local member was unwired from a previously-wired external peer.
+    ///
+    /// Restored post-#31 D-external-peer: companion of
+    /// [`Self::ExternalPeerWired`]. `peer_name` is the canonical
+    /// [`PeerName`] of the external peer, matching the
+    /// [`TrustedPeerDescriptor::name`] of the previously-wired descriptor.
+    ExternalPeerUnwired {
+        /// Local member that initiated the unwire.
+        local: AgentIdentity,
+        /// Canonical name of the external peer removed from local trust.
+        peer_name: PeerName,
     },
     /// A task was created on the shared task board.
     TaskCreated {
@@ -750,6 +777,28 @@ mod tests {
         roundtrip(&MobEventKind::MembersUnwired {
             a: AgentIdentity::from("l-1"),
             b: AgentIdentity::from("w-2"),
+        });
+    }
+
+    #[test]
+    fn test_external_peer_wired_roundtrip() {
+        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            "remote-mob/worker/agent-b",
+            meerkat_core::comms::PeerId::new(),
+            "inproc://remote-mob/worker/agent-b",
+        )
+        .expect("valid external peer");
+        roundtrip(&MobEventKind::ExternalPeerWired {
+            local: AgentIdentity::from("l-1"),
+            spec,
+        });
+    }
+
+    #[test]
+    fn test_external_peer_unwired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerUnwired {
+            local: AgentIdentity::from("l-1"),
+            peer_name: PeerName::new("remote-mob/worker/agent-b").unwrap(),
         });
     }
 

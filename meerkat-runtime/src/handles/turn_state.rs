@@ -43,6 +43,7 @@ impl RuntimeTurnStateHandle {
             return Ok(());
         }
 
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Commit {
                 input_id: mm_dsl::InputId::from(format!("direct-run:{run_id}")),

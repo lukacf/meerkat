@@ -910,15 +910,6 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
-                            if let Some(completions) = completions.as_ref() {
-                                let mut completions = completions.lock().await;
-                                for input_id in &input_ids {
-                                    completions.resolve_abandoned(
-                                        input_id,
-                                        format!("runtime commit failed: {err}"),
-                                    );
-                                }
-                            }
                             let _ = executor
                                 .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                                     reason: format!("runtime loop commit failed for run {run_id}: {err}"),

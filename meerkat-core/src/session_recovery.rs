@@ -9,7 +9,8 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, PeerMeta,
-    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef, skills::SkillKey,
+    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
+    checkpoint::SessionCheckpointer, skills::SkillKey,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
@@ -42,6 +43,7 @@ pub struct SurfaceSessionRecoveryOverrides {
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
     pub require_runtime_build_mode: bool,
     pub realm_id: Option<String>,
@@ -287,7 +289,7 @@ pub fn build_recovered_session(
         // the binding re-resolves through the same realm entry.
         connection_ref: metadata.connection_ref.clone(),
         keep_alive,
-        checkpointer: None,
+        checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
         max_inline_peer_notifications: build_state.max_inline_peer_notifications,
         app_context: overrides

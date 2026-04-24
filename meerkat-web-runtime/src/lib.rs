@@ -2097,6 +2097,8 @@ struct MobSpawnHelperOptions {
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
+    connection_ref: Option<String>,
+    #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
     backend: Option<meerkat_mob::MobBackendKind>,
@@ -2110,6 +2112,8 @@ struct MobForkHelperOptions {
     agent_identity: Option<String>,
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
+    #[serde(default)]
+    connection_ref: Option<String>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -2232,6 +2236,9 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
+    if let Some(connection_ref) = request.connection_ref.as_deref() {
+        options.connection_ref = Some(parse_connection_ref_boundary(connection_ref)?);
+    }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
     let result = mob_state
@@ -2262,6 +2269,9 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
+    }
+    if let Some(connection_ref) = request.connection_ref.as_deref() {
+        options.connection_ref = Some(parse_connection_ref_boundary(connection_ref)?);
     }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
@@ -2564,6 +2574,16 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_connection_ref() -> meerkat_core::ConnectionRef {
+        meerkat_core::ConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse("default").expect("test realm id"),
+            binding: meerkat_core::connection::BindingId::parse("default_anthropic")
+                .expect("test binding id"),
+            profile: None,
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn init_test_runtime() {
         let init = init_runtime_from_config(
@@ -2654,19 +2674,9 @@ mod tests {
         );
     }
 
-    /// SCOPE-DEFERRED — wave-c auth-seam cleanup deleted env-default realm
-    /// synthesis + first-matching-provider promotion; `build_agent` now
-    /// requires an explicit `ConnectionRef (realm + binding)`. The test's
-    /// `populate_realm_from_api_keys` + mob definition path doesn't thread
-    /// a ConnectionRef through to helper spawn. Preserved under `#[ignore]`
-    /// so the intent (append_system_context targets correct member session
-    /// via mob API) is retained for the eventual harness update that
-    /// threads the explicit ConnectionRef through `HelperOptions` /
-    /// `MobDefinition` profile wiring.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "blocked on threading explicit ConnectionRef through web-runtime helper-spawn harness (wave-c auth-seam cleanup deleted ambient credential promotion)"]
     async fn mob_append_system_context_targets_member_session() {
         let mut config = Config::default();
         populate_realm_from_api_keys(
@@ -2709,6 +2719,7 @@ mod tests {
                 &mob_id,
                 vec![
                     SpawnMemberSpec::new("worker", "worker-1")
+                        .with_connection_ref(test_connection_ref())
                         .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
                 ],
             )
@@ -2811,12 +2822,9 @@ mod tests {
         assert_eq!(spawn_payload["agent_identity"], "test-member");
     }
 
-    /// SCOPE-DEFERRED — same harness gap as
-    /// `mob_append_system_context_targets_member_session`.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "blocked on threading explicit ConnectionRef through web-runtime helper-spawn harness (wave-c auth-seam cleanup deleted ambient credential promotion)"]
     async fn helper_result_payload_returns_identity_native_fields() {
         let mut config = Config::default();
         populate_realm_from_api_keys(
@@ -2842,6 +2850,7 @@ mod tests {
             .expect("create mob");
         let mut options = meerkat_mob::HelperOptions::default();
         options.role_name = Some(meerkat_mob::ProfileName::from("worker"));
+        options.connection_ref = Some(test_connection_ref());
 
         let result = mob_state
             .mob_spawn_helper(

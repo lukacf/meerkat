@@ -2341,12 +2341,11 @@ fn acknowledge_node_grant(
         };
         let body_depth = current_depth + 1;
         if max_frame_depth > 0 && body_depth > max_frame_depth {
-            return Err(MobError::NotYetImplemented(format!(
-                "loop '{}' would exceed max_frame_depth={} (current depth={}); nested loops require a higher limit in LimitsSpec.max_frame_depth",
-                loop_spec.loop_id,
+            return Err(MobError::FrameDepthLimitExceeded {
+                loop_id: loop_spec.loop_id,
                 max_frame_depth,
-                body_depth - 1
-            )));
+                current_depth: body_depth - 1,
+            });
         }
         let loop_instance_id = LoopInstanceId::from(format!("{frame_id}::{node_id}").as_str());
         let initial_loop = initial_loop_snapshot(

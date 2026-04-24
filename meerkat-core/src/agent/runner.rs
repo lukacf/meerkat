@@ -547,7 +547,6 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    #[allow(dead_code)] // Used by persistent session service.
     #[doc(hidden)]
     pub async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
@@ -900,6 +899,7 @@ where
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
+                self.checkpoint_current_session().await;
                 Ok(result)
             }
             Err(err) => {
@@ -968,6 +968,7 @@ where
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
+                self.checkpoint_current_session().await;
                 Ok(result)
             }
             Err(err) => {

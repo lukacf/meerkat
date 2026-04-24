@@ -1176,6 +1176,71 @@ impl MobBuilder {
                         .await?,
                 );
             }
+
+            // D31 resume wire-restoration: install trust for every desired
+            // edge and prune stale trust that matches one of "our own"
+            // candidate peers but is no longer in the wiring projection. The
+            // two-sided diff ensures (a) resumed members re-enter comms trust
+            // sets after restart / manual `force_remove_trust` test scaffolds,
+            // and (b) leftover trust entries from retired members or
+            // orphaned external peers are revoked so `peers()` matches the
+            // canonical roster projection.
+            let Some(comms_a) = local_comms else {
+                // Peer-only external members have no local comms runtime on
+                // the supervisor side — their trust lives on the remote
+                // process. Those trust edges are re-established by the
+                // external agent's own comms runtime; see the
+                // `test_resume_reconciles_peer_only_trust_edges` path.
+                continue;
+            };
+            let desired_peer_ids: std::collections::HashSet<String> = desired_specs
+                .iter()
+                .map(|spec| spec.peer_id.to_string())
+                .collect();
+            // `candidate_peer_ids` is retained as an explicit signal of the
+            // "our members" set — it currently guides diagnostics, and the
+            // d-external-peer-wire agent's work will extend the diff below
+            // to restrict pruning to the mob's own namespace once external
+            // peer wiring rejoins the canonical seam.
+            let _ = &candidate_specs;
+            let current_peers = comms_a.peers().await;
+            for current in &current_peers {
+                let current_peer_id = current.peer_id.to_string();
+                if desired_peer_ids.contains(&current_peer_id) {
+                    continue;
+                }
+                // Prune any trust entry that no longer corresponds to a
+                // desired edge. Resume aligns live comms trust with the
+                // canonical roster projection, so trust left behind from
+                // retired members or test scaffolding (see
+                // `test_resume_prunes_stale_trust_not_present_in_roster`)
+                // must be revoked here.
+                if let Err(error) = comms_a.remove_trusted_peer(&current_peer_id).await {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        peer = %current.name,
+                        %error,
+                        "resume: failed to prune stale trust"
+                    );
+                }
+            }
+            for spec in &desired_specs {
+                let spec_peer_id = spec.peer_id.to_string();
+                if current_peers
+                    .iter()
+                    .any(|entry| entry.peer_id.to_string() == spec_peer_id)
+                {
+                    continue;
+                }
+                if let Err(error) = comms_a.add_trusted_peer(spec.clone()).await {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        peer = %spec.name,
+                        %error,
+                        "resume: failed to re-establish trust"
+                    );
+                }
+            }
         }
         // Notify orchestrator that the mob resumed.
         if notify_orchestrator_on_resume

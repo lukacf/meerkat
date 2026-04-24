@@ -4097,7 +4097,84 @@ impl MobActor {
             }
         }
 
-        let failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
+        // D31 restore: re-fire peer wiring captured from the prior generation
+        // on respawn. The pre-DSL respawn path ran this fan-out imperatively;
+        // wave-A removed the call sites alongside the shell-authority wire
+        // symbols. For local peers we re-use `handle_wire` so the canonical
+        // `MembersWired` event + DSL `WireMembers` input + roster projection
+        // all line up with a fresh spawn. For external peers (whose
+        // `handle_wire` path was deleted in `0ad584cde` and is pending the
+        // d-external-peer-wire agent's restoration), we install comms trust
+        // directly and restore the `external_peer_specs` + `wired_to`
+        // projection so member_status/get_member surfaces the edge.
+        // Failures are accumulated in `failed_restore_peer_ids` so
+        // `handle_respawn` can surface `TopologyRestoreFailed` without
+        // tearing down the replacement member.
+        let mut failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
+        if let Some(plan) = restore_wiring {
+            let local_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+            for peer_identity in plan.local_peers {
+                if peer_identity == *agent_identity {
+                    continue;
+                }
+                // Re-project the edge into the roster. The DSL `wiring_edges`
+                // set survived retire (Retire does not clear it), so
+                // `handle_wire` would hit the `edge_not_already_wired` guard
+                // rejection's idempotent-success path and never emit a
+                // `MembersWired` event — leaving the fresh `RosterEntry` for
+                // the replacement member with an empty `wired_to`. Direct
+                // projection restores the bidirectional edge so
+                // `get_member` / `member_status` surface the wiring again
+                // without duplicating the canonical event in the log.
+                let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
+                let projected = self
+                    .roster
+                    .write()
+                    .await
+                    .restore_local_peer_edge(&local_identity, &peer_agent_identity);
+                if !projected {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        peer = %peer_identity,
+                        "respawn: local peer missing from roster while restoring wiring projection"
+                    );
+                    failed_restore_peer_ids.push(peer_identity);
+                }
+            }
+            for peer_spec in plan.external_peers {
+                let peer_name_id = MeerkatId::from(peer_spec.name.as_str());
+                if let Err(error) = self
+                    .restore_external_peer_trust(agent_identity, &member_ref, peer_spec.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        peer = %peer_spec.name,
+                        %error,
+                        "respawn: failed to restore external peer trust"
+                    );
+                    failed_restore_peer_ids.push(peer_name_id);
+                    continue;
+                }
+                // Preserve the roster projection of the external edge so
+                // `member_status`/`get_member` callers observe the restored
+                // `wired_to` + `external_peer_specs` without relying on a
+                // replayed `ExternalPeerWired` event (that event variant is
+                // pending the d-external-peer-wire agent's restoration).
+                let local_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+                let inserted = self
+                    .roster
+                    .write()
+                    .await
+                    .restore_external_peer_edge(&local_identity, peer_spec);
+                if !inserted {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        "respawn: roster entry missing while restoring external peer edge"
+                    );
+                }
+            }
+        }
 
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -6980,6 +7057,32 @@ impl MobActor {
     /// Get the comms runtime for a session, if available.
     async fn provisioner_comms(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
         self.provisioner.comms_runtime(member_ref).await
+    }
+
+    /// Install comms trust for a restored external peer edge.
+    ///
+    /// Used by the D31 respawn restore loop in `finalize_spawn_from_pending`
+    /// to re-establish the comms trust that was dropped when the prior
+    /// generation of the member was retired. The corresponding `wired_to` +
+    /// `external_peer_specs` roster projection is restored separately via
+    /// [`RosterAuthority::restore_external_peer_edge`].
+    async fn restore_external_peer_trust(
+        &self,
+        agent_identity: &MeerkatId,
+        member_ref: &MemberRef,
+        spec: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let comms = self.provisioner_comms(member_ref).await.ok_or_else(|| {
+            MobError::WiringError(format!(
+                "respawn cannot restore external peer trust for '{agent_identity}': \
+                 comms runtime unavailable"
+            ))
+        })?;
+        comms.add_trusted_peer(spec).await.map_err(|error| {
+            MobError::WiringError(format!(
+                "respawn failed to restore external peer trust for '{agent_identity}': {error}"
+            ))
+        })
     }
 
     async fn sender_runtime_for_entry(

@@ -162,6 +162,94 @@ fn resolve_completion_waiters(
     }
 }
 
+fn primitive_admitted_content_shape(primitive: &RunPrimitive) -> String {
+    match primitive {
+        RunPrimitive::StagedInput(staged) => {
+            match (staged.appends.is_empty(), staged.context_appends.is_empty()) {
+                (false, false) => "conversation+context",
+                (false, true) => "conversation",
+                (true, false) => "context",
+                (true, true) => "empty",
+            }
+        }
+        RunPrimitive::ImmediateAppend(_) => "immediate_append",
+        RunPrimitive::ImmediateContextAppend(_) => "immediate_context",
+        _ => "conversation",
+    }
+    .to_string()
+}
+
+fn primitive_turn_start_input(
+    run_id: &RunId,
+    primitive: &RunPrimitive,
+) -> crate::meerkat_machine::dsl::MeerkatMachineInput {
+    let admitted_content_shape = primitive_admitted_content_shape(primitive);
+    match primitive {
+        RunPrimitive::ImmediateAppend(_) => {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateAppend {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            }
+        }
+        RunPrimitive::ImmediateContextAppend(_) => {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            }
+        }
+        RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty() && !staged.context_appends.is_empty() =>
+        {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            }
+        }
+        RunPrimitive::StagedInput(_) => {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            }
+        }
+        _ => crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+            run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+            primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+            admitted_content_shape,
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+            max_extraction_retries: 0,
+        },
+    }
+}
+
+async fn prepare_turn_state_for_primitive(
+    driver: &crate::meerkat_machine::SharedDriver,
+    run_id: &RunId,
+    primitive: &RunPrimitive,
+) -> Result<(), crate::RuntimeDriverError> {
+    let authority = {
+        let driver = driver.lock().await;
+        driver.shared_dsl_authority()
+    };
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut *auth,
+        primitive_turn_start_input(run_id, primitive),
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        crate::RuntimeDriverError::Internal(format!(
+            "failed to start runtime turn state for run {run_id}: {err}"
+        ))
+    })
+}
+
 fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
     let source_name = match &event.header.source {
         crate::input::InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
@@ -767,6 +855,18 @@ async fn process_queue(
                 .await
                 .is_err()
                 {
+                    return false;
+                }
+                if let Err(error) =
+                    prepare_turn_state_for_primitive(driver, &run_id, &primitive).await
+                {
+                    tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
+                    let _ = crate::meerkat_machine::fail_runtime_loop_run(
+                        driver,
+                        run_id,
+                        error.to_string(),
+                    )
+                    .await;
                     return false;
                 }
 

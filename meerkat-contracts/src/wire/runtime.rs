@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use crate::wire::session::WireContentBlock;
 use meerkat_core::comms::PeerName;
 
+fn deserialize_raw_json_box<'de, D>(
+    deserializer: D,
+) -> Result<Box<serde_json::value::RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    serde_json::value::RawValue::from_string(value.to_string()).map_err(serde::de::Error::custom)
+}
+
 /// Request payload for `session/realtime_attachment_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -53,6 +63,7 @@ pub enum SessionExternalEventEnvelope {
     /// Generic external JSON event admitted as `Input::ExternalEvent`.
     GenericJson {
         event_type: String,
+        #[serde(deserialize_with = "deserialize_raw_json_box")]
         #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
         payload: Box<serde_json::value::RawValue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +77,7 @@ pub enum SessionExternalEventEnvelope {
         peer_name: PeerName,
         request_id: String,
         status: PeerResponseTerminalStatusWire,
+        #[serde(deserialize_with = "deserialize_raw_json_box")]
         #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
         result: Box<serde_json::value::RawValue>,
     },

@@ -421,6 +421,17 @@ impl RestSessionRuntimeExecutor {
     }
 }
 
+async fn ensure_rest_session_runtime_executor(state: &AppState, session_id: &SessionId) {
+    let executor = Box::new(RestSessionRuntimeExecutor::new(
+        state.runtime_executor_context(),
+        session_id.clone(),
+    ));
+    state
+        .runtime_adapter
+        .ensure_session_with_executor(session_id.clone(), executor)
+        .await;
+}
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -1939,7 +1950,13 @@ async fn post_external_event(
     }
     .map_err(IntoResponse::into_response)?;
 
-    admit_runtime_input_via_webhook(&state, &session_id, input).await
+    admit_runtime_input_via_webhook(
+        &state,
+        &session_id,
+        input,
+        WebhookAdmissionMode::WithoutWake,
+    )
+    .await
 }
 
 /// Admit a correlated terminal peer response through the typed runtime ingress.
@@ -1997,18 +2014,40 @@ async fn post_peer_response_terminal(
         handling_mode: None,
     });
 
-    admit_runtime_input_via_webhook(&state, &session_id, input).await
+    admit_runtime_input_via_webhook(&state, &session_id, input, WebhookAdmissionMode::Wakeful).await
 }
 
-/// Admit a webhook-originated runtime input via `MeerkatMachine::accept_input`
-/// and map the typed accept outcome into the HTTP response shape shared by
-/// `/external-events` and `/peer-response-terminal`.
+enum WebhookAdmissionMode {
+    /// Stage the input without waking an idle runtime. Used by generic
+    /// external events that are explicitly "next turn boundary" work.
+    WithoutWake,
+    /// Admit normally, allowing the runtime policy to wake or steer. Used by
+    /// terminal peer responses that may unblock live work.
+    Wakeful,
+}
+
+/// Admit a webhook-originated runtime input and map the typed accept outcome
+/// into the HTTP response shape shared by `/external-events` and
+/// `/peer-response-terminal`.
 async fn admit_runtime_input_via_webhook(
     state: &AppState,
     session_id: &SessionId,
     input: meerkat_runtime::Input,
+    mode: WebhookAdmissionMode,
 ) -> Result<(StatusCode, Json<Value>), Response> {
-    match state.runtime_adapter.accept_input(session_id, input).await {
+    let outcome = match mode {
+        WebhookAdmissionMode::WithoutWake => {
+            state
+                .runtime_adapter
+                .accept_input_without_wake(session_id, input)
+                .await
+        }
+        WebhookAdmissionMode::Wakeful => {
+            state.runtime_adapter.accept_input(session_id, input).await
+        }
+    };
+
+    match outcome {
         Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
         | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {
             Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
@@ -2727,6 +2766,8 @@ async fn create_session_inner(
             return RequestTerminal::RespondWithoutPublish(Err(api_err));
         }
     };
+
+    ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
 
     // Update peer-ingress context so live sessions always get attached ingress
     // and idle keep_alive sessions retain a persistent host drain.
@@ -3515,6 +3556,7 @@ async fn continue_session_inner(
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                 .await;
         }
+        ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
         let input =
             meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
@@ -3565,6 +3607,7 @@ async fn continue_session_inner(
             }),
         }
     } else {
+        ensure_rest_session_runtime_executor(state, &session_id).await;
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;

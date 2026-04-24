@@ -1454,7 +1454,7 @@ machine! {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.active_run_count = 0;
             }
-            to Stopped
+            to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
@@ -2768,5 +2768,56 @@ mod tests {
             authority.state.loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingBodyFrame)
         );
+    }
+
+    #[test]
+    fn observe_runtime_retired_clears_member_binding_without_stopping_mob() {
+        let mut authority = MobMachineAuthority::new();
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        let fence_token = FenceToken(7);
+        authority.state.live_runtime_ids.insert(runtime_id.clone());
+        authority
+            .state
+            .externally_addressable_runtime_ids
+            .insert(runtime_id.clone());
+        authority
+            .state
+            .runtime_fence_tokens
+            .insert(runtime_id.clone(), fence_token);
+        authority
+            .state
+            .member_state_markers
+            .insert(runtime_id.clone(), MobMemberState::Retiring);
+        authority.state.active_run_count = 3;
+
+        let transition = authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("runtime retire observation should be accepted");
+
+        assert_eq!(transition.to_phase, MobPhase::Running);
+        assert_eq!(authority.state.lifecycle_phase, MobPhase::Running);
+        assert!(!authority.state.live_runtime_ids.contains(&runtime_id));
+        assert!(
+            !authority
+                .state
+                .externally_addressable_runtime_ids
+                .contains(&runtime_id)
+        );
+        assert!(
+            !authority
+                .state
+                .runtime_fence_tokens
+                .contains_key(&runtime_id)
+        );
+        assert!(
+            !authority
+                .state
+                .member_state_markers
+                .contains_key(&runtime_id)
+        );
+        assert_eq!(authority.state.active_run_count, 0);
     }
 }

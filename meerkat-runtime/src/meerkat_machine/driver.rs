@@ -636,6 +636,52 @@ pub(crate) fn machine_apply_run_return_projection(
     Ok(())
 }
 
+fn machine_apply_turn_run_completed(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut *auth,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::RunCompleted {
+            run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        RuntimeDriverError::Internal(format!(
+            "failed to apply runtime turn completion for run {run_id}: {err}"
+        ))
+    })
+}
+
+fn machine_apply_turn_run_failed(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+    error: String,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut *auth,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::RunFailed {
+            run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+            error,
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        RuntimeDriverError::Internal(format!(
+            "failed to apply runtime turn failure for run {run_id}: {err}"
+        ))
+    })
+}
+
 pub(crate) fn slice_starts_with(seq: &[InputId], prefix: &[InputId]) -> bool {
     prefix.len() <= seq.len() && seq[..prefix.len()] == *prefix
 }
@@ -1431,6 +1477,7 @@ pub(crate) async fn commit_runtime_loop_run(
 
     let completed_run_id = run_id.clone();
     machine_validate_run_completed(&driver, &consumed_input_ids)?;
+    machine_apply_turn_run_completed(&mut driver, &completed_run_id)?;
     driver
         .machine_realize_run_completed(completed_run_id.clone(), consumed_input_ids)
         .await
@@ -1464,6 +1511,7 @@ pub(crate) async fn fail_runtime_loop_run(
     let failed_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)?;
+    machine_apply_turn_run_failed(&mut driver, &failed_run_id, error.clone())?;
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     driver
         .machine_realize_run_failed(

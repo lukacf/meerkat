@@ -96,6 +96,14 @@ pub trait MobProvisioner: Send + Sync {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerDescriptor, MobError>;
+    async fn reconcile_peer_only_trust(
+        &self,
+        member_ref: &MemberRef,
+        desired_specs: &[TrustedPeerDescriptor],
+    ) -> Result<(), MobError> {
+        let _ = (member_ref, desired_specs);
+        Ok(())
+    }
     /// Resolve the live canonical mob-child lifecycle operation for an
     /// existing member bridge.
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId>;
@@ -1727,6 +1735,53 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
+    async fn reconcile_peer_only_trust(
+        &self,
+        member_ref: &MemberRef,
+        desired_specs: &[TrustedPeerDescriptor],
+    ) -> Result<(), MobError> {
+        let MemberRef::BackendPeer {
+            peer_id,
+            address,
+            bootstrap_token,
+            session_id: None,
+            ..
+        } = member_ref
+        else {
+            return Ok(());
+        };
+
+        let peer = self.peer_only_spec(member_ref).await?;
+        let peer = self
+            .ensure_supervisor_authorized(
+                &peer,
+                Some((
+                    peer_id.as_str(),
+                    address.as_str(),
+                    bootstrap_token
+                        .as_ref()
+                        .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
+                )),
+            )
+            .await?;
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        for spec in desired_specs {
+            let command = super::bridge_protocol::BridgeCommand::WireMember(
+                super::bridge_protocol::BridgePeerWiringPayload {
+                    supervisor: sup_spec.clone().into(),
+                    epoch: authority.epoch,
+                    protocol_version: authority.protocol_version,
+                    peer_spec: spec.clone().into(),
+                },
+            );
+            let _ack: super::bridge_protocol::BridgeAck = self
+                .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn interaction_event_injector(
         &self,
         bridge_session_id: &SessionId,
@@ -1766,12 +1821,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .trusted_peer_spec(member_ref, fallback_name, fallback_peer_id)
                     .await
             }
-            MemberRef::BackendPeer {
-                peer_id,
-                address,
-                session_id,
-                ..
-            } => {
+            MemberRef::BackendPeer { session_id, .. } => {
                 if let Some(session_id) = session_id {
                     // External members keep a local bridge session for lifecycle
                     // transport (notifications, kickoff events). The trust spec
@@ -1792,12 +1842,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                         .await;
                 }
                 // No bridge — use the real BackendPeer identity directly.
-                TrustedPeerDescriptor::test_only_unsigned(
-                    fallback_name,
-                    peer_id.clone(),
-                    address.clone(),
-                )
-                .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
+                let mut spec = self.peer_only_spec(member_ref).await?;
+                spec.name = meerkat_core::comms::PeerName::new(fallback_name.to_string()).map_err(
+                    |error| MobError::WiringError(format!("invalid peer name: {error}")),
+                )?;
+                Ok(spec)
             }
         }
     }

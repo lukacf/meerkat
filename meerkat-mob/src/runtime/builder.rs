@@ -1187,10 +1187,12 @@ impl MobBuilder {
             // canonical roster projection.
             let Some(comms_a) = local_comms else {
                 // Peer-only external members have no local comms runtime on
-                // the supervisor side — their trust lives on the remote
-                // process. Those trust edges are re-established by the
-                // external agent's own comms runtime; see the
-                // `test_resume_reconciles_peer_only_trust_edges` path.
+                // the supervisor side; their trust lives on the remote
+                // process, so resume reconciles it through the supervisor
+                // bridge instead of mutating local state.
+                provisioner
+                    .reconcile_peer_only_trust(&entry.member_ref, &desired_specs)
+                    .await?;
                 continue;
             };
             let desired_peer_ids: std::collections::HashSet<String> = desired_specs

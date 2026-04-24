@@ -161,7 +161,7 @@ async fn run_pre_command(
     let key = format!(
         "{}::{}::{}",
         cwd.display(),
-        command_display(entry.command),
+        command_display_with_env(entry.command, env_overrides),
         env_signature
     );
     loop {
@@ -201,7 +201,7 @@ async fn run_command(
     env_overrides: &[(String, String)],
     timeout_secs: u64,
 ) -> Result<CompletedCommand, String> {
-    let argv = normalize_command(command);
+    let argv = normalize_command_with_env(command, env_overrides);
     let mut child = Command::new(&argv[0]);
     child
         .args(&argv[1..])
@@ -309,11 +309,21 @@ fn build_commands(
 }
 
 fn normalize_command(command: &[&str]) -> Vec<String> {
+    let cargo_target_dir = cargo_target_dir().unwrap_or_else(|_| workspace_root().join("target"));
+    normalize_command_with_target_dir(command, &cargo_target_dir)
+}
+
+fn normalize_command_with_env(command: &[&str], env_overrides: &[(String, String)]) -> Vec<String> {
+    let cargo_target_dir = env_value(env_overrides, "CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| cargo_target_dir().ok())
+        .unwrap_or_else(|| workspace_root().join("target"));
+    normalize_command_with_target_dir(command, &cargo_target_dir)
+}
+
+fn normalize_command_with_target_dir(command: &[&str], cargo_target_dir: &Path) -> Vec<String> {
     let repo_root = workspace_root().display().to_string();
-    let cargo_target_dir = cargo_target_dir()
-        .unwrap_or_else(|_| workspace_root().join("target"))
-        .display()
-        .to_string();
+    let cargo_target_dir = cargo_target_dir.display().to_string();
     let mut argv = command
         .iter()
         .map(|part| {
@@ -325,6 +335,12 @@ fn normalize_command(command: &[&str]) -> Vec<String> {
         argv[0] = repo_cargo().display().to_string();
     }
     argv
+}
+
+fn env_value<'a>(env_overrides: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env_overrides
+        .iter()
+        .find_map(|(env_key, value)| (env_key == key).then_some(value.as_str()))
 }
 
 fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -440,7 +456,21 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
 
 fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
-    let cargo_target_dir = cargo_target_dir()?;
+    let cargo_target_dir = scenario_cargo_target_dir(spec)?;
+    std::fs::create_dir_all(&cargo_target_dir).map_err(|error| {
+        format!(
+            "failed to create scenario cargo target dir {}: {error}",
+            cargo_target_dir.display()
+        )
+    })?;
+    env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        cargo_target_dir.display().to_string(),
+    );
+    env.insert(
+        "RUST_LANE_ID".to_string(),
+        format!("e2e-{}", scenario_artifact_key(spec)),
+    );
     // macOS 26.3.1+ `codeSigningMonitor=2` can SIGKILL adhoc/linker-signed
     // binaries whose signature is invalidated while dyld is loading them,
     // which happens when the outer `cargo test` or sibling scenarios
@@ -482,6 +512,35 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
         env.insert("MEERKAT_PYTHON_BIN".to_string(), python.to_string());
     }
     Ok(env.into_iter().collect())
+}
+
+fn scenario_cargo_target_dir(spec: &Spec) -> Result<PathBuf, String> {
+    Ok(cargo_target_dir()?
+        .join("e2e-lanes")
+        .join(scenario_artifact_key(spec)))
+}
+
+fn scenario_artifact_key(spec: &Spec) -> String {
+    let base = match spec.id {
+        Some(id) => format!("scenario-{id:02}"),
+        None => run_label(spec),
+    };
+    sanitize_artifact_key(&base)
+}
+
+fn sanitize_artifact_key(value: &str) -> String {
+    let mut key = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            key.push(character.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            key.push('-');
+            last_was_dash = true;
+        }
+    }
+    key.trim_matches('-').to_string()
 }
 
 fn expand_template(value: &str, cargo_target_dir: &Path) -> String {
@@ -673,6 +732,10 @@ fn completed_pre_commands() -> &'static Mutex<HashMap<String, PreCommandState>> 
 
 fn command_display(command: &[&str]) -> String {
     normalize_command(command).join(" ")
+}
+
+fn command_display_with_env(command: &[&str], env_overrides: &[(String, String)]) -> String {
+    normalize_command_with_env(command, env_overrides).join(" ")
 }
 
 fn scenario_spec(id: u16) -> Option<&'static Spec> {
@@ -3148,7 +3211,30 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lane, scenario_spec};
+    use super::{
+        Lane, normalize_command_with_env, repo_cargo, sanitize_artifact_key, scenario_spec,
+    };
+
+    #[test]
+    fn artifact_keys_are_stable_for_scenario_targets() {
+        assert_eq!(
+            sanitize_artifact_key("Surface smoke: rkat-rpc --help"),
+            "surface-smoke-rkat-rpc-help"
+        );
+        assert_eq!(sanitize_artifact_key("56 RPC/rest"), "56-rpc-rest");
+    }
+
+    #[test]
+    fn command_normalization_uses_scenario_target_dir_from_env() {
+        let env = vec![(
+            "CARGO_TARGET_DIR".to_string(),
+            "/tmp/meerkat-e2e-scenario-target".to_string(),
+        )];
+        let argv =
+            normalize_command_with_env(&["cargo", "run", "{cargo_target_dir}/debug/rkat"], &env);
+        assert_eq!(argv[0], repo_cargo().display().to_string());
+        assert_eq!(argv[2], "/tmp/meerkat-e2e-scenario-target/debug/rkat");
+    }
 
     #[test]
     fn numbered_catalog_covers_matrix_ids() {

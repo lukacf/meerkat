@@ -368,7 +368,7 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn boundary_complete(&self) -> Result<(), DslTransitionError>;
 
-    fn enter_extraction(&self) -> Result<(), DslTransitionError>;
+    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError>;
 
     fn extraction_start(&self) -> Result<(), DslTransitionError>;
 

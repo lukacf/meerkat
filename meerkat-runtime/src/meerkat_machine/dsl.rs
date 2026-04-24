@@ -2349,7 +2349,7 @@ machine! {
             OpsBarrierSatisfied { operation_ids: Set<String> },
             BoundaryContinue,
             BoundaryComplete,
-            EnterExtraction,
+            EnterExtraction { max_extraction_retries: u64 },
             ExtractionStart,
             ExtractionValidationPassed,
             ExtractionValidationFailed { error: String },
@@ -4286,12 +4286,12 @@ machine! {
         }
 
         transition EnterExtraction {
-            on input EnterExtraction
+            on input EnterExtraction { max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
                 self.turn_phase = TurnPhase::Extracting;
-                self.extraction_attempts = self.extraction_attempts + 1;
+                self.max_extraction_retries = max_extraction_retries;
             }
             to Running
         }
@@ -4300,7 +4300,9 @@ machine! {
             on input ExtractionStart
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
-            update {}
+            update {
+                self.turn_phase = TurnPhase::CallingLlm;
+            }
             to Running
         }
 
@@ -4323,6 +4325,7 @@ machine! {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_remaining" { self.extraction_attempts < self.max_extraction_retries }
             update {
+                self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
@@ -4335,6 +4338,7 @@ machine! {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
+                self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }

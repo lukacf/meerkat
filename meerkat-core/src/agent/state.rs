@@ -498,7 +498,9 @@ where
             TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
             TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
             TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
-            TurnExecutionInput::EnterExtraction { .. } => handle.enter_extraction(),
+            TurnExecutionInput::EnterExtraction { max_retries, .. } => {
+                handle.enter_extraction(*max_retries)
+            }
             TurnExecutionInput::ExtractionValidationPassed { .. } => {
                 handle.extraction_validation_passed()
             }

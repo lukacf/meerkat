@@ -156,10 +156,12 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn enter_extraction(&self) -> Result<(), DslTransitionError> {
+    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::EnterExtraction,
+            mm_dsl::MeerkatMachineInput::EnterExtraction {
+                max_extraction_retries: u64::from(max_retries),
+            },
             "TurnStateHandle::enter_extraction",
         )
     }

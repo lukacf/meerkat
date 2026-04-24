@@ -726,10 +726,9 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::BoundaryComplete { run_id })
     }
 
-    fn enter_extraction(&self) -> Result<(), DslTransitionError> {
+    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "enter_extraction")?;
-        let max_retries = guard.fields.max_extraction_retries;
         guard.apply(TurnExecutionInput::EnterExtraction {
             run_id,
             max_retries,

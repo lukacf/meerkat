@@ -1,7 +1,6 @@
 //! Wire session types.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 use meerkat_core::{
@@ -470,6 +469,7 @@ pub enum WireSessionMessage {
 }
 
 impl From<Message> for WireSessionMessage {
+    #[allow(clippy::expect_used)]
     fn from(value: Message) -> Self {
         match value {
             Message::System(message) => Self::System {

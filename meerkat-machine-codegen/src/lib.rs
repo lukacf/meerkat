@@ -11,6 +11,7 @@
     clippy::useless_conversion,
     clippy::useless_format
 )]
+#![cfg_attr(test, allow(clippy::expect_used))]
 
 #[cfg(not(test))]
 mod artifacts;

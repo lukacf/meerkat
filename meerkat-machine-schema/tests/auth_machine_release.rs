@@ -6,32 +6,30 @@ use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
 use meerkat_machine_schema::identity::FieldId;
 use meerkat_machine_schema::{EffectEmit, Expr, TransitionSchema, TriggerMatch};
 
-fn release_transition() -> TransitionSchema {
+fn release_transition() -> Result<TransitionSchema, String> {
     let schema = dsl_auth_machine();
     schema
         .transitions
         .into_iter()
         .find(|t| t.name.as_str() == "Release")
-        .expect("AuthMachine must declare a Release transition")
+        .ok_or_else(|| "AuthMachine must declare a Release transition".to_string())
 }
 
 #[test]
-fn release_transition_is_valid_on_input_release() {
-    let release = release_transition();
-    match release.on {
-        TriggerMatch::Input { variant, .. } => {
-            assert_eq!(variant.as_str(), "Release");
-        }
-        TriggerMatch::Signal { .. } => {
-            panic!("Release must fire on an input, not a signal");
-        }
+fn release_transition_is_valid_on_input_release() -> Result<(), String> {
+    let release = release_transition()?;
+    if let TriggerMatch::Input { variant, .. } = release.on {
+        assert_eq!(variant.as_str(), "Release");
+    } else {
+        return Err("Release must fire on an input, not a signal".to_string());
     }
     assert_eq!(release.to.as_str(), "Released");
+    Ok(())
 }
 
 #[test]
-fn release_transition_emits_lifecycle_event_with_lifecycle_phase() {
-    let release = release_transition();
+fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(), String> {
+    let release = release_transition()?;
 
     assert_eq!(
         release.emit.len(),
@@ -52,10 +50,10 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() {
         1,
         "EmitLifecycleEvent carries exactly one field (new_state); got {fields:?}",
     );
-    let (new_state_field, new_state_expr): (&FieldId, &Expr) = fields
-        .iter()
-        .next()
-        .expect("EmitLifecycleEvent field list non-empty by prior assertion");
+    let Some((new_state_field, new_state_expr)) = fields.iter().next() else {
+        return Err("EmitLifecycleEvent field list non-empty by prior assertion".to_string());
+    };
+    let (new_state_field, new_state_expr): (&FieldId, &Expr) = (new_state_field, new_state_expr);
     assert_eq!(new_state_field.as_str(), "new_state");
 
     // The DSL macro rewrites `self.lifecycle_phase` (the declared stored-phase
@@ -66,6 +64,7 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() {
         "EmitLifecycleEvent.new_state must be Expr::CurrentPhase (matching every \
          other AuthMachine transition); got {new_state_expr:?}",
     );
+    Ok(())
 }
 
 #[test]

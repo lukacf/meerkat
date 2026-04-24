@@ -329,6 +329,7 @@ pub struct WireStagedRunInput {
 
 /// Typed wire projection of `meerkat_core::lifecycle::run_primitive::RunPrimitive`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRunPrimitive {

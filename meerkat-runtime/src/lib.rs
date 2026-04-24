@@ -14,6 +14,23 @@
 //! Core-facing types (RunPrimitive, RunEvent, CoreExecutor, etc.) live in
 //! `meerkat-core::lifecycle`. This crate contains everything else.
 
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        unused_imports,
+        clippy::expect_used,
+        clippy::large_futures,
+        clippy::needless_borrow,
+        clippy::panic,
+        clippy::redundant_closure_for_method_calls,
+        clippy::redundant_clone,
+        clippy::type_complexity,
+        clippy::unnecessary_to_owned,
+        clippy::unwrap_used
+    )
+)]
+
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use tokio_with_wasm::alias::*;

@@ -1,5 +1,5 @@
 #![cfg(feature = "integration-real-tests")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(unused_mut, clippy::unwrap_used, clippy::expect_used)]
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;

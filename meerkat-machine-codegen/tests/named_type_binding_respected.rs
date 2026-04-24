@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 //! Track-B wave-b B-4b — named-type binding authority.
 //!

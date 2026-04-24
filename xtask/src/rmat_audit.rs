@@ -538,20 +538,19 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
                     if route.to.input_variant.as_str() == rule.consumer_input.as_str() {
                         route_found_somewhere = true;
                         break;
-                    } else {
-                        findings.push(error_finding(
-                            "CompositionRouteSemanticCoverage",
-                            "<schema>",
-                            &format!("{}::{}", rule.producer_machine, rule.effect_variant),
-                            format!(
-                                "policy expects consumer_input=`{}` but composition `{}` typed Route targets input=`{}`",
-                                rule.consumer_input,
-                                composition.name,
-                                route.to.input_variant.as_str()
-                            ),
-                            false,
-                        ));
                     }
+                    findings.push(error_finding(
+                        "CompositionRouteSemanticCoverage",
+                        "<schema>",
+                        &format!("{}::{}", rule.producer_machine, rule.effect_variant),
+                        format!(
+                            "policy expects consumer_input=`{}` but composition `{}` typed Route targets input=`{}`",
+                            rule.consumer_input,
+                            composition.name,
+                            route.to.input_variant.as_str()
+                        ),
+                        false,
+                    ));
                 }
             }
             if !route_found_somewhere {

@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 use clap::{Parser, ValueEnum};
 use meerkat::AgentFactory;
 use meerkat_core::{

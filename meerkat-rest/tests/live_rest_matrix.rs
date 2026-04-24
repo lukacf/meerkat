@@ -1,5 +1,11 @@
 #![cfg(feature = "integration-real-tests")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 
 #[path = "../../test-fixtures/live_smoke/support.rs"]
 mod live_smoke;

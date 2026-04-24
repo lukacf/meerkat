@@ -287,7 +287,7 @@ pub fn render_machine_contract_markdown(
                 .on
                 .bindings()
                 .iter()
-                .map(|b| b.as_str())
+                .map(meerkat_machine_schema::identity::FieldId::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -837,7 +837,7 @@ fn composition_witness_scheduler_property_name(witness: &str, rule: &SchedulerRu
     format!(
         "WitnessSchedulerTriggered_{}_{}",
         tla_ident(witness),
-        tla_ident(&witness_scheduler_rule_label(rule))
+        tla_ident(witness_scheduler_rule_label(rule))
     )
 }
 
@@ -2252,15 +2252,6 @@ fn type_sample_bucket(ty: &TypeRef) -> Option<String> {
     }
 }
 
-/// Borrow the name slug from a `TypeRef::Named` or `TypeRef::Enum`.
-fn typeref_named_or_enum_str(ty: &TypeRef) -> Option<&str> {
-    match ty {
-        TypeRef::Named(name) => Some(name.as_str()),
-        TypeRef::Enum(name) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
 fn collected_sample_literals(
     bucket: &str,
     sample_cardinality: usize,
@@ -2271,7 +2262,7 @@ fn collected_sample_literals(
     let rendered = samples
         .iter()
         .take(limit)
-        .map(|sample| tla_string(sample))
+        .map(tla_string)
         .collect::<Vec<_>>();
     (!rendered.is_empty()).then_some(rendered)
 }
@@ -2328,8 +2319,14 @@ fn render_default_domain_assignment(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        ty @ (TypeRef::Named(_) | TypeRef::Enum(_)) => render_named_domain_assignment(
-            typeref_named_or_enum_str(ty).expect("matched Named/Enum above"),
+        TypeRef::Named(name) => render_named_domain_assignment(
+            name.as_str(),
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
+        TypeRef::Enum(name) => render_named_domain_assignment(
+            name.as_str(),
             sample_cardinality,
             named_samples,
             named_bindings,
@@ -2442,7 +2439,7 @@ fn render_named_domain_assignment(
     }
 
     let values = (1..=sample_cardinality.max(1))
-        .map(|idx| tla_string(&format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+        .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{{values}}}")
@@ -2470,26 +2467,45 @@ fn sample_values(
                 .map(|sample| tla_string(&sample))
                 .collect()
         }
-        ty @ (TypeRef::Named(_) | TypeRef::Enum(_))
-            if named_type_uses_nat_domain(
-                named_bindings,
-                typeref_named_or_enum_str(ty).expect("matched Named/Enum above"),
-            ) =>
-        {
+        TypeRef::Named(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
             if sample_cardinality > 1 {
                 vec!["1".into(), "2".into()]
             } else {
                 vec!["1".into()]
             }
         }
-        ty @ (TypeRef::Named(_) | TypeRef::Enum(_)) => {
-            let name = typeref_named_or_enum_str(ty).expect("matched Named/Enum above");
+        TypeRef::Enum(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
+        }
+        TypeRef::Named(name) => {
+            let name = name.as_str();
             if let Some(samples) = named_samples.get(name) {
                 let limit = sample_cardinality.max(1);
                 let rendered = samples
                     .iter()
                     .take(limit)
-                    .map(|sample| tla_string(sample))
+                    .map(tla_string)
+                    .collect::<Vec<_>>();
+                if !rendered.is_empty() {
+                    return rendered;
+                }
+            }
+            (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect()
+        }
+        TypeRef::Enum(name) => {
+            let name = name.as_str();
+            if let Some(samples) = named_samples.get(name) {
+                let limit = sample_cardinality.max(1);
+                let rendered = samples
+                    .iter()
+                    .take(limit)
+                    .map(tla_string)
                     .collect::<Vec<_>>();
                 if !rendered.is_empty() {
                     return rendered;
@@ -3462,7 +3478,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .state
                 .terminal_phases
                 .iter()
-                .map(|phase| phase.as_str())
+                .map(meerkat_machine_schema::identity::PhaseId::as_str)
                 .collect();
 
             // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
@@ -4288,7 +4304,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                     packet.input_variant.as_str(),
                     &payload_fields,
                     "entry",
-                    &format!("witness:{}:{}", witness.name, idx + 1),
+                    format!("witness:{}:{}", witness.name, idx + 1),
                     "external_entry",
                     &packet.input_variant,
                     "0",

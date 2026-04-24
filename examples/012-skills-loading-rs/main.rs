@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 //! # 012 -- Skills Loading (Rust)
 //!
 //! Skills inject domain-specific knowledge and behavioral instructions into

@@ -1,3 +1,5 @@
+#![allow(clippy::panic)]
+
 //! Browse / load skill tool surface tests (C-T §6 #15).
 //!
 //! Covers the agent-facing tools `browse_skills` + `load_skill` exposed

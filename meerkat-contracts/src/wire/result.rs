@@ -12,6 +12,7 @@ use meerkat_core::{RunResult, SchemaWarning, SessionId};
 /// SDK clients, REST handlers, and RPC callers can map `AccessDenied` to
 /// HTTP 403 and `NotFound` to HTTP 404 without sniffing message strings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireToolErrorClass {
@@ -24,6 +25,7 @@ pub enum WireToolErrorClass {
 
 impl WireToolErrorClass {
     /// Stable wire string used across REST/RPC error payloads.
+    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotFound => "not_found",

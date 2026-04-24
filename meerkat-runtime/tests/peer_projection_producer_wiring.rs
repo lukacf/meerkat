@@ -1,3 +1,5 @@
+#![allow(clippy::implicit_clone, clippy::redundant_clone)]
+
 //! D-track-b · Peer-projection producer wiring end-to-end contract.
 //!
 //! Pins the wave-d closure of the emitter→consumer gap documented in

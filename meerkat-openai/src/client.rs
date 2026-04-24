@@ -188,15 +188,13 @@ impl OpenAiClient {
         }
 
         if let Some(tag) = openai_tag(request) {
-            if reasoning_enabled {
-                if let Some(effort) = tag.reasoning_effort {
-                    let s = match effort {
-                        TypedReasoningEffort::Low => "low",
-                        TypedReasoningEffort::Medium => "medium",
-                        TypedReasoningEffort::High => "high",
-                    };
-                    body["reasoning"]["effort"] = Value::String(s.to_string());
-                }
+            if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
+                let s = match effort {
+                    TypedReasoningEffort::Low => "low",
+                    TypedReasoningEffort::Medium => "medium",
+                    TypedReasoningEffort::High => "high",
+                };
+                body["reasoning"]["effort"] = Value::String(s.to_string());
             }
 
             if let Some(seed) = tag.seed {
@@ -1166,7 +1164,8 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
-            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -1195,7 +1194,8 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
-            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -1213,7 +1213,8 @@ mod tests {
         .with_openai_tag_merge(|t| t.supports_temperature_override = Some(true))
         .with_openai_tag_merge(|t| t.supports_reasoning_override = Some(true))
         .with_openai_tag_merge(|t| {
-            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -1417,7 +1418,8 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
-            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High)
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
         })
         .with_openai_tag_merge(|t| t.seed = Some(999))
         .with_openai_tag_merge(|t| t.frequency_penalty = Some(0.3))

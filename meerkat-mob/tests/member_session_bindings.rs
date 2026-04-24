@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_or_default)]
+
 //! W3-H-1 / dogma #4: MobMachine canonical
 //! `member_session_bindings` map — transition coverage.
 //!

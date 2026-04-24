@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 //! B-7 V4: the wire `SkillRef` type is single-variant (`Structured`) and
 //! refuses every legacy string encoding. Round-trip asserts the shape is
 //! a tagged object with the `kind: "structured"` discriminator.

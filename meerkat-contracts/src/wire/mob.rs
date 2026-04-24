@@ -125,6 +125,7 @@ pub struct MobToolConfigInput {
 /// params (`temperature`, `top_p`) so `Eq` cannot be derived without
 /// losing fidelity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum MobProfileBindingInput {

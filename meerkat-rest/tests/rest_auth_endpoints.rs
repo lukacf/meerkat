@@ -1,3 +1,5 @@
+#![allow(unused_mut)]
+
 //! T15 (Phase 5): REST auth endpoints e2e — top-down observable proof
 //! that the `/auth/*` + `/realms/*` routes registered in Phase 4d are
 //! reachable through the router and return well-formed responses

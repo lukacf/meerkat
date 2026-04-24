@@ -132,10 +132,12 @@ impl MeerkatConsumerSurface {
     }
 }
 
+#[allow(clippy::panic)]
 fn meerkat_instance_id() -> &'static MachineInstanceId {
     static ID: OnceLock<MachineInstanceId> = OnceLock::new();
-    ID.get_or_init(|| {
-        MachineInstanceId::parse("meerkat").expect("canonical consumer instance slug")
+    ID.get_or_init(|| match MachineInstanceId::parse("meerkat") {
+        Ok(id) => id,
+        Err(err) => unreachable!("canonical consumer instance slug rejected: {err}"),
     })
 }
 

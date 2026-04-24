@@ -1,3 +1,5 @@
+#![allow(clippy::manual_assert, clippy::panic)]
+
 //! Tripwire for wave-c (Section 1.5 #4). Flipped green by **C-12**
 //! (CLI consolidation to a single `ConnectionRef`-parsing call site).
 //!

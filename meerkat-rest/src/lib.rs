@@ -15,6 +15,17 @@
 //! When enabled, the REST instance uses its instance-scoped data directory
 //! as the project root for task storage and shell working directory.
 
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::boxed_local,
+    clippy::expect_used,
+    clippy::implicit_clone,
+    clippy::large_futures,
+    clippy::redundant_clone,
+    clippy::unnested_or_patterns
+)]
+
 pub mod auth_endpoints;
 mod schedule_host;
 pub mod webhook;

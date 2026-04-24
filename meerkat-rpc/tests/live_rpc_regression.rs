@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! E2E regression tests for the RPC server (scenarios 19-21).
 //!
 //! Reuses the same duplex-stream pattern from `live_smoke_rpc.rs`.

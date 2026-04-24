@@ -187,7 +187,7 @@ When running background jobs...";
             .descriptor
             .capability_requirements
             .iter()
-            .map(|c| c.as_str())
+            .map(meerkat_core::skills::CapabilityId::as_str)
             .collect();
         assert_eq!(caps, vec!["builtins", "shell"]);
         assert!(doc.body.contains("# shell-patterns"));

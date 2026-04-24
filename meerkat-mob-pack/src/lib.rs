@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod archive;
 pub mod digest;
 pub mod exec_bits;

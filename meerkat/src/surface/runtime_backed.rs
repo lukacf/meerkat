@@ -11,7 +11,7 @@ use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
 use crate::JsonlStore;
 use crate::{
     CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
-    SessionError, SessionId, StartTurnRequest,
+    SessionError, SessionId,
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;

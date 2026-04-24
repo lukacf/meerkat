@@ -5,10 +5,13 @@
 //! `RuntimeCommsBridge` (comms_sink.rs) which implemented the now-removed
 //! `RuntimeInputSink` trait on `meerkat-core`.
 
+#![allow(clippy::large_futures)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
+#[allow(unused_imports)]
 use meerkat_core::comms::{CommsCommand, PeerId, PeerName, TrustedPeerDescriptor};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, PeerInputClass};

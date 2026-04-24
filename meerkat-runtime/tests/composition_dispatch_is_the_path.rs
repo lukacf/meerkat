@@ -1,3 +1,12 @@
+#![allow(
+    clippy::expect_used,
+    clippy::explicit_iter_loop,
+    clippy::panic,
+    clippy::redundant_clone,
+    clippy::type_complexity,
+    clippy::unwrap_used
+)]
+
 //! `composition_dispatch_is_the_path` — wave-b V2 / Task B-5.
 //!
 //! End-to-end assertion that the [`meerkat_runtime::composition::

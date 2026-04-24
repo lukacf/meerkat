@@ -1,3 +1,5 @@
+#![allow(clippy::panic, clippy::unwrap_used)]
+
 //! Wave B (V7): `AccessDenied` is distinct from `NotFound` at dispatcher
 //! boundaries.
 //!

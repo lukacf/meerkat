@@ -6,8 +6,10 @@
 //! and events are appended to the `EventStore`. On `read` and `list`, persisted
 //! sessions are merged with live (ephemeral) sessions.
 
+#![cfg_attr(test, allow(dead_code))]
+
 use async_trait::async_trait;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use meerkat_core::BlobStore;
 use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
@@ -22,8 +24,8 @@ use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     MobToolAuthorityContext, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
+    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionView,
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
@@ -227,6 +229,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
 /// Looks for `SESSION_LABELS_KEY` and deserializes the value as
 /// `BTreeMap<String, String>`. Returns an empty map on missing or
 /// malformed data.
+#[allow(dead_code)]
 fn extract_labels_from_metadata(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> BTreeMap<String, String> {

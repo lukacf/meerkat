@@ -30,7 +30,7 @@
 //! live surface.
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
@@ -522,6 +522,15 @@ fn ensure_active_conversation_run(state: &mut LocalState) -> Result<(), DslTrans
     Ok(())
 }
 
+fn active_run_or_err(state: &LocalState, context: &str) -> Result<RunId, DslTransitionError> {
+    state.fields.active_run.clone().ok_or_else(|| {
+        DslTransitionError::guard_rejected(
+            "test-turn-state-handle",
+            format!("{context} without active run"),
+        )
+    })
+}
+
 /// Test-only `TurnStateHandle` that tracks phase via the deleted-wave-a
 /// `LocalTurnExecutionState` transition logic.
 #[derive(Debug)]
@@ -534,6 +543,15 @@ impl TestTurnStateHandle {
         Self {
             state: Mutex::new(LocalState::new()),
         }
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, LocalState>, DslTransitionError> {
+        self.state.lock().map_err(|_| {
+            DslTransitionError::guard_rejected(
+                "test-turn-state-handle",
+                "state mutex poisoned".to_string(),
+            )
+        })
     }
 }
 
@@ -553,7 +571,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         _image_tool_results_enabled: bool,
         _max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.lock_state()?;
         match primitive_kind {
             TurnPrimitiveKind::ConversationTurn => {
                 guard.apply(TurnExecutionInput::StartConversationRun { run_id })
@@ -576,9 +594,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         run_id: RunId,
         _admitted_content_shape: String,
     ) -> Result<(), DslTransitionError> {
-        self.state
-            .lock()
-            .unwrap()
+        self.lock_state()?
             .apply(TurnExecutionInput::StartImmediateAppend { run_id })
     }
 
@@ -587,14 +603,12 @@ impl TurnStateHandle for TestTurnStateHandle {
         run_id: RunId,
         _admitted_content_shape: String,
     ) -> Result<(), DslTransitionError> {
-        self.state
-            .lock()
-            .unwrap()
+        self.lock_state()?
             .apply(TurnExecutionInput::StartImmediateContext { run_id })
     }
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.lock_state()?;
         // `apply_turn_input_via_runtime_handle` in `agent::state` deliberately
         // returns Ok without routing `TurnExecutionInput::StartConversationRun`
         // (and its Immediate* siblings) through the handle — the real runtime
@@ -614,9 +628,7 @@ impl TurnStateHandle for TestTurnStateHandle {
             *guard = LocalState::new();
             let run_id = RunId(uuid::Uuid::new_v4());
             guard
-                .apply(TurnExecutionInput::StartConversationRun {
-                    run_id: run_id.clone(),
-                })
+                .apply(TurnExecutionInput::StartConversationRun { run_id })
                 .map_err(|err| {
                     DslTransitionError::guard_rejected(
                         "test-turn-state-handle",
@@ -624,11 +636,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                     )
                 })?;
         }
-        let run_id = guard
-            .fields
-            .active_run
-            .clone()
-            .expect("active_run just seeded above");
+        let run_id = active_run_or_err(&guard, "primitive_applied")?;
         guard.apply(TurnExecutionInput::PrimitiveApplied {
             run_id,
             admitted_content_shape: ContentShape("conversation".to_string()),
@@ -638,13 +646,8 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "llm_returned_tool_calls without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "llm_returned_tool_calls")?;
         guard.apply(TurnExecutionInput::LlmReturnedToolCalls {
             run_id,
             tool_count: u32::try_from(tool_count).unwrap_or(u32::MAX),
@@ -652,13 +655,8 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn llm_returned_terminal(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "llm_returned_terminal without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "llm_returned_terminal")?;
         guard.apply(TurnExecutionInput::LlmReturnedTerminal { run_id })
     }
 
@@ -667,13 +665,8 @@ impl TurnStateHandle for TestTurnStateHandle {
         op_refs: BTreeSet<String>,
         barrier_operation_ids: BTreeSet<String>,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "register_pending_ops without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "register_pending_ops")?;
         let op_refs_vec = op_refs
             .into_iter()
             .map(|s| {
@@ -698,13 +691,8 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn tool_calls_resolved(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "tool_calls_resolved without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "tool_calls_resolved")?;
         guard.apply(TurnExecutionInput::ToolCallsResolved { run_id })
     }
 
@@ -712,13 +700,8 @@ impl TurnStateHandle for TestTurnStateHandle {
         &self,
         operation_ids: BTreeSet<String>,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "ops_barrier_satisfied without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "ops_barrier_satisfied")?;
         let ops_vec = operation_ids
             .into_iter()
             .map(|s| {
@@ -732,36 +715,21 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn boundary_continue(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "boundary_continue without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "boundary_continue")?;
         guard.apply(TurnExecutionInput::BoundaryContinue { run_id })
     }
 
     fn boundary_complete(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "boundary_complete without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "boundary_complete")?;
         guard.apply(TurnExecutionInput::BoundaryComplete { run_id })
     }
 
     fn enter_extraction(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "enter_extraction without active run".to_string(),
-            )
-        })?;
-        let max_retries = u32::try_from(guard.fields.max_extraction_retries).unwrap_or(u32::MAX);
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "enter_extraction")?;
+        let max_retries = guard.fields.max_extraction_retries;
         guard.apply(TurnExecutionInput::EnterExtraction {
             run_id,
             max_retries,
@@ -769,101 +737,56 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn extraction_start(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "extraction_start without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "extraction_start")?;
         guard.apply(TurnExecutionInput::ExtractionStart { run_id })
     }
 
     fn extraction_validation_passed(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "extraction_validation_passed without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "extraction_validation_passed")?;
         guard.apply(TurnExecutionInput::ExtractionValidationPassed { run_id })
     }
 
     fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "extraction_validation_failed without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "extraction_validation_failed")?;
         guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
     }
 
     fn recoverable_failure(&self, _error: String) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "recoverable_failure without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "recoverable_failure")?;
         guard.apply(TurnExecutionInput::RecoverableFailure { run_id })
     }
 
     fn fatal_failure(&self, _error: String) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "fatal_failure without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "fatal_failure")?;
         guard.apply(TurnExecutionInput::FatalFailure { run_id })
     }
 
     fn retry_requested(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "retry_requested without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "retry_requested")?;
         guard.apply(TurnExecutionInput::RetryRequested { run_id })
     }
 
     fn cancel_now(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "cancel_now without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "cancel_now")?;
         guard.apply(TurnExecutionInput::CancelNow { run_id })
     }
 
     fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "request_cancel_after_boundary without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "request_cancel_after_boundary")?;
         guard.apply(TurnExecutionInput::CancelAfterBoundary { run_id })
     }
 
     fn cancellation_observed(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "cancellation_observed without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "cancellation_observed")?;
         guard.apply(TurnExecutionInput::CancellationObserved { run_id })
     }
 
@@ -871,53 +794,34 @@ impl TurnStateHandle for TestTurnStateHandle {
         &self,
         _outcome: TurnTerminalOutcome,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
-        let run_id = guard.fields.active_run.clone().ok_or_else(|| {
-            DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "acknowledge_terminal without active run".to_string(),
-            )
-        })?;
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "acknowledge_terminal")?;
         guard.apply(TurnExecutionInput::AcknowledgeTerminal { run_id })
     }
 
     fn turn_limit_reached(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.lock_state()?;
         ensure_active_conversation_run(&mut guard)?;
-        let run_id = guard
-            .fields
-            .active_run
-            .clone()
-            .expect("active_run seeded by ensure_active_conversation_run");
+        let run_id = active_run_or_err(&guard, "turn_limit_reached")?;
         guard.apply(TurnExecutionInput::TurnLimitReached { run_id })
     }
 
     fn budget_exhausted(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.lock_state()?;
         ensure_active_conversation_run(&mut guard)?;
-        let run_id = guard
-            .fields
-            .active_run
-            .clone()
-            .expect("active_run seeded by ensure_active_conversation_run");
+        let run_id = active_run_or_err(&guard, "budget_exhausted")?;
         guard.apply(TurnExecutionInput::BudgetExhausted { run_id })
     }
 
     fn time_budget_exceeded(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.lock_state()?;
         ensure_active_conversation_run(&mut guard)?;
-        let run_id = guard
-            .fields
-            .active_run
-            .clone()
-            .expect("active_run seeded by ensure_active_conversation_run");
+        let run_id = active_run_or_err(&guard, "time_budget_exceeded")?;
         guard.apply(TurnExecutionInput::TimeBudgetExceeded { run_id })
     }
 
     fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
-        self.state
-            .lock()
-            .unwrap()
+        self.lock_state()?
             .apply(TurnExecutionInput::ForceCancelNoRun)
     }
 
@@ -936,7 +840,10 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn snapshot(&self) -> TurnStateSnapshot {
-        let guard = self.state.lock().unwrap();
+        let guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let fields = &guard.fields;
         TurnStateSnapshot {
             active_run_id: fields.active_run.clone(),

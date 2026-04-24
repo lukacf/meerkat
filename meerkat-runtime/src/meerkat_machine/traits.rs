@@ -35,7 +35,10 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        MeerkatMachine::accept_input_with_completion(self, session_id, input).await
+        Box::pin(MeerkatMachine::accept_input_with_completion(
+            self, session_id, input,
+        ))
+        .await
     }
 
     async fn runtime_state(

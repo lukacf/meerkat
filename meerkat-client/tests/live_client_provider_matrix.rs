@@ -1,4 +1,5 @@
 #![cfg(feature = "integration-real-tests")]
+#![allow(clippy::expect_used)]
 
 //! Live integration tests for LLM clients.
 //!

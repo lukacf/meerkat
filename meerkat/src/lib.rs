@@ -15,6 +15,18 @@
 //! For the runtime-backed entry point, see [`meerkat_rpc::SessionRuntime`] or
 //! the REST/MCP server crates.
 
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        clippy::expect_used,
+        clippy::large_futures,
+        clippy::panic,
+        clippy::too_many_arguments,
+        clippy::unwrap_used
+    )
+)]
+
 // On wasm32, provide tokio alias backed by tokio_with_wasm.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {

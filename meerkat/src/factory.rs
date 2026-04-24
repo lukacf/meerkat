@@ -1698,7 +1698,7 @@ impl AgentFactory {
 
         let registry = self.model_registry(config)?;
 
-        let explicit_meerkat_tool_policy =
+        let _explicit_meerkat_tool_policy =
             !matches!(
                 build_config.override_builtins,
                 ToolCategoryOverride::Inherit

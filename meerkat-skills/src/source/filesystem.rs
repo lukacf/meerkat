@@ -52,7 +52,7 @@ impl FilesystemSkillSource {
         }
     }
 
-    fn discover_skill_directories(&self, base: &Path) -> Vec<PathBuf> {
+    fn discover_skill_directories(base: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir(base) else {
             return out;
@@ -63,7 +63,7 @@ impl FilesystemSkillSource {
                 if path.join("SKILL.md").is_file() {
                     out.push(path);
                 } else {
-                    out.extend(self.discover_skill_directories(&path));
+                    out.extend(Self::discover_skill_directories(&path));
                 }
             }
         }
@@ -83,7 +83,7 @@ impl FilesystemSkillSource {
 impl SkillSource for FilesystemSkillSource {
     async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
         let mut all: Vec<SkillDescriptor> = Vec::new();
-        for dir in self.discover_skill_directories(&self.root) {
+        for dir in Self::discover_skill_directories(&self.root) {
             let Some(key) = self.skill_key_for_dir(&dir) else {
                 continue;
             };
@@ -111,7 +111,7 @@ impl SkillSource for FilesystemSkillSource {
             return Err(SkillError::NotFound { key: key.clone() });
         }
         let content = std::fs::read_to_string(dir.join("SKILL.md"))
-            .map_err(|e| SkillError::Load(format!("read {dir:?}: {e}").into()))?;
+            .map_err(|e| SkillError::Load(format!("read {}: {e}", dir.display()).into()))?;
         parse_skill_md(
             key.clone(),
             self.scope,

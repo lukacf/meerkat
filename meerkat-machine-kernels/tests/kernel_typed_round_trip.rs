@@ -7,6 +7,7 @@
 //! `FieldId`, `TransitionId`, `EnumTypeId`, `EnumVariantId`) — no bare strings.
 
 #![cfg(feature = "test-oracle")]
+#![allow(clippy::expect_used, clippy::panic, clippy::redundant_clone)]
 
 use std::collections::BTreeMap;
 

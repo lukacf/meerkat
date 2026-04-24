@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(translated.model, "gemma4:e2b");
         let tag = match translated.provider_params.as_ref() {
             Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(t)) => t,
-            other => panic!("expected OpenAi variant, got {other:?}"),
+            other => unreachable!("expected OpenAi variant, got {other:?}"),
         };
         assert_eq!(tag.supports_temperature_override, Some(true));
         assert_eq!(tag.supports_reasoning_override, Some(true));

@@ -1,3 +1,5 @@
+#![allow(clippy::manual_assert, clippy::panic)]
+
 //! Tripwire for wave-c (Section 1.5 #5). Flipped green by **C-6c**
 //! (composition-dispatcher consumer — the meerkat-runtime handle
 //! layer).

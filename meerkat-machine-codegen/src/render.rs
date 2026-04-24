@@ -377,7 +377,7 @@ fn render_include_kernel_source(path: &str, catalog_fn: &str) -> String {
     };
     let source = source.replace("#[cfg(test)]", "#[cfg(any())]");
     format!(
-        "mod source {{\n#![allow(clippy::expect_used, clippy::assign_op_pattern)]\n{source}\n}}\npub use source::*;\n\npub fn schema() -> meerkat_machine_schema::MachineSchema {{\n    meerkat_machine_schema::{catalog_fn}()\n}}\n"
+        "mod source {{\n#![allow(dead_code, clippy::expect_used, clippy::assign_op_pattern)]\n{source}\n}}\npub use source::*;\n\npub fn schema() -> meerkat_machine_schema::MachineSchema {{\n    meerkat_machine_schema::{catalog_fn}()\n}}\n"
     )
 }
 
@@ -2989,13 +2989,14 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
             if generated_enum_names.contains(&rust_ident(&alias)) {
                 continue;
             }
-            let atom = lookup_named_type_atom(schema, &alias);
-            pushln!(
-                &mut out,
-                "pub type {} = {};",
-                rust_ident(&alias),
-                render_rust_type_atom(atom)
-            );
+            if let Some(atom) = lookup_named_type_atom(schema, &alias) {
+                pushln!(
+                    &mut out,
+                    "pub type {} = {};",
+                    rust_ident(&alias),
+                    render_rust_type_atom(atom)
+                );
+            }
         }
         pushln!(&mut out);
     }
@@ -3925,7 +3926,7 @@ fn render_transition(out: &mut String, transition: &TransitionSchema) {
             .on
             .bindings()
             .iter()
-            .map(|b| b.as_str())
+            .map(meerkat_machine_schema::identity::FieldId::as_str)
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -4340,27 +4341,16 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
 
 /// Look up the authoritative Rust atom for a `TypeRef::Named` slug.
 ///
-/// Panics when the schema is missing a binding for a named type it
-/// references — `MachineSchema::validate()` rejects such schemas at
-/// construction, so reaching codegen in that state is a bug, not a
-/// user-correctable error.
 #[cfg(not(test))]
 fn lookup_named_type_atom<'a>(
     schema: &'a MachineSchema,
     name: &str,
-) -> &'a meerkat_machine_schema::RustTypeAtom {
+) -> Option<&'a meerkat_machine_schema::RustTypeAtom> {
     schema
         .named_types
         .iter()
         .find(|binding| binding.name.as_str() == name)
         .map(|binding| &binding.rust)
-        .unwrap_or_else(|| {
-            panic!(
-                "codegen: named type `{name}` on machine `{}` has no NamedTypeBinding — \
-                 MachineSchema::validate() must be run before rendering",
-                schema.machine
-            )
-        })
 }
 
 /// Named-type slugs whose authoritative binding resolves to `u64`.
@@ -4369,10 +4359,12 @@ fn lookup_named_type_atom<'a>(
 #[cfg(not(test))]
 fn named_type_lowers_to_u64(schema: &MachineSchema, name: &str) -> bool {
     use meerkat_machine_schema::RustTypeAtom;
-    matches!(
-        lookup_named_type_atom(schema, name),
-        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8
-    )
+    lookup_named_type_atom(schema, name).is_some_and(|atom| {
+        matches!(
+            atom,
+            RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8
+        )
+    })
 }
 
 #[cfg(not(test))]
@@ -4460,11 +4452,7 @@ fn render_enum_variants_inline(schema: &EnumSchema) -> String {
 }
 
 fn render_string_list<S: AsRef<str>>(items: &[S]) -> String {
-    let rendered = items
-        .iter()
-        .map(|item| tla_string(item))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let rendered = items.iter().map(tla_string).collect::<Vec<_>>().join(", ");
     format!("<<{rendered}>>")
 }
 

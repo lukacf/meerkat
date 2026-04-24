@@ -1,5 +1,12 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::needless_borrows_for_generic_args,
+    clippy::redundant_closure_for_method_calls
+)]
+
 mod cli_parse;
 #[cfg(feature = "mcp")]
 mod mcp;

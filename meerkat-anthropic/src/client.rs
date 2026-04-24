@@ -1716,7 +1716,7 @@ mod tests {
         )
         .with_anthropic_tag_merge(|t| {
             t.thinking =
-                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive)
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive);
         });
 
         let body = client.build_request_body(&request)?;
@@ -1740,7 +1740,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
-            t.effort = Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::Medium)
+            t.effort = Some(meerkat_core::lifecycle::run_primitive::AnthropicEffort::Medium);
         });
 
         let body = client.build_request_body(&request)?;
@@ -1817,7 +1817,7 @@ mod tests {
         )
         .with_anthropic_tag_merge(|t| {
             t.thinking =
-                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive)
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive);
         });
 
         let body = client.build_request_body(&request)?;
@@ -1860,7 +1860,7 @@ mod tests {
         )
         .with_anthropic_tag_merge(|t| {
             t.inference_geo =
-                Some(meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo::Us)
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo::Us);
         });
 
         let body = client.build_request_body(&request)?;
@@ -1879,7 +1879,7 @@ mod tests {
         )
         .with_anthropic_tag_merge(|t| {
             t.compaction =
-                Some(meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig::Auto)
+                Some(meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig::Auto);
         });
 
         let body = client.build_request_body(&request)?;

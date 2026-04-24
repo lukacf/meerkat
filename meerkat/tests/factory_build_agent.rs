@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Integration tests for `AgentFactory::build_agent()`.
 //!
 //! These tests validate the consolidated agent construction pipeline without

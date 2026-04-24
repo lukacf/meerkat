@@ -1,4 +1,5 @@
 #![cfg(feature = "skills")]
+#![allow(clippy::expect_used)]
 
 use meerkat_core::skills::{SkillKey, SkillName, SkillSource};
 use meerkat_skills::EmbeddedSkillSource;

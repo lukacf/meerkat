@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Integration tests for the RPC server.
 //!
 //! These tests exercise the full roundtrip: write JSONL requests to a stream,

@@ -65,7 +65,7 @@ impl BuiltinTool for BrowseSkillsTool {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(ToString::to_string);
         let source_uuid = match args.get("source_uuid").and_then(|v| v.as_str()) {
             Some(raw) => Some(
                 meerkat_core::skills::SourceUuid::parse(raw)

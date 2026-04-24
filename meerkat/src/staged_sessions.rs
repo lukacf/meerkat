@@ -115,6 +115,10 @@ impl StagedSessionRegistry {
         self.slots.read().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.slots.read().await.is_empty()
+    }
+
     /// Whether any slot exists for `id`, regardless of phase.
     pub async fn contains(&self, id: &SessionId) -> bool {
         self.slots.read().await.contains_key(id)
@@ -232,6 +236,7 @@ impl StagedSessionRegistry {
     /// validation or service-side materialization fails before the first
     /// successful turn. Preserves the original metadata + deferred prompt
     /// so the next `start_turn` call sees the same pre-promotion state.
+    #[allow(clippy::too_many_arguments)]
     pub async fn abandon_promotion(
         &self,
         id: SessionId,

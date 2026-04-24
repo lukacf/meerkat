@@ -88,17 +88,15 @@ pub(crate) fn for_input(
     match input {
         Input::Prompt(prompt) => prompt.turn_metadata.clone(),
         Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
-        Input::ExternalEvent(event) => {
-            let mut meta = RuntimeTurnMetadata::default();
-            meta.handling_mode = Some(event.handling_mode);
-            meta.render_metadata = event.render_metadata.clone();
-            Some(meta)
-        }
-        Input::Continuation(continuation) => {
-            let mut meta = RuntimeTurnMetadata::default();
-            meta.handling_mode = Some(continuation.handling_mode);
-            Some(meta)
-        }
+        Input::ExternalEvent(event) => Some(RuntimeTurnMetadata {
+            handling_mode: Some(event.handling_mode),
+            render_metadata: event.render_metadata.clone(),
+            ..Default::default()
+        }),
+        Input::Continuation(continuation) => Some(RuntimeTurnMetadata {
+            handling_mode: Some(continuation.handling_mode),
+            ..Default::default()
+        }),
         _ => None,
     }
 }

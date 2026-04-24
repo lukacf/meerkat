@@ -1,4 +1,5 @@
 //! Meerkat WASM runtime — a real meerkat surface in the browser.
+#![allow(clippy::expect_used)]
 //!
 //! Routes through `AgentFactory::build_agent()` with override-first resource
 //! injection, same pipeline as CLI/RPC/REST/MCP. Uses real agent loop, real LLM

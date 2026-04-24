@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 //! Wave-B V5 (B-8): [`TrustStore`] keys by canonical [`PeerId`].
 //!
 //! Duplicate [`PeerName`] across entries is explicitly allowed — peer names

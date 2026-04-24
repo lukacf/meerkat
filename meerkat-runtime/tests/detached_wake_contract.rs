@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 //! Detached-wake contract tests for background shell job notification.
 //!
 //! These tests verify the current runtime-loop-owned detached-wake paths that

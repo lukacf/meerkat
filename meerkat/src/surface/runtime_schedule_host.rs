@@ -47,6 +47,7 @@ pub fn spawn_runtime_backed_schedule_host(
 struct RuntimeBackedScheduleSessionHost {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
+    #[allow(dead_code)]
     config: Config,
     build_template: SessionBuildOptions,
 }
@@ -66,6 +67,7 @@ impl RuntimeBackedScheduleSessionHost {
         }
     }
 
+    #[allow(dead_code)]
     async fn ensure_runtime_session_registered(
         &self,
         session_id: &SessionId,
@@ -96,6 +98,7 @@ impl RuntimeBackedScheduleSessionHost {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn update_peer_ingress_context(&self, session_id: &SessionId) {
         #[cfg(feature = "comms")]
         {

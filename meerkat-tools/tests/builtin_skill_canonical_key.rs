@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 //! B-7 V4: builtin skill tools receive a typed `SkillKey` directly at the
 //! ingress boundary; there is no slash-string path parsing. Malformed input
 //! raises `BuiltinToolError::InvalidArgs`.

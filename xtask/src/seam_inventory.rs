@@ -1060,8 +1060,7 @@ fn print_summary(
     );
     for (protocol, composition, producer, effect, actor, feedback) in &protocol_rows {
         println!(
-            "  {:40} {:28} {:30} {:32} {:32} {}",
-            protocol, composition, producer, effect, actor, feedback
+            "  {protocol:40} {composition:28} {producer:30} {effect:32} {actor:32} {feedback}"
         );
     }
     println!(

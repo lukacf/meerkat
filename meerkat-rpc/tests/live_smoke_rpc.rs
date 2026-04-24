@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Live integration and smoke tests for the RPC server.
 //!
 //! Reuses the same duplex-stream pattern from `integration_server.rs`.

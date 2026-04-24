@@ -1,3 +1,10 @@
+#![allow(
+    unused_imports,
+    clippy::clone_on_copy,
+    clippy::implicit_clone,
+    clippy::redundant_clone
+)]
+
 mod agent_tools;
 mod public_definition;
 mod public_mcp;

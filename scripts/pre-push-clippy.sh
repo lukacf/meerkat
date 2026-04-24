@@ -2,13 +2,6 @@
 # Pre-push clippy gate: lint only changed crates instead of the full workspace.
 # Falls back to workspace clippy when root Cargo.toml/Cargo.lock changes.
 #
-# Wave-d temporary: clippy runs with `-W warnings` (warn, not deny) until
-# D-GATE (#15) closes. The workspace has ~1200+ pre-existing lints scattered
-# across meerkat-machine-kernels generated code, meerkat-contracts wire
-# schemas, and meerkat-runtime. Chasing them per-crate during d.0 fan-out
-# blocks every agent push serially. D-GATE's exit criterion restores
-# `-D warnings` once the structural cleanup tasks (D-mob, D-l, D-clippy)
-# have landed. Lints are still visible in output; they just don't gate push.
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -22,7 +15,7 @@ fi
 MERGE_BASE=$(git merge-base "$UPSTREAM" HEAD 2>/dev/null || echo "")
 if [ -z "$MERGE_BASE" ]; then
   echo "No merge base with $UPSTREAM; running full workspace clippy."
-  "$CARGO" clippy --workspace --all-targets --all-features -- -W warnings
+  "$CARGO" clippy --workspace --all-targets --all-features -- -D warnings
   exit $?
 fi
 
@@ -37,7 +30,7 @@ fi
 # Root workspace manifest changes → full workspace clippy
 if echo "$CHANGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
   echo "Workspace manifest changed — running full workspace clippy."
-  "$CARGO" clippy --workspace --all-targets --all-features -- -W warnings
+  "$CARGO" clippy --workspace --all-targets --all-features -- -D warnings
   exit $?
 fi
 
@@ -72,4 +65,4 @@ fi
 
 echo "Clippy on changed crates:$PKG_FLAGS"
 # shellcheck disable=SC2086
-"$CARGO" clippy $PKG_FLAGS --all-targets --all-features -- -W warnings
+"$CARGO" clippy $PKG_FLAGS --all-targets --all-features -- -D warnings

@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 //! Wave-B V5 (B-8): name-to-PeerId resolution returns a typed ambiguity
 //! error when more than one [`TrustEntry`] shares a [`PeerName`].
 //!

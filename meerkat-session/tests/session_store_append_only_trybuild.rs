@@ -1,3 +1,5 @@
+#![allow(clippy::panic)]
+
 //! Tripwire for wave-c (Section 1.5 #9). Flipped green by **C-H1**
 //! (type-level append-only `SessionStore` / `AppendOnlyMessages`
 //! newtype — the compile-time form of F1 closure from the

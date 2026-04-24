@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 //! CI-gate self-test (wave-b B-10, Risk #6 mitigation).
 //!
 //! Guards against the silent-regression failure mode where

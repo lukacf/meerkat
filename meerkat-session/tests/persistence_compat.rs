@@ -1,3 +1,5 @@
+#![allow(clippy::panic, clippy::unnecessary_debug_formatting)]
+
 //! Tripwire for wave-c (Section 1.5 #2). Flipped green by **C-3**
 //! (fixtures 1-11) + **C-6r** (fixture #12, runtime-side snapshot
 //! table).

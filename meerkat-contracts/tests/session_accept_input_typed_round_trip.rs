@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 //! Wave B (V8): `session/accept_input` has a typed request shape.
 //!
 //! The ad-hoc raw-JSON ingress is gone; callers construct a

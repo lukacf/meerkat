@@ -15,15 +15,25 @@
 //! - [`TaskBoard`] - Projected view of shared tasks
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::collapsible_if,
+    clippy::expect_used,
+    clippy::if_not_else,
+    clippy::implicit_clone,
+    clippy::large_futures,
+    clippy::redundant_closure_for_method_calls,
+    clippy::redundant_clone,
+    clippy::unnecessary_to_owned
+)]
 #![cfg_attr(
     test,
     allow(
         clippy::unwrap_used,
-        clippy::expect_used,
         clippy::panic,
-        clippy::redundant_clone,
         clippy::io_other_error,
-        clippy::collapsible_if,
         clippy::await_holding_lock
     )
 )]

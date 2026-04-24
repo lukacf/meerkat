@@ -168,7 +168,7 @@ mod tests {
         let caps: Vec<&str> = descriptor
             .capability_requirements
             .iter()
-            .map(|c| c.as_str())
+            .map(meerkat_core::skills::CapabilityId::as_str)
             .collect();
         assert_eq!(caps, vec!["builtins", "shell"]);
     }

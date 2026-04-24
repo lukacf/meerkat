@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, MobPeerTarget, MobUnwireParams, MobWireParams,

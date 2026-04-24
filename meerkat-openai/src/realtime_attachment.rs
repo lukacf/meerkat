@@ -4,6 +4,8 @@
 //! module owns provider-specific orchestration that coordinates those
 //! mechanics with runtime-owned live attachment authority.
 
+#![allow(clippy::large_futures)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

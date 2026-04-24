@@ -251,7 +251,7 @@ pub enum OwnedFieldValue {
     Opaque(Arc<dyn std::any::Any + Send + Sync>),
 }
 
-impl<'a> FieldValue<'a> {
+impl FieldValue<'_> {
     /// Lift a borrowed field value into its owned counterpart, cloning the
     /// backing `&str` when required. The [`Arc<dyn Any>`] path is shared,
     /// not cloned.

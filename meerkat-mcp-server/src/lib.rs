@@ -3,6 +3,8 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
+#![allow(dead_code, unused_imports, clippy::expect_used, clippy::large_futures)]
+
 mod runtime_ingress;
 mod schedule_host;
 

@@ -1,3 +1,12 @@
+#![allow(
+    clippy::enum_variant_names,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::redundant_clone,
+    clippy::type_complexity,
+    clippy::unwrap_used
+)]
+
 //! Composition driver / dispatcher contract (C-T §6 #10).
 //!
 //! The audit calls for a "name/descriptor agreement, duplicate
@@ -21,7 +30,6 @@
 //! shape of those 4 routes + the typed refusal arms.
 //!
 //! See `docs/wave-c-prep/test-coverage-audit.md` §6 #10.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::{Arc, OnceLock};
 

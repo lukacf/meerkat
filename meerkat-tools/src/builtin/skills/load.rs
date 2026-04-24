@@ -89,7 +89,7 @@ impl BuiltinTool for LoadSkillTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let results = self
             .engine
-            .resolve_and_render(&[key.clone()])
+            .resolve_and_render(std::slice::from_ref(&key))
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 

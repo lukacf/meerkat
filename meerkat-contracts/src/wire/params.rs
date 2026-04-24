@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_core_create_params_with_connection_ref() -> Result<(), serde_json::Error> {
+    fn test_core_create_params_with_connection_ref() -> Result<(), Box<dyn std::error::Error>> {
         use crate::wire::WireConnectionRef;
         let params = CoreCreateParams {
             prompt: "hello".to_string(),
@@ -281,8 +281,8 @@ mod tests {
             app_context: None,
             shell_env: None,
             connection_ref: Some(WireConnectionRef {
-                realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
+                realm: meerkat_core::connection::RealmId::parse("dev")?,
+                binding: meerkat_core::connection::BindingId::parse("default_openai")?,
                 profile: None,
             }),
         };

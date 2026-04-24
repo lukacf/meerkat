@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls)]
+
 use meerkat_machine_schema::TriggerKind;
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,

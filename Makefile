@@ -38,10 +38,16 @@ test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	$(CARGO) nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
 
-# Integration-fast tests only (no unit tests)
+# Integration-fast tests only (no unit tests). Must stay in sync with the
+# `int` cargo alias in `.cargo/config.toml`: both exclude the e2e lane
+# binaries (`e2e_{fast,system,live,smoke,models}_lane`) since those have
+# their own Makefile targets and scenario-test timeouts incompatible with
+# the integration-fast lane's default 300s nextest deadline.
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	$(CARGO) nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
+	$(CARGO) nextest run --workspace --tests \
+		-E 'not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)' \
+		--show-progress none --status-level none --final-status-level fail
 
 # Deterministic end-to-end lane (canonical integration harness)
 e2e-fast:

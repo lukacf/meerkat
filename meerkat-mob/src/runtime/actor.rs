@@ -5228,6 +5228,29 @@ impl MobActor {
             roster.mark_retiring_by_identity(&entry.agent_identity);
         }
 
+        // Flush routed effects *before* the disposal pipeline tears down
+        // the runtime session. The `Retire` DSL input above emits a
+        // `RequestRuntimeRetire` routed effect that the `MeerkatConsumer
+        // Surface` delivers as a `Retire` input on the meerkat DSL
+        // authority; that authority lives behind the session registered
+        // with the shared `MeerkatMachine`. `dispose_member` →
+        // `dispose_stop_host_loop` → `teardown_autonomous_runtime` calls
+        // `adapter.unregister_session`, so if the routed effect hasn't
+        // been drained yet, the consumer surface fails with
+        // `ConsumerRefused { reason: "session is not registered" }` and
+        // the actor task crashes. Drain the pending queue at the natural
+        // async boundary here — before the disposal pipeline runs — so
+        // the routed-effect delivery observes the session in its
+        // pre-teardown state.
+        if let Err(error) = self.flush_routed_effects().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                %error,
+                "pre-disposal routed-effect flush failed; proceeding with disposal"
+            );
+        }
+
         // Snapshot context and run disposal pipeline.
         let ctx = self
             .disposal_context_from_entry(agent_identity, &entry)

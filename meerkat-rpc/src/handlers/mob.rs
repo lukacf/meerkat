@@ -263,6 +263,13 @@ pub struct MobSpawnParams {
     /// mob definition.
     #[serde(default)]
     pub override_profile: Option<meerkat_mob::Profile>,
+    /// Explicit provider binding for this member's session build.
+    ///
+    /// The mob runtime refuses ambient credential selection; callers
+    /// that spawn live model-backed members must name the realm binding
+    /// that owns auth resolution.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 pub async fn handle_spawn(
@@ -322,6 +329,9 @@ pub async fn handle_spawn(
     if let Some(override_profile) = params.override_profile {
         spec.override_profile = Some(override_profile);
     }
+    if let Some(connection_ref) = params.connection_ref {
+        spec.connection_ref = Some(connection_ref);
+    }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
         Err(err) => invalid_params(id, err.to_string()),
@@ -355,6 +365,8 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -392,6 +404,7 @@ pub async fn handle_spawn_many(
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
         spec.additional_instructions = s.additional_instructions.clone();
+        spec.connection_ref = s.connection_ref.clone();
         specs.push(spec);
     }
 
@@ -1967,6 +1980,10 @@ mod tests {
                 "peer_description": "",
                 "external_addressable": false
             },
+            "connection_ref": {
+                "realm": "dev",
+                "binding": "default_anthropic"
+            },
         });
         let params: MobSpawnParams =
             serde_json::from_value(value).expect("spawn params with full surface deserialize");
@@ -2007,6 +2024,12 @@ mod tests {
             .as_ref()
             .expect("override_profile round-trips through serde");
         assert_eq!(override_profile.model, "claude-sonnet-4-6");
+        let connection_ref = params
+            .connection_ref
+            .as_ref()
+            .expect("connection_ref round-trips through serde");
+        assert_eq!(connection_ref.realm.as_str(), "dev");
+        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
 
         // And all older fields that aren't set stay None so the additive
         // wire extension doesn't break prior callers.
@@ -2022,6 +2045,7 @@ mod tests {
         assert!(minimal_params.budget_split_policy.is_none());
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
+        assert!(minimal_params.connection_ref.is_none());
     }
 
     #[test]

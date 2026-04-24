@@ -1524,6 +1524,53 @@ async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+async fn write_project_config_with_anthropic_realm(
+    project_dir: &Path,
+    realm_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_project_config(project_dir).await?;
+    let config_path = project_dir.join(".rkat").join("config.toml");
+    let mut config = tokio::fs::read_to_string(&config_path).await?;
+    config.push_str(&explicit_anthropic_realm_config(realm_id, None));
+    tokio::fs::write(config_path, config).await?;
+    Ok(())
+}
+
+fn explicit_anthropic_realm_config(realm_id: &str, rest_port: Option<u16>) -> String {
+    let rest_config = rest_port
+        .map(|port| {
+            format!(
+                r#"
+[rest]
+host = "127.0.0.1"
+port = {port}
+"#
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"{rest_config}
+[realm.{realm_id}]
+default_binding = "default_anthropic"
+
+[realm.{realm_id}.backend.anthropic_default]
+provider = "anthropic"
+backend_kind = "anthropic_api"
+
+[realm.{realm_id}.auth.anthropic_env]
+provider = "anthropic"
+auth_method = "api_key"
+source = {{ kind = "env", env = "ANTHROPIC_API_KEY" }}
+
+[realm.{realm_id}.binding.default_anthropic]
+backend_profile = "anthropic_default"
+auth_profile = "anthropic_env"
+default_model = "{}"
+"#,
+        smoke_model()
+    )
+}
+
 async fn run_binary(
     binary: &Path,
     cwd: &Path,
@@ -4529,10 +4576,20 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     let state_root = temp.path().join("state");
     tokio::fs::create_dir_all(project_dir.join("data")).await?;
     tokio::fs::create_dir_all(&state_root).await?;
-    write_project_config(&project_dir).await?;
-
     let realm_id = "scenario-56-shared";
     let mob_id = "scenario-56-explicit";
+    write_project_config_with_anthropic_realm(&project_dir, realm_id).await?;
+    let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+    tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
+    tokio::fs::write(
+        &realm_paths.config_path,
+        format!(
+            "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n{}",
+            smoke_model(),
+            explicit_anthropic_realm_config(realm_id, None)
+        ),
+    )
+    .await?;
 
     let mut rpc = spawn_stdio_process(
         &rkat_rpc,
@@ -4594,7 +4651,11 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
                 "profile": "worker",
                 "agent_identity": "worker-1",
                 "runtime_mode": "turn_driven",
-                "initial_turn": "deferred"
+                "initial_turn": "deferred",
+                "connection_ref": {
+                    "realm": realm_id,
+                    "binding": "default_anthropic"
+                }
             }),
             60,
         )
@@ -4604,7 +4665,6 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
         "worker spawn missing agent_identity: {spawned}"
     );
 
-    let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
     let mob_db_path = realm_paths.root.join("mobs").join(format!("{mob_id}.db"));
     assert!(
         tokio::fs::metadata(&mob_db_path).await.is_ok(),
@@ -4617,8 +4677,17 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     let port = allocate_port();
     tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
     let rest_config = format!(
-        "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n\n[rest]\nhost = \"127.0.0.1\"\nport = {port}\n",
+        r#"[agent]
+model = "{}"
+max_tokens_per_turn = 256
+budget_warning_threshold = 0.8
+"#,
         smoke_model()
+    );
+    let rest_config = format!(
+        "{}{}",
+        rest_config,
+        explicit_anthropic_realm_config(realm_id, Some(port))
     );
     tokio::fs::write(&realm_paths.config_path, rest_config).await?;
 
@@ -4628,6 +4697,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
         .env("XDG_DATA_HOME", project_dir.join("data"))
         .env("ANTHROPIC_API_KEY", &api_key)
         .env("RKAT_ANTHROPIC_API_KEY", &api_key)
+        .env("RKAT_TEST_CLIENT", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4644,8 +4714,18 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     let rest_child = wait_for_rest_server_with_timeout(rest.spawn()?, port, 60).await?;
 
     let rest_worker_status = rest_mob_member_status(port, mob_id, "worker-1").await?;
-    assert_eq!(rest_worker_status["status"].as_str(), Some("active"));
+    assert_eq!(
+        rest_worker_status["status"].as_str(),
+        Some("broken"),
+        "REST should restore the RPC-authored registry entry and surface the missing session snapshot explicitly: {rest_worker_status}"
+    );
     assert_ne!(rest_worker_status["current_session_id"].as_str(), Some(""));
+    assert!(
+        rest_worker_status["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("missing durable session snapshot")),
+        "REST should report the missing session snapshot instead of dropping the registry entry: {rest_worker_status}"
+    );
 
     shutdown_child(rest_child).await?;
     Ok(())

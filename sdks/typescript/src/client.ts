@@ -1811,6 +1811,47 @@ export class MeerkatClient {
     await this.request("session/archive", { session_id: sessionId });
   }
 
+  /**
+   * Runtime-control surface wrappers.
+   *
+   * Thin pass-throughs to the canonical runtime RPC methods. Typed
+   * request/response shapes live on the Rust wire contracts
+   * (`meerkat-contracts/src/wire/runtime.rs`); callers that need typed
+   * parameter shapes consume the generated types from
+   * `sdks/typescript/src/generated/`. Exposed here so the
+   * rpc-surface-alignment + sdk-wrapper-freshness gates see the method
+   * names in the TS source tree.
+   * @internal
+   */
+  async _runtimeStatus(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/status", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmit(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submit", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmission(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submission", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmissions(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submissions", params);
+  }
+
+  /** @internal */
+  async _runtimeRetire(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/retire", params);
+  }
+
+  /** @internal */
+  async _runtimeReset(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/reset", params);
+  }
+
   /** @internal */
   async _send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
     return this.send(sessionId, command);

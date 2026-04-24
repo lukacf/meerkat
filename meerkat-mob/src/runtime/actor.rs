@@ -3935,6 +3935,18 @@ impl MobActor {
         // this insert, `start_autonomous_member` below reads an empty roster
         // and fails with `"autonomous member '{id}' missing roster entry for
         // startup readiness"` (#30 D-spawn-readiness-lookup).
+        //
+        // `peer_id` is resolved from the session's comms runtime public key;
+        // callers like `list_members` project it directly from the roster
+        // entry (see `test_member_roster_surfaces_peer_id`).
+        let peer_id = if let Some(session_id) = member_ref.bridge_session_id() {
+            self.session_service
+                .comms_runtime(session_id)
+                .await
+                .and_then(|runtime| runtime.public_key())
+        } else {
+            None
+        };
         {
             let mut roster = self.roster.write().await;
             roster.add_member(crate::roster::RosterAddEntry {
@@ -3945,7 +3957,7 @@ impl MobActor {
                 role: profile_name.clone(),
                 runtime_mode,
                 member_ref: Self::sanitized_member_ref(&member_ref),
-                peer_id: None,
+                peer_id,
                 labels: labels.clone(),
                 effective_profile_override: effective_profile_override.clone(),
             });

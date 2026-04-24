@@ -43,14 +43,65 @@ impl MeerkatMachine {
                 .await
                 .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
-                // Wave-c C-6r: the shell-side ingress-ownership and
-                // peer-context update paths were removed in
-                // `bdd46095149ae` — the DSL transition IS the ownership
-                // decision now, and no shell update runs after a DSL
-                // rejection by construction. `comms_runtime` and `mob_id`
-                // are carried through the command for the DSL input to
-                // see (and for tracing) but have no shell side effect.
-                let _ = (comms_runtime, mob_id);
+                // W2-G (issue #264): peer-ingress ownership is tracked by
+                // the DSL via `peer_ingress_owner_kind` +
+                // `peer_ingress_comms_runtime_id` + `peer_ingress_mob_id`.
+                // The `SetPeerIngressContext` transition above is a
+                // keep-alive-only self-loop that doesn't mutate those
+                // fields; the ownership-establishing transitions are
+                // `AttachSessionIngress` / `AttachMobIngress` at
+                // `meerkat-runtime/src/meerkat_machine/dsl.rs:6375-6407`.
+                //
+                // When a `comms_runtime` is provided:
+                //   - If `mob_id` is present → fire `AttachMobIngress` to
+                //     record `MobOwned { comms_runtime_id, mob_id }`.
+                //   - Otherwise → fire `AttachSessionIngress` to record
+                //     `SessionOwned { comms_runtime_id }`.
+                // Ignore the DSL's transition-rejected case gracefully —
+                // the two guards (`owner_is_unattached` on Session,
+                // `owner_allows_mob_attach` on Mob) turn no-op when the
+                // owner is already at the target kind or a higher level,
+                // which is the idempotent semantic these helpers have
+                // always meant to carry.
+                //
+                // When `comms_runtime` is `None` the caller intends
+                // keep-alive-only; no ownership transition fires.
+                if let Some(ref runtime) = comms_runtime {
+                    let comms_runtime_id =
+                        crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(runtime);
+                    let attach_input = if let Some(mob_id) = mob_id {
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AttachMobIngress {
+                            comms_runtime_id,
+                            mob_id,
+                        }
+                    } else {
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AttachSessionIngress {
+                            comms_runtime_id,
+                        }
+                    };
+                    // The Attach transitions have `guard` clauses that
+                    // reject no-op re-application (already at target
+                    // owner kind); treat transition rejections as
+                    // expected idempotent behavior rather than a
+                    // command failure.
+                    let _ = self
+                        .stage_session_dsl_input(&session_id, attach_input, "AttachPeerIngress")
+                        .await;
+                } else if !keep_alive {
+                    // keep_alive=false + comms_runtime=None → caller is
+                    // tearing down the drain. Fire `DetachIngress` to
+                    // clear any active ownership. Its guard rejects
+                    // no-op (already Unattached) with the same
+                    // idempotent semantic as the Attach transitions.
+                    let _ = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::DetachIngress,
+                            "DetachIngress",
+                        )
+                        .await;
+                }
+                let _ = comms_runtime;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {

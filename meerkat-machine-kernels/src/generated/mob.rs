@@ -1017,8 +1017,8 @@ mod source {
                 ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
                 RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
                 ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-                ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
-                RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
+                ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
+                RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
                 DestroyMob,
                 ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
                 MarkCompleted,
@@ -1045,7 +1045,7 @@ mod source {
             }
 
             effect MobMachineEffect {
-                RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+                RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
                 RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
                 RequestRuntimeRetire,
                 RequestRuntimeDestroy,
@@ -1171,7 +1171,7 @@ mod source {
                     self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
             }
 
@@ -1196,7 +1196,7 @@ mod source {
                     self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
             }
 
@@ -1437,7 +1437,7 @@ mod source {
             }
 
             transition ResetMember {
-                on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+                on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id }
                 guard {
                     self.lifecycle_phase == Phase::Running
                     || self.lifecycle_phase == Phase::Stopped
@@ -1458,12 +1458,12 @@ mod source {
                     self.member_startup_ready.remove(agent_runtime_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Reset }
             }
 
             transition RespawnMember {
-                on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+                on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 update {
                     self.active_run_count = 0;
@@ -1481,7 +1481,7 @@ mod source {
                     self.member_startup_ready.remove(agent_runtime_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
             }
 

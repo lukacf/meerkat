@@ -272,6 +272,7 @@ impl MeerkatMachine {
                     ),
                     fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
                     generation: crate::meerkat_machine::dsl::Generation::from(0),
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                 };
                 machine_prepare_bindings_projection(&mut driver)?;
                 drop(driver);

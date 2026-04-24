@@ -125,6 +125,7 @@ pub enum MobProducerEffect {
         agent_runtime_id: mob_dsl::AgentRuntimeId,
         fence_token: mob_dsl::FenceToken,
         generation: mob_dsl::Generation,
+        session_id: mob_dsl::SessionId,
     },
     /// Route `work_request_reaches_meerkat` — target `meerkat.Ingest`.
     /// The route binds producer `runtime_id` to consumer
@@ -166,10 +167,12 @@ impl MobProducerEffect {
                 agent_runtime_id,
                 fence_token,
                 generation,
+                session_id,
             } => match id.as_str() {
                 "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
                 "fence_token" => Some(FieldValue::U64(fence_token.0)),
                 "generation" => Some(FieldValue::U64(generation.0)),
+                "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
                 _ => None,
             },
             Self::RequestRuntimeIngress {
@@ -238,11 +241,13 @@ pub fn lift_routed_effect(effect: &mob_dsl::MobMachineEffect) -> Option<MobSeamE
             agent_runtime_id,
             fence_token,
             generation,
+            session_id,
         } => MobProducerEffect::RequestRuntimeBinding {
             agent_identity: agent_identity.clone(),
             agent_runtime_id: agent_runtime_id.clone(),
             fence_token: *fence_token,
             generation: *generation,
+            session_id: session_id.clone(),
         },
         DslEffect::RequestRuntimeIngress {
             agent_runtime_id,
@@ -397,6 +402,7 @@ mod tests {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
             generation: mob_dsl::Generation(3),
+            session_id: mob_dsl::SessionId::from("session-1"),
         };
         assert_eq!(body.variant_id(), ev("RequestRuntimeBinding"));
         assert_eq!(
@@ -412,6 +418,7 @@ mod tests {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
             generation: mob_dsl::Generation(3),
+            session_id: mob_dsl::SessionId::from("session-1"),
         };
         let effect = MobSeamEffect::Mob(body);
 
@@ -480,6 +487,7 @@ mod tests {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt"),
             fence_token: mob_dsl::FenceToken(1),
             generation: mob_dsl::Generation(0),
+            session_id: mob_dsl::SessionId::from("session-1"),
         };
         assert!(matches!(
             lift_routed_effect(&binding_in),

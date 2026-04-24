@@ -289,7 +289,7 @@ machine! {
                 next_active_visibility_revision: u64,
                 tool_visibility_delta: SessionToolVisibilityDelta,
             },
-            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
             NotifyDrainExited { reason: String },
             InterruptCurrentRun,
@@ -936,7 +936,7 @@ machine! {
         // 7. PrepareBindings: different source→target mappings per phase
         // Initializing → Initializing (no guard, emits RuntimeBound)
         transition PrepareBindingsInitializing {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -947,7 +947,7 @@ machine! {
         }
         // Idle → Attached
         transition PrepareBindingsIdle {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -958,7 +958,7 @@ machine! {
         }
         // Attached → Attached
         transition PrepareBindingsAttached {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -969,7 +969,7 @@ machine! {
         }
         // Running → Running
         transition PrepareBindingsRunning {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -980,7 +980,7 @@ machine! {
         }
         // Retired → Retired
         transition PrepareBindingsRetired {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -991,7 +991,7 @@ machine! {
         }
         // Stopped → Stopped (inline in hand-written catalog)
         transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);

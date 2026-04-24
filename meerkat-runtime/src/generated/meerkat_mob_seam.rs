@@ -51,6 +51,10 @@ pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>
                         FieldId::parse("generation").expect("route producer field slug"),
                         FieldId::parse("generation").expect("route consumer field slug"),
                     ),
+                    (
+                        FieldId::parse("session_id").expect("route producer field slug"),
+                        FieldId::parse("session_id").expect("route consumer field slug"),
+                    ),
                 ],
             }),
             crate::generated::mob::Effect::RequestRuntimeIngress(_) => Some(TypedRoutedInput {

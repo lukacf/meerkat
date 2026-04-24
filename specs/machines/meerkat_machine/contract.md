@@ -50,7 +50,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
-- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
 - `InterruptCurrentRun`
@@ -401,37 +401,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsInitializing`
 - From: `Initializing`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Initializing`
 
 ### `PrepareBindingsIdle`
 - From: `Idle`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Attached`
 
 ### `PrepareBindingsAttached`
 - From: `Attached`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Attached`
 
 ### `PrepareBindingsRunning`
 - From: `Running`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Running`
 
 ### `PrepareBindingsRetired`
 - From: `Retired`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Retired`
 
 ### `PrepareBindingsStopped`
 - From: `Stopped`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Stopped`
 

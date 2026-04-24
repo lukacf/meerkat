@@ -104,24 +104,27 @@ impl MeerkatConsumerSurface {
         &self,
         projected: &[(FieldId, OwnedFieldValue)],
     ) -> Result<SessionId, String> {
-        let projected_runtime_id = projected
+        // Typed session_id is the canonical source (Shape 4 — producer DSL
+        // emits `session_id: SessionId` alongside `agent_runtime_id`; see
+        // `MobMachineEffect::RequestRuntimeBinding` in
+        // `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs:168`).
+        let projected_session_id = projected
             .iter()
-            .find(|(id, _)| id.as_str() == "agent_runtime_id")
+            .find(|(id, _)| id.as_str() == "session_id")
             .and_then(|(_, v)| match v {
                 OwnedFieldValue::Str(s) => Some(s.clone()),
                 _ => None,
             });
 
-        match (&self.pinned_session, projected_runtime_id) {
-            (Some(pinned), Some(rt)) if rt != pinned.to_string() => Err(format!(
-                "routed agent_runtime_id `{rt}` does not match pinned session `{pinned}`"
+        match (&self.pinned_session, projected_session_id) {
+            (Some(pinned), Some(sid)) if sid != pinned.to_string() => Err(format!(
+                "routed session_id `{sid}` does not match pinned session `{pinned}`"
             )),
             (Some(pinned), _) => Ok(pinned.clone()),
-            (None, Some(rt)) => SessionId::parse(&rt).map_err(|e| {
-                format!("routed agent_runtime_id `{rt}` is not a valid session UUID: {e}")
-            }),
+            (None, Some(sid)) => SessionId::parse(&sid)
+                .map_err(|e| format!("routed session_id `{sid}` is not a valid UUID: {e}")),
             (None, None) => Err(
-                "routed input did not project `agent_runtime_id` and surface is not pinned \
+                "routed input did not project `session_id` and surface is not pinned \
                  to a session — no session can be resolved"
                     .into(),
             ),
@@ -187,10 +190,12 @@ impl ConsumerSurface for MeerkatConsumerSurface {
                 let rt = project_str(&projected, "agent_runtime_id")?;
                 let fence = project_u64(&projected, "fence_token")?;
                 let gen_ = project_u64(&projected, "generation")?;
+                let sid = project_str(&projected, "session_id")?;
                 mm_dsl::MeerkatMachineInput::PrepareBindings {
                     agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
                     fence_token: mm_dsl::FenceToken(fence),
                     generation: mm_dsl::Generation(gen_),
+                    session_id: mm_dsl::SessionId::from(sid.to_string()),
                 }
             }
             "Ingest" => {

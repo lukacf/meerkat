@@ -329,6 +329,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                     bind("agent_runtime_id", "agent_runtime_id"),
                     bind("fence_token", "fence_token"),
                     bind("generation", "generation"),
+                    bind("session_id", "session_id"),
                 ],
             ),
             route(

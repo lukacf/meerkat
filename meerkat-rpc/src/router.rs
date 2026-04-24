@@ -5089,6 +5089,15 @@ mod tests {
             .to_string();
         let parsed_session_id =
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        let session_status = router
+            .dispatch(make_request(
+                "session/status",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let status = result_value(&session_status);
+        assert_eq!(status["state"].as_str(), Some("attached"));
 
         // Drive the session into a reconnecting state. `intent=true`
         // plus `RequireRealtimeReattach` puts the DSL into

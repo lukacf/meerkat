@@ -2008,7 +2008,7 @@
   "MobPeerTarget": {
     "$defs": {
       "WireTrustedPeerSpec": {
-        "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+        "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`pubkey` is the Ed25519 signing public key (32 bytes) required so the\nreceiver can verify envelope signatures after trust registration.\nSerialized as a 32-element JSON array of numbers (matching\n`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —\nthe corresponding `TrustedPeerDescriptor::pubkey` will then be all\nzeros, which makes signature verification fail closed. Production\nclients MUST send the real pubkey.",
         "properties": {
           "address": {
             "type": "string"
@@ -2018,6 +2018,51 @@
           },
           "peer_id": {
             "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
           }
         },
         "required": [
@@ -12168,7 +12213,7 @@
   },
   "WireTrustedPeerSpec": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+    "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`pubkey` is the Ed25519 signing public key (32 bytes) required so the\nreceiver can verify envelope signatures after trust registration.\nSerialized as a 32-element JSON array of numbers (matching\n`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —\nthe corresponding `TrustedPeerDescriptor::pubkey` will then be all\nzeros, which makes signature verification fail closed. Production\nclients MUST send the real pubkey.",
     "properties": {
       "address": {
         "type": "string"
@@ -12178,6 +12223,51 @@
       },
       "peer_id": {
         "type": "string"
+      },
+      "pubkey": {
+        "default": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
       }
     },
     "required": [

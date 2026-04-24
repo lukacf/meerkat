@@ -154,6 +154,41 @@ impl SessionBackend {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
+        // Post-#31: real comms runtimes return `"ed25519:<base64>"` from
+        // `CommsRuntime::public_key()` (see the trait doc at
+        // `meerkat-core/src/agent.rs::CommsRuntime::public_key`). Decode it
+        // back to the 32-byte Ed25519 pubkey and derive the UUIDv5
+        // `PeerId` so we can stamp both onto the descriptor — otherwise
+        // the supervisor's trust store entry holds a zero-pubkey row and
+        // the external peer's real-keyed signed envelopes fail admission
+        // at ingress with `UntrustedSender`.
+        //
+        // Pre-#24 `PeerId::parse` accepted arbitrary strings (including
+        // the `"ed25519:…"` form); post-#24 it only accepts hyphenated
+        // UUIDs. Tests with `MockCommsRuntime` pass a UUID-shaped peer_id
+        // directly (the mock synthesizes one off the name bytes, not a
+        // real keypair), so we fall back to the legacy
+        // `test_only_unsigned` zero-pubkey descriptor when the caller
+        // supplies a non-ed25519 peer_id string. Those paths remain
+        // inproc-only — signature verification is bypassed there, so a
+        // zero-pubkey descriptor is admission-safe.
+        if let Some(pubkey_b64) = fallback_peer_id.strip_prefix("ed25519:") {
+            let _ = pubkey_b64; // pattern anchor; full parse delegates below.
+            let pubkey =
+                meerkat_comms::PubKey::from_pubkey_string(fallback_peer_id).map_err(|err| {
+                    MobError::WiringError(format!(
+                        "invalid peer spec: invalid pubkey string for '{fallback_name}': {err}"
+                    ))
+                })?;
+            let derived_peer_id = pubkey.to_peer_id().to_string();
+            return TrustedPeerDescriptor::unsigned_with_pubkey(
+                fallback_name,
+                derived_peer_id,
+                *pubkey.as_bytes(),
+                format!("inproc://{fallback_name}"),
+            )
+            .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")));
+        }
         TrustedPeerDescriptor::test_only_unsigned(
             fallback_name,
             fallback_peer_id,
@@ -502,6 +537,7 @@ mod tests {
             "mob/worker/member-1",
             &peer_id_str,
             "tcp://example.invalid/member-1",
+            None,
         )
         .expect("external peer spec should validate");
 
@@ -1127,6 +1163,10 @@ struct ExternalBindingTarget {
     peer_id: String,
     address: String,
     bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
+    /// Ed25519 signing pubkey of the external process. When present,
+    /// propagated into the supervisor's trust store so inbound
+    /// signed-envelope replies admit past ingress `is_trusted` gating.
+    pubkey: Option<[u8; 32]>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1213,13 +1253,22 @@ impl MultiBackendProvisioner {
         peer_name: &str,
         peer_id: &str,
         address: &str,
+        pubkey: Option<[u8; 32]>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::test_only_unsigned(
-            peer_name.to_string(),
-            peer_id.to_string(),
-            address.to_string(),
-        )
-        .map_err(|error| {
+        let result = match pubkey {
+            Some(pubkey) => TrustedPeerDescriptor::unsigned_with_pubkey(
+                peer_name.to_string(),
+                peer_id.to_string(),
+                pubkey,
+                address.to_string(),
+            ),
+            None => TrustedPeerDescriptor::test_only_unsigned(
+                peer_name.to_string(),
+                peer_id.to_string(),
+                address.to_string(),
+            ),
+        };
+        result.map_err(|error| {
             MobError::WiringError(format!(
                 "invalid external peer spec for '{peer_name}': {error}"
             ))
@@ -1400,6 +1449,7 @@ impl MultiBackendProvisioner {
             peer_id: real_peer_id,
             address: real_address,
             bootstrap_token,
+            pubkey,
         } = target;
         let effective_bootstrap_token = Self::bridge_bootstrap_token_from_binding(
             &real_address,
@@ -1425,7 +1475,8 @@ impl MultiBackendProvisioner {
             address = %real_address,
             "ExternalBackend::external_member_ref success (real identity)"
         );
-        let peer = Self::validated_external_peer_spec(&peer_name, &real_peer_id, &real_address)?;
+        let peer =
+            Self::validated_external_peer_spec(&peer_name, &real_peer_id, &real_address, pubkey)?;
         let bind_response = self
             .bind_peer_only_member(
                 &peer,
@@ -1486,6 +1537,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             } => {
                 self.external_member_ref(
                     req.create_session,
@@ -1496,6 +1548,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         peer_id,
                         address,
                         bootstrap_token,
+                        pubkey,
                     },
                 )
                 .await

@@ -285,10 +285,19 @@ class WireRenderMetadata:
 
 @dataclass
 class WireTrustedPeerSpec:
-    """Minimal trusted peer spec for public mob wiring surfaces."""
+    """Minimal trusted peer spec for public mob wiring surfaces.
+
+`pubkey` is the Ed25519 signing public key (32 bytes) required so the
+receiver can verify envelope signatures after trust registration.
+Serialized as a 32-element JSON array of numbers (matching
+`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —
+the corresponding `TrustedPeerDescriptor::pubkey` will then be all
+zeros, which makes signature verification fail closed. Production
+clients MUST send the real pubkey."""
     address: str = ''
     name: str = ''
     peer_id: str = ''
+    pubkey: list[int] = field(default_factory=list)
 
 
 @dataclass

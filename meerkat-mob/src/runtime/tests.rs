@@ -2594,6 +2594,7 @@ fn test_external_binding(agent_identity: &str) -> crate::RuntimeBinding {
         peer_id: format!("ed25519:test-key:{agent_identity}"),
         address: format!("tcp://test.invalid/{agent_identity}"),
         bootstrap_token: Some(bootstrap_token.into()),
+        pubkey: None,
     }
 }
 
@@ -2686,10 +2687,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
             .expect("create live external peer runtime"),
     );
     let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
+    let peer_pubkey = *runtime.public_key().as_bytes();
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id().to_string(),
         address: format!("inproc://{peer_name}"),
         bootstrap_token: Some(bootstrap_token.into()),
+        pubkey: Some(peer_pubkey),
     };
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4658,6 +4661,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         peer_id,
         address,
         bootstrap_token: _,
+        pubkey: _,
     } = external.binding()
     else {
         panic!("live external peer must expose external binding");
@@ -4913,6 +4917,7 @@ async fn test_query_string_bootstrap_token_fallback_is_rejected() {
         peer_id,
         address,
         bootstrap_token,
+        pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -4927,6 +4932,7 @@ async fn test_query_string_bootstrap_token_fallback_is_rejected() {
             bootstrap_token.as_str()
         ),
         bootstrap_token: None,
+        pubkey,
     };
     let err = handle
         .spawn_with_binding(
@@ -8096,6 +8102,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         peer_id,
         address,
         bootstrap_token,
+        pubkey: _,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -8906,6 +8913,7 @@ async fn test_spawn_supports_session_and_external_backends() {
         peer_id: expected_peer_id,
         address: expected_address,
         bootstrap_token: _expected_bootstrap_token,
+        pubkey: _expected_pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -18401,6 +18409,7 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
         peer_id: expected_peer_id,
         address: expected_address,
         bootstrap_token: _expected_bootstrap_token,
+        pubkey: _expected_pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -18499,6 +18508,7 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
         peer_id,
         address,
         bootstrap_token,
+        pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -18509,6 +18519,7 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
         peer_id: peer_id.clone(),
         address: address.clone(),
         bootstrap_token: bootstrap_token.clone(),
+        pubkey,
     });
     let _member_ref = handle
         .spawn_spec(spec)

@@ -1019,10 +1019,12 @@ fn runtime_binding_from_wire(wb: WireRuntimeBinding) -> meerkat_mob::RuntimeBind
             peer_id,
             address,
             bootstrap_token,
+            pubkey,
         } => meerkat_mob::RuntimeBinding::External {
             peer_id,
             address,
             bootstrap_token,
+            pubkey,
         },
     }
 }

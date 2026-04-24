@@ -331,16 +331,26 @@ impl MobActor {
         peer_id: &str,
         address: &str,
         context: &'static str,
+        pubkey: Option<[u8; 32]>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        TrustedPeerDescriptor::test_only_unsigned(
-            address
-                .strip_prefix("inproc://")
-                .map(|value| value.split('?').next().unwrap_or(value).to_string())
-                .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
-            peer_id.to_string(),
-            address.to_string(),
-        )
-        .map_err(|error| {
+        let peer_name = address
+            .strip_prefix("inproc://")
+            .map(|value| value.split('?').next().unwrap_or(value).to_string())
+            .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
+        let result = match pubkey {
+            Some(pubkey) => TrustedPeerDescriptor::unsigned_with_pubkey(
+                peer_name,
+                peer_id.to_string(),
+                pubkey,
+                address.to_string(),
+            ),
+            None => TrustedPeerDescriptor::test_only_unsigned(
+                peer_name,
+                peer_id.to_string(),
+                address.to_string(),
+            ),
+        };
+        result.map_err(|error| {
             MobError::WiringError(format!(
                 "{context}: invalid peer-only runtime spec: {error}"
             ))
@@ -353,8 +363,11 @@ impl MobActor {
     ) -> Result<TrustedPeerDescriptor, MobError> {
         match binding {
             crate::RuntimeBinding::External {
-                peer_id, address, ..
-            } => Self::peer_only_spec_from_parts(peer_id, address, context),
+                peer_id,
+                address,
+                pubkey,
+                ..
+            } => Self::peer_only_spec_from_parts(peer_id, address, context, *pubkey),
             crate::RuntimeBinding::Session => Err(MobError::Internal(format!(
                 "{context}: peer-only runtime spec requested for session binding"
             ))),
@@ -416,6 +429,7 @@ impl MobActor {
             peer_id,
             address,
             bootstrap_token: _,
+            pubkey: _,
         } = binding
         else {
             return Err(MobError::Internal(
@@ -527,6 +541,7 @@ impl MobActor {
                         peer_id: bind.peer_id,
                         address: super::bridge_protocol::canonicalize_bridge_address(&bind.address),
                         bootstrap_token: Some(effective_bootstrap_token),
+                        pubkey: None,
                     },
                     "ensure_supervisor_authorized rebound peer",
                 );
@@ -5285,6 +5300,7 @@ impl MobActor {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
                     bootstrap_token: bootstrap_token.clone(),
+                    pubkey: None,
                 },
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
@@ -5844,6 +5860,7 @@ impl MobActor {
                 peer_id: peer_id.clone(),
                 address: super::bridge_protocol::canonicalize_bridge_address(address),
                 bootstrap_token: bootstrap_token.clone(),
+                pubkey: None,
             }),
             _ => None,
         }
@@ -6339,6 +6356,7 @@ impl MobActor {
                                                     &bind_response.address,
                                                 ),
                                             bootstrap_token: Some(effective_bootstrap_token),
+                                            pubkey: None,
                                         };
                                         effective_peer = Self::peer_only_spec_for_binding(
                                             &effective_binding,

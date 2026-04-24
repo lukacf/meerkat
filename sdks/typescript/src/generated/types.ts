@@ -265,6 +265,7 @@ export interface WireTrustedPeerSpec {
   address: string;
   name: string;
   peer_id: string;
+  pubkey?: number[];
 }
 
 export interface MobWireResult {

@@ -292,10 +292,12 @@ pub async fn handle_spawn(
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             } => meerkat_mob::RuntimeBinding::External {
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             },
         });
     }
@@ -1676,10 +1678,12 @@ fn spawn_spec_from_wire(
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             } => meerkat_mob::RuntimeBinding::External {
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             },
         });
     }

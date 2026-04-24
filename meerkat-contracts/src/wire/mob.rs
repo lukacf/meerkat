@@ -34,6 +34,12 @@ pub enum WireRuntimeBinding {
         address: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bootstrap_token: Option<BridgeBootstrapToken>,
+        /// Ed25519 signing pubkey (32 bytes) of the external peer. Required
+        /// for the supervisor to install a non-zero-pubkey trust entry so
+        /// real-comms signed-envelope replies admit past ingress trust
+        /// check. Absent on legacy bindings that pre-date pubkey plumbing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pubkey: Option<[u8; 32]>,
     },
 }
 

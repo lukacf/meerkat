@@ -35,13 +35,26 @@ pub enum RuntimeBinding {
     Session,
     /// Member runtime is an external process with known comms identity.
     External {
-        /// Real comms public key of the external process.
+        /// Real comms peer_id of the external process (UUIDv5 derived from
+        /// the Ed25519 signing pubkey).
         peer_id: String,
         /// Real comms transport address of the external process.
         address: String,
         /// One-time bootstrap proof for the initial supervisor bind.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bootstrap_token: Option<BridgeBootstrapToken>,
+        /// Ed25519 signing pubkey (32 bytes) of the external process.
+        ///
+        /// When present, the supervisor registers the external peer in its
+        /// comms trust store with this pubkey so envelope signature
+        /// verification succeeds on inbound replies. When absent (legacy
+        /// call sites that pre-date the pubkey plumbing), the supervisor
+        /// installs a zero-pubkey descriptor — inproc transports tolerate
+        /// this because signatures are not verified on the loopback path,
+        /// but real-comms round-trips with signed envelopes will be
+        /// rejected at admission with `UntrustedSender`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pubkey: Option<[u8; 32]>,
     },
 }
 

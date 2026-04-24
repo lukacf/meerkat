@@ -319,6 +319,33 @@ impl TrustedPeerDescriptor {
         self.pubkey = pubkey;
         self
     }
+
+    /// Build a descriptor with a caller-supplied Ed25519 signing pubkey
+    /// from typed identity atoms.
+    ///
+    /// This is the dogma-clean alternative to
+    /// [`Self::test_only_unsigned`] for live-comms paths where the
+    /// caller has a real pubkey (e.g. from
+    /// `CommsRuntime::public_key().as_bytes()`). The supervisor needs
+    /// a non-zero-pubkey trust entry for signed-envelope replies to
+    /// admit past `is_trusted(&envelope.from)` at ingress.
+    ///
+    /// Like [`Self::test_only_unsigned`], this accepts a stringly
+    /// `peer_id` that must parse as a UUID (post-#24 `PeerId::parse`
+    /// only accepts hyphenated UUID strings). The hashed consistency
+    /// check in [`crate::comms`] enforces that the supplied `peer_id`
+    /// matches `PubKey::from(pubkey).to_peer_id()` at descriptor →
+    /// trust conversion.
+    pub fn unsigned_with_pubkey(
+        name: impl Into<String>,
+        peer_id: impl AsRef<str>,
+        pubkey: [u8; 32],
+        address: impl AsRef<str>,
+    ) -> Result<Self, String> {
+        let mut descriptor = Self::test_only_unsigned(name, peer_id, address)?;
+        descriptor.pubkey = pubkey;
+        Ok(descriptor)
+    }
 }
 
 /// One-way peer lifecycle notification kind.

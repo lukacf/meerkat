@@ -5617,8 +5617,18 @@ mod tests {
         state.llm_client_override = Some(Arc::new(ErrorLlmClient));
         let app = router(state);
 
-        let response = app
-            .oneshot(
+        // Bound the oneshot in a timeout matching the sibling at lib.rs:5370
+        // (`test_create_session_route_completes_in_runtime_backed_mode`). The
+        // post-commit-failure path currently deadlocks when `ErrorLlmClient`
+        // surfaces the failure — see #32 Class B in the triage doc at
+        // `docs/wave-d-prep/workspace-runtime-cascade-triage.md`. The timeout
+        // converts the hang into a visible `Elapsed(())` panic so workspace
+        // nextest runs don't stall indefinitely. The underlying deadlock in
+        // the runtime-backed create-session error branch is a separate
+        // root-cause fix.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.oneshot(
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/sessions")
@@ -5630,9 +5640,11 @@ mod tests {
                         .to_string(),
                     ))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("post-commit-failure create route timed out")
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = response.into_body().collect().await.unwrap().to_bytes();

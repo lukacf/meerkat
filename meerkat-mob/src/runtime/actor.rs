@@ -7050,6 +7050,26 @@ impl MobActor {
                     Err(error) => Some(error),
                 };
                 if let Some(error) = authorize_error {
+                    if !rotated_peers.is_empty() {
+                        match self
+                            .rollback_rotated_supervisor_peers(&current, &rotated_peers)
+                            .await
+                        {
+                            Ok(()) => {
+                                return Err(MobError::WiringError(format!(
+                                    "failed to rotate supervisor authority: {error}; rolled back {} remote peer(s)",
+                                    rotated_peers.len()
+                                )));
+                            }
+                            Err(rollback_error) => {
+                                self.activate_supervisor_authority(&current, &next).await?;
+                                return Err(MobError::WiringError(format!(
+                                    "failed to rotate supervisor authority after partially applying next authority: {error}; rollback failed: {rollback_error}; local supervisor authority advanced to epoch {}",
+                                    next.epoch
+                                )));
+                            }
+                        }
+                    }
                     return Err(MobError::WiringError(format!(
                         "failed to rotate supervisor authority: {error}"
                     )));
@@ -7058,11 +7078,50 @@ impl MobActor {
             }
         }
         let public_peer_id = next.public_peer_id.clone();
+        self.activate_supervisor_authority(&current, &next).await?;
+        Ok(super::handle::SupervisorRotationReport {
+            previous_epoch: current.epoch,
+            current_epoch: next.epoch,
+            public_peer_id,
+        })
+    }
+
+    async fn rollback_rotated_supervisor_peers(
+        &self,
+        current: &crate::store::SupervisorAuthorityRecord,
+        rotated_peers: &[(TrustedPeerDescriptor, crate::RuntimeBinding)],
+    ) -> Result<(), MobError> {
+        let current_sup_spec: super::bridge_protocol::BridgePeerSpec =
+            Self::supervisor_spec_for_authority(&self.definition.id, current)?.into();
+        let current_payload = super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: current_sup_spec,
+            epoch: current.epoch,
+            protocol_version: current.protocol_version,
+        };
+        for (peer, binding) in rotated_peers {
+            let bind = self
+                .bind_peer_only_member_for_binding_with_payload(peer, binding, &current_payload)
+                .await
+                .map_err(|bind_error| {
+                    MobError::WiringError(format!(
+                        "failed to roll peer back to prior supervisor authority: {bind_error}"
+                    ))
+                })?;
+            self.persist_rebound_binding(binding, &bind).await?;
+        }
+        Ok(())
+    }
+
+    async fn activate_supervisor_authority(
+        &self,
+        current: &crate::store::SupervisorAuthorityRecord,
+        next: &crate::store::SupervisorAuthorityRecord,
+    ) -> Result<(), MobError> {
         self.runtime_metadata
-            .put_supervisor_authority(&self.definition.id, &next)
+            .put_supervisor_authority(&self.definition.id, next)
             .await?;
         self.supervisor_bridge.rotate(next.clone()).await?;
-        let previous_spec = Self::supervisor_spec_for_authority(&self.definition.id, &current)?;
+        let previous_spec = Self::supervisor_spec_for_authority(&self.definition.id, current)?;
         let next_spec = self.supervisor_bridge.supervisor_spec().await?;
         let session_member_refs = {
             let roster = self.roster.read().await;
@@ -7085,11 +7144,7 @@ impl MobActor {
                     .map_err(MobError::from)?;
             }
         }
-        Ok(super::handle::SupervisorRotationReport {
-            previous_epoch: current.epoch,
-            current_epoch: next.epoch,
-            public_peer_id,
-        })
+        Ok(())
     }
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`

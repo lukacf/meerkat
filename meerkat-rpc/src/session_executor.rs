@@ -153,11 +153,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
             }
         });
 
-        // Post-wave-a: typed `RuntimeTurnMetadata` atoms (keep_alive/model/
-        // provider/provider_params/connection_ref/additional_instructions) no
-        // longer project into the stringly-typed rpc `TurnOverrides` overlay.
-        // The legacy overlay is empty; the typed seam travels via the
-        // primitive's embedded metadata directly.
+        let turn_overrides = crate::session_runtime::SessionRuntime::turn_overrides_from_metadata(
+            primitive.turn_metadata(),
+        );
         let result = Box::pin(
             self.runtime.apply_runtime_turn(
                 &self.session_id,
@@ -172,7 +170,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
                 None,
-                Some(crate::handlers::turn::TurnOverrides::default()),
+                turn_overrides,
             ),
         )
         .await;

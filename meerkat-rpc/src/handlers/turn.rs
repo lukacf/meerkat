@@ -126,7 +126,7 @@ pub struct TurnOverrides {
 }
 
 impl TurnOverrides {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.keep_alive.is_none()
             && self.model.is_none()
             && self.provider.is_none()

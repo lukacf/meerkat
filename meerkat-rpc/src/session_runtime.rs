@@ -649,6 +649,76 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
 }
 
 impl SessionRuntime {
+    fn turn_keep_alive_policy(
+        requested: Option<bool>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+        requested.and_then(|keep_alive| {
+            keep_alive.then(|| meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(30),
+                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+            })
+        })
+    }
+
+    fn turn_additional_instructions(
+        requested: Option<Vec<String>>,
+    ) -> Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>> {
+        requested.map(|instructions| {
+            instructions
+                .into_iter()
+                .map(
+                    |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                        body,
+                    },
+                )
+                .collect()
+        })
+    }
+
+    fn turn_metadata_from_overrides(
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            handling_mode: None,
+            keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions: Self::turn_additional_instructions(additional_instructions),
+            model: overrides
+                .and_then(|ov| ov.model.clone())
+                .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
+            provider: overrides
+                .and_then(|ov| ov.provider.as_ref())
+                .map(|provider| meerkat_core::Provider::from_name(provider)),
+            provider_params: None,
+            render_metadata: None,
+            execution_kind: None,
+            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
+        };
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    pub(crate) fn turn_overrides_from_metadata(
+        metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    ) -> Option<crate::handlers::turn::TurnOverrides> {
+        let metadata = metadata?;
+        let overrides = crate::handlers::turn::TurnOverrides {
+            keep_alive: metadata.keep_alive.as_ref().map(|_| true),
+            model: metadata.model.as_ref().map(ToString::to_string),
+            provider: metadata
+                .provider
+                .map(|provider| provider.as_str().to_string()),
+            provider_params: None,
+            connection_ref: metadata.connection_ref.clone(),
+            ..Default::default()
+        };
+        (!overrides.is_empty()).then_some(overrides)
+    }
+
     #[cfg(feature = "comms")]
     async fn preserve_existing_peer_ingress(
         &self,
@@ -1847,24 +1917,11 @@ impl SessionRuntime {
             }
         }
 
-        // Stringly-typed rpc overlay (model/provider/provider_params/
-        // keep_alive/additional_instructions) does not project into the
-        // typed `RuntimeTurnMetadata` seam on this path yet.
-        let _ = &overrides;
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: None,
-                skill_references,
-                flow_tool_overlay,
-                additional_instructions: None,
-                model: None,
-                provider: None,
-                provider_params: None,
-                render_metadata: None,
-                execution_kind: None,
-                connection_ref: None,
-            },
+        let turn_metadata = Self::turn_metadata_from_overrides(
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            overrides.as_ref(),
         );
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));

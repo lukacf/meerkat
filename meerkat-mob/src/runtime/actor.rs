@@ -4298,24 +4298,32 @@ impl MobActor {
         self.provisioner.interrupt_member(&member_ref).await
     }
 
-    /// D-wire-handler (#26): forward a wire command to the MobMachine DSL.
+    /// D-wire-handler (#26) + #31 D-trust-reconciliation (Wave D): forward a
+    /// wire command to the MobMachine DSL and install bidirectional comms
+    /// trust + peer notifications.
     ///
-    /// Thin shell forward: normalizes `(local, target)` into a
-    /// `WiringEdge::new(local, target)` and submits
-    /// `MobMachineInput::WireMembers { edge }` to the DSL authority. On
-    /// DSL acceptance, records `MobEventKind::MembersWired { a, b }` to
-    /// the event store as observability (mirroring the DSL's emitted
-    /// `EmitWiringLifecycleNotice` effect).
+    /// Shell-mechanical steps on a successful local-local wire:
     ///
-    /// Idempotent: the DSL's `edge_not_already_wired` guard rejects a
-    /// second wire of the same edge. Per-dogma #1 (one semantic fact,
-    /// one owner) that rejection is a no-op success here — the edge is
-    /// already in the authority — and no new event is recorded.
+    /// 1. Normalize `(local, target)` into a canonical `WiringEdge`.
+    /// 2. Resolve both endpoints' comms runtimes + trusted-peer specs. Any
+    ///    missing comms runtime / public key fails fast as
+    ///    [`MobError::WiringError`] with **zero side effects**.
+    /// 3. Submit `MobMachineInput::WireMembers { edge }` to the DSL
+    ///    authority. `edge_not_already_wired` makes re-wiring the same
+    ///    edge a no-op success (idempotent) when the roster is already
+    ///    in sync. Otherwise we proceed to repair live comms state.
+    /// 4. On DSL acceptance, bidirectionally install trust on both
+    ///    runtimes (A trusts B, B trusts A) and emit `mob.peer_added`
+    ///    notifications from both sides. Any failure mid-step rolls back
+    ///    the trust installs and reverts the DSL wire so failure leaves
+    ///    no observable side effect. This replaces the pre-DSL
+    ///    trust-install loop that Wave-A commit `0ad584cde` deleted.
+    /// 5. Append `MembersWired` event and project it through the roster.
+    ///    Append failure also rolls back trust + DSL wire.
     ///
-    /// External peer targets ([`PeerTarget::External`]) are handled on a
-    /// separate path ([`Self::handle_wire_external`]) because they carry a
-    /// full [`TrustedPeerDescriptor`] that has to round-trip through the
-    /// event log so resume can reinstate trust deterministically.
+    /// External peer targets ([`PeerTarget::External`]) are routed to
+    /// [`Self::handle_wire_external`] which uses the shell-authority path
+    /// for external peer trust (#31 D-external-peer).
     async fn handle_wire(
         &mut self,
         local: MeerkatId,
@@ -4335,44 +4343,74 @@ impl MobActor {
             )));
         }
 
+        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+
         // Project domain identities into the DSL bridging type.
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
         let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
         let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
 
-        // Submit the DSL input. The `edge_not_already_wired` guard makes
-        // re-wiring an existing edge a no-op success (idempotent).
-        match self.apply_dsl_input(
+        // Pre-flight: roster lookups. Missing members fail fast before
+        // any authority mutation.
+        let (local_entry, peer_entry) = {
+            let roster = self.roster.read().await;
+            (
+                roster
+                    .get(&local)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(local.clone()))?,
+                roster
+                    .get(&peer_meerkat_id)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(peer_meerkat_id.clone()))?,
+            )
+        };
+
+        // Idempotent short-circuit when DSL AND roster both already
+        // reflect the edge — no trust/notification fan-out needed.
+        let dsl_has_edge = self
+            .dsl_authority
+            .state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge);
+        let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
+            && peer_entry.wired_to.contains(&local_entry.agent_identity);
+        if dsl_has_edge && roster_has_edge {
+            return Ok(());
+        }
+
+        // Resolve both endpoints' comms runtimes + specs BEFORE mutating
+        // any authority state. Missing comms / missing public key yields
+        // WiringError with zero side effects.
+        let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "wire").await?;
+        let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "wire").await?;
+        let (local_comms, local_spec) = match local_endpoint {
+            WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
+            WiringEndpoint::PeerOnly { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "wire requires local session comms runtime for '{local}'"
+                )));
+            }
+        };
+        let (peer_comms, peer_spec) = match peer_endpoint {
+            WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
+            WiringEndpoint::PeerOnly { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "wire requires local session comms runtime for '{peer_identity}'"
+                )));
+            }
+        };
+
+        // Submit the DSL input. `edge_not_already_wired` may reject as
+        // idempotent-success. We still fall through to repair trust/
+        // notifications if the roster projection is out of sync.
+        let dsl_added = match self.apply_dsl_input(
             mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
             "wire_members",
         ) {
-            Ok(()) => {
-                // DSL accepted the new edge — record observability event.
-                // Project edge endpoints back into the domain
-                // `AgentIdentity` for the public event surface.
-                let event = NewMobEvent {
-                    mob_id: self.definition.id.clone(),
-                    timestamp: None,
-                    kind: MobEventKind::MembersWired {
-                        a: AgentIdentity::from(edge.a.0.as_str()),
-                        b: AgentIdentity::from(edge.b.0.as_str()),
-                    },
-                };
-                let stored = self.events.append(event).await?;
-                // Mirror the event through the roster projection so live
-                // readers of `RosterEntry.wired_to` observe the new edge
-                // immediately (#29 D-roster-wiring-projection: apply() path
-                // + this mirror at the shell append site keep the two
-                // projection entry points in sync).
-                self.roster.write().await.apply_event(&stored);
-                Ok(())
-            }
+            Ok(()) => true,
             Err(MobError::Internal(message)) if message.contains("wire_members") => {
-                // DSL rejection. `edge_not_already_wired` guard → idempotent
-                // success (the edge is already in the authority, so the
-                // semantic intent is satisfied without a new event).
-                // Other rejections (phase mismatch etc.) propagate as
-                // WiringError for caller visibility.
                 if self
                     .dsl_authority
                     .state
@@ -4380,14 +4418,163 @@ impl MobActor {
                     .iter()
                     .any(|existing| existing == &edge)
                 {
-                    Ok(())
+                    false
                 } else {
-                    Err(MobError::WiringError(format!(
+                    return Err(MobError::WiringError(format!(
                         "wire rejected by MobMachine DSL: {message}"
-                    )))
+                    )));
                 }
             }
-            Err(other) => Err(other),
+            Err(other) => return Err(other),
+        };
+
+        let local_peer_id = local_spec.peer_id.as_str().to_string();
+        let peer_peer_id = peer_spec.peer_id.as_str().to_string();
+
+        // A-side trust install.
+        if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+            self.rollback_wire_side_effects(
+                &edge,
+                dsl_added,
+                false,
+                false,
+                &local_comms,
+                &peer_comms,
+                &local_peer_id,
+                &peer_peer_id,
+            )
+            .await;
+            return Err(MobError::from(err));
+        }
+
+        // B-side trust install.
+        if let Err(err) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+            self.rollback_wire_side_effects(
+                &edge,
+                dsl_added,
+                true,
+                false,
+                &local_comms,
+                &peer_comms,
+                &local_peer_id,
+                &peer_peer_id,
+            )
+            .await;
+            return Err(MobError::from(err));
+        }
+
+        // Notify peer_added on A-side (A tells its peers: here is B).
+        if let Err(err) = self
+            .notify_peer_added(&local_comms, &peer_spec, &peer_meerkat_id, &peer_entry)
+            .await
+        {
+            self.rollback_wire_side_effects(
+                &edge,
+                dsl_added,
+                true,
+                true,
+                &local_comms,
+                &peer_comms,
+                &local_peer_id,
+                &peer_peer_id,
+            )
+            .await;
+            return Err(err);
+        }
+
+        // Notify peer_added on B-side (B tells its peers: here is A).
+        if let Err(err) = self
+            .notify_peer_added(&peer_comms, &local_spec, &local, &local_entry)
+            .await
+        {
+            self.rollback_wire_side_effects(
+                &edge,
+                dsl_added,
+                true,
+                true,
+                &local_comms,
+                &peer_comms,
+                &local_peer_id,
+                &peer_peer_id,
+            )
+            .await;
+            return Err(err);
+        }
+
+        // Append MembersWired — rollback on failure.
+        let event = NewMobEvent {
+            mob_id: self.definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MembersWired {
+                a: AgentIdentity::from(edge.a.0.as_str()),
+                b: AgentIdentity::from(edge.b.0.as_str()),
+            },
+        };
+        let stored = match self.events.append(event).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                self.rollback_wire_side_effects(
+                    &edge,
+                    dsl_added,
+                    true,
+                    true,
+                    &local_comms,
+                    &peer_comms,
+                    &local_peer_id,
+                    &peer_peer_id,
+                )
+                .await;
+                return Err(MobError::from(err));
+            }
+        };
+        self.roster.write().await.apply_event(&stored);
+        Ok(())
+    }
+
+    /// Unwind side effects from a failed local-local wire. Best-effort:
+    /// logs on compensation failure since we've already decided to surface
+    /// the original error to the caller.
+    #[allow(clippy::too_many_arguments)]
+    async fn rollback_wire_side_effects(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        dsl_added: bool,
+        installed_local_trust: bool,
+        installed_peer_trust: bool,
+        local_comms: &Arc<dyn CoreCommsRuntime>,
+        peer_comms: &Arc<dyn CoreCommsRuntime>,
+        local_peer_id: &str,
+        peer_peer_id: &str,
+    ) {
+        if installed_local_trust {
+            if let Err(err) = local_comms.remove_trusted_peer(peer_peer_id).await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "wire rollback: failed to remove local trust"
+                );
+            }
+        }
+        if installed_peer_trust {
+            if let Err(err) = peer_comms.remove_trusted_peer(local_peer_id).await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "wire rollback: failed to remove peer trust"
+                );
+            }
+        }
+        if dsl_added {
+            if let Err(err) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
+                "wire_members_rollback",
+            ) {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "wire rollback: failed to revert DSL wire"
+                );
+            }
         }
     }
 
@@ -4450,32 +4637,77 @@ impl MobActor {
             )));
         }
 
+        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
         let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
         let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
 
-        match self.apply_dsl_input(
+        let (local_entry, peer_entry) = {
+            let roster = self.roster.read().await;
+            (
+                roster
+                    .get(&local)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(local.clone()))?,
+                roster
+                    .get(&peer_meerkat_id)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(peer_meerkat_id.clone()))?,
+            )
+        };
+
+        let dsl_has_edge = self
+            .dsl_authority
+            .state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge);
+        let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
+            || peer_entry.wired_to.contains(&local_entry.agent_identity);
+
+        // Resolve endpoints. Failing here leaves the DSL + roster
+        // untouched — matches the zero-side-effect expectations.
+        let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "unwire").await?;
+        let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "unwire").await?;
+        let (local_comms, local_spec) = match local_endpoint {
+            WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
+            WiringEndpoint::PeerOnly { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "unwire requires local session comms runtime for '{local}'"
+                )));
+            }
+        };
+        let (peer_comms, peer_spec) = match peer_endpoint {
+            WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
+            WiringEndpoint::PeerOnly { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "unwire requires local session comms runtime for '{peer_identity}'"
+                )));
+            }
+        };
+
+        let local_peer_id = local_spec.peer_id.as_str().to_string();
+        let peer_peer_id = peer_spec.peer_id.as_str().to_string();
+
+        // Idempotent stale-trust cleanup: if the DSL + roster both show
+        // the edge as already absent, but the comms runtimes still carry
+        // trust (e.g. re-added externally after the first unwire), prune
+        // it without emitting a new event.
+        if !dsl_has_edge && !roster_has_edge {
+            let _ = local_comms.remove_trusted_peer(&peer_peer_id).await;
+            let _ = peer_comms.remove_trusted_peer(&local_peer_id).await;
+            return Ok(());
+        }
+
+        // Submit DSL input first. Idempotent rejection (edge absent) is
+        // handled above; here we expect acceptance (or a non-idempotent
+        // rejection that must surface).
+        let dsl_removed = match self.apply_dsl_input(
             mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
             "unwire_members",
         ) {
-            Ok(()) => {
-                let event = NewMobEvent {
-                    mob_id: self.definition.id.clone(),
-                    timestamp: None,
-                    kind: MobEventKind::MembersUnwired {
-                        a: AgentIdentity::from(edge.a.0.as_str()),
-                        b: AgentIdentity::from(edge.b.0.as_str()),
-                    },
-                };
-                let stored = self.events.append(event).await?;
-                // Mirror through roster projection — same pattern as the
-                // `MembersWired` event in `handle_wire` (#29).
-                self.roster.write().await.apply_event(&stored);
-                Ok(())
-            }
+            Ok(()) => true,
             Err(MobError::Internal(message)) if message.contains("unwire_members") => {
-                // `edge_currently_wired` guard → idempotent no-op when the
-                // edge is already absent.
                 if !self
                     .dsl_authority
                     .state
@@ -4483,14 +4715,251 @@ impl MobActor {
                     .iter()
                     .any(|existing| existing == &edge)
                 {
-                    Ok(())
+                    // DSL already absent — proceed with trust removal +
+                    // notification so live comms state is repaired.
+                    false
                 } else {
-                    Err(MobError::WiringError(format!(
+                    return Err(MobError::WiringError(format!(
                         "unwire rejected by MobMachine DSL: {message}"
-                    )))
+                    )));
                 }
             }
-            Err(other) => Err(other),
+            Err(other) => return Err(other),
+        };
+
+        let mut removed_local_trust = false;
+        let mut removed_peer_trust = false;
+        let mut sent_unwired_from_local = false;
+        let mut sent_unwired_from_peer = false;
+
+        // Notify peer_unwired on both sides BEFORE trust removal so the
+        // notifications can still be delivered (the send path resolves
+        // the recipient by name in the comms' trusted-peers table). If a
+        // notification fails, compensate the prior side's notification
+        // by re-sending peer_added so the observable intent stream stays
+        // balanced.
+        if let Err(err) = self
+            .notify_peer_event(
+                "mob.peer_unwired",
+                &peer_spec,
+                &peer_meerkat_id,
+                &peer_entry,
+                &local_comms,
+            )
+            .await
+        {
+            self.rollback_unwire_side_effects(
+                &edge,
+                dsl_removed,
+                removed_local_trust,
+                removed_peer_trust,
+                sent_unwired_from_local,
+                sent_unwired_from_peer,
+                &local_comms,
+                &peer_comms,
+                &local_spec,
+                &peer_spec,
+                &local,
+                &peer_meerkat_id,
+                &local_entry,
+                &peer_entry,
+            )
+            .await;
+            return Err(err);
+        }
+        sent_unwired_from_local = true;
+
+        if let Err(err) = self
+            .notify_peer_event(
+                "mob.peer_unwired",
+                &local_spec,
+                &local,
+                &local_entry,
+                &peer_comms,
+            )
+            .await
+        {
+            self.rollback_unwire_side_effects(
+                &edge,
+                dsl_removed,
+                removed_local_trust,
+                removed_peer_trust,
+                sent_unwired_from_local,
+                sent_unwired_from_peer,
+                &local_comms,
+                &peer_comms,
+                &local_spec,
+                &peer_spec,
+                &local,
+                &peer_meerkat_id,
+                &local_entry,
+                &peer_entry,
+            )
+            .await;
+            return Err(err);
+        }
+        sent_unwired_from_peer = true;
+
+        // A-side trust removal (after notifications succeeded).
+        if let Err(err) = local_comms.remove_trusted_peer(&peer_peer_id).await {
+            self.rollback_unwire_side_effects(
+                &edge,
+                dsl_removed,
+                removed_local_trust,
+                removed_peer_trust,
+                sent_unwired_from_local,
+                sent_unwired_from_peer,
+                &local_comms,
+                &peer_comms,
+                &local_spec,
+                &peer_spec,
+                &local,
+                &peer_meerkat_id,
+                &local_entry,
+                &peer_entry,
+            )
+            .await;
+            return Err(MobError::from(err));
+        }
+        removed_local_trust = true;
+
+        // B-side trust removal.
+        if let Err(err) = peer_comms.remove_trusted_peer(&local_peer_id).await {
+            self.rollback_unwire_side_effects(
+                &edge,
+                dsl_removed,
+                removed_local_trust,
+                removed_peer_trust,
+                sent_unwired_from_local,
+                sent_unwired_from_peer,
+                &local_comms,
+                &peer_comms,
+                &local_spec,
+                &peer_spec,
+                &local,
+                &peer_meerkat_id,
+                &local_entry,
+                &peer_entry,
+            )
+            .await;
+            return Err(MobError::from(err));
+        }
+        removed_peer_trust = true;
+
+        // Append MembersUnwired — rollback on failure.
+        let event = NewMobEvent {
+            mob_id: self.definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MembersUnwired {
+                a: AgentIdentity::from(edge.a.0.as_str()),
+                b: AgentIdentity::from(edge.b.0.as_str()),
+            },
+        };
+        let stored = match self.events.append(event).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                self.rollback_unwire_side_effects(
+                    &edge,
+                    dsl_removed,
+                    removed_local_trust,
+                    removed_peer_trust,
+                    sent_unwired_from_local,
+                    sent_unwired_from_peer,
+                    &local_comms,
+                    &peer_comms,
+                    &local_spec,
+                    &peer_spec,
+                    &local,
+                    &peer_meerkat_id,
+                    &local_entry,
+                    &peer_entry,
+                )
+                .await;
+                return Err(MobError::from(err));
+            }
+        };
+        self.roster.write().await.apply_event(&stored);
+        Ok(())
+    }
+
+    /// Unwind side effects from a failed local-local unwire. Best-effort.
+    ///
+    /// Re-installs trust on sides where trust was removed, and emits
+    /// compensating `mob.peer_added` notifications on sides that already
+    /// sent `mob.peer_unwired` so the observable intent stream stays
+    /// balanced. The DSL wire is re-submitted if it was removed.
+    #[allow(clippy::too_many_arguments)]
+    async fn rollback_unwire_side_effects(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        dsl_removed: bool,
+        removed_local_trust: bool,
+        removed_peer_trust: bool,
+        sent_unwired_from_local: bool,
+        sent_unwired_from_peer: bool,
+        local_comms: &Arc<dyn CoreCommsRuntime>,
+        peer_comms: &Arc<dyn CoreCommsRuntime>,
+        local_spec: &TrustedPeerDescriptor,
+        peer_spec: &TrustedPeerDescriptor,
+        local_meerkat_id: &MeerkatId,
+        peer_meerkat_id: &MeerkatId,
+        local_entry: &RosterEntry,
+        peer_entry: &RosterEntry,
+    ) {
+        if removed_local_trust {
+            if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "unwire rollback: failed to re-install local trust"
+                );
+            }
+        }
+        if removed_peer_trust {
+            if let Err(err) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "unwire rollback: failed to re-install peer trust"
+                );
+            }
+        }
+        // Compensate peer_unwired notifications by re-sending peer_added.
+        if sent_unwired_from_local {
+            if let Err(err) = self
+                .notify_peer_added(local_comms, peer_spec, peer_meerkat_id, peer_entry)
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "unwire rollback: failed to send compensating peer_added from local side"
+                );
+            }
+        }
+        if sent_unwired_from_peer {
+            if let Err(err) = self
+                .notify_peer_added(peer_comms, local_spec, local_meerkat_id, local_entry)
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "unwire rollback: failed to send compensating peer_added from peer side"
+                );
+            }
+        }
+        if dsl_removed {
+            if let Err(err) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                "unwire_members_rollback",
+            ) {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "unwire rollback: failed to re-submit DSL wire"
+                );
+            }
         }
     }
 

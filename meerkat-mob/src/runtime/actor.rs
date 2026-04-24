@@ -383,6 +383,14 @@ impl MobActor {
         meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string()
     }
 
+    fn trusted_peer_removal_key(peer: &TrustedPeerDescriptor) -> String {
+        if peer.pubkey == [0u8; 32] {
+            peer.peer_id.to_string()
+        } else {
+            Self::trusted_peer_pubkey_string(peer)
+        }
+    }
+
     fn supervisor_spec_for_authority(
         mob_id: &crate::MobId,
         authority: &crate::store::SupervisorAuthorityRecord,
@@ -4058,9 +4066,17 @@ impl MobActor {
         // compensating rollback in `rollback_failed_spawn` expects both
         // `wired_spawn_targets` and `planned_wiring_targets` populated so
         // partial-wire failures can unwind.
-        let planned_wiring_targets = self
+        let mut planned_wiring_targets = self
             .spawn_wiring_targets(profile_name, agent_identity)
             .await;
+        if auto_wire_parent
+            && let Some(parent_target) = self
+                .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), agent_identity)
+                .await
+            && !planned_wiring_targets.contains(&parent_target)
+        {
+            planned_wiring_targets.push(parent_target);
+        }
         let mut wired_spawn_targets: Vec<MeerkatId> = Vec::new();
         for target in &planned_wiring_targets {
             let target_identity = crate::ids::AgentIdentity::from(target.as_str());
@@ -4074,6 +4090,10 @@ impl MobActor {
             {
                 Ok(()) => wired_spawn_targets.push(target.clone()),
                 Err(wire_error) => {
+                    let surfaced_wire_error = match wire_error {
+                        MobError::WiringError(_) => wire_error,
+                        other => MobError::WiringError(other.to_string()),
+                    };
                     // Rollback the spawn: the member is in the DSL + roster
                     // but the role-wiring contract was violated. Surface the
                     // failure to the caller so they can decide how to
@@ -4091,10 +4111,10 @@ impl MobActor {
                         .await
                     {
                         return Err(MobError::Internal(format!(
-                            "spawn wire fan-out failed for '{agent_identity}': {wire_error}; rollback failed: {rollback_error}"
+                            "spawn wire fan-out failed for '{agent_identity}': {surfaced_wire_error}; rollback failed: {rollback_error}"
                         )));
                     }
-                    return Err(wire_error);
+                    return Err(surfaced_wire_error);
                 }
             }
         }
@@ -4414,8 +4434,10 @@ impl MobActor {
                 "wire requires distinct members (got '{local}')"
             )));
         }
+        self.ensure_member_not_broken(&local).await?;
 
         let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+        self.ensure_member_not_broken(&peer_meerkat_id).await?;
 
         // Project domain identities into the DSL bridging type.
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
@@ -4448,15 +4470,97 @@ impl MobActor {
             .any(|existing| existing == &edge);
         let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
             && peer_entry.wired_to.contains(&local_entry.agent_identity);
-        if dsl_has_edge && roster_has_edge {
-            return Ok(());
-        }
 
         // Resolve both endpoints' comms runtimes + specs BEFORE mutating
         // any authority state. Missing comms / missing public key yields
         // WiringError with zero side effects.
         let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "wire").await?;
         let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "wire").await?;
+        if dsl_has_edge && roster_has_edge {
+            match (&local_endpoint, &peer_endpoint) {
+                (
+                    WiringEndpoint::Local {
+                        comms: local_comms,
+                        spec: local_spec,
+                        ..
+                    },
+                    WiringEndpoint::Local {
+                        comms: peer_comms,
+                        spec: peer_spec,
+                        ..
+                    },
+                ) => {
+                    local_comms.add_trusted_peer(peer_spec.clone()).await?;
+                    peer_comms.add_trusted_peer(local_spec.clone()).await?;
+                }
+                (
+                    WiringEndpoint::PeerOnly {
+                        spec: local_spec,
+                        binding: local_binding,
+                    },
+                    WiringEndpoint::PeerOnly {
+                        spec: peer_spec,
+                        binding: peer_binding,
+                    },
+                ) => {
+                    self.wire_peer_only_recipient(
+                        local_spec,
+                        Some(local_binding),
+                        peer_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await?;
+                    self.wire_peer_only_recipient(
+                        peer_spec,
+                        Some(peer_binding),
+                        local_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await?;
+                }
+                (
+                    WiringEndpoint::Local {
+                        comms: local_comms,
+                        spec: local_spec,
+                        ..
+                    },
+                    WiringEndpoint::PeerOnly {
+                        spec: peer_spec,
+                        binding: peer_binding,
+                    },
+                ) => {
+                    local_comms.add_trusted_peer(peer_spec.clone()).await?;
+                    self.wire_peer_only_recipient(
+                        peer_spec,
+                        Some(peer_binding),
+                        local_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await?;
+                }
+                (
+                    WiringEndpoint::PeerOnly {
+                        spec: local_spec,
+                        binding: local_binding,
+                    },
+                    WiringEndpoint::Local {
+                        comms: peer_comms,
+                        spec: peer_spec,
+                        ..
+                    },
+                ) => {
+                    peer_comms.add_trusted_peer(local_spec.clone()).await?;
+                    self.wire_peer_only_recipient(
+                        local_spec,
+                        Some(local_binding),
+                        peer_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await?;
+                }
+            }
+            return Ok(());
+        }
         if let (
             WiringEndpoint::PeerOnly {
                 spec: local_spec,
@@ -4548,7 +4652,7 @@ impl MobActor {
                 .await
             {
                 let _ = local_comms
-                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(peer_spec))
+                    .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
                     .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
@@ -4566,7 +4670,7 @@ impl MobActor {
                 Ok(stored) => stored,
                 Err(error) => {
                     let _ = local_comms
-                        .remove_trusted_peer(&Self::trusted_peer_pubkey_string(peer_spec))
+                        .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
                         .await;
                     self.rollback_peer_only_wire(
                         &edge,
@@ -4610,7 +4714,7 @@ impl MobActor {
                 .await
             {
                 let _ = peer_comms
-                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(local_spec))
+                    .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
                     .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
@@ -4628,7 +4732,7 @@ impl MobActor {
                 Ok(stored) => stored,
                 Err(error) => {
                     let _ = peer_comms
-                        .remove_trusted_peer(&Self::trusted_peer_pubkey_string(local_spec))
+                        .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
                         .await;
                     self.rollback_peer_only_wire(
                         &edge,
@@ -4687,8 +4791,8 @@ impl MobActor {
             Err(other) => return Err(other),
         };
 
-        let local_peer_id = Self::trusted_peer_pubkey_string(&local_spec);
-        let peer_peer_id = Self::trusted_peer_pubkey_string(&peer_spec);
+        let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
+        let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
 
         // A-side trust install.
         if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
@@ -4722,9 +4826,9 @@ impl MobActor {
             return Err(MobError::from(err));
         }
 
-        // Notify peer_added on A-side (A tells its peers: here is B).
+        // Notify A that B is now wired.
         if let Err(err) = self
-            .notify_peer_added(&local_comms, &peer_spec, &peer_meerkat_id, &peer_entry)
+            .notify_peer_added(&peer_comms, &local_spec, &peer_meerkat_id, &peer_entry)
             .await
         {
             self.rollback_wire_side_effects(
@@ -4741,9 +4845,9 @@ impl MobActor {
             return Err(err);
         }
 
-        // Notify peer_added on B-side (B tells its peers: here is A).
+        // Notify B that A is now wired.
         if let Err(err) = self
-            .notify_peer_added(&peer_comms, &local_spec, &local, &local_entry)
+            .notify_peer_added(&local_comms, &peer_spec, &local, &local_entry)
             .await
         {
             self.rollback_wire_side_effects(
@@ -5141,8 +5245,8 @@ impl MobActor {
             }
         };
 
-        let local_peer_id = Self::trusted_peer_pubkey_string(&local_spec);
-        let peer_peer_id = Self::trusted_peer_pubkey_string(&peer_spec);
+        let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
+        let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
 
         // Idempotent stale-trust cleanup: if the DSL + roster both show
         // the edge as already absent, but the comms runtimes still carry
@@ -5516,7 +5620,7 @@ impl MobActor {
             Ok(stored) => stored,
             Err(append_err) => {
                 if let Err(rollback_err) = comms
-                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&spec))
+                    .remove_trusted_peer(&Self::trusted_peer_removal_key(&spec))
                     .await
                 {
                     tracing::warn!(
@@ -5576,7 +5680,7 @@ impl MobActor {
 
         // Remove trust on the local session runtime.
         let _ = comms
-            .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&prior_spec))
+            .remove_trusted_peer(&Self::trusted_peer_removal_key(&prior_spec))
             .await?;
 
         let event = NewMobEvent {
@@ -6277,7 +6381,7 @@ impl MobActor {
             }
             if let Some(recipient_comms) = recipient_comms {
                 if let Err(error) = recipient_comms
-                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&retiring_spec))
+                    .remove_trusted_peer(&Self::trusted_peer_removal_key(&retiring_spec))
                     .await
                     && first_error.is_none()
                 {
@@ -8022,6 +8126,64 @@ impl MobActor {
                         }
                     },
                 );
+            }
+        }
+
+        if let Some(spawned_entry) = spawned_entry.as_ref()
+            && let Ok(spawned_endpoint) = self
+                .resolve_wiring_endpoint(spawned_entry, "spawn rollback trust cleanup spawned")
+                .await
+        {
+            let (spawned_spec, spawned_comms, spawned_binding) = match spawned_endpoint {
+                WiringEndpoint::Local { comms, spec, .. } => (spec, Some(comms), None),
+                WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
+            };
+            for peer_meerkat_id in &cleanup_peers {
+                let peer_entry = {
+                    let roster = self.roster.read().await;
+                    roster.get(peer_meerkat_id).cloned()
+                };
+                let Some(peer_entry) = peer_entry else {
+                    continue;
+                };
+                let Ok(peer_endpoint) = self
+                    .resolve_wiring_endpoint(&peer_entry, "spawn rollback trust cleanup peer")
+                    .await
+                else {
+                    continue;
+                };
+                let (peer_spec, peer_comms, peer_binding) = match peer_endpoint {
+                    WiringEndpoint::Local { comms, spec, .. } => (spec, Some(comms), None),
+                    WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
+                };
+                if let Some(spawned_comms) = spawned_comms.as_ref() {
+                    let _ = spawned_comms
+                        .remove_trusted_peer(&Self::trusted_peer_removal_key(&peer_spec))
+                        .await;
+                } else if let Some(spawned_binding) = spawned_binding.as_ref() {
+                    let _ = self
+                        .unwire_peer_only_recipient(
+                            &spawned_spec,
+                            Some(spawned_binding),
+                            &peer_spec,
+                            std::time::Duration::from_secs(2),
+                        )
+                        .await;
+                }
+                if let Some(peer_comms) = peer_comms {
+                    let _ = peer_comms
+                        .remove_trusted_peer(&Self::trusted_peer_removal_key(&spawned_spec))
+                        .await;
+                } else if let Some(peer_binding) = peer_binding {
+                    let _ = self
+                        .unwire_peer_only_recipient(
+                            &peer_spec,
+                            Some(&peer_binding),
+                            &spawned_spec,
+                            std::time::Duration::from_secs(2),
+                        )
+                        .await;
+                }
             }
         }
 

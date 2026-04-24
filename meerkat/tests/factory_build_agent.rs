@@ -2171,8 +2171,8 @@ async fn web_search_explicit_params_merged_with_defaults() {
         "web_search default should survive explicit param merge: {params}"
     );
     assert!(
-        params.get("thinking_budget").is_some(),
-        "explicit thinking_budget should be present: {params}"
+        params.get("thinking_budget_tokens").is_some(),
+        "explicit thinking_budget should project into typed Anthropic budget: {params}"
     );
 }
 

@@ -54,6 +54,39 @@ fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
 }
 
+fn merge_provider_param_patch(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target_obj), Value::Object(patch_obj)) => {
+            for (key, value) in patch_obj {
+                if value.is_null() {
+                    target_obj.remove(key);
+                } else {
+                    merge_provider_param_patch(
+                        target_obj.entry(key.clone()).or_insert(Value::Null),
+                        value,
+                    );
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch.clone();
+        }
+    }
+}
+
+fn merged_provider_params(defaults: Option<&Value>, explicit: Option<&Value>) -> Option<Value> {
+    match (defaults, explicit) {
+        (None, None) => None,
+        (Some(defaults), None) => Some(defaults.clone()),
+        (None, Some(explicit)) => Some(explicit.clone()),
+        (Some(defaults), Some(explicit)) => {
+            let mut merged = defaults.clone();
+            merge_provider_param_patch(&mut merged, explicit);
+            Some(merged)
+        }
+    }
+}
+
 fn hidden_deferred_catalog_names(
     catalog: &[crate::ToolCatalogEntry],
     visible_names: &BTreeSet<String>,
@@ -1110,7 +1143,10 @@ where
 
                     let mut effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    let mut effective_provider_params: Option<Value> = None;
+                    let mut effective_provider_params = merged_provider_params(
+                        self.config.provider_tool_defaults.as_ref(),
+                        self.config.provider_params.as_ref(),
+                    );
 
                     // Pre-LLM hooks may rewrite request params or deny the turn.
                     let pre_llm_report = self

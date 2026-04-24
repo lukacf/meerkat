@@ -655,6 +655,32 @@ impl meerkat_core::ModelOperationalDefaultsResolver for RegistryBackedDefaultsRe
     }
 }
 
+fn provider_tool_defaults_for(
+    provider: Provider,
+    config: &Config,
+    model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+    explicit_meerkat_tool_policy: bool,
+) -> Option<serde_json::Value> {
+    if explicit_meerkat_tool_policy
+        || !model_profile.is_some_and(|profile| profile.supports_web_search)
+    {
+        return None;
+    }
+
+    match provider {
+        Provider::Anthropic if config.provider_tools.anthropic.web_search => Some(
+            serde_json::json!({"web_search": {"type": "web_search_20250305", "name": "web_search"}}),
+        ),
+        Provider::OpenAI if config.provider_tools.openai.web_search => {
+            Some(serde_json::json!({"web_search": {"type": "web_search"}}))
+        }
+        Provider::Gemini if config.provider_tools.gemini.google_search => {
+            Some(serde_json::json!({"google_search": {}}))
+        }
+        _ => None,
+    }
+}
+
 /// Return the canonical string key for a provider.
 /// Construct a [`ProviderRuntimeRegistry`] populated with the
 /// feature-gated per-provider runtimes from the per-provider crates.
@@ -1698,7 +1724,7 @@ impl AgentFactory {
 
         let registry = self.model_registry(config)?;
 
-        let _explicit_meerkat_tool_policy =
+        let explicit_meerkat_tool_policy =
             !matches!(
                 build_config.override_builtins,
                 ToolCategoryOverride::Inherit
@@ -2647,6 +2673,14 @@ impl AgentFactory {
             }))
             .with_call_timeout_override(effective_call_timeout_override);
 
+        if let Some(defaults) = provider_tool_defaults_for(
+            provider,
+            config,
+            model_profile.as_ref(),
+            explicit_meerkat_tool_policy,
+        ) {
+            builder = builder.provider_tool_defaults(defaults);
+        }
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }

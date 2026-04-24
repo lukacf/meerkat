@@ -1796,7 +1796,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::TrustedPeerDescriptor;
+    use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
     use meerkat_core::types::SessionId;
@@ -1858,9 +1858,9 @@ mod tests {
             &op_id,
             OperationPeerHandle {
                 peer_name: meerkat_core::comms::PeerName::new("peer").unwrap(),
-                trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
+                trusted_peer: TrustedPeerDescriptor::test_only_unsigned_typed(
                     "peer",
-                    "peer-id",
+                    PeerId::new(),
                     "inproc://peer",
                 )
                 .unwrap(),
@@ -2274,9 +2274,9 @@ mod tests {
 
         let handle = OperationPeerHandle {
             peer_name: meerkat_core::comms::PeerName::new("member-x").unwrap(),
-            trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
+            trusted_peer: TrustedPeerDescriptor::test_only_unsigned_typed(
                 "member-x",
-                "peer-id",
+                PeerId::new(),
                 "inproc://x",
             )
             .unwrap(),

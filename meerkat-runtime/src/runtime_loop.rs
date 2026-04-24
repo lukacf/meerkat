@@ -246,6 +246,17 @@ async fn prepare_turn_state_for_primitive(
     let mut auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Retired drain path: `machine_begin_run` treats Retired as
+    // `is_retired_drain` and skips the `Prepare` DSL input, leaving
+    // phase at Retired. The turn-start transitions
+    // (`StartConversationRun{Initializing,Attached}` /
+    // `StartImmediate{Append,Context}{Initializing,Attached}`) only
+    // guard on Initializing/Attached — no Retired variant. Skip the
+    // signal during drain; shell-side `set_control_projection` has
+    // already advanced control so `executor.apply` proceeds next.
+    if auth.state.lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
+        return Ok(());
+    }
     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input)
         .map(|_| ())
         .map_err(|err| {

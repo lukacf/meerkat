@@ -2261,8 +2261,8 @@ machine! {
                 self.loop_definition.insert(loop_instance_id, loop_id);
                 self.loop_depth.insert(loop_instance_id, depth);
                 self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
-                self.loop_current_iteration.insert(loop_instance_id, 0u32);
-                self.loop_last_completed_iteration.insert(loop_instance_id, 0u32);
+                self.loop_current_iteration.insert(loop_instance_id, 0u64);
+                self.loop_last_completed_iteration.insert(loop_instance_id, 0u64);
                 self.loop_max_iterations.insert(loop_instance_id, max_iterations);
                 self.loop_active_body_frame.insert(loop_instance_id, None);
             }
@@ -2280,7 +2280,7 @@ machine! {
             update {
                 self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingUntilEvaluation);
                 self.loop_last_completed_iteration.insert(loop_instance_id, iteration);
-                self.loop_current_iteration.insert(loop_instance_id, iteration + 1u32);
+                self.loop_current_iteration.insert(loop_instance_id, iteration + 1u64);
                 self.loop_active_body_frame.insert(loop_instance_id, None);
             }
             to Running

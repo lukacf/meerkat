@@ -278,6 +278,32 @@ mod tests {
     }
 
     #[test]
+    fn work_request_projects_agent_runtime_id_to_runtime_id() {
+        let schema = meerkat_mob_seam_composition();
+        let table = RouteTable::from_schema(&schema).unwrap();
+
+        let mob = MachineInstanceId::parse("mob").unwrap();
+        let variant = EffectVariantId::parse("RequestRuntimeIngress").unwrap();
+        let descriptor = table.resolve(&mob, &variant).expect("known route");
+
+        assert_eq!(descriptor.route_id.as_str(), "work_request_reaches_meerkat");
+        assert_eq!(descriptor.input_variant.as_str(), "Ingest");
+        let field_pairs: Vec<(&str, &str)> = descriptor
+            .bindings
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect();
+        assert_eq!(
+            field_pairs,
+            vec![
+                ("agent_runtime_id", "runtime_id"),
+                ("work_id", "work_id"),
+                ("origin", "origin"),
+            ]
+        );
+    }
+
+    #[test]
     fn resolve_returns_none_for_unknown_variant() {
         let schema = meerkat_mob_seam_composition();
         let table = RouteTable::from_schema(&schema).unwrap();

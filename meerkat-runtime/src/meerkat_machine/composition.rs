@@ -50,14 +50,11 @@ use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
 /// the matching [`MeerkatMachineInput`][mmi] and applies it against the
 /// session's shared DSL authority on the owning [`MeerkatMachine`].
 ///
-/// Session selection: routed effects carry `agent_runtime_id` (for
-/// variants that require a target) which matches the `SessionId` string
-/// used by `MeerkatMachine::register_session`. `Retire` and `Destroy`
-/// do not carry a target in the schema — production wiring is
-/// per-member and will install one surface per session so the
-/// `agent_runtime_id` of the carrying surface is authoritative; until
-/// that per-session wiring lands, a single shared surface returns a
-/// typed refusal rather than mis-routing.
+/// Session selection: routed effects prefer a projected `session_id`.
+/// `Ingest` may arrive without one, so the shared surface resolves its
+/// projected `runtime_id` through each registered session's DSL-owned
+/// `active_runtime_id`. Zero or multiple matches are refused rather than
+/// guessing.
 ///
 /// [mmi]: crate::meerkat_machine::dsl::MeerkatMachineInput
 pub struct MeerkatConsumerSurface {
@@ -80,8 +77,7 @@ impl std::fmt::Debug for MeerkatConsumerSurface {
 
 impl MeerkatConsumerSurface {
     /// Build a consumer surface backed by the given machine. The surface
-    /// resolves each routed input's target session from the projected
-    /// `agent_runtime_id` field.
+    /// resolves each routed input's target session from projected fields.
     pub fn new(machine: Arc<MeerkatMachine>) -> Self {
         Self {
             machine,
@@ -90,9 +86,9 @@ impl MeerkatConsumerSurface {
     }
 
     /// Build a consumer surface pinned to `session_id`. All routed
-    /// inputs are applied against this session; variants that carry
-    /// `agent_runtime_id` are additionally checked for agreement and
-    /// refused on mismatch.
+    /// inputs are applied against this session; variants that carry a
+    /// `session_id` are additionally checked for agreement and refused on
+    /// mismatch.
     pub fn pinned(machine: Arc<MeerkatMachine>, session_id: SessionId) -> Self {
         Self {
             machine,
@@ -100,8 +96,9 @@ impl MeerkatConsumerSurface {
         }
     }
 
-    fn resolve_session(
+    async fn resolve_session(
         &self,
+        variant: &str,
         projected: &[(FieldId, OwnedFieldValue)],
     ) -> Result<SessionId, String> {
         // Typed session_id is the canonical source (Shape 4 — producer DSL
@@ -123,11 +120,51 @@ impl MeerkatConsumerSurface {
             (Some(pinned), _) => Ok(pinned.clone()),
             (None, Some(sid)) => SessionId::parse(&sid)
                 .map_err(|e| format!("routed session_id `{sid}` is not a valid UUID: {e}")),
+            (None, None) if variant == "Ingest" => {
+                let runtime_id = project_str(projected, "runtime_id")?;
+                self.machine
+                    .resolve_registered_session_for_runtime_id(&mm_dsl::AgentRuntimeId::from(
+                        runtime_id.to_string(),
+                    ))
+                    .await
+            }
             (None, None) => Err(
                 "routed input did not project `session_id` and surface is not pinned \
                  to a session — no session can be resolved"
                     .into(),
             ),
+        }
+    }
+}
+
+impl MeerkatMachine {
+    async fn resolve_registered_session_for_runtime_id(
+        &self,
+        runtime_id: &mm_dsl::AgentRuntimeId,
+    ) -> Result<SessionId, String> {
+        let sessions = self.sessions.read().await;
+        let mut matches = Vec::new();
+
+        for (session_id, entry) in sessions.iter() {
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if authority.state.active_runtime_id.as_ref() == Some(runtime_id) {
+                matches.push(session_id.clone());
+            }
+        }
+
+        match matches.len() {
+            0 => Err(format!(
+                "routed Ingest runtime_id `{}` did not match any registered session active_runtime_id",
+                runtime_id.0
+            )),
+            1 => Ok(matches.remove(0)),
+            count => Err(format!(
+                "routed Ingest runtime_id `{}` matched {count} registered sessions; refusing ambiguous delivery",
+                runtime_id.0
+            )),
         }
     }
 }
@@ -186,8 +223,9 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         variant: InputVariantId,
         projected: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), String> {
-        let session_id = self.resolve_session(&projected)?;
-        let input = match variant.as_str() {
+        let variant_slug = variant.as_str();
+        let session_id = self.resolve_session(variant_slug, &projected).await?;
+        let input = match variant_slug {
             "PrepareBindings" => {
                 let rt = project_str(&projected, "agent_runtime_id")?;
                 let fence = project_u64(&projected, "fence_token")?;
@@ -202,12 +240,10 @@ impl ConsumerSurface for MeerkatConsumerSurface {
             }
             "Ingest" => {
                 // Route binding `work_request_reaches_meerkat` delivers
-                // producer `runtime_id` → consumer `agent_runtime_id`;
-                // producer `work_id` → consumer `work_id`; producer
-                // `origin` → consumer `origin`. The consumer DSL input
-                // names the runtime field `runtime_id`, matching the
-                // schema's consumer-field slug.
-                let rt = project_str(&projected, "agent_runtime_id")?;
+                // producer `agent_runtime_id` into the consumer's canonical
+                // `runtime_id` field; producer `work_id` → consumer
+                // `work_id`; producer `origin` → consumer `origin`.
+                let rt = project_str(&projected, "runtime_id")?;
                 let work_id = project_str(&projected, "work_id")?;
                 let origin_slug = project_str(&projected, "origin")?;
                 let origin = parse_work_origin(origin_slug)?;
@@ -254,6 +290,35 @@ mod tests {
 
     fn iv(slug: &str) -> InputVariantId {
         InputVariantId::parse(slug).expect("input variant slug")
+    }
+
+    fn sid(slug: &str) -> SessionId {
+        SessionId::parse(slug).expect("session id")
+    }
+
+    async fn bind_runtime(
+        surface: &MeerkatConsumerSurface,
+        session_id: &SessionId,
+        runtime_id: &str,
+    ) {
+        surface
+            .apply_routed_input(
+                iv("PrepareBindings"),
+                vec![
+                    (
+                        fld("agent_runtime_id"),
+                        OwnedFieldValue::Str(runtime_id.into()),
+                    ),
+                    (fld("fence_token"), OwnedFieldValue::U64(1)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
+                    (
+                        fld("session_id"),
+                        OwnedFieldValue::Str(session_id.to_string()),
+                    ),
+                ],
+            )
+            .await
+            .expect("bind runtime");
     }
 
     #[tokio::test]
@@ -333,5 +398,100 @@ mod tests {
             .await
             .expect_err("session_id disagrees with pinned session");
         assert!(err.contains("pinned"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ingest_prefers_projected_session_id() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let session_id = sid("00000000-0000-0000-0000-000000000001");
+        machine.register_session(session_id.clone()).await;
+
+        surface
+            .apply_routed_input(
+                iv("Ingest"),
+                vec![
+                    (fld("runtime_id"), OwnedFieldValue::Str("rt-other".into())),
+                    (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
+                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                    (
+                        fld("session_id"),
+                        OwnedFieldValue::Str(session_id.to_string()),
+                    ),
+                ],
+            )
+            .await
+            .expect("session_id targets the routed input");
+    }
+
+    #[tokio::test]
+    async fn ingest_resolves_session_from_runtime_id_when_session_id_absent() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let session_id = sid("00000000-0000-0000-0000-000000000001");
+        machine.register_session(session_id.clone()).await;
+        bind_runtime(&surface, &session_id, "rt-match").await;
+
+        surface
+            .apply_routed_input(
+                iv("Ingest"),
+                vec![
+                    (fld("runtime_id"), OwnedFieldValue::Str("rt-match".into())),
+                    (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
+                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                ],
+            )
+            .await
+            .expect("runtime_id resolves to the registered session");
+    }
+
+    #[tokio::test]
+    async fn ingest_without_matching_runtime_id_is_refused() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        machine
+            .register_session(sid("00000000-0000-0000-0000-000000000001"))
+            .await;
+
+        let err = surface
+            .apply_routed_input(
+                iv("Ingest"),
+                vec![
+                    (fld("runtime_id"), OwnedFieldValue::Str("rt-missing".into())),
+                    (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
+                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                ],
+            )
+            .await
+            .expect_err("runtime_id has no registered owner");
+        assert!(
+            err.contains("did not match any registered session"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_with_ambiguous_runtime_id_is_refused() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let first = sid("00000000-0000-0000-0000-000000000001");
+        let second = sid("00000000-0000-0000-0000-000000000002");
+        machine.register_session(first.clone()).await;
+        machine.register_session(second.clone()).await;
+        bind_runtime(&surface, &first, "rt-shared").await;
+        bind_runtime(&surface, &second, "rt-shared").await;
+
+        let err = surface
+            .apply_routed_input(
+                iv("Ingest"),
+                vec![
+                    (fld("runtime_id"), OwnedFieldValue::Str("rt-shared".into())),
+                    (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
+                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                ],
+            )
+            .await
+            .expect_err("runtime_id is ambiguous");
+        assert!(err.contains("ambiguous delivery"), "{err}");
     }
 }

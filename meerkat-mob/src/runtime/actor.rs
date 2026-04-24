@@ -6071,6 +6071,12 @@ impl MobActor {
         let Some(retiring_comms) = self.sender_runtime_for_entry(&ctx.entry).await else {
             return Ok(());
         };
+        let retiring_spec = match self
+            .resolve_wiring_endpoint(&ctx.entry, "dispose_notify_peers retiring member")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+        };
         let mut first_error: Option<MobError> = None;
         for peer_identity in &ctx.entry.wired_to {
             // Resolve identity to bridge MeerkatId; skip absent peers (already retired).
@@ -6087,11 +6093,12 @@ impl MobActor {
                 );
                 continue;
             };
-            let recipient_spec = match self
+            let (recipient_spec, recipient_comms, recipient_binding) = match self
                 .resolve_wiring_endpoint(&peer_entry, "dispose_notify_peers")
                 .await?
             {
-                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+                WiringEndpoint::Local { comms, spec, .. } => (spec, Some(comms), None),
+                WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
             };
 
             if let Err(error) = self
@@ -6102,6 +6109,27 @@ impl MobActor {
                     &retiring_comms,
                 )
                 .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+            if let Some(recipient_comms) = recipient_comms {
+                if let Err(error) = recipient_comms
+                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&retiring_spec))
+                    .await
+                    && first_error.is_none()
+                {
+                    first_error = Some(MobError::from(error));
+                }
+            } else if let Some(recipient_binding) = recipient_binding
+                && let Err(error) = self
+                    .unwire_peer_only_recipient(
+                        &recipient_spec,
+                        Some(&recipient_binding),
+                        &retiring_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
                 && first_error.is_none()
             {
                 first_error = Some(error);

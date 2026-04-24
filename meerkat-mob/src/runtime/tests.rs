@@ -230,7 +230,16 @@ impl CoreCommsRuntime for MockCommsRuntime {
             }
         }
         let mut peers = self.trusted_peers.write().await;
-        Ok(peers.remove(peer_id).is_some())
+        if peers.remove(peer_id).is_some() {
+            return Ok(true);
+        }
+        let matching_peer_id = peers.iter().find_map(|(stored_peer_id, peer)| {
+            (meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string() == peer_id)
+                .then(|| stored_peer_id.clone())
+        });
+        Ok(matching_peer_id
+            .and_then(|stored_peer_id| peers.remove(&stored_peer_id))
+            .is_some())
     }
 
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {

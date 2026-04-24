@@ -604,6 +604,35 @@ impl MobRun {
         }
     }
 
+    pub(crate) fn record_loop_body_frame_completed_input(
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted {
+            loop_instance_id: mob_dsl::LoopInstanceId::from(loop_instance_id.as_str()),
+            iteration,
+        }
+    }
+
+    pub(crate) fn record_loop_until_condition_feedback_input(
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+        until_met: bool,
+    ) -> mob_dsl::MobMachineInput {
+        let loop_instance_id = mob_dsl::LoopInstanceId::from(loop_instance_id.as_str());
+        if until_met {
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration,
+            }
+        } else {
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration,
+            }
+        }
+    }
+
     pub fn flow_state_for_steps<I>(step_ids: I) -> Result<flow_run::State, MobError>
     where
         I: IntoIterator<Item = StepId>,

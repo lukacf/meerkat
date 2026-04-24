@@ -9,11 +9,9 @@
 //! cross-crate change with no other callers — this bridge machine
 //! mirrors the same effect shape and declares the handoff annotation.
 //!
-//! This is the same pattern `loop_iteration_machine` uses for
-//! `flow_loop_until_evaluation`: a compat machine whose only job is to
-//! host the cross-machine protocol declaration. The compat machine is
-//! intentionally excluded from the canonical catalog and TLC state
-//! space; it exists only for the protocol-codegen producer lookup.
+//! The compat machine is intentionally excluded from the canonical catalog
+//! and TLC state space; it exists only for the protocol-codegen producer
+//! lookup.
 
 use crate::identity::{
     EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, NamedTypeId,

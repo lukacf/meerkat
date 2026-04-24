@@ -936,6 +936,18 @@ machine! {
                 depth: u32,
                 max_iterations: u32,
             },
+            RecordLoopBodyFrameCompleted {
+                loop_instance_id: LoopInstanceId,
+                iteration: u32,
+            },
+            RecordLoopUntilConditionMet {
+                loop_instance_id: LoopInstanceId,
+                iteration: u32,
+            },
+            RecordLoopUntilConditionFailed {
+                loop_instance_id: LoopInstanceId,
+                iteration: u32,
+            },
             ProjectRunStatus {
                 run_id: RunId,
                 status: Enum<FlowRunStatus>,
@@ -2249,7 +2261,79 @@ machine! {
                 self.loop_definition.insert(loop_instance_id, loop_id);
                 self.loop_depth.insert(loop_instance_id, depth);
                 self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                self.loop_current_iteration.insert(loop_instance_id, 0);
+                self.loop_last_completed_iteration.insert(loop_instance_id, 0);
                 self.loop_max_iterations.insert(loop_instance_id, max_iterations);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopBodyFrameCompletedRunning {
+            on input RecordLoopBodyFrameCompleted { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "body_frame_active" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::BodyFrameActive) }
+            guard "iteration_matches_current" { self.loop_current_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            update {
+                self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingUntilEvaluation);
+                self.loop_last_completed_iteration.insert(loop_instance_id, iteration);
+                self.loop_current_iteration.insert(loop_instance_id, iteration + 1);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionMetRunning {
+            on input RecordLoopUntilConditionMet { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            update {
+                self.loop_phase.insert(loop_instance_id, LoopStatus::Completed);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionFailedRunning {
+            on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            guard "iterations_remaining" {
+                self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                    < self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+            }
+            update {
+                self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionFailedExhausted {
+            on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            guard "iterations_exhausted" {
+                self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                    >= self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+            }
+            update {
+                self.loop_phase.insert(loop_instance_id, LoopStatus::Exhausted);
                 self.loop_active_body_frame.insert(loop_instance_id, None);
             }
             to Running
@@ -2767,6 +2851,101 @@ mod tests {
         assert_eq!(
             authority.state.loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingBodyFrame)
+        );
+        assert_eq!(
+            authority
+                .state
+                .loop_current_iteration
+                .get(&loop_instance_id),
+            Some(&0)
+        );
+        assert_eq!(
+            authority
+                .state
+                .loop_last_completed_iteration
+                .get(&loop_instance_id),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn loop_until_feedback_is_recorded_by_mob_machine() {
+        let mut authority = MobMachineAuthority::new();
+        let loop_instance_id = LoopInstanceId::from("loop-1");
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CreateLoopSeed {
+                loop_instance_id: loop_instance_id.clone(),
+                parent_frame_id: FrameId::from("frame-root"),
+                parent_node_id: FlowNodeId::from("loop-node"),
+                loop_id: LoopId::from("repeat"),
+                depth: 1,
+                max_iterations: 2,
+            },
+        )
+        .expect("CreateLoopSeed should be accepted");
+        authority.state.loop_stage.insert(
+            loop_instance_id.clone(),
+            LoopIterationStage::BodyFrameActive,
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 0,
+            },
+        )
+        .expect("body completion should be accepted");
+        assert_eq!(
+            authority.state.loop_stage.get(&loop_instance_id),
+            Some(&LoopIterationStage::AwaitingUntilEvaluation)
+        );
+        assert_eq!(
+            authority
+                .state
+                .loop_current_iteration
+                .get(&loop_instance_id),
+            Some(&1)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 0,
+            },
+        )
+        .expect("until=false should request another body frame");
+        assert_eq!(
+            authority.state.loop_stage.get(&loop_instance_id),
+            Some(&LoopIterationStage::AwaitingBodyFrame)
+        );
+
+        authority.state.loop_stage.insert(
+            loop_instance_id.clone(),
+            LoopIterationStage::BodyFrameActive,
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 1,
+            },
+        )
+        .expect("second body completion should be accepted");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 1,
+            },
+        )
+        .expect("until=true should complete the loop");
+        assert_eq!(
+            authority.state.loop_phase.get(&loop_instance_id),
+            Some(&LoopStatus::Completed)
         );
     }
 

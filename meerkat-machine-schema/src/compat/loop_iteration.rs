@@ -2,7 +2,7 @@ use indexmap::IndexMap;
 
 use crate::identity::{
     EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, NamedTypeId,
-    PhaseId, ProtocolId, TransitionId,
+    PhaseId, TransitionId,
 };
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
@@ -1076,7 +1076,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
         ci_step_limit: None,
         effect_dispositions: vec![
             routed_disposition("RequestBodyFrameStart", &["FlowRunMachine"]),
-            handoff_disposition("EvaluateUntilCondition", "flow_loop_until_evaluation"),
+            disposition("EvaluateUntilCondition", EffectDisposition::Local),
             routed_disposition("LoopCompleted", &["FlowFrameMachine"]),
             routed_disposition("LoopExhausted", &["FlowFrameMachine"]),
             routed_disposition("LoopFailed", &["FlowFrameMachine"]),
@@ -1104,11 +1104,11 @@ fn routed_disposition(name: &str, consumer_machines: &[&str]) -> EffectDispositi
     }
 }
 
-fn handoff_disposition(name: &str, protocol: &str) -> EffectDispositionRule {
+fn disposition(name: &str, disposition: EffectDisposition) -> EffectDispositionRule {
     EffectDispositionRule {
         effect_variant: EffectVariantId::parse(name).expect("valid effect-variant slug"),
-        disposition: EffectDisposition::External,
-        handoff_protocol: Some(ProtocolId::parse(protocol).expect("valid protocol slug")),
+        disposition,
+        handoff_protocol: None,
     }
 }
 

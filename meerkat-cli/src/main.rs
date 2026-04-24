@@ -8161,6 +8161,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         return Ok(());
     }
 
+    if let MobCommands::Web {
+        command: MobWebCommands::Build { pack, output },
+    } = &command
+    {
+        println!("{}", execute_mob_web_build(pack, output).await?);
+        return Ok(());
+    }
+
     let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
     let persistent = get_or_create_mob_persistent_service(scope, config).await?;
@@ -8476,7 +8484,9 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         | MobCommands::Validate { .. }
         | MobCommands::Deploy { .. }
         | MobCommands::Web { .. } => {
-            unreachable!("pack/inspect/validate handled before runtime mob state initialization")
+            unreachable!(
+                "pack/inspect/validate/deploy/web handled before runtime mob state initialization"
+            )
         }
     };
 
@@ -8537,6 +8547,58 @@ async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> 
     let digest = compute_archive_digest(&bytes)
         .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
     Ok(format!("valid\t{digest}"))
+}
+
+#[cfg(feature = "mob")]
+async fn execute_mob_web_build(
+    pack: &std::path::Path,
+    output: &std::path::Path,
+) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(pack)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+    let files =
+        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    let archive = MobpackArchive::from_extracted_files(&files)
+        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    if let Some(requires) = &archive.manifest.requires {
+        for cap in &requires.capabilities {
+            if matches!(cap.as_str(), "shell" | "mcp_stdio" | "process_spawn") {
+                anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
+            }
+        }
+    }
+
+    tokio::fs::create_dir_all(output).await.map_err(|err| {
+        anyhow::anyhow!("failed creating web output '{}': {err}", output.display())
+    })?;
+    tokio::fs::write(output.join("mobpack.bin"), &bytes)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing mobpack.bin: {err}"))?;
+    tokio::fs::write(
+        output.join("manifest.web.toml"),
+        toml::to_string(&archive.manifest)
+            .map_err(|err| anyhow::anyhow!("failed encoding web manifest: {err}"))?,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing manifest.web.toml: {err}"))?;
+    tokio::fs::write(
+        output.join("index.html"),
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Meerkat Mob</title></head><body><script type=\"module\" src=\"./runtime.js\"></script></body></html>\n",
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing index.html: {err}"))?;
+    tokio::fs::write(
+        output.join("runtime.js"),
+        "export const mobpackUrl = './mobpack.bin';\nexport const wasmUrl = './runtime_bg.wasm';\n",
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing runtime.js: {err}"))?;
+    tokio::fs::write(output.join("runtime_bg.wasm"), [])
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
+
+    Ok(format!("web\t{}", output.display()))
 }
 
 #[cfg(feature = "mob")]

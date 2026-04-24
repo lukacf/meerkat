@@ -3720,6 +3720,7 @@ dependencies = [
  "meerkat",
  "meerkat-anthropic",
  "meerkat-client",
+ "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-gemini",

@@ -3687,11 +3687,14 @@ mod tests {
             .advertised_address()
             .expect("worker advertised address");
 
+        let operator_pubkey =
+            meerkat_comms::PubKey::from_pubkey_string(&operator_peer_id).expect("operator pubkey");
         CoreCommsRuntime::add_trusted_peer(
             &*sender,
-            TrustedPeerDescriptor::test_only_unsigned(
+            TrustedPeerDescriptor::unsigned_with_pubkey(
                 format!("{mob_id}/worker/worker-1"),
-                operator_peer_id,
+                operator_pubkey.to_peer_id().to_string(),
+                *operator_pubkey.as_bytes(),
                 operator_addr,
             )
             .expect("worker trusted peer spec"),
@@ -3700,9 +3703,10 @@ mod tests {
         .expect("sender trusts worker");
         CoreCommsRuntime::add_trusted_peer(
             operator_comms.as_ref(),
-            TrustedPeerDescriptor::test_only_unsigned(
+            TrustedPeerDescriptor::unsigned_with_pubkey(
                 "router-peer-response-sender",
                 sender_peer_id,
+                *sender.public_key().as_bytes(),
                 sender_addr,
             )
             .expect("sender trusted peer spec"),

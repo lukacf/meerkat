@@ -728,7 +728,12 @@ mod tests {
         let field_names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             field_names,
-            vec!["agent_runtime_id", "fence_token", "generation"]
+            vec![
+                "agent_runtime_id",
+                "fence_token",
+                "generation",
+                "session_id"
+            ]
         );
         match &fields[0].1 {
             OwnedFieldValue::Str(s) => assert_eq!(s, "rt-1"),
@@ -741,6 +746,10 @@ mod tests {
         match &fields[2].1 {
             OwnedFieldValue::U64(v) => assert_eq!(*v, 3),
             other => panic!("expected U64, got {other:?}"),
+        }
+        match &fields[3].1 {
+            OwnedFieldValue::Str(s) => assert_eq!(s, "019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
+            other => panic!("expected Str for session_id, got {other:?}"),
         }
     }
 

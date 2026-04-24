@@ -48,6 +48,7 @@ enum SeamEffect {
         agent_runtime_id: String,
         fence_token: u64,
         generation: u64,
+        session_id: String,
     },
     RequestRuntimeIngress {
         agent_runtime_id: String,
@@ -75,10 +76,12 @@ impl ProducerEffect for SeamEffect {
                 agent_runtime_id,
                 fence_token,
                 generation,
+                session_id,
             } => match id.as_str() {
                 "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id)),
                 "fence_token" => Some(FieldValue::U64(*fence_token)),
                 "generation" => Some(FieldValue::U64(*generation)),
+                "session_id" => Some(FieldValue::Str(session_id)),
                 _ => None,
             },
             Self::RequestRuntimeIngress {
@@ -186,6 +189,7 @@ async fn all_four_catalog_routes_dispatch_to_meerkat_consumer() {
                     agent_runtime_id: "rt-1".into(),
                     fence_token: 11,
                     generation: 3,
+                    session_id: "019dbd3d-d7ad-75a1-96d0-8013927e78f8".into(),
                 },
             },
         )
@@ -254,9 +258,11 @@ async fn all_four_catalog_routes_dispatch_to_meerkat_consumer() {
         variants,
         vec!["PrepareBindings", "Ingest", "Retire", "Destroy"],
     );
-    // PrepareBindings field projection: 3 fields, typed correctly.
+    // PrepareBindings field projection: 4 fields, typed correctly.
+    // session_id added by A1 Shape 4 (9e3b31ec4) as the fourth binding
+    // on `binding_request_reaches_meerkat`.
     let (_, binding_fields) = &log[0];
-    assert_eq!(binding_fields.len(), 3);
+    assert_eq!(binding_fields.len(), 4);
     assert_eq!(binding_fields[0].0.as_str(), "agent_runtime_id");
     match &binding_fields[0].1 {
         OwnedFieldValue::Str(s) => assert_eq!(s, "rt-1"),
@@ -269,6 +275,11 @@ async fn all_four_catalog_routes_dispatch_to_meerkat_consumer() {
     match &binding_fields[2].1 {
         OwnedFieldValue::U64(v) => assert_eq!(*v, 3),
         other => panic!("generation not U64: {other:?}"),
+    }
+    assert_eq!(binding_fields[3].0.as_str(), "session_id");
+    match &binding_fields[3].1 {
+        OwnedFieldValue::Str(s) => assert_eq!(s, "019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
+        other => panic!("session_id not Str: {other:?}"),
     }
 }
 

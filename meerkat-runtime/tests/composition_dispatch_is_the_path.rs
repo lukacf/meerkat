@@ -52,6 +52,7 @@ enum MobEffect {
         agent_runtime_id: String,
         fence_token: u64,
         generation: u64,
+        session_id: String,
     },
     RequestRuntimeRetire,
 }
@@ -74,10 +75,12 @@ impl ProducerEffect for SeamEffect {
                 agent_runtime_id,
                 fence_token,
                 generation,
+                session_id,
             }) => match id.as_str() {
                 "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id)),
                 "fence_token" => Some(FieldValue::U64(*fence_token)),
                 "generation" => Some(FieldValue::U64(*generation)),
+                "session_id" => Some(FieldValue::Str(session_id)),
                 _ => None,
             },
             Self::Mob(MobEffect::RequestRuntimeRetire) => None,
@@ -145,6 +148,7 @@ async fn dispatcher_is_the_path_for_mob_request_runtime_binding() {
             agent_runtime_id: "rt-alpha".into(),
             fence_token: 11,
             generation: 2,
+            session_id: "019dbd3d-d7ad-75a1-96d0-8013927e78f8".into(),
         }),
     };
 
@@ -169,7 +173,12 @@ async fn dispatcher_is_the_path_for_mob_request_runtime_binding() {
     let field_ids: Vec<&str> = fields.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(
         field_ids,
-        vec!["agent_runtime_id", "fence_token", "generation"]
+        vec![
+            "agent_runtime_id",
+            "fence_token",
+            "generation",
+            "session_id"
+        ]
     );
     match &fields[0].1 {
         OwnedFieldValue::Str(s) => assert_eq!(s, "rt-alpha"),
@@ -182,6 +191,10 @@ async fn dispatcher_is_the_path_for_mob_request_runtime_binding() {
     match &fields[2].1 {
         OwnedFieldValue::U64(v) => assert_eq!(*v, 2),
         other => panic!("expected U64 for generation, got {other:?}"),
+    }
+    match &fields[3].1 {
+        OwnedFieldValue::Str(s) => assert_eq!(s, "019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
+        other => panic!("expected Str for session_id, got {other:?}"),
     }
 }
 
@@ -251,6 +264,7 @@ async fn refuses_unwired_consumer_typed() {
             agent_runtime_id: "rt".into(),
             fence_token: 0,
             generation: 0,
+            session_id: "019dbd3d-d7ad-75a1-96d0-8013927e78f8".into(),
         }),
     };
 
@@ -278,6 +292,7 @@ async fn refuses_composition_mismatch_typed() {
             agent_runtime_id: "rt".into(),
             fence_token: 0,
             generation: 0,
+            session_id: "019dbd3d-d7ad-75a1-96d0-8013927e78f8".into(),
         }),
     };
 
@@ -323,10 +338,16 @@ fn no_legacy_composition_helpers_in_routed_effect_call_sites() {
     // would mean a parallel, non-typed path to the one this trait
     // defines. We scan the source files themselves (not the crate's
     // compile output) so the test is cheap and deterministic.
+    // Helper-shape substrings: we ban the stringly-typed *helper-call*
+    // patterns that wave-a deleted, not the mere presence of the name —
+    // wave-c C-T restored `comms_trust_reconcile` as a proper typed
+    // module (`crate::comms_trust_reconcile::CommsTrustReconciler`), so
+    // the bare name is no longer a signal for a parallel non-typed path.
+    // Match the helper-function shape (`fn <name>`) instead.
     const BANNED: &[&str] = &[
         "composition_dispatch", // deleted wave-a helper
         "recompute_mob_peer_overlay",
-        "comms_trust_reconcile",
+        "fn comms_trust_reconcile", // helper fn, not the typed module
     ];
 
     let crate_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");

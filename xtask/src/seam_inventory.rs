@@ -400,6 +400,14 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "RealtimeReconnectProgressProjected",
+            SeamClassification::SurfaceResultAlignment,
+            "External realtime reconnect-progress projection must align with the realtime \
+             overlay's attempt-count + timestamp truth so `realtime/status` surfaces the \
+             actual reconnect state, not a hard-coded default",
+        ),
+        (
+            "MeerkatMachine",
             "LiveTopologyPhaseChanged",
             SeamClassification::OwnerRealizationOnly,
             "External live-topology phase delta realized by the live-topology surface",
@@ -461,6 +469,14 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "WiringGraphChanged",
             SeamClassification::SurfaceResultAlignment,
             "External wiring-graph delta must align with roster wiring-projection truth",
+        ),
+        (
+            "MobMachine",
+            "EmitWiringLifecycleNotice",
+            SeamClassification::SurfaceResultAlignment,
+            "External wiring-lifecycle notices (members wired / unwired) must align with the \
+             canonical `WireMembersRunning` / `UnwireMembersRunning` DSL transitions so event \
+             consumers see the same wiring truth the DSL committed",
         ),
         (
             "MobMachine",

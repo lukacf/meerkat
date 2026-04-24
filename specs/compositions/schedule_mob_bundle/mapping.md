@@ -17,7 +17,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `materialization-failure-classification` — mob-side delivery failure preserves explicit TargetMaterializationFailed classification
 
 ### Routes
-- `(none)`
+- `revision_supersede_enters_occurrence_authority`
+  - anchors: `schedule_driver`, `mob_delivery_precursor`, `schedule_mob_bundle_schema`
+  - scenarios: `mob-delivery-feedback`, `materialization-failure-classification`
+- `occurrence_supersede_ack_returns_to_schedule`
+  - anchors: `schedule_driver`, `mob_delivery_precursor`, `schedule_mob_bundle_schema`
+  - scenarios: `mob-delivery-feedback`, `materialization-failure-classification`
 
 ### Scheduler Rules
 - `(none)`

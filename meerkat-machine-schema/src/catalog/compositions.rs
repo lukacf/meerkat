@@ -211,15 +211,62 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
 pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("schedule_runtime_bundle"),
-        machines: vec![MachineInstance {
-            instance_id: mi_id("occurrence"),
-            machine_name: mach_id("OccurrenceLifecycleMachine"),
-            actor: act_id("occurrence_authority"),
-        }],
-        actors: vec![machine_actor("occurrence_authority")],
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("occurrence"),
+                machine_name: mach_id("OccurrenceLifecycleMachine"),
+                actor: act_id("occurrence_authority"),
+            },
+            // Bind the schedule authority so
+            // `OccurrenceLifecycleMachine::OccurrencesSuperseded` has a
+            // declared consumer in this composition. Runtime-delivery
+            // compositions still own the claim→delivery seam, but the
+            // machine-level `=> routed [ScheduleLifecycleMachine]`
+            // disposition is unconditional: if OccurrencesSuperseded
+            // fires from this bundle's occurrence authority, it must
+            // have somewhere to land. Mirrors `schedule_bundle`'s
+            // `occurrence_supersede_ack_returns_to_schedule` route.
+            MachineInstance {
+                instance_id: mi_id("schedule"),
+                machine_name: mach_id("ScheduleLifecycleMachine"),
+                actor: act_id("schedule_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("occurrence_authority"),
+            machine_actor("schedule_authority"),
+        ],
         handoff_protocols: vec![],
         entry_inputs: vec![],
-        routes: vec![],
+        routes: vec![
+            // Outbound: schedule revisions supersede pending occurrences.
+            // Mirrors `schedule_bundle::revision_supersede_enters_occurrence_authority`.
+            // The runtime bundle rarely originates schedule edits, but
+            // binding ScheduleLifecycleMachine here means its routed
+            // effects must have declared consumers; the reverse ack
+            // route below closes the pair.
+            route(
+                "revision_supersede_enters_occurrence_authority",
+                "schedule",
+                "SupersedePendingOccurrences",
+                "occurrence",
+                RouteTargetKind::Input,
+                "Supersede",
+                &[bind("superseded_by_revision", "superseding_revision")],
+            ),
+            route(
+                "occurrence_supersede_ack_returns_to_schedule",
+                "occurrence",
+                "OccurrencesSuperseded",
+                "schedule",
+                RouteTargetKind::Input,
+                "ConfirmOccurrencesSuperseded",
+                &[
+                    bind("occurrence_id", "occurrence_id"),
+                    bind("superseding_revision", "superseding_revision"),
+                ],
+            ),
+        ],
         route_target_selectors: vec![],
         driver: None,
         transaction_plans: vec![transaction_plan(
@@ -234,6 +281,14 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             witness("runtime_delivery_feedback", &[]),
             witness("runtime_lease_expiry", &[]),
+            witness(
+                "revision_supersede_route",
+                &["revision_supersede_enters_occurrence_authority"],
+            ),
+            witness(
+                "occurrence_supersede_ack_route",
+                &["occurrence_supersede_ack_returns_to_schedule"],
+            ),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -246,15 +301,62 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
 pub fn schedule_mob_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("schedule_mob_bundle"),
-        machines: vec![MachineInstance {
-            instance_id: mi_id("occurrence"),
-            machine_name: mach_id("OccurrenceLifecycleMachine"),
-            actor: act_id("occurrence_authority"),
-        }],
-        actors: vec![machine_actor("occurrence_authority")],
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("occurrence"),
+                machine_name: mach_id("OccurrenceLifecycleMachine"),
+                actor: act_id("occurrence_authority"),
+            },
+            // Bind the schedule authority so
+            // `OccurrenceLifecycleMachine::OccurrencesSuperseded` has a
+            // declared consumer in this composition. Mob-delivery
+            // compositions still own the claim→delivery seam, but the
+            // machine-level `=> routed [ScheduleLifecycleMachine]`
+            // disposition is unconditional: if OccurrencesSuperseded
+            // fires from this bundle's occurrence authority, it must
+            // have somewhere to land. Mirrors `schedule_bundle` and
+            // `schedule_runtime_bundle`.
+            MachineInstance {
+                instance_id: mi_id("schedule"),
+                machine_name: mach_id("ScheduleLifecycleMachine"),
+                actor: act_id("schedule_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("occurrence_authority"),
+            machine_actor("schedule_authority"),
+        ],
         handoff_protocols: vec![],
         entry_inputs: vec![],
-        routes: vec![],
+        routes: vec![
+            // Outbound: schedule revisions supersede pending occurrences.
+            // Mirrors `schedule_bundle::revision_supersede_enters_occurrence_authority`.
+            // The mob bundle rarely originates schedule edits, but
+            // binding ScheduleLifecycleMachine here means its routed
+            // effects must have declared consumers; the reverse ack
+            // route below closes the pair.
+            route(
+                "revision_supersede_enters_occurrence_authority",
+                "schedule",
+                "SupersedePendingOccurrences",
+                "occurrence",
+                RouteTargetKind::Input,
+                "Supersede",
+                &[bind("superseded_by_revision", "superseding_revision")],
+            ),
+            route(
+                "occurrence_supersede_ack_returns_to_schedule",
+                "occurrence",
+                "OccurrencesSuperseded",
+                "schedule",
+                RouteTargetKind::Input,
+                "ConfirmOccurrencesSuperseded",
+                &[
+                    bind("occurrence_id", "occurrence_id"),
+                    bind("superseding_revision", "superseding_revision"),
+                ],
+            ),
+        ],
         route_target_selectors: vec![],
         driver: None,
         transaction_plans: vec![transaction_plan(
@@ -269,6 +371,14 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
         witnesses: vec![
             witness("mob_delivery_feedback", &[]),
             witness("materialization_failure_classification", &[]),
+            witness(
+                "revision_supersede_route",
+                &["revision_supersede_enters_occurrence_authority"],
+            ),
+            witness(
+                "occurrence_supersede_ack_route",
+                &["occurrence_supersede_ack_returns_to_schedule"],
+            ),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -1437,7 +1547,48 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
             realizing_actor: act_id("mob_destroy_session_ingress_owner"),
             correlation_fields: vec![fld_id("mob_id"), fld_id("agent_runtime_id")],
             obligation_fields: vec![fld_id("mob_id"), fld_id("agent_runtime_id")],
-            allowed_feedback_inputs: vec![],
+            // C-F3 destroy-obligation pairing: the bridge machine's
+            // surface-only inputs already declare the two typed acks
+            // (`SessionIngressDetachedForMobDestroy` on success,
+            // `SessionIngressDetachFailedForMobDestroy` on failure).
+            // Declaring them here wires the schema so the seam-inventory
+            // destroy-obligation audit sees the paired detach ack for
+            // `MobMachine::RequestRuntimeDestroy` and the `mob-destroy →
+            // session-detach` ordering cannot regress silently.
+            allowed_feedback_inputs: vec![
+                FeedbackInputRef {
+                    machine_instance: mi_id("mob_destroy_session_ingress_bridge"),
+                    input_variant: iv_id("SessionIngressDetachedForMobDestroy"),
+                    field_bindings: vec![
+                        FeedbackFieldBinding {
+                            input_field: fld_id("mob_id"),
+                            source: FeedbackFieldSource::ObligationField(fld_id("mob_id")),
+                        },
+                        FeedbackFieldBinding {
+                            input_field: fld_id("agent_runtime_id"),
+                            source: FeedbackFieldSource::ObligationField(fld_id(
+                                "agent_runtime_id",
+                            )),
+                        },
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: mi_id("mob_destroy_session_ingress_bridge"),
+                    input_variant: iv_id("SessionIngressDetachFailedForMobDestroy"),
+                    field_bindings: vec![
+                        FeedbackFieldBinding {
+                            input_field: fld_id("mob_id"),
+                            source: FeedbackFieldSource::ObligationField(fld_id("mob_id")),
+                        },
+                        FeedbackFieldBinding {
+                            input_field: fld_id("agent_runtime_id"),
+                            source: FeedbackFieldSource::ObligationField(fld_id(
+                                "agent_runtime_id",
+                            )),
+                        },
+                    ],
+                },
+            ],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback: the mob destroy path awaits each session's DetachIngress ack before requesting runtime destroy"

@@ -31,6 +31,37 @@ use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use serde::{Deserialize, Serialize};
 
+/// Frame-aware atomic persistence operation required by the flow/frame store contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameAtomicOperation {
+    CasFrameState,
+    CasGrantNodeSlot,
+    CasCompleteStepAndRecordOutput,
+    CasStartLoop,
+    CasLoopRequestBodyFrame,
+    CasGrantBodyFrameStart,
+    CasCompleteBodyFrame,
+    CasCompleteLoop,
+}
+
+impl std::fmt::Display for FrameAtomicOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CasFrameState => write!(f, "cas_frame_state"),
+            Self::CasGrantNodeSlot => write!(f, "cas_grant_node_slot"),
+            Self::CasCompleteStepAndRecordOutput => {
+                write!(f, "cas_complete_step_and_record_output")
+            }
+            Self::CasStartLoop => write!(f, "cas_start_loop"),
+            Self::CasLoopRequestBodyFrame => write!(f, "cas_loop_request_body_frame"),
+            Self::CasGrantBodyFrameStart => write!(f, "cas_grant_body_frame_start"),
+            Self::CasCompleteBodyFrame => write!(f, "cas_complete_body_frame"),
+            Self::CasCompleteLoop => write!(f, "cas_complete_loop"),
+        }
+    }
+}
+
 /// Errors from mob storage operations.
 ///
 /// Scoped to storage concerns only — callers convert to [`MobError`](crate::MobError)
@@ -60,6 +91,10 @@ pub enum MobStoreError {
         expected: Option<u64>,
         actual: u64,
     },
+
+    /// The backend cannot provide the requested frame-aware atomic operation.
+    #[error("frame-aware atomic persistence unavailable for operation '{operation}'")]
+    FrameAtomicPersistenceUnavailable { operation: FrameAtomicOperation },
 
     /// Serialization or deserialization failed.
     #[error("Serialization error: {0}")]
@@ -303,7 +338,9 @@ pub trait MobRunStore: Send + Sync {
     /// If `expected` is `Some(snapshot)`, the current frame state must match.
     /// Returns `Ok(true)` on success, `Ok(false)` on mismatch.
     ///
-    /// # Frame support
+    /// Implementations must atomically compare and replace the frame snapshot.
+    /// Backends that cannot make that guarantee must return
+    /// [`MobStoreError::FrameAtomicPersistenceUnavailable`] for this operation.
     async fn cas_frame_state(
         &self,
         run_id: &RunId,
@@ -314,9 +351,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 2: grant node slot — atomically update run flow state + frame state.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the run-state and frame-state changes in one
+    /// atomic unit. Backends that cannot make that guarantee must return
+    /// [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
@@ -333,9 +370,9 @@ pub trait MobRunStore: Send + Sync {
     /// When `loop_context` is `Some((loop_id, iteration))`, the output is stored
     /// in `loop_iteration_outputs[loop_id][iteration]`.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the frame-state update and step-output write
+    /// in one atomic unit. Backends that cannot make that guarantee must return
+    /// [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     #[allow(clippy::too_many_arguments)]
     async fn cas_complete_step_and_record_output(
         &self,
@@ -350,9 +387,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 4: start loop — register loop + update run state + parent frame.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must register the loop and commit the run/frame updates
+    /// in one atomic unit. Backends that cannot make that guarantee must return
+    /// [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop(
         &self,
@@ -368,9 +405,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 5: register pending body frame — loop transition + run state update.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the loop transition and run-state update in
+    /// one atomic unit. Backends that cannot make that guarantee must return
+    /// [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     async fn cas_loop_request_body_frame(
         &self,
         run_id: &RunId,
@@ -383,9 +420,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 6: body frame start — loop transition + register new frame + run state update.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the loop transition, frame registration, and
+    /// run-state update in one atomic unit. Backends that cannot make that
+    /// guarantee must return [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     #[allow(clippy::too_many_arguments)]
     async fn cas_grant_body_frame_start(
         &self,
@@ -402,9 +439,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 7: body frame completion — terminalize frame + loop state update + run state.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the frame terminalization, loop update, and
+    /// run-state update in one atomic unit. Backends that cannot make that
+    /// guarantee must return [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame(
         &self,
@@ -421,9 +458,9 @@ pub trait MobRunStore: Send + Sync {
 
     /// CAS wrapper 8: loop completion — loop state + run state + parent frame update.
     ///
-    /// # Frame support
-    /// Backends that do not support frame-aware atomic persistence may return
-    /// `Err(MobError::NotYetImplemented(...))`.
+    /// Implementations must commit the loop state, run state, and parent-frame
+    /// update in one atomic unit. Backends that cannot make that guarantee must
+    /// return [`MobStoreError::FrameAtomicPersistenceUnavailable`].
     #[allow(clippy::too_many_arguments)]
     async fn cas_complete_loop(
         &self,

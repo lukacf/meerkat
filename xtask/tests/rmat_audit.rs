@@ -322,7 +322,7 @@ fn forbidden_shell_reads_can_be_suppressed_with_rmat_allow() {
         r"
 use std::collections::HashMap;
 struct Router {
-    // RMAT-ALLOW(ForbiddenShellAuthorityReads): migration in flight — see issue #42
+    // RMAT-ALLOW(ForbiddenShellAuthorityReads): route timeout projection is tested as non-authoritative
     removal_timeouts: HashMap<String, u64>,
 }
 ",

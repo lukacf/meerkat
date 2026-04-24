@@ -1,7 +1,8 @@
 //! Error types for mob operations.
 
-use crate::ids::{AgentRuntimeId, FenceToken, FlowId, MeerkatId, ProfileName, WorkRef};
+use crate::ids::{AgentRuntimeId, FenceToken, FlowId, LoopId, MeerkatId, ProfileName, WorkRef};
 use crate::runtime::MobState;
+use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
 use crate::{MobId, RunId, StepId};
 
@@ -83,6 +84,20 @@ pub enum MobError {
     #[error("flow turn timed out")]
     FlowTurnTimedOut,
 
+    /// A frame-aware flow exceeded its configured nesting depth.
+    #[error(
+        "loop '{loop_id}' would exceed max_frame_depth={max_frame_depth} (current depth={current_depth})"
+    )]
+    FrameDepthLimitExceeded {
+        loop_id: LoopId,
+        max_frame_depth: u32,
+        current_depth: u32,
+    },
+
+    /// The selected mob run store cannot provide frame-aware atomic persistence.
+    #[error("mob run store cannot atomically persist frame operation '{operation}'")]
+    FrameAtomicPersistenceUnavailable { operation: FrameAtomicOperation },
+
     /// Spec revision compare-and-swap failed.
     #[error("spec revision conflict for mob {mob_id}: expected {expected:?}, actual {actual}")]
     SpecRevisionConflict {
@@ -160,14 +175,6 @@ pub enum MobError {
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),
-
-    /// Operation is not yet implemented for the given storage backend.
-    ///
-    /// Callers can match on this to fall back gracefully (e.g., refuse
-    /// frame-aware flows when the selected persistence backend does not expose
-    /// the required CAS seams yet).
-    #[error("not yet implemented: {0}")]
-    NotYetImplemented(String),
 }
 
 fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
@@ -203,6 +210,9 @@ impl From<crate::store::MobStoreError> for MobError {
                 expected,
                 actual,
             },
+            crate::store::MobStoreError::FrameAtomicPersistenceUnavailable { operation } => {
+                Self::FrameAtomicPersistenceUnavailable { operation }
+            }
             other => Self::StorageError(Box::new(other)),
         }
     }
@@ -335,6 +345,14 @@ mod tests {
             MobError::RunNotFound(RunId::new()),
             MobError::RunCanceled(RunId::new()),
             MobError::FlowTurnTimedOut,
+            MobError::FrameDepthLimitExceeded {
+                loop_id: LoopId::from("loop"),
+                max_frame_depth: 1,
+                current_depth: 1,
+            },
+            MobError::FrameAtomicPersistenceUnavailable {
+                operation: FrameAtomicOperation::CasGrantNodeSlot,
+            },
             MobError::SpecRevisionConflict {
                 mob_id: MobId::from("mob"),
                 expected: Some(2),
@@ -374,7 +392,6 @@ mod tests {
             },
             MobError::WorkNotFound(WorkRef::new()),
             MobError::Internal("i".to_string()),
-            MobError::NotYetImplemented("storage cas".to_string()),
         ];
     }
 }

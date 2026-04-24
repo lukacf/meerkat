@@ -264,6 +264,13 @@ impl AgentMobToolSurface {
         Err(ToolError::access_denied(tool_name))
     }
 
+    async fn ensure_profile_mutation_authority(&self, tool_name: &str) -> Result<(), ToolError> {
+        if self.authority_context_snapshot().can_mutate_profiles() {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
     async fn ensure_mob_scope_authority(
         &self,
         tool_name: &str,
@@ -913,14 +920,11 @@ impl AgentMobToolSurface {
         Self::encode_result(call, json!({ "unwired": true }))
     }
 
-    // TODO: Profile mutation authority. Currently gated on mob capability + store
-    // availability. Per-profile authority checks are a follow-up concern for
-    // multi-tenant realm scenarios.
-
     async fn dispatch_mob_profile_create(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -966,6 +970,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileUpdateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -981,6 +986,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileDeleteArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -3086,6 +3092,22 @@ mod tests {
         )
     }
 
+    fn surface_with_profiles_and_authority(
+        state: Arc<MobMcpState>,
+        authority: MobToolAuthorityContext,
+    ) -> AgentMobToolSurface {
+        AgentMobToolSurface::new(
+            state,
+            None,
+            authority,
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
     #[test]
     fn test_profile_tools_present_when_store_available() {
         let defs = build_tool_defs_with_profile_support(true, false);
@@ -3224,6 +3246,35 @@ mod tests {
         let got2: serde_json::Value =
             serde_json::from_str(&get_result2.result.text_content()).unwrap();
         assert_eq!(got2["not_found"], true);
+    }
+
+    #[tokio::test]
+    async fn test_profile_mutation_requires_profile_authority() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles_and_authority(
+            Arc::clone(&state),
+            create_only_authority().with_profile_mutation(false),
+        );
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "worker",
+                "profile": sample_profile_json("claude-opus-4-6")
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let create_result = surface
+            .dispatch(ToolCallView {
+                id: "c1",
+                name: "mob_profile_create",
+                args: &create_args,
+            })
+            .await;
+        assert!(
+            create_result.is_err(),
+            "profile create must require explicit profile mutation authority"
+        );
     }
 
     #[tokio::test]

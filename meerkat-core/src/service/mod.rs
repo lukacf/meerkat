@@ -366,6 +366,8 @@ impl MobToolCallerProvenance {
 pub struct MobToolAuthorityContext {
     principal_token: OpaquePrincipalToken,
     can_create_mobs: bool,
+    #[serde(default)]
+    can_mutate_profiles: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     managed_mob_scope: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +381,7 @@ impl MobToolAuthorityContext {
         Self {
             principal_token,
             can_create_mobs,
+            can_mutate_profiles: can_create_mobs,
             managed_mob_scope: BTreeSet::new(),
             caller_provenance: None,
             audit_invocation_id: None,
@@ -395,6 +398,15 @@ impl MobToolAuthorityContext {
 
     pub fn can_create_mobs(&self) -> bool {
         self.can_create_mobs
+    }
+
+    pub fn can_mutate_profiles(&self) -> bool {
+        self.can_mutate_profiles
+    }
+
+    pub fn with_profile_mutation(mut self, allowed: bool) -> Self {
+        self.can_mutate_profiles = allowed;
+        self
     }
 
     pub fn managed_mob_scope(&self) -> &BTreeSet<String> {

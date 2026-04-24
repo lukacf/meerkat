@@ -21778,6 +21778,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::RunNotFound(_) => "run_not_found".to_string(),
         MobError::RunCanceled(_) => "run_canceled".to_string(),
         MobError::FlowTurnTimedOut => "flow_turn_timed_out".to_string(),
+        MobError::FrameDepthLimitExceeded { .. } => "frame_depth_limit_exceeded".to_string(),
+        MobError::FrameAtomicPersistenceUnavailable { .. } => {
+            "frame_atomic_persistence_unavailable".to_string()
+        }
         MobError::SpecRevisionConflict { .. } => "spec_revision_conflict".to_string(),
         MobError::SchemaValidation { .. } => "schema_validation".to_string(),
         MobError::InsufficientTargets { .. } => "insufficient_targets".to_string(),
@@ -21792,7 +21796,6 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
-        MobError::NotYetImplemented(_) => "not_yet_implemented".to_string(),
     }
 }
 

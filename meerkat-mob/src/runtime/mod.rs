@@ -63,7 +63,7 @@ pub(crate) fn flow_system_member_id() -> MeerkatId {
     MeerkatId::from(FLOW_SYSTEM_MEMBER_ID_RAW)
 }
 
-mod actor;
+pub(crate) mod actor;
 mod actor_turn_executor;
 pub mod bridge;
 mod bridge_fallback;

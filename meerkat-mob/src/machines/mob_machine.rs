@@ -56,6 +56,24 @@ impl<T: Into<String>> From<T> for AgentRuntimeId {
         Self(s.into())
     }
 }
+
+/// Bridging type for mob id. Maps to `crate::ids::MobId`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct MobId(pub String);
+
+impl<T: Into<String>> From<T> for MobId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl MobId {
+    pub fn from_domain(id: &crate::ids::MobId) -> Self {
+        Self(id.to_string())
+    }
+}
 impl AgentRuntimeId {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -784,6 +802,7 @@ machine! {
             in_progress_task_ids: Set<TaskId>,
             completed_task_ids: Set<TaskId>,
             member_session_bindings: Map<AgentIdentity, SessionId>,
+            pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
             topology_epoch: u64,
         }
 
@@ -865,6 +884,7 @@ machine! {
             in_progress_task_ids = EmptySet,
             completed_task_ids = EmptySet,
             member_session_bindings = EmptyMap,
+            pending_session_ingress_detach_runtime_ids = EmptySet,
             topology_epoch = 0,
         }
 
@@ -954,6 +974,8 @@ machine! {
             BindMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
             RotateMemberSession { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
             ReleaseMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
+            SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
+            SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
             SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1501,6 +1523,7 @@ machine! {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
@@ -1508,6 +1531,7 @@ machine! {
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
+                self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;
@@ -2381,6 +2405,7 @@ machine! {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
             to Running
@@ -2426,11 +2451,54 @@ machine! {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
             to Stopped
             emit RequestRuntimeRetire { session_id: session_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+        }
+
+        transition SessionIngressDetachedForMobDestroyRunning {
+            on input SessionIngressDetachedForMobDestroy { mob_id, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "mob_id_present" { mob_id == mob_id }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
+            }
+            to Running
+        }
+
+        transition SessionIngressDetachedForMobDestroyStopped {
+            on input SessionIngressDetachedForMobDestroy { mob_id, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "mob_id_present" { mob_id == mob_id }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
+            }
+            to Stopped
+        }
+
+        transition SessionIngressDetachFailedForMobDestroyRunning {
+            on input SessionIngressDetachFailedForMobDestroy { mob_id, agent_runtime_id, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "mob_id_present" { mob_id == mob_id }
+            guard "reason_present" { reason == reason }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Running
+        }
+
+        transition SessionIngressDetachFailedForMobDestroyStopped {
+            on input SessionIngressDetachFailedForMobDestroy { mob_id, agent_runtime_id, reason }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "mob_id_present" { mob_id == mob_id }
+            guard "reason_present" { reason == reason }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Stopped
         }
 
         transition RetireStoppedPreservingBinding {
@@ -2509,9 +2577,11 @@ machine! {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;

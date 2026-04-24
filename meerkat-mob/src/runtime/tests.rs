@@ -4596,6 +4596,69 @@ async fn test_destroy_is_terminal_for_commands() {
 }
 
 #[tokio::test]
+async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    let adapter = service.enable_runtime_adapter();
+
+    let session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ingress-destroy"),
+            None,
+        )
+        .await
+        .expect("spawn session-backed member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(owner, meerkat_runtime::PeerIngressOwner::MobOwned { .. }),
+        "spawn should claim mob-owned session ingress before destroy, got {owner:?}"
+    );
+
+    handle
+        .destroy()
+        .await
+        .expect("destroy should close detach ack before final destroy");
+    assert_eq!(handle.status().await.unwrap(), MobState::Destroyed);
+}
+
+#[tokio::test]
+async fn test_stopped_retire_detaches_mob_owned_session_ingress() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    let adapter = service.enable_runtime_adapter();
+
+    let session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-stopped-ingress-retire"),
+            None,
+        )
+        .await
+        .expect("spawn session-backed member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+    handle.stop().await.expect("stop mob");
+
+    handle
+        .retire(AgentIdentity::from("w-stopped-ingress-retire"))
+        .await
+        .expect("stopped retire should close detach ack");
+    assert!(
+        matches!(
+            adapter.peer_ingress_owner(&session_id).await,
+            meerkat_runtime::PeerIngressOwner::Unattached
+        ),
+        "retire from Stopped should detach mob-owned peer ingress"
+    );
+}
+
+#[tokio::test]
 async fn test_destroy_scrubs_runtime_metadata() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();

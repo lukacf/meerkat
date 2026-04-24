@@ -1605,6 +1605,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![
                     "use crate::runtime::actor::MobDestroySessionIngressBridgeEffect;".into(),
+                    "use crate::machines::mob_machine::{AgentRuntimeId, MobId, MobMachineAuthority, MobMachineInput, MobMachineMutator, MobMachineTransition, MobMachineTransitionError};".into(),
                 ],
                 // Compat bridge — the `MobDestroySessionIngressBridgeMachine`
                 // is declarative-only (codegen skips it because its

@@ -34,6 +34,17 @@ impl InitialTurnHandle {
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobDestroySessionIngressBridgeEffect {
+    RequestSessionIngressDetachForMobDestroy {
+        mob_id: mob_dsl::MobId,
+        agent_runtime_id: mob_dsl::AgentRuntimeId,
+    },
+    #[doc(hidden)]
+    __NonExhaustive,
+}
+
 #[derive(Clone)]
 enum WiringEndpoint {
     Local {
@@ -5739,6 +5750,70 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
+    async fn detach_session_ingress_for_mob_destroy(
+        &mut self,
+        entry: &RosterEntry,
+        session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        use crate::generated::protocol_mob_destroying_session_ingress::{
+            extract_obligations, submit_session_ingress_detach_failed_for_mob_destroy,
+            submit_session_ingress_detached_for_mob_destroy,
+        };
+
+        let effect =
+            MobDestroySessionIngressBridgeEffect::RequestSessionIngressDetachForMobDestroy {
+                mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+            };
+        let mut obligations = extract_obligations(std::slice::from_ref(&effect));
+        let Some(obligation) = obligations.pop() else {
+            return Err(MobError::Internal(
+                "mob_destroying_session_ingress produced no detach obligation".to_string(),
+            ));
+        };
+
+        let detach_result = self.detach_runtime_session_ingress(session_id).await;
+        match detach_result {
+            Ok(()) => {
+                submit_session_ingress_detached_for_mob_destroy(&mut self.dsl_authority, obligation)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "MobMachine SessionIngressDetachedForMobDestroy transition rejected: {error}"
+                        ))
+                    })?;
+                Ok(())
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let _ = submit_session_ingress_detach_failed_for_mob_destroy(
+                    &mut self.dsl_authority,
+                    obligation,
+                    reason.clone(),
+                );
+                Err(MobError::Internal(format!(
+                    "mob_destroying_session_ingress detach failed for {session_id}: {reason}"
+                )))
+            }
+        }
+    }
+
+    async fn detach_runtime_session_ingress(&self, session_id: &SessionId) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = &self.runtime_adapter {
+            adapter
+                .update_peer_ingress_context(session_id, false, None)
+                .await;
+            let owner = adapter.peer_ingress_owner(session_id).await;
+            if !matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached) {
+                return Err(MobError::Internal(format!(
+                    "peer ingress owner remained attached after detach: {owner:?}"
+                )));
+            }
+        }
+        let _ = session_id;
+        Ok(())
+    }
+
     async fn handle_retire_inner(
         &mut self,
         agent_identity: &MeerkatId,
@@ -5776,6 +5851,11 @@ impl MobActor {
         // The DSL guards reject Retire when the runtime_id is absent from
         // `live_runtime_ids` or the phase forbids it.
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let detach_session_id = if preserve_realtime_binding {
+            None
+        } else {
+            entry.member_ref.bridge_session_id().cloned()
+        };
         let releasing = if preserve_realtime_binding {
             None
         } else {
@@ -5804,6 +5884,10 @@ impl MobActor {
             },
             "handle_retire_inner_mark_retiring",
         )?;
+        if let Some(session_id) = detach_session_id {
+            self.detach_session_ingress_for_mob_destroy(&entry, &session_id)
+                .await?;
+        }
 
         // #31 Wave D (D-trust-reconciliation subsystem 4): flip the roster
         // entry's state to `Retiring` so live readers of

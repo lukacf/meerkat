@@ -104,6 +104,7 @@ pub fn dsl_mob_machine() -> MachineSchema {
             NamedTypeBinding::u64("Generation"),
             NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("MobId"),
             NamedTypeBinding::string("MobMemberState"),
             NamedTypeBinding::string("MobPhase"),
             NamedTypeBinding::string("MobTask"),

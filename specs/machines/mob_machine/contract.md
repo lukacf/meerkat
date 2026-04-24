@@ -20,6 +20,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `in_progress_task_ids`: `Set<TaskId>`
 - `completed_task_ids`: `Set<TaskId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
+- `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
 - `topology_epoch`: `u64`
 
 ## Inputs
@@ -35,6 +36,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BindMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
 - `RotateMemberSession`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
 - `ReleaseMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
+- `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -263,6 +266,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `DestroyMob`
 - From: `Running`, `Stopped`, `Completed`
 - On: `DestroyMob`(session_id)
+- Guards:
+  - `session_ingress_detaches_closed`
 - Emits: `RequestRuntimeDestroy`
 - To: `Destroyed`
 
@@ -721,6 +726,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeRetire`, `MemberSessionBindingChanged`
 - To: `Stopped`
 
+### `SessionIngressDetachedForMobDestroyRunning`
+- From: `Running`
+- On: `SessionIngressDetachedForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `mob_id_present`
+  - `pending_detach_present`
+- To: `Running`
+
+### `SessionIngressDetachedForMobDestroyStopped`
+- From: `Stopped`
+- On: `SessionIngressDetachedForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `mob_id_present`
+  - `pending_detach_present`
+- To: `Stopped`
+
+### `SessionIngressDetachFailedForMobDestroyRunning`
+- From: `Running`
+- On: `SessionIngressDetachFailedForMobDestroy`(mob_id, agent_runtime_id, reason)
+- Guards:
+  - `mob_id_present`
+  - `reason_present`
+  - `pending_detach_present`
+- To: `Running`
+
+### `SessionIngressDetachFailedForMobDestroyStopped`
+- From: `Stopped`
+- On: `SessionIngressDetachFailedForMobDestroy`(mob_id, agent_runtime_id, reason)
+- Guards:
+  - `mob_id_present`
+  - `reason_present`
+  - `pending_detach_present`
+- To: `Stopped`
+
 ### `RetireStoppedPreservingBinding`
 - From: `Stopped`
 - On: `Retire`(agent_runtime_id, agent_identity, releasing, session_id)
@@ -766,6 +805,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `DestroyFromAny`
 - From: `Running`, `Stopped`, `Completed`
 - On: `Destroy`()
+- Guards:
+  - `session_ingress_detaches_closed`
 - To: `Destroyed`
 
 ### `RespawnRunning`

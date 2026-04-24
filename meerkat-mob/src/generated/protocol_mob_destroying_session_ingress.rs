@@ -3,6 +3,10 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback: the mob destroy path awaits each session's DetachIngress ack before requesting runtime destroy
 
+use crate::machines::mob_machine::{
+    AgentRuntimeId, MobId, MobMachineAuthority, MobMachineInput, MobMachineMutator,
+    MobMachineTransition, MobMachineTransitionError,
+};
 use crate::runtime::actor::MobDestroySessionIngressBridgeEffect;
 
 #[derive(Debug, Clone)]

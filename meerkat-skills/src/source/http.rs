@@ -44,44 +44,16 @@ pub struct HttpSkillSource {
     failure_streak: Arc<RwLock<u32>>,
 }
 
-pub trait HttpSourceUuidInput {
-    fn into_source_uuid(self) -> SourceUuid;
-}
-
-impl HttpSourceUuidInput for SourceUuid {
-    fn into_source_uuid(self) -> SourceUuid {
-        self
-    }
-}
-
-impl HttpSourceUuidInput for String {
-    fn into_source_uuid(self) -> SourceUuid {
-        match SourceUuid::parse(&self) {
-            Ok(source_uuid) => source_uuid,
-            Err(err) => panic!("invalid HTTP skill source_uuid '{self}': {err}"),
-        }
-    }
-}
-
-impl HttpSourceUuidInput for &str {
-    fn into_source_uuid(self) -> SourceUuid {
-        match SourceUuid::parse(self) {
-            Ok(source_uuid) => source_uuid,
-            Err(err) => panic!("invalid HTTP skill source_uuid '{self}': {err}"),
-        }
-    }
-}
-
 impl HttpSkillSource {
     pub fn new_with_source_uuid(
-        source_uuid: impl HttpSourceUuidInput,
+        source_uuid: SourceUuid,
         url: String,
         auth: Option<HttpSkillAuth>,
         refresh_interval: Duration,
         request_timeout: Duration,
     ) -> Self {
         Self::new_with_thresholds(
-            source_uuid.into_source_uuid(),
+            source_uuid,
             url,
             auth,
             refresh_interval,
@@ -220,10 +192,10 @@ impl SkillSource for HttpSkillSource {
             return Err(SkillError::NotFound { key: key.clone() });
         }
         self.refresh_if_needed().await?;
-        if let Ok(cache) = self.cache.read() {
-            if let Ok(doc) = load_cached(&cache, key) {
-                return Ok(doc);
-            }
+        if let Ok(cache) = self.cache.read()
+            && let Ok(doc) = load_cached(&cache, key)
+        {
+            return Ok(doc);
         }
         let doc = self.fetch_skill(key).await?;
         if let Ok(mut cache) = self.cache.write() {

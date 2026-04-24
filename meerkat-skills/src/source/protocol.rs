@@ -226,10 +226,10 @@ impl SkillSource for ExternalSkillSource<StdioExternalClient> {
             return Err(SkillError::NotFound { key: key.clone() });
         }
         self.refresh_if_needed().await?;
-        if let Ok(cache) = self.cache.read() {
-            if let Ok(doc) = load_cached(&cache, key) {
-                return Ok(doc);
-            }
+        if let Ok(cache) = self.cache.read()
+            && let Ok(doc) = load_cached(&cache, key)
+        {
+            return Ok(doc);
         }
         let doc = self.load_remote_document(key).await?;
         if let Ok(mut cache) = self.cache.write() {

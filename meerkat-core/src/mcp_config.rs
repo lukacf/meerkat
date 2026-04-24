@@ -200,13 +200,13 @@ impl McpConfigMutationAuthority {
                 .as_deref()
                 .map(project_mcp_path_in)
                 .or_else(project_mcp_path)
-                .ok_or_else(|| McpConfigError::PathUnavailable { scope: self.scope })?),
+                .ok_or(McpConfigError::PathUnavailable { scope: self.scope })?),
             McpScope::User => Ok(self
                 .user_config_root
                 .as_deref()
                 .map(user_mcp_path_in)
                 .or_else(user_mcp_path)
-                .ok_or_else(|| McpConfigError::PathUnavailable { scope: self.scope })?),
+                .ok_or(McpConfigError::PathUnavailable { scope: self.scope })?),
         }
     }
 }

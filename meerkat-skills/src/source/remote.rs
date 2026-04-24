@@ -101,13 +101,17 @@ pub fn parse_remote_catalog(
                 }
                 descriptors.push(descriptor);
             }
-            Err((key, message)) => quarantined.push(quarantine(
-                key,
-                entry_location,
-                "invalid_remote_skill",
-                "parse",
-                message,
-            )),
+            Err((key, message)) => {
+                if let Some(key) = key {
+                    quarantined.push(quarantine(
+                        key,
+                        entry_location,
+                        "invalid_remote_skill",
+                        "parse",
+                        message,
+                    ));
+                }
+            }
         }
     }
     Ok(ParsedRemoteCatalog {
@@ -155,7 +159,7 @@ fn parse_remote_entry(
     entry: RemoteSkillEntry,
     configured_source_uuid: &SourceUuid,
     scope: SkillScope,
-) -> Result<(SkillDescriptor, Option<SkillDocument>), (SkillKey, String)> {
+) -> Result<(SkillDescriptor, Option<SkillDocument>), (Option<SkillKey>, String)> {
     let skill_name = SkillName::parse(&entry.name).map_err(|e| {
         (
             fallback_key(configured_source_uuid),
@@ -164,10 +168,11 @@ fn parse_remote_entry(
     })?;
     let key = SkillKey::new(configured_source_uuid.clone(), skill_name.clone());
     if let Some(raw_uuid) = entry.source_uuid {
-        let remote_uuid = SourceUuid::parse(&raw_uuid).map_err(|e| (key.clone(), e.to_string()))?;
+        let remote_uuid =
+            SourceUuid::parse(&raw_uuid).map_err(|e| (Some(key.clone()), e.to_string()))?;
         if &remote_uuid != configured_source_uuid {
             return Err((
-                key,
+                Some(key),
                 format!(
                     "remote entry source_uuid mismatch: configured {configured_source_uuid}, remote {remote_uuid}"
                 ),
@@ -177,13 +182,13 @@ fn parse_remote_entry(
 
     if let Some(content) = entry.body {
         let doc = parse_skill_md(key.clone(), scope, &content, Some(skill_name.as_str()))
-            .map_err(|e| (key.clone(), e.to_string()))?;
+            .map_err(|e| (Some(key.clone()), e.to_string()))?;
         return Ok((doc.descriptor.clone(), Some(doc)));
     }
 
     let Some(description) = entry.description else {
         return Err((
-            key,
+            Some(key),
             "remote skill entry missing description or body".to_string(),
         ));
     };
@@ -236,11 +241,10 @@ pub fn load_cached(cache: &RemoteCache, key: &SkillKey) -> Result<SkillDocument,
         .ok_or_else(|| SkillError::NotFound { key: key.clone() })
 }
 
-fn fallback_key(source_uuid: &SourceUuid) -> SkillKey {
-    match SkillName::parse("invalid-skill") {
-        Ok(skill_name) => SkillKey::new(source_uuid.clone(), skill_name),
-        Err(err) => panic!("static skill name is invalid: {err}"),
-    }
+fn fallback_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
+    SkillName::parse("invalid-skill")
+        .ok()
+        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
 }
 
 fn quarantine(

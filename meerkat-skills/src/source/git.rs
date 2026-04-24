@@ -112,7 +112,7 @@ impl GitSkillSource {
             return Ok(());
         }
 
-        match self.refresh_checkout().and_then(|_| self.scan_checkout()) {
+        match self.refresh_checkout().and_then(|()| self.scan_checkout()) {
             Ok(cache) => {
                 if let Ok(mut cached) = self.cache.write() {
                     *cached = cache;
@@ -197,11 +197,13 @@ impl GitSkillSource {
             let skill_name = match SkillName::parse(file_name) {
                 Ok(skill_name) => skill_name,
                 Err(err) => {
-                    quarantined.push(quarantine(
-                        SkillKey::new(self.config.source_uuid.clone(), invalid_skill_name()),
-                        skill_dir.display().to_string(),
-                        err.to_string(),
-                    ));
+                    if let Some(key) = invalid_skill_key(&self.config.source_uuid) {
+                        quarantined.push(quarantine(
+                            key,
+                            skill_dir.display().to_string(),
+                            err.to_string(),
+                        ));
+                    }
                     continue;
                 }
             };
@@ -371,11 +373,10 @@ fn stable_hash(input: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn invalid_skill_name() -> SkillName {
-    match SkillName::parse("invalid-skill") {
-        Ok(skill_name) => skill_name,
-        Err(err) => panic!("static skill name is invalid: {err}"),
-    }
+fn invalid_skill_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
+    SkillName::parse("invalid-skill")
+        .ok()
+        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
 }
 
 fn quarantine(key: SkillKey, location: String, message: String) -> SkillQuarantineDiagnostic {

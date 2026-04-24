@@ -24,8 +24,8 @@ use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     MobToolAuthorityContext, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionView,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
@@ -34,7 +34,7 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
-use meerkat_store::SessionStore;
+use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -246,6 +246,45 @@ fn extract_labels_from_metadata(
             }
         },
         None => BTreeMap::new(),
+    }
+}
+
+fn summary_from_meta(meta: meerkat_core::SessionMeta) -> SessionSummary {
+    SessionSummary {
+        session_id: meta.id,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+        message_count: meta.message_count,
+        total_tokens: meta.total_tokens,
+        is_active: false,
+        labels: extract_labels_from_metadata(&meta.metadata),
+    }
+}
+
+fn view_from_authoritative_session(session: &Session) -> SessionView {
+    let metadata = session.session_metadata();
+    SessionView {
+        state: SessionInfo {
+            session_id: session.id().clone(),
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            is_active: false,
+            model: metadata
+                .as_ref()
+                .map(|metadata| metadata.model.clone())
+                .unwrap_or_default(),
+            provider: metadata
+                .as_ref()
+                .map(|metadata| metadata.provider)
+                .unwrap_or(meerkat_core::Provider::Other),
+            last_assistant_text: session.last_assistant_text(),
+            labels: extract_labels_from_metadata(session.metadata()),
+        },
+        billing: SessionUsage {
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+        },
     }
 }
 
@@ -1088,11 +1127,41 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let _ = self.discard_stale_live_session_if_needed(id).await?;
-        self.inner.read(id).await
+        match self.inner.read(id).await {
+            Ok(view) => Ok(view),
+            Err(SessionError::NotFound { .. }) => {
+                let Some(session) = self.load_authoritative_session_base(id).await? else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                };
+                self.reject_if_archived_session(id, &session)
+                    .await
+                    .map_err(control_error_into_session_error)?;
+                Ok(view_from_authoritative_session(&session))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut summaries = self.inner.list(SessionQuery::default()).await?;
+        let stored = self
+            .store
+            .list(SessionFilter::default())
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        let mut summaries_by_id: IndexMap<SessionId, SessionSummary> = stored
+            .into_iter()
+            .filter(|meta| !metadata_marks_archived(&meta.metadata))
+            .map(|meta| {
+                let summary = summary_from_meta(meta);
+                (summary.session_id.clone(), summary)
+            })
+            .collect();
+
+        for summary in self.inner.list(SessionQuery::default()).await? {
+            summaries_by_id.insert(summary.session_id.clone(), summary);
+        }
+
+        let mut summaries: Vec<SessionSummary> = summaries_by_id.into_values().collect();
 
         // Filter by labels if specified (all k/v pairs must match).
         if let Some(ref filter_labels) = query.labels {

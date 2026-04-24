@@ -756,7 +756,13 @@ impl MeerkatMcpState {
         &self,
         session_id: &meerkat::SessionId,
     ) -> Result<Arc<meerkat_mcp::McpRouterAdapter>, String> {
-        if self.service.read(session_id).await.is_err() {
+        if self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(|error| format!("Failed to load session: {error}"))?
+            .is_none()
+        {
             return Err(format!("Session not found: {session_id}"));
         }
         self.mcp_adapters

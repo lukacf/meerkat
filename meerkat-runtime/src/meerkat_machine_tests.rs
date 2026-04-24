@@ -4198,8 +4198,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         .expect("snapshot should exist while recover replay is in flight");
     assert_eq!(
         during_recover.control.phase,
-        RuntimeState::Running,
-        "recover currently re-enters Running while the attached loop replays recovered work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recover self-loops on Attached (RecoverAttached transition in dsl.rs:3494) — the DSL lifecycle_phase remains Attached through the runtime-loop replay window"
     );
     assert_eq!(during_recover.completion_waiters.input_count, 1);
     assert_eq!(during_recover.completion_waiters.waiter_count, 1);
@@ -4379,8 +4379,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         .expect("snapshot should exist while recycle replay is in flight");
     assert_eq!(
         during_recycle.control.phase,
-        RuntimeState::Running,
-        "recycle currently re-enters Running while the attached loop replays preserved work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recycle from Attached holds lifecycle_phase at Attached while the runtime-loop replays preserved work; DSL is source of truth, not control_projection cache"
     );
     assert_eq!(during_recycle.completion_waiters.input_count, 1);
     assert_eq!(during_recycle.completion_waiters.waiter_count, 1);
@@ -5615,8 +5615,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
         .expect("snapshot should exist while recover replay is in flight");
     assert_eq!(
         during_recover.control.phase,
-        RuntimeState::Running,
-        "recover currently re-enters Running while the attached loop replays recovered work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recover self-loops on Attached (RecoverAttached transition in dsl.rs:3494) — the DSL lifecycle_phase remains Attached through the runtime-loop replay window"
     );
     assert_eq!(
         during_recover.ops.wait_request_id,
@@ -5893,8 +5893,8 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
         .expect("snapshot should exist while recover replay is in flight");
     assert_eq!(
         during_recover.control.phase,
-        RuntimeState::Running,
-        "recover currently re-enters Running while the attached loop replays recovered work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recover self-loops on Attached (RecoverAttached transition in dsl.rs:3494) — the DSL lifecycle_phase remains Attached through the runtime-loop replay window"
     );
     assert_eq!(during_recover.completion_waiters.input_count, 1);
     assert_eq!(during_recover.completion_waiters.waiter_count, 1);
@@ -6164,8 +6164,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
         .expect("snapshot should exist after recycle wakes the loop");
     assert_eq!(
         after_recycle.control.phase,
-        RuntimeState::Running,
-        "recycle currently re-enters Running while the attached loop replays preserved work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recycle from Attached holds lifecycle_phase at Attached after the loop wake; DSL is source of truth, not control_projection cache"
     );
     assert_eq!(
         after_recycle.ops.wait_request_id,
@@ -6413,8 +6413,8 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
         .expect("snapshot should exist while recycle replay is in flight");
     assert_eq!(
         during_recycle.control.phase,
-        RuntimeState::Running,
-        "recycle currently re-enters Running while the attached loop replays preserved work"
+        RuntimeState::Attached,
+        "post-`e5c5ecaf3` DSL-authoritative: recycle from Attached holds lifecycle_phase at Attached while the runtime-loop replays preserved work; DSL is source of truth, not control_projection cache"
     );
     assert_eq!(during_recycle.completion_waiters.input_count, 1);
     assert_eq!(during_recycle.completion_waiters.waiter_count, 1);
@@ -9489,8 +9489,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
         .expect("snapshot should exist after retire wakes the loop");
     assert_eq!(
         after_retire.control.phase,
-        RuntimeState::Running,
-        "retire currently re-enters Running while the attached loop drains preserved work"
+        RuntimeState::Retired,
+        "post-`e5c5ecaf3` DSL-authoritative: retire holds lifecycle_phase at Retired through the drain window (Retire transition goes to Retired unconditionally); DSL is source of truth, not control_projection cache"
     );
     assert_eq!(
         after_retire.ops.wait_request_id,
@@ -9758,8 +9758,8 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
         .expect("snapshot should exist after retire wakes the loop");
     assert_eq!(
         during_retire.control.phase,
-        RuntimeState::Running,
-        "retire currently re-enters Running while the attached loop drains preserved work"
+        RuntimeState::Retired,
+        "post-`e5c5ecaf3` DSL-authoritative: retire holds lifecycle_phase at Retired through the drain window (Retire transition goes to Retired unconditionally); DSL is source of truth, not control_projection cache"
     );
     assert_eq!(during_retire.completion_waiters.input_count, 1);
     assert_eq!(during_retire.completion_waiters.waiter_count, 1);

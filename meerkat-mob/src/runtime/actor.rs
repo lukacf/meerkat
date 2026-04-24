@@ -864,6 +864,23 @@ impl MobActor {
         Ok(())
     }
 
+    fn discard_pending_routed_effects_for_session(&mut self, session_id: &SessionId) {
+        let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
+        self.pending_routed_effects.retain(|effect| {
+            !matches!(
+                effect,
+                super::composition::MobSeamEffect::Mob(
+                    super::composition::MobProducerEffect::RequestRuntimeBinding {
+                        session_id,
+                        ..
+                    }
+                    | super::composition::MobProducerEffect::RequestRuntimeRetire { session_id }
+                    | super::composition::MobProducerEffect::RequestRuntimeDestroy { session_id },
+                ) if session_id == &dsl_session_id
+            )
+        });
+    }
+
     /// Snapshot the DSL's current `member_state_markers` as a set of
     /// runtime-id keys (in their stringified DSL form) currently marked
     /// `Retiring`. The stringified form matches
@@ -8037,7 +8054,7 @@ impl MobActor {
 
     /// Compensate a failed spawn wiring path to avoid partial state.
     async fn rollback_failed_spawn(
-        &self,
+        &mut self,
         agent_identity: &MeerkatId,
         profile_name: &ProfileName,
         member_ref: &MemberRef,
@@ -8050,6 +8067,35 @@ impl MobActor {
             self.append_retire_event(agent_identity, profile_name, member_ref)
                 .await?;
         }
+        let spawned_entry = {
+            let roster = self.roster.read().await;
+            roster.get(agent_identity).cloned()
+        };
+        if let Some(entry) = spawned_entry.as_ref() {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let releasing = member_ref
+                .bridge_session_id()
+                .map(mob_dsl::SessionId::from_domain);
+            let session_id_for_route = releasing.clone().unwrap_or_default();
+            if let Err(error) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::Retire {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    agent_identity: dsl_identity,
+                    releasing,
+                    session_id: session_id_for_route,
+                },
+                "rollback_failed_spawn_mark_retiring",
+            ) {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    %error,
+                    "spawn rollback could not mark runtime retired in DSL"
+                );
+            }
+            if let Some(session_id) = member_ref.bridge_session_id() {
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
+        }
 
         let mut wired_peers = successful_wiring_targets.to_vec();
         wired_peers.sort();
@@ -8061,10 +8107,6 @@ impl MobActor {
                 cleanup_peers.push(peer_id.clone());
             }
         }
-        let spawned_entry = {
-            let roster = self.roster.read().await;
-            roster.get(agent_identity).cloned()
-        };
         let spawned_comms = self.provisioner_comms(member_ref).await;
         let mut rollback = LifecycleRollback::new("spawn rollback");
 
@@ -8115,14 +8157,16 @@ impl MobActor {
                         let peer_spec = peer_spec.clone();
                         let spawned_entry = spawned_entry.clone();
                         let agent_identity = agent_identity.clone();
+                        let actor = &*self;
                         move || async move {
-                            self.notify_peer_added(
-                                &spawned_sender,
-                                &peer_spec,
-                                &agent_identity,
-                                &spawned_entry,
-                            )
-                            .await
+                            actor
+                                .notify_peer_added(
+                                    &spawned_sender,
+                                    &peer_spec,
+                                    &agent_identity,
+                                    &spawned_entry,
+                                )
+                                .await
                         }
                     },
                 );

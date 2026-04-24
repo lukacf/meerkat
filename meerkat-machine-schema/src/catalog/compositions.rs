@@ -1586,6 +1586,10 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                                 "agent_runtime_id",
                             )),
                         },
+                        FeedbackFieldBinding {
+                            input_field: fld_id("reason"),
+                            source: FeedbackFieldSource::OwnerContext("reason".into()),
+                        },
                     ],
                 },
             ],

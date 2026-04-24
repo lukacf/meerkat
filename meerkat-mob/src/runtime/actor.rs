@@ -374,6 +374,10 @@ impl MobActor {
         }
     }
 
+    fn trusted_peer_pubkey_string(peer: &TrustedPeerDescriptor) -> String {
+        meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string()
+    }
+
     async fn bridge_supervisor_payload(
         &self,
     ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
@@ -4521,8 +4525,8 @@ impl MobActor {
             Err(other) => return Err(other),
         };
 
-        let local_peer_id = local_spec.peer_id.as_str().to_string();
-        let peer_peer_id = peer_spec.peer_id.as_str().to_string();
+        let local_peer_id = Self::trusted_peer_pubkey_string(&local_spec);
+        let peer_peer_id = Self::trusted_peer_pubkey_string(&peer_spec);
 
         // A-side trust install.
         if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
@@ -4844,6 +4848,120 @@ impl MobActor {
         // untouched — matches the zero-side-effect expectations.
         let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "unwire").await?;
         let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "unwire").await?;
+        if let (
+            WiringEndpoint::PeerOnly {
+                spec: local_spec,
+                binding: local_binding,
+            },
+            WiringEndpoint::PeerOnly {
+                spec: peer_spec,
+                binding: peer_binding,
+            },
+        ) = (&local_endpoint, &peer_endpoint)
+        {
+            if !dsl_has_edge && !roster_has_edge {
+                let _ = self
+                    .unwire_peer_only_recipient(
+                        local_spec,
+                        Some(local_binding),
+                        peer_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
+                let _ = self
+                    .unwire_peer_only_recipient(
+                        peer_spec,
+                        Some(peer_binding),
+                        local_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
+                return Ok(());
+            }
+
+            let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
+            if let Err(error) = self
+                .unwire_peer_only_recipient(
+                    local_spec,
+                    Some(local_binding),
+                    peer_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                if dsl_removed {
+                    let _ = self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                        "peer_only_unwire_rollback",
+                    );
+                }
+                return Err(error);
+            }
+            if let Err(error) = self
+                .unwire_peer_only_recipient(
+                    peer_spec,
+                    Some(peer_binding),
+                    local_spec,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                let _ = self
+                    .wire_peer_only_recipient(
+                        local_spec,
+                        Some(local_binding),
+                        peer_spec,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
+                if dsl_removed {
+                    let _ = self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                        "peer_only_unwire_rollback",
+                    );
+                }
+                return Err(error);
+            }
+
+            let event = NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MembersUnwired {
+                    a: AgentIdentity::from(edge.a.0.as_str()),
+                    b: AgentIdentity::from(edge.b.0.as_str()),
+                },
+            };
+            let stored = match self.events.append(event).await {
+                Ok(stored) => stored,
+                Err(error) => {
+                    let _ = self
+                        .wire_peer_only_recipient(
+                            local_spec,
+                            Some(local_binding),
+                            peer_spec,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
+                    let _ = self
+                        .wire_peer_only_recipient(
+                            peer_spec,
+                            Some(peer_binding),
+                            local_spec,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
+                    if dsl_removed {
+                        let _ = self.apply_dsl_input(
+                            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                            "peer_only_unwire_rollback",
+                        );
+                    }
+                    return Err(MobError::from(error));
+                }
+            };
+            self.roster.write().await.apply_event(&stored);
+            return Ok(());
+        }
         let (local_comms, local_spec) = match local_endpoint {
             WiringEndpoint::Local { comms, spec, .. } => (comms, spec),
             WiringEndpoint::PeerOnly { .. } => {
@@ -4861,8 +4979,8 @@ impl MobActor {
             }
         };
 
-        let local_peer_id = local_spec.peer_id.as_str().to_string();
-        let peer_peer_id = peer_spec.peer_id.as_str().to_string();
+        let local_peer_id = Self::trusted_peer_pubkey_string(&local_spec);
+        let peer_peer_id = Self::trusted_peer_pubkey_string(&peer_spec);
 
         // Idempotent stale-trust cleanup: if the DSL + roster both show
         // the edge as already absent, but the comms runtimes still carry
@@ -5057,6 +5175,34 @@ impl MobActor {
         Ok(())
     }
 
+    fn apply_unwire_members_idempotent(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+    ) -> Result<bool, MobError> {
+        match self.apply_dsl_input(
+            mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
+            "unwire_members",
+        ) {
+            Ok(()) => Ok(true),
+            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
+                if !self
+                    .dsl_authority
+                    .state
+                    .wiring_edges
+                    .iter()
+                    .any(|existing| existing == edge)
+                {
+                    Ok(false)
+                } else {
+                    Err(MobError::WiringError(format!(
+                        "unwire rejected by MobMachine DSL: {message}"
+                    )))
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Unwind side effects from a failed local-local unwire. Best-effort.
     ///
     /// Re-installs trust on sides where trust was removed, and emits
@@ -5207,7 +5353,10 @@ impl MobActor {
         let stored = match self.events.append(event).await {
             Ok(stored) => stored,
             Err(append_err) => {
-                if let Err(rollback_err) = comms.remove_trusted_peer(&spec.peer_id.as_str()).await {
+                if let Err(rollback_err) = comms
+                    .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&spec))
+                    .await
+                {
                     tracing::warn!(
                         mob_id = %self.definition.id,
                         local = %local,
@@ -5265,7 +5414,7 @@ impl MobActor {
 
         // Remove trust on the local session runtime.
         let _ = comms
-            .remove_trusted_peer(&prior_spec.peer_id.as_str())
+            .remove_trusted_peer(&Self::trusted_peer_pubkey_string(&prior_spec))
             .await?;
 
         let event = NewMobEvent {

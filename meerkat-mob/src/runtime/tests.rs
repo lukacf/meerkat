@@ -2634,9 +2634,32 @@ impl LiveExternalPeerHarness {
             .collect()
     }
 
-    async fn remove_trusted_peer(&self, peer_id: &str) {
+    async fn remove_trusted_peer(&self, peer_id_or_pubkey: &str) {
+        let Some(remove_key) = (if peer_id_or_pubkey.starts_with("ed25519:") {
+            Some(peer_id_or_pubkey.to_string())
+        } else {
+            self.runtime
+                .trusted_peers_shared()
+                .read()
+                .peers
+                .iter()
+                .find(|entry| entry.pubkey.to_peer_id().as_str() == peer_id_or_pubkey)
+                .map(|entry| entry.pubkey.to_pubkey_string())
+        }) else {
+            return;
+        };
         self.runtime
-            .remove_trusted_peer(peer_id)
+            .remove_trusted_peer(&remove_key)
+            .await
+            .expect("remove trusted peer from harness runtime");
+    }
+
+    async fn remove_trusted_peer_descriptor(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        peer: &meerkat_core::comms::TrustedPeerDescriptor,
+    ) {
+        runtime
+            .remove_trusted_peer(&meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string())
             .await
             .expect("remove trusted peer from harness runtime");
     }
@@ -2880,7 +2903,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             {
                                                 let _ = responder_runtime
                                                     .remove_trusted_peer(
-                                                        &current.supervisor.peer_id.to_string(),
+                                                        &meerkat_comms::PubKey::new(
+                                                            current.supervisor.pubkey,
+                                                        )
+                                                        .to_pubkey_string(),
                                                     )
                                                     .await;
                                             }
@@ -2928,8 +2954,16 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 super::bridge_protocol::BridgeCommand::RevokeSupervisor(
                                     payload,
                                 ) => {
+                                    let supervisor_spec =
+                                        meerkat_core::comms::TrustedPeerDescriptor::try_from(
+                                            payload.supervisor,
+                                        )
+                                        .expect("valid supervisor spec");
                                     let _ = responder_runtime
-                                        .remove_trusted_peer(&payload.supervisor.peer_id)
+                                        .remove_trusted_peer(
+                                            &meerkat_comms::PubKey::new(supervisor_spec.pubkey)
+                                                .to_pubkey_string(),
+                                        )
                                         .await;
                                     *responder_supervisor_state.write().await = None;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
@@ -3031,8 +3065,16 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     .expect("wire ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::UnwireMember(payload) => {
+                                    let peer_spec =
+                                        meerkat_core::comms::TrustedPeerDescriptor::try_from(
+                                            payload.peer_spec,
+                                        )
+                                        .expect("valid peer spec");
                                     let _ = responder_runtime
-                                        .remove_trusted_peer(&payload.peer_spec.peer_id)
+                                        .remove_trusted_peer(
+                                            &meerkat_comms::PubKey::new(peer_spec.pubkey)
+                                                .to_pubkey_string(),
+                                        )
                                         .await;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
@@ -3112,7 +3154,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         )
                                         .expect("peer lifecycle trusted peer spec");
                                     let _ = responder_runtime
-                                        .remove_trusted_peer(&peer_spec.peer_id.to_string())
+                                        .remove_trusted_peer(
+                                            &meerkat_comms::PubKey::new(peer_spec.pubkey)
+                                                .to_pubkey_string(),
+                                        )
                                         .await;
                                     serde_json::json!({ "ok": true })
                                 }
@@ -17375,9 +17420,10 @@ async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent(
     let key_b = comms_b.public_key();
     comms_a
         .add_trusted_peer(
-            TrustedPeerDescriptor::test_only_unsigned(
+            TrustedPeerDescriptor::unsigned_with_pubkey(
                 &name_b,
                 key_b.to_peer_id().to_string(),
+                *key_b.as_bytes(),
                 format!("inproc://{name_b}"),
             )
             .expect("valid worker trusted spec"),
@@ -17386,9 +17432,10 @@ async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent(
         .expect("re-add stale trust on lead");
     comms_b
         .add_trusted_peer(
-            TrustedPeerDescriptor::test_only_unsigned(
+            TrustedPeerDescriptor::unsigned_with_pubkey(
                 &name_a,
                 key_a.to_peer_id().to_string(),
+                *key_a.as_bytes(),
                 format!("inproc://{name_a}"),
             )
             .expect("valid lead trusted spec"),

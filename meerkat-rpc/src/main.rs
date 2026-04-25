@@ -38,9 +38,18 @@ struct Cli {
     user_config_root: Option<PathBuf>,
     /// Listen on a TCP address instead of stdin/stdout.
     ///
-    /// Example: --tcp 127.0.0.1:4800 or --tcp 0.0.0.0:4800
+    /// Loopback binds are accepted by default. Non-loopback binds require
+    /// --allow-remote and should be used only behind an authenticated and
+    /// encrypted transport wrapper.
+    ///
+    /// Example: --tcp 127.0.0.1:4800
     #[arg(long)]
     tcp: Option<String>,
+    /// Permit --tcp/--realtime-ws to bind non-loopback addresses.
+    ///
+    /// This is an explicit transport exposure opt-in, not an auth mechanism.
+    #[arg(long)]
+    allow_remote: bool,
     /// Listen on a sibling WebSocket address for realtime channels.
     ///
     /// Example: --realtime-ws 127.0.0.1:4900
@@ -124,6 +133,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
+    let tcp_bind_policy = if cli.allow_remote {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::allow_remote()
+    } else {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::local_only()
+    };
+    if let Some(ref tcp_addr) = cli.tcp {
+        meerkat_rpc::secure_rpc::validate_tcp_bind_policy("rpc", tcp_addr, tcp_bind_policy)
+            .map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+            })?;
+    }
+    if let Some(ref realtime_ws_addr) = cli.realtime_ws {
+        meerkat_rpc::secure_rpc::validate_tcp_bind_policy(
+            "realtime_ws",
+            realtime_ws_addr,
+            tcp_bind_policy,
+        )
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    }
     let selection = RealmConfig::selection_from_inputs(
         cli.realm.clone(),
         cli.isolated,

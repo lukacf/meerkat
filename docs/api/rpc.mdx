@@ -28,6 +28,14 @@ The RPC surface is fully runtime-backed:
     rkat-rpc --tcp 127.0.0.1:9001
     rkat-rpc --tcp 127.0.0.1:9001 --realtime-ws 127.0.0.1:9002
     ```
+
+    TCP and realtime WebSocket listeners are local-only by default. Binding
+    a non-loopback address such as `0.0.0.0:9001` requires `--allow-remote`;
+    that flag only opts in to network exposure and does not add
+    authentication or encryption. Use it behind a production-safe transport
+    wrapper such as SSH tunneling, mTLS, or another authenticated encrypted
+    channel. Plain TCP host capabilities continue to report
+    `secure_remote_rpc: false`.
   </Step>
   <Step title="Send the handshake">
     ```json

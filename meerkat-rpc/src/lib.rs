@@ -20,6 +20,7 @@ pub mod handlers;
 pub mod protocol;
 pub mod realtime_ws;
 pub mod router;
+pub mod secure_rpc;
 pub mod server;
 pub mod session_executor;
 pub mod session_runtime;

@@ -11,6 +11,7 @@
 use futures::{SinkExt, StreamExt};
 use meerkat_contracts::{RealtimeChannelOpenFrame, RealtimeClientFrame, RealtimeServerFrame};
 use serde_json::{Value, json};
+use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -52,6 +53,32 @@ async fn spawn_rpc_tcp_with_bin(bin: &str) -> (tokio::process::Child, u16) {
 
 async fn spawn_rpc_tcp() -> (tokio::process::Child, u16) {
     spawn_rpc_tcp_with_bin(env!("CARGO_BIN_EXE_rkat-rpc")).await
+}
+
+#[tokio::test]
+async fn tcp_e2e_rejects_wildcard_bind_without_allow_remote() {
+    let output = timeout(
+        CONNECT_TIMEOUT,
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_rkat-rpc"))
+            .args(["--isolated", "--tcp", "0.0.0.0:0"])
+            .env("RKAT_TEST_CLIENT", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .expect("process should reject unsafe bind without hanging")
+    .expect("rkat-rpc process should run");
+
+    assert!(
+        !output.status.success(),
+        "wildcard TCP bind must fail without --allow-remote"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--allow-remote"),
+        "stderr should explain explicit remote opt-in: {stderr}"
+    );
 }
 
 /// Spawn an RPC binary with --tcp and --realtime-ws on random ports.
@@ -282,6 +309,31 @@ async fn tcp_e2e_capabilities_get() {
     let resp = read_jsonl(&mut reader2).await;
     assert_eq!(resp["id"], 2);
     assert!(resp["result"]["capabilities"].is_array());
+
+    child.kill().await.ok();
+}
+
+#[tokio::test]
+async fn tcp_e2e_runtime_host_reports_remote_rpc_not_secure() {
+    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+
+    send_jsonl(
+        &mut stream,
+        &json!({"jsonrpc":"2.0","method":"runtime/capabilities","params":{},"id":1}),
+    )
+    .await;
+
+    let (read, _write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let resp = read_response_for_id(&mut reader, 1).await;
+    assert_eq!(resp["id"], 1);
+    assert_eq!(
+        resp["result"]["features"]["secure_remote_rpc"], false,
+        "plain TCP JSON-RPC must not advertise production secure remote RPC"
+    );
 
     child.kill().await.ok();
 }

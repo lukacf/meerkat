@@ -21804,6 +21804,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::CommsError(_) => "comms_error".to_string(),
         MobError::CallbackPending { .. } => "callback_pending".to_string(),
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
+        MobError::StaleEventCursor { .. } => "stale_event_cursor".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
     }

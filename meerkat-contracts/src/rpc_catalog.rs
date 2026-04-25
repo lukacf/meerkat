@@ -337,6 +337,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobMemberSendParams",
                 "MobMemberSendResult",
             ),
+            RpcMethodDescriptor::typed(
+                "mob/ingress_interaction",
+                "Ensure an ingress member, then deliver user input with a replay cursor receipt",
+                "MobIngressInteractionParams",
+                "MobIngressInteractionResult",
+            ),
             RpcMethodDescriptor::basic(
                 "mob/append_system_context",
                 "Append system context for a mob member",

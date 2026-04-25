@@ -552,6 +552,39 @@ pub struct MobMemberSendResult {
     pub handling_mode: WireHandlingMode,
 }
 
+/// Request payload for `mob/ingress_interaction`.
+///
+/// This is the ergonomic "ensure an ingress member, then deliver user input"
+/// path. It composes the existing declarative roster and member-send
+/// semantics without introducing a separate thread/project runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobIngressInteractionParams {
+    pub mob_id: String,
+    pub spec: MobMemberSpecWire,
+    pub content: WireContentInput,
+    #[serde(default)]
+    pub handling_mode: WireHandlingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<WireRenderMetadata>,
+}
+
+/// Response payload for `mob/ingress_interaction`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobIngressInteractionResult {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub member_ref: WireMemberRef,
+    pub ensure_outcome: MobEnsureMemberOutcomeWire,
+    pub delivery: MobMemberSendResult,
+    /// Cursor observed immediately before the ensure/send composition.
+    pub events_after_cursor: u64,
+    /// Cursor observed after delivery was accepted.
+    pub latest_event_cursor: u64,
+}
+
 /// Public handling mode for mob member delivery.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

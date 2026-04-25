@@ -859,6 +859,7 @@ async fn initialize_methods_list_complete() {
             "mob/members",
             "mob/events",
             "mob/member_send",
+            "mob/ingress_interaction",
             "mob/append_system_context",
             "mob/flows",
             "mob/flow_run",

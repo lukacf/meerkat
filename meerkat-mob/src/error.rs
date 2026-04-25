@@ -168,6 +168,13 @@ pub enum MobError {
         actual: FenceToken,
     },
 
+    /// A caller supplied an event replay cursor beyond the store frontier.
+    #[error("stale mob event cursor: requested {after_cursor}, latest {latest_cursor}")]
+    StaleEventCursor {
+        after_cursor: u64,
+        latest_cursor: u64,
+    },
+
     /// The referenced work unit does not exist.
     #[error("work not found: {0}")]
     WorkNotFound(WorkRef),

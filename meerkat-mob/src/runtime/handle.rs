@@ -884,6 +884,14 @@ impl SpawnMemberSpec {
 }
 
 impl MobEventsView {
+    pub async fn latest_cursor(&self) -> Result<u64, MobError> {
+        Ok(self
+            .replay_all()
+            .await?
+            .last()
+            .map_or(0, |event| event.cursor))
+    }
+
     pub async fn poll(
         &self,
         after_cursor: u64,
@@ -902,6 +910,21 @@ impl MobEventsView {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    pub async fn poll_strict(
+        &self,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::event::MobEvent>, MobError> {
+        let latest_cursor = self.latest_cursor().await?;
+        if after_cursor > latest_cursor {
+            return Err(MobError::StaleEventCursor {
+                after_cursor,
+                latest_cursor,
+            });
+        }
+        self.poll(after_cursor, limit).await
     }
 
     pub async fn replay_all(&self) -> Result<Vec<crate::event::MobEvent>, MobError> {

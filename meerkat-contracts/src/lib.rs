@@ -63,6 +63,8 @@ pub use wire::{
     MobEnsureMemberOutcomeWire,
     MobEnsureMemberParams,
     MobEnsureMemberResult,
+    MobIngressInteractionParams,
+    MobIngressInteractionResult,
     MobLifecycleParams,
     MobListMembersMatchingParams,
     MobListMembersMatchingResult,

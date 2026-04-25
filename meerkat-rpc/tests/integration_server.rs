@@ -275,6 +275,7 @@ async fn initialize_roundtrip() {
         assert!(method_names.contains(&"mob/fork_helper"));
         assert!(method_names.contains(&"mob/force_cancel"));
         assert!(method_names.contains(&"mob/member_status"));
+        assert!(method_names.contains(&"mob/ingress_interaction"));
     }
 
     // Close to trigger EOF

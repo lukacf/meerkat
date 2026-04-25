@@ -1016,6 +1016,10 @@ impl MethodRouter {
                 handlers::mob::handle_member_send(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/ingress_interaction" => {
+                handlers::mob::handle_ingress_interaction(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/append_system_context" => {
                 handlers::mob::handle_append_system_context(
                     id,
@@ -2975,6 +2979,7 @@ mod tests {
             assert!(method_names.contains(&"mob/force_cancel"));
             assert!(method_names.contains(&"mob/member_status"));
             assert!(method_names.contains(&"mob/member_send"));
+            assert!(method_names.contains(&"mob/ingress_interaction"));
             assert!(!method_names.contains(&"mob/tools"));
             assert!(!method_names.contains(&"mob/call"));
             assert!(method_names.contains(&"mob/stream_open"));
@@ -3268,6 +3273,176 @@ mod tests {
             "binding-era agent_runtime_id must not leak to app-facing mob/member_send"
         );
         assert_eq!(sent["handling_mode"], "queue");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_ingress_interaction_ensures_member_and_returns_replay_anchor() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-ingress-interaction",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let ingress_resp = router
+            .dispatch(make_request(
+                "mob/ingress_interaction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "spec": {
+                        "profile": "worker",
+                        "agent_identity": "ingress-1",
+                        "runtime_mode": "turn_driven"
+                    },
+                    "content": "Please acknowledge with INGRESS_OK."
+                }),
+            ))
+            .await
+            .unwrap();
+        let receipt = result_value(&ingress_resp);
+        assert_eq!(receipt["mob_id"], mob_id);
+        assert_eq!(receipt["agent_identity"], "ingress-1");
+        assert_eq!(receipt["delivery"]["agent_identity"], "ingress-1");
+        assert_eq!(receipt["delivery"]["handling_mode"], "queue");
+        assert!(
+            receipt["member_ref"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "ingress helper must return the opaque member_ref"
+        );
+        assert!(
+            receipt["ensure_outcome"].get("spawned").is_some(),
+            "first interaction should spawn the ingress member: {receipt}"
+        );
+        assert!(
+            receipt["events_after_cursor"].as_u64().is_some(),
+            "receipt must carry a replay anchor cursor"
+        );
+        assert!(
+            receipt["latest_event_cursor"].as_u64().is_some(),
+            "receipt must carry the post-delivery event cursor"
+        );
+        assert!(
+            receipt.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak from ingress helper"
+        );
+
+        let second_resp = router
+            .dispatch(make_request(
+                "mob/ingress_interaction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "spec": {
+                        "profile": "worker",
+                        "agent_identity": "ingress-1",
+                        "runtime_mode": "turn_driven"
+                    },
+                    "content": "Second interaction."
+                }),
+            ))
+            .await
+            .unwrap();
+        let second = result_value(&second_resp);
+        assert!(
+            second["ensure_outcome"].get("existed").is_some(),
+            "second interaction should reuse the ingress member: {second}"
+        );
+        assert_eq!(second["delivery"]["agent_identity"], "ingress-1");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_ingress_interaction_rejects_missing_mob() {
+        let (router, _notif_rx) = test_router().await;
+
+        let resp = router
+            .dispatch(make_request(
+                "mob/ingress_interaction",
+                serde_json::json!({
+                    "mob_id": "missing-mob",
+                    "spec": {
+                        "profile": "worker",
+                        "agent_identity": "ingress-missing",
+                        "runtime_mode": "turn_driven"
+                    },
+                    "content": "hello"
+                }),
+            ))
+            .await
+            .unwrap();
+        let err = resp.error.expect("missing mob should fail");
+        assert!(
+            err.message.contains("mob not found"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_events_strict_rejects_stale_cursor() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-events-strict",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = router
+            .dispatch(make_request(
+                "mob/events",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "after_cursor": 999_999_u64,
+                    "limit": 10,
+                    "strict": true
+                }),
+            ))
+            .await
+            .unwrap();
+        let err = resp.error.expect("strict stale cursor should fail");
+        assert!(
+            err.message.contains("stale mob event cursor"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[cfg(feature = "mob")]

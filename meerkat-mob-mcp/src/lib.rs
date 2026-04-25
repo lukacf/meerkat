@@ -836,6 +836,27 @@ impl MobMcpState {
             .await
     }
 
+    pub async fn mob_events_strict(
+        &self,
+        mob_id: &MobId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<meerkat_mob::MobEvent>, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .events()
+            .poll_strict(after_cursor, limit)
+            .await
+    }
+
+    pub async fn mob_latest_event_cursor(&self, mob_id: &MobId) -> Result<u64, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .events()
+            .latest_cursor()
+            .await
+    }
+
     /// Submit a unit of work to a mob member through the work-lane.
     ///
     /// Thin wrapper over [`meerkat_mob::MobHandle::submit_work`] for the

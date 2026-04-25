@@ -398,6 +398,30 @@ impl MobActor {
         Self::trusted_peer_pubkey_string(peer)
     }
 
+    async fn remove_trusted_peer_by_descriptor(
+        comms: &dyn CoreCommsRuntime,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<bool, meerkat_core::comms::SendError> {
+        let peer_id = peer.peer_id.to_string();
+        match comms.remove_trusted_peer(&peer_id).await {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                let pubkey_key = Self::trusted_peer_removal_key(peer);
+                comms.remove_trusted_peer(&pubkey_key).await
+            }
+            Err(peer_id_error) => match comms.remove_trusted_peer(&peer_id).await {
+                Ok(removed) => Ok(removed),
+                Err(_) => {
+                    let pubkey_key = Self::trusted_peer_removal_key(peer);
+                    match comms.remove_trusted_peer(&pubkey_key).await {
+                        Ok(removed) => Ok(removed),
+                        Err(_) => Err(peer_id_error),
+                    }
+                }
+            },
+        }
+    }
+
     fn supervisor_spec_for_authority(
         mob_id: &crate::MobId,
         authority: &crate::store::SupervisorAuthorityRecord,
@@ -8314,9 +8338,8 @@ impl MobActor {
                     WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
                 };
                 if let Some(spawned_comms) = spawned_comms.as_ref() {
-                    let _ = spawned_comms
-                        .remove_trusted_peer(&Self::trusted_peer_removal_key(&peer_spec))
-                        .await;
+                    let _ =
+                        Self::remove_trusted_peer_by_descriptor(&**spawned_comms, &peer_spec).await;
                 } else if let Some(spawned_binding) = spawned_binding.as_ref() {
                     let _ = self
                         .unwire_peer_only_recipient(
@@ -8328,9 +8351,8 @@ impl MobActor {
                         .await;
                 }
                 if let Some(peer_comms) = peer_comms {
-                    let _ = peer_comms
-                        .remove_trusted_peer(&Self::trusted_peer_removal_key(&spawned_spec))
-                        .await;
+                    let _ =
+                        Self::remove_trusted_peer_by_descriptor(&*peer_comms, &spawned_spec).await;
                 } else if let Some(peer_binding) = peer_binding {
                     let _ = self
                         .unwire_peer_only_recipient(

@@ -3,3 +3,9 @@ error[E0432]: unresolved import `meerkat_machine_kernels::generated::flow_run`
   |
 1 | use meerkat_machine_kernels::generated::flow_run;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `flow_run` in `generated`
+  |
+help: consider importing this module instead
+  |
+1 - use meerkat_machine_kernels::generated::flow_run;
+1 + use meerkat_mob::run::flow_run;
+  |

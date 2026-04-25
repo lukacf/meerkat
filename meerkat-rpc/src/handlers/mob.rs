@@ -316,6 +316,12 @@ pub async fn handle_spawn(
         Ok(m) => m,
         Err(resp) => return resp,
     };
+    if let Err(err) = meerkat::surface::validate_public_surface_metadata(
+        params.labels.as_ref(),
+        params.context.as_ref(),
+    ) {
+        return invalid_params(id, err);
+    }
     let mut spec = SpawnMemberSpec::new(params.profile.as_str(), params.agent_identity.as_str());
     spec.initial_message = params.initial_message;
     spec.runtime_mode = params.runtime_mode;
@@ -428,6 +434,12 @@ pub async fn handle_spawn_many(
 
     let mut specs = Vec::with_capacity(params.specs.len());
     for s in &params.specs {
+        if let Err(err) = meerkat::surface::validate_public_surface_metadata(
+            s.labels.as_ref(),
+            s.context.as_ref(),
+        ) {
+            return invalid_params(id, err);
+        }
         let mut spec = SpawnMemberSpec::new(s.profile.as_str(), s.agent_identity.as_str());
         spec.initial_message = s.initial_message.clone();
         spec.runtime_mode = s.runtime_mode;
@@ -1798,6 +1810,9 @@ pub async fn handle_mob_turn_start(
 fn spawn_spec_from_wire(
     spec_wire: &meerkat_contracts::MobMemberSpecWire,
 ) -> Result<SpawnMemberSpec, String> {
+    spec_wire
+        .validate_public_surface_metadata()
+        .map_err(|err| err.to_string())?;
     let mut spec = SpawnMemberSpec::new(
         spec_wire.profile.as_str(),
         spec_wire.agent_identity.as_str(),
@@ -2182,6 +2197,46 @@ mod tests {
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
         assert!(minimal_params.connection_ref.is_none());
+    }
+
+    #[test]
+    fn mob_spawn_surface_metadata_rejects_reserved_labels() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "labels": {
+                "meerkat.runtime_id": "spoof"
+            }
+        });
+        let params: MobSpawnParams = serde_json::from_value(value).unwrap();
+        let result = meerkat::surface::validate_public_surface_metadata(
+            params.labels.as_ref(),
+            params.context.as_ref(),
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("meerkat.runtime_id"));
+    }
+
+    #[test]
+    fn mob_member_wire_surface_metadata_rejects_reserved_app_context() {
+        let spec = meerkat_contracts::MobMemberSpecWire {
+            profile: "worker".into(),
+            agent_identity: "w1".into(),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+            binding: None,
+            context: Some(serde_json::json!({"meerkat.runtime_id": "spoof"})),
+            labels: None,
+            additional_instructions: None,
+            auto_wire_parent: None,
+        };
+
+        let result = spawn_spec_from_wire(&spec);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("meerkat.runtime_id"));
     }
 
     #[test]

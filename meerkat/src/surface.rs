@@ -339,8 +339,6 @@ pub fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
     }
 }
 
-const RESERVED_MOB_PEER_META_LABELS: [&str; 3] = ["mob_id", "role", "meerkat_id"];
-
 /// Reject public `PeerMeta` labels that are reserved for mob-managed sessions.
 ///
 /// Mob runtime code stamps these labels internally when provisioning members.
@@ -362,19 +360,18 @@ pub fn validate_public_peer_meta(peer_meta: Option<&PeerMeta>) -> Result<(), Str
 pub fn validate_raw_labels(
     labels: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<(), String> {
-    let Some(labels) = labels else {
-        return Ok(());
-    };
+    meerkat_core::validate_public_labels(labels).map_err(|err| err.to_string())
+}
 
-    for &label in &RESERVED_MOB_PEER_META_LABELS {
-        if labels.contains_key(label) {
-            return Err(format!(
-                "peer_meta label '{label}' is reserved for mob-managed sessions"
-            ));
-        }
-    }
-
-    Ok(())
+/// Reject caller-owned surface metadata that attempts to set Meerkat-owned
+/// labels or top-level app-context keys.
+pub fn validate_public_surface_metadata(
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+    app_context: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let metadata =
+        meerkat_core::SurfaceMetadata::from_optional_parts(labels.cloned(), app_context.cloned());
+    metadata.validate_public().map_err(|err| err.to_string())
 }
 
 /// List all skills with provenance and shadow information.
@@ -619,7 +616,7 @@ mod tests {
         let Err(err) = result else {
             unreachable!("asserted reserved labels are rejected above");
         };
-        assert!(err.contains("mob-managed sessions"));
+        assert!(err.contains("reserved"));
         assert!(err.contains("mob_id"));
     }
 
@@ -631,6 +628,18 @@ mod tests {
             result.is_ok(),
             "ordinary peer metadata should stay available"
         );
+    }
+
+    #[test]
+    fn validate_public_surface_metadata_rejects_reserved_app_context_keys() {
+        let app_context = serde_json::json!({
+            "meerkat.runtime_id": "spoof",
+            "client_ref": "ok"
+        });
+        let result = validate_public_surface_metadata(None, Some(&app_context));
+
+        assert!(result.is_err(), "reserved app_context keys must fail");
+        assert!(result.unwrap_err().contains("meerkat.runtime_id"));
     }
 
     #[test]

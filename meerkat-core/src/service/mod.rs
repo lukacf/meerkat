@@ -172,6 +172,20 @@ pub struct CreateSessionRequest {
     pub labels: Option<BTreeMap<String, String>>,
 }
 
+impl CreateSessionRequest {
+    /// Compose the existing service-level labels and build app-context into the
+    /// shared surface metadata contract.
+    #[must_use]
+    pub fn surface_metadata(&self) -> crate::SurfaceMetadata {
+        crate::SurfaceMetadata::from_optional_parts(
+            self.labels.clone(),
+            self.build
+                .as_ref()
+                .and_then(|build| build.app_context.clone()),
+        )
+    }
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {

@@ -866,6 +866,14 @@ fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Resu
     meerkat::surface::validate_public_peer_meta(peer_meta).map_err(ApiError::BadRequest)
 }
 
+fn validate_public_surface_metadata(
+    labels: Option<&BTreeMap<String, String>>,
+    app_context: Option<&Value>,
+) -> Result<(), ApiError> {
+    meerkat::surface::validate_public_surface_metadata(labels, app_context)
+        .map_err(ApiError::BadRequest)
+}
+
 /// Create session request
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
@@ -2786,6 +2794,10 @@ async fn create_session_inner(
 ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     // --- Validation (pre-stateful work) ---
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
+        return RequestTerminal::RespondWithoutPublish(Err(e));
+    }
+    if let Err(e) = validate_public_surface_metadata(req.labels.as_ref(), req.app_context.as_ref())
+    {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
@@ -5079,10 +5091,24 @@ mod tests {
         assert!(
             payload["error"]
                 .as_str()
-                .is_some_and(|msg| msg.contains("mob-managed sessions")),
+                .is_some_and(|msg| msg.contains("reserved") && msg.contains("mob_id")),
             "reserved mob label rejection should explain the trust boundary: {}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    #[test]
+    fn test_create_session_request_rejects_reserved_surface_metadata_keys() {
+        let app_context = serde_json::json!({
+            "meerkat.runtime_id": "spoof"
+        });
+        let result = validate_public_surface_metadata(None, Some(&app_context));
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ApiError::BadRequest(message) => assert!(message.contains("meerkat.runtime_id")),
+            other => panic!("expected bad request, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -65,6 +65,7 @@ pub mod session_store;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
+pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
 pub mod tool_scope;
@@ -98,6 +99,11 @@ pub use peer_correlation::{
 };
 pub use peer_meta::PeerMeta;
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
+pub use surface_metadata::{
+    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, RuntimeMetadata, SurfaceMetadata,
+    SurfaceMetadataError, is_reserved_meerkat_label_key, is_reserved_meerkat_metadata_key,
+    validate_public_app_context, validate_public_labels,
+};
 
 pub use completion_feed::{
     CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,

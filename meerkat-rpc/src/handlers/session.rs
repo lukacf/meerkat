@@ -244,6 +244,12 @@ pub async fn handle_create(
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
+    if let Err(err) = meerkat::surface::validate_public_surface_metadata(
+        params.labels.as_ref(),
+        params.app_context.as_ref(),
+    ) {
+        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+    }
 
     let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
         config_runtime
@@ -620,6 +626,7 @@ pub async fn handle_read(
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
     use super::CreateSessionResult;
+    use std::collections::BTreeMap;
 
     #[test]
     fn create_session_result_preserves_skill_diagnostics() {
@@ -687,6 +694,18 @@ mod tests {
             unreachable!("asserted reserved mob peer labels are rejected above");
         };
         assert!(err.contains("mob_id"));
+    }
+
+    #[test]
+    fn create_session_rejects_reserved_surface_metadata_keys() {
+        let labels = BTreeMap::from([("meerkat.runtime_id".to_string(), "spoof".to_string())]);
+        let result = meerkat::surface::validate_public_surface_metadata(Some(&labels), None);
+
+        assert!(
+            result.is_err(),
+            "reserved surface metadata labels must be rejected"
+        );
+        assert!(result.unwrap_err().contains("meerkat.runtime_id"));
     }
 }
 

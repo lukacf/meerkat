@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use meerkat_core::{SurfaceMetadata, SurfaceMetadataError};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -766,6 +768,20 @@ pub struct MobMemberSpecWire {
     pub auto_wire_parent: Option<bool>,
 }
 
+impl MobMemberSpecWire {
+    /// Compose the existing member `labels` and opaque `context` fields into
+    /// the shared surface metadata contract without changing the JSON shape.
+    #[must_use]
+    pub fn surface_metadata(&self) -> SurfaceMetadata {
+        SurfaceMetadata::from_optional_parts(self.labels.clone(), self.context.clone())
+    }
+
+    /// Validate caller-supplied metadata for public member create surfaces.
+    pub fn validate_public_surface_metadata(&self) -> Result<(), SurfaceMetadataError> {
+        self.surface_metadata().validate_public()
+    }
+}
+
 /// Request payload for `mob/ensure_member`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1121,6 +1137,50 @@ mod tests {
             .decode()
             .expect_err("malformed tokens must fail to decode");
         assert!(matches!(err, WireMemberRefError::Malformed));
+    }
+
+    #[test]
+    fn mob_member_spec_exposes_shared_surface_metadata() {
+        let spec = MobMemberSpecWire {
+            profile: "worker".into(),
+            agent_identity: "w1".into(),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+            binding: None,
+            context: Some(serde_json::json!({"client_ref": "member-card"})),
+            labels: Some(BTreeMap::from([("client.member_id".into(), "w1".into())])),
+            additional_instructions: None,
+            auto_wire_parent: None,
+        };
+
+        let metadata = spec.surface_metadata();
+        assert_eq!(
+            metadata.labels.get("client.member_id").map(String::as_str),
+            Some("w1")
+        );
+        assert_eq!(
+            metadata.app_context,
+            Some(serde_json::json!({"client_ref": "member-card"}))
+        );
+    }
+
+    #[test]
+    fn mob_member_spec_surface_metadata_rejects_reserved_keys() {
+        let spec = MobMemberSpecWire {
+            profile: "worker".into(),
+            agent_identity: "w1".into(),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+            binding: None,
+            context: None,
+            labels: Some(BTreeMap::from([("mob_id".into(), "spoof".into())])),
+            additional_instructions: None,
+            auto_wire_parent: None,
+        };
+
+        assert!(spec.validate_public_surface_metadata().is_err());
     }
 
     #[test]

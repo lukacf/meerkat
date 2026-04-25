@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use meerkat_core::{
-    HookRunOverrides, OutputSchema, PeerMeta, Provider,
+    HookRunOverrides, OutputSchema, PeerMeta, Provider, SurfaceMetadata, SurfaceMetadataError,
     skills::{SkillKey, SkillRef},
 };
 
@@ -38,6 +38,20 @@ pub struct CoreCreateParams {
     /// legacy flat `provider + api_key` path is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_ref: Option<super::connection::WireConnectionRef>,
+}
+
+impl CoreCreateParams {
+    /// Compose the existing `labels` and `app_context` fields into the shared
+    /// surface metadata contract without changing the JSON wire shape.
+    #[must_use]
+    pub fn surface_metadata(&self) -> SurfaceMetadata {
+        SurfaceMetadata::from_optional_parts(self.labels.clone(), self.app_context.clone())
+    }
+
+    /// Validate caller-supplied metadata for public create surfaces.
+    pub fn validate_public_surface_metadata(&self) -> Result<(), SurfaceMetadataError> {
+        self.surface_metadata().validate_public()
+    }
 }
 
 /// Structured output parameters.
@@ -229,7 +243,40 @@ mod tests {
             ])
         );
         assert!(parsed.app_context.is_some());
+        assert_eq!(
+            parsed
+                .surface_metadata()
+                .labels
+                .get("team")
+                .map(String::as_str),
+            Some("infra")
+        );
+        assert_eq!(
+            parsed.surface_metadata().app_context,
+            Some(serde_json::json!({"org_id": "acme", "tier": "premium"}))
+        );
         Ok(())
+    }
+
+    #[test]
+    fn test_core_create_params_surface_metadata_rejects_reserved_keys() {
+        let params = CoreCreateParams {
+            prompt: "hello".to_string(),
+            model: None,
+            provider: None,
+            max_tokens: None,
+            system_prompt: None,
+            labels: Some(std::collections::BTreeMap::from([(
+                "meerkat.runtime_id".to_string(),
+                "spoof".to_string(),
+            )])),
+            additional_instructions: None,
+            app_context: None,
+            shell_env: None,
+            connection_ref: None,
+        };
+
+        assert!(params.validate_public_surface_metadata().is_err());
     }
 
     #[test]

@@ -68,6 +68,7 @@ impl CanonicalMemberSnapshotMaterial {
             current_bridge_session_id: None,
             peer_connectivity: self.peer_connectivity.clone(),
             kickoff: self.kickoff.clone(),
+            external_member: None,
         }
         .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }

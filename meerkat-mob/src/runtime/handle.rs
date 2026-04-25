@@ -130,6 +130,15 @@ pub struct MobMemberSnapshot {
     /// Initial autonomous-turn kickoff state, when this member has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    /// External-member observation projection, when this member is backed by
+    /// an external peer rather than a local session.
+    ///
+    /// This is a read-only projection over the roster member ref and restore
+    /// diagnostics. It intentionally avoids peer ids, transport addresses,
+    /// bootstrap tokens, runtime incarnation ids, and fence tokens; those are
+    /// binding mechanics, not app-facing authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_member: Option<ExternalMemberObservationSnapshot>,
 }
 
 impl MobMemberSnapshot {
@@ -272,6 +281,111 @@ pub enum MobMemberStatus {
     Completed,
     /// Member is not in the roster.
     Unknown,
+}
+
+/// Identity-native owner reference for external-member observation and hooks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct ExternalMemberOwnerRef {
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+}
+
+/// Whether an external member is still bridged through a local session or is
+/// a peer-only binding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExternalMemberBindingMode {
+    BridgeSessionBacked,
+    PeerOnly,
+}
+
+/// Current external-member reachability observation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExternalMemberReachability {
+    /// No live probe has been executed as part of this snapshot.
+    Unknown,
+    /// The member is known unavailable because canonical restore/binding
+    /// projection has failed.
+    Unavailable { reason: String },
+}
+
+/// Whether the supervisor has enough durable proof to rebind this external
+/// member after reconnect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExternalMemberRebindStatus {
+    /// A bridge session is still present; peer-only rebind is not required.
+    NotRequired,
+    /// A peer-only binding carries the typed bootstrap proof needed for
+    /// supervisor bind fallback.
+    Available,
+    /// The peer-only binding is missing rebind proof.
+    Unavailable { reason: String },
+    /// Restore/binding normalization failed.
+    Failed { reason: String },
+}
+
+/// Declared external-member forwarding hook status.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExternalMemberForwardingStatus {
+    /// The hook owner is typed and can be used by future artifact/approval
+    /// forwarding code; this slice does not execute forwarding.
+    Declared,
+}
+
+/// Stable forwarding hook reference for a mob-owned external member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct ExternalMemberForwardingHookRef {
+    pub owner: ExternalMemberOwnerRef,
+    pub status: ExternalMemberForwardingStatus,
+}
+
+/// External-member artifact/approval forwarding hook projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct ExternalMemberForwardingHooks {
+    pub artifacts: ExternalMemberForwardingHookRef,
+    pub approvals: ExternalMemberForwardingHookRef,
+}
+
+/// Read-only observation block for an external mob member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct ExternalMemberObservationSnapshot {
+    pub owner: ExternalMemberOwnerRef,
+    pub binding_mode: ExternalMemberBindingMode,
+    pub bridge_session_present: bool,
+    pub reachability: ExternalMemberReachability,
+    pub rebind: ExternalMemberRebindStatus,
+    pub forwarding: ExternalMemberForwardingHooks,
+}
+
+impl ExternalMemberObservationSnapshot {
+    fn hook(owner: &ExternalMemberOwnerRef) -> ExternalMemberForwardingHookRef {
+        ExternalMemberForwardingHookRef {
+            owner: owner.clone(),
+            status: ExternalMemberForwardingStatus::Declared,
+        }
+    }
+
+    fn forwarding(owner: &ExternalMemberOwnerRef) -> ExternalMemberForwardingHooks {
+        ExternalMemberForwardingHooks {
+            artifacts: Self::hook(owner),
+            approvals: Self::hook(owner),
+        }
+    }
 }
 
 /// Receipt returned by a successful member respawn.
@@ -3262,6 +3376,9 @@ impl MobHandle {
         };
         snapshot.realtime_attachment_status =
             self.project_realtime_attachment_status(&snapshot).await;
+        snapshot.external_member = self
+            .project_external_member_observation(identity, &snapshot)
+            .await;
         Ok(snapshot)
     }
 
@@ -3286,6 +3403,70 @@ impl MobHandle {
             let _ = snapshot;
             None
         }
+    }
+
+    async fn project_external_member_observation(
+        &self,
+        identity: &AgentIdentity,
+        snapshot: &MobMemberSnapshot,
+    ) -> Option<ExternalMemberObservationSnapshot> {
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(identity).cloned()
+        }?;
+        let MemberRef::BackendPeer {
+            session_id,
+            bootstrap_token,
+            ..
+        } = &entry.member_ref
+        else {
+            return None;
+        };
+
+        let owner = ExternalMemberOwnerRef {
+            mob_id: self.definition.id.clone(),
+            agent_identity: identity.clone(),
+        };
+        let bridge_session_present = session_id.is_some();
+        let has_bootstrap_token = bootstrap_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty());
+        let binding_mode = if bridge_session_present {
+            ExternalMemberBindingMode::BridgeSessionBacked
+        } else {
+            ExternalMemberBindingMode::PeerOnly
+        };
+        let reachability = match snapshot.status {
+            MobMemberStatus::Broken => ExternalMemberReachability::Unavailable {
+                reason: snapshot
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "external member restore failed".to_string()),
+            },
+            _ => ExternalMemberReachability::Unknown,
+        };
+        let rebind = match snapshot.status {
+            MobMemberStatus::Broken => ExternalMemberRebindStatus::Failed {
+                reason: snapshot
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "external member restore failed".to_string()),
+            },
+            _ if bridge_session_present => ExternalMemberRebindStatus::NotRequired,
+            _ if has_bootstrap_token => ExternalMemberRebindStatus::Available,
+            _ => ExternalMemberRebindStatus::Unavailable {
+                reason: "missing bootstrap_token for supervisor rebind".to_string(),
+            },
+        };
+
+        Some(ExternalMemberObservationSnapshot {
+            owner: owner.clone(),
+            binding_mode,
+            bridge_session_present,
+            reachability,
+            rebind,
+            forwarding: ExternalMemberObservationSnapshot::forwarding(&owner),
+        })
     }
 
     /// Wait until all current autonomous members resolve their initial kickoff.
@@ -3611,6 +3792,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            external_member: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -3642,6 +3824,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            external_member: None,
         };
 
         let snapshot_value =
@@ -3672,6 +3855,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            external_member: None,
         };
         assert_eq!(
             snapshot.agent_identity(),

@@ -123,11 +123,14 @@ pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
-    HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobDestroyError, MobDestroyReport, MobEventsView, MobHandle, MobMemberListEntry,
-    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult,
-    SupervisorRotationReport, WorkDeliveryReceipt,
+    ExternalMemberBindingMode, ExternalMemberForwardingHookRef, ExternalMemberForwardingHooks,
+    ExternalMemberForwardingStatus, ExternalMemberObservationSnapshot, ExternalMemberOwnerRef,
+    ExternalMemberReachability, ExternalMemberRebindStatus, HelperOptions, HelperResult,
+    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError, MobDestroyReport,
+    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget,
+    PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};

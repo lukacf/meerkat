@@ -8045,6 +8045,49 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
         "peer-only external member should stay non-terminal without a bridge session"
     );
     assert_eq!(snapshot.current_bridge_session_id(), None);
+    let external = snapshot
+        .external_member
+        .as_ref()
+        .expect("peer-only external member should expose observation snapshot");
+    assert_eq!(
+        external.owner.agent_identity,
+        AgentIdentity::from("w-ext"),
+        "external observation is keyed by stable AgentIdentity"
+    );
+    assert_eq!(external.owner.mob_id, mob_id);
+    assert_eq!(
+        external.binding_mode,
+        crate::runtime::ExternalMemberBindingMode::PeerOnly
+    );
+    assert!(!external.bridge_session_present);
+    assert_eq!(
+        external.rebind,
+        crate::runtime::ExternalMemberRebindStatus::Unavailable {
+            reason: "missing bootstrap_token for supervisor rebind".to_string()
+        }
+    );
+    let serialized_external =
+        serde_json::to_value(external).expect("serialize external observation");
+    assert!(
+        serialized_external.get("peer_id").is_none(),
+        "external observation must not expose raw peer ids as public authority"
+    );
+    assert!(
+        serialized_external.get("address").is_none(),
+        "external observation must not expose transport addresses as public authority"
+    );
+    assert!(
+        serialized_external.get("bootstrap_token").is_none(),
+        "external observation must not expose bootstrap proofs"
+    );
+    assert!(
+        serialized_external.get("agent_runtime_id").is_none(),
+        "external observation must not expose raw runtime ids as public authority"
+    );
+    assert!(
+        serialized_external.get("fence_token").is_none(),
+        "external observation must not expose fence tokens as public authority"
+    );
 }
 
 #[tokio::test]
@@ -8139,6 +8182,30 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
             .as_deref()
             .is_some_and(|message| message.contains("normalization failed")),
         "overlay failure reason should surface as a broken-member error"
+    );
+    let external = snapshot
+        .external_member
+        .as_ref()
+        .expect("broken external member should still expose observation snapshot");
+    assert_eq!(
+        external.reachability,
+        crate::runtime::ExternalMemberReachability::Unavailable {
+            reason: snapshot.error.clone().expect("restore error")
+        }
+    );
+    assert!(matches!(
+        external.rebind,
+        crate::runtime::ExternalMemberRebindStatus::Failed { .. }
+    ));
+    assert_eq!(
+        external.forwarding.approvals.owner.agent_identity,
+        AgentIdentity::from("w-ext"),
+        "approval forwarding hook should be stable-identity owned"
+    );
+    assert_eq!(
+        external.forwarding.artifacts.owner.agent_identity,
+        AgentIdentity::from("w-ext"),
+        "artifact forwarding hook should be stable-identity owned"
     );
 
     let error = resumed
@@ -8370,6 +8437,15 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         crate::runtime::handle::MobMemberStatus::Active
     );
     assert_eq!(snapshot.current_bridge_session_id(), None);
+    let external_snapshot = snapshot
+        .external_member
+        .as_ref()
+        .expect("live peer-only external member should expose observation snapshot");
+    assert_eq!(
+        external_snapshot.rebind,
+        crate::runtime::ExternalMemberRebindStatus::Available,
+        "live peer-only member with bootstrap proof should be rebind-capable"
+    );
     assert!(
         external
             .trusted_peer_names()
@@ -8393,6 +8469,19 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         .await
         .expect("peer-only member status after respawn");
     assert_eq!(post_respawn.current_bridge_session_id(), None);
+    let post_external = post_respawn
+        .external_member
+        .as_ref()
+        .expect("external observation should survive respawn");
+    assert_eq!(
+        post_external.owner.agent_identity,
+        AgentIdentity::from("w-ext"),
+        "respawn must preserve stable AgentIdentity in external observation"
+    );
+    assert_eq!(
+        post_external.rebind,
+        crate::runtime::ExternalMemberRebindStatus::Available
+    );
 }
 
 #[tokio::test]

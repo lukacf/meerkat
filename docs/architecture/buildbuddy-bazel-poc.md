@@ -66,6 +66,8 @@ modes:
 - `edit-probes-warmed`: runs the same edit probes after prewarming the relevant
   lanes in the temporary worktree, separating first-touch materialization from
   steady-state edit feedback.
+- `prewarm-dev`: runs the shared dev prewarm profile.
+- `prewarm-ci`: runs the shared CI prewarm profile.
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
@@ -98,6 +100,8 @@ Representative measurements from the POC environment:
 | Prewarmed temp worktree support-local edit probe | `5.62s` wall |
 | Direct-label dev prewarm, first touch | `46.13s` wall |
 | Direct-label dev prewarm, warm | `4.62s` wall |
+| Direct-label CI prewarm, first touch | `37.01-37.05s` wall |
+| Direct-label CI prewarm, warm | `4.74-5.07s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |

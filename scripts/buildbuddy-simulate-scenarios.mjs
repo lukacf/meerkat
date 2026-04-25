@@ -14,6 +14,8 @@ Scenarios:
   support-file       Run exact selectors for a shared integration-test support file.
   edit-probes        Make real edits in a temporary worktree and time edit lanes.
   edit-probes-warmed Prewarm lanes in a temporary worktree before timing edits.
+  prewarm-dev        Run the shared dev-lane prewarm helper.
+  prewarm-ci         Run the shared CI-lane prewarm helper.
   multi-worktree     Create two temporary git worktrees and run parallel agents.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
@@ -260,6 +262,17 @@ async function multiWorktree(root) {
   }
 }
 
+async function prewarmProfile(root, profile) {
+  console.log(`\n== prewarm-${profile} ==`);
+  const result = await run("./scripts/buildbuddy-prewarm-lanes", [profile], {
+    cwd: root,
+    env: { RUST_LANE_ID_PREFIX: `scenario-prewarm-${profile}` },
+    label: `buildbuddy-prewarm-lanes ${profile}`,
+  });
+  printResult(result);
+  return result.code;
+}
+
 async function ciCold(root) {
   console.log("\n== ci-cold ==");
   const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-ci-"));
@@ -328,7 +341,19 @@ if (requested.includes("--help") || requested.includes("-h")) {
   process.exit(0);
 }
 const scenarios = requested.length === 0 || requested.includes("all")
-  ? ["warm-noop", "same-worktree", "same-command", "support-file", "edit-probes", "edit-probes-warmed", "multi-worktree", "ci-cold", "ci-parallel"]
+  ? [
+      "warm-noop",
+      "same-worktree",
+      "same-command",
+      "support-file",
+      "edit-probes",
+      "edit-probes-warmed",
+      "prewarm-dev",
+      "prewarm-ci",
+      "multi-worktree",
+      "ci-cold",
+      "ci-parallel",
+    ]
   : requested;
 
 const runners = new Map([
@@ -338,6 +363,8 @@ const runners = new Map([
   ["support-file", supportFile],
   ["edit-probes", editProbes],
   ["edit-probes-warmed", (root) => editProbes(root, { prewarm: true })],
+  ["prewarm-dev", (root) => prewarmProfile(root, "dev")],
+  ["prewarm-ci", (root) => prewarmProfile(root, "ci")],
   ["multi-worktree", multiWorktree],
   ["ci-cold", ciCold],
   ["ci-parallel", ciParallel],

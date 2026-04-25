@@ -2834,7 +2834,7 @@ mod tests {
             capabilities["result"]["features"]["secure_remote_rpc"],
             false
         );
-        assert_eq!(capabilities["result"]["features"]["approvals"], true);
+        assert_eq!(capabilities["result"]["features"]["approvals"], false);
         assert_eq!(health["result"]["status"], "ok");
     }
 

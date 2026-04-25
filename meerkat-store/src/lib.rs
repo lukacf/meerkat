@@ -9,6 +9,8 @@ pub mod tokio {
 }
 
 pub mod adapter;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod approval_file_store;
 pub mod artifact;
 pub mod blob;
 mod error;
@@ -30,6 +32,8 @@ pub mod memory;
 pub mod sqlite_store;
 
 pub use adapter::StoreAdapter;
+#[cfg(not(target_arch = "wasm32"))]
+pub use approval_file_store::FileApprovalStore;
 pub use artifact::MemoryArtifactStore;
 pub use blob::MemoryBlobStore;
 pub use error::StoreError;

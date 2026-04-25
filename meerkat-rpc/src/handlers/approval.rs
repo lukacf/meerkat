@@ -16,6 +16,7 @@ use crate::session_runtime::SessionRuntime;
 fn approval_error_to_response(id: Option<RpcId>, error_value: ApprovalError) -> RpcResponse {
     let code = match error_value {
         ApprovalError::NotFound { .. } => error::INVALID_PARAMS,
+        ApprovalError::Store(_) => error::INTERNAL_ERROR,
         ApprovalError::AlreadyDecided { .. }
         | ApprovalError::Expired { .. }
         | ApprovalError::InvalidDecision { .. }
@@ -53,8 +54,10 @@ pub async fn handle_list(
         },
         None => ApprovalListParams::default(),
     };
-    let approvals = runtime.approval_service().list(params.filter);
-    RpcResponse::success(id, ApprovalListResult { approvals })
+    match runtime.approval_service().list(params.filter) {
+        Ok(approvals) => RpcResponse::success(id, ApprovalListResult { approvals }),
+        Err(error_value) => approval_error_to_response(id, error_value),
+    }
 }
 
 pub async fn handle_get(

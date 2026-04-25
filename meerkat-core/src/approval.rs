@@ -253,18 +253,92 @@ pub enum ApprovalError {
     InvalidPrincipal,
     #[error(transparent)]
     InvalidMetadata(#[from] crate::SurfaceMetadataError),
+    #[error("approval store error: {0}")]
+    Store(String),
+}
+
+/// Durable approval store mechanics.
+///
+/// The service owns approval transitions; stores persist full records and do
+/// not decide status legality.
+pub trait ApprovalStore: Send + Sync {
+    fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError>;
+    fn put(&self, record: &ApprovalRecord) -> Result<(), ApprovalStoreError>;
+    fn is_persistent(&self) -> bool;
+}
+
+/// Approval store errors, erased at the service boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ApprovalStoreError {
+    #[error("{0}")]
+    Backend(String),
+}
+
+impl From<ApprovalStoreError> for ApprovalError {
+    fn from(value: ApprovalStoreError) -> Self {
+        Self::Store(value.to_string())
+    }
+}
+
+/// In-memory approval store for tests and process-local runtimes.
+#[derive(Debug, Default)]
+pub struct InMemoryApprovalStore {
+    records: RwLock<BTreeMap<ApprovalId, ApprovalRecord>>,
+}
+
+impl InMemoryApprovalStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ApprovalStore for InMemoryApprovalStore {
+    fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
+        Ok(self.records.read().values().cloned().collect())
+    }
+
+    fn put(&self, record: &ApprovalRecord) -> Result<(), ApprovalStoreError> {
+        self.records
+            .write()
+            .insert(record.approval_id.clone(), record.clone());
+        Ok(())
+    }
+
+    fn is_persistent(&self) -> bool {
+        false
+    }
 }
 
 /// In-process approval service.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct ApprovalService {
     records: Arc<RwLock<BTreeMap<ApprovalId, ApprovalRecord>>>,
+    store: Arc<dyn ApprovalStore>,
 }
 
 impl ApprovalService {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_store(Arc::new(InMemoryApprovalStore::new()))
+            .expect("in-memory approval store cannot fail to load")
+    }
+
+    pub fn with_store(store: Arc<dyn ApprovalStore>) -> Result<Self, ApprovalError> {
+        let records = store
+            .load_all()?
+            .into_iter()
+            .map(|record| (record.approval_id.clone(), record))
+            .collect();
+        Ok(Self {
+            records: Arc::new(RwLock::new(records)),
+            store,
+        })
+    }
+
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        self.store.is_persistent()
     }
 
     pub fn request(&self, request: ApprovalRequest) -> Result<ApprovalRecord, ApprovalError> {
@@ -293,6 +367,7 @@ impl ApprovalService {
             request_provenance: request.request_provenance,
             decision: None,
         };
+        self.store.put(&record)?;
         self.records
             .write()
             .insert(record.approval_id.clone(), record.clone());
@@ -300,7 +375,7 @@ impl ApprovalService {
     }
 
     pub fn get(&self, approval_id: &ApprovalId) -> Result<ApprovalRecord, ApprovalError> {
-        self.refresh_expiry(approval_id);
+        self.refresh_expiry(approval_id)?;
         self.records
             .read()
             .get(approval_id)
@@ -310,15 +385,15 @@ impl ApprovalService {
             })
     }
 
-    #[must_use]
-    pub fn list(&self, filter: ApprovalListFilter) -> Vec<ApprovalRecord> {
-        self.refresh_all_expiry();
-        self.records
+    pub fn list(&self, filter: ApprovalListFilter) -> Result<Vec<ApprovalRecord>, ApprovalError> {
+        self.refresh_all_expiry()?;
+        Ok(self
+            .records
             .read()
             .values()
             .filter(|record| filter.status.is_none_or(|status| record.status == status))
             .cloned()
-            .collect()
+            .collect())
     }
 
     pub fn decide(
@@ -379,10 +454,11 @@ impl ApprovalService {
             reason,
             provenance,
         });
+        self.store.put(record)?;
         Ok(record.clone())
     }
 
-    fn refresh_expiry(&self, approval_id: &ApprovalId) {
+    fn refresh_expiry(&self, approval_id: &ApprovalId) -> Result<(), ApprovalError> {
         let now = Utc::now();
         let mut records = self.records.write();
         if let Some(record) = records.get_mut(approval_id)
@@ -393,14 +469,17 @@ impl ApprovalService {
         {
             record.status = ApprovalStatus::Expired;
             record.updated_at = now;
+            self.store.put(record)?;
         }
+        Ok(())
     }
 
-    fn refresh_all_expiry(&self) {
+    fn refresh_all_expiry(&self) -> Result<(), ApprovalError> {
         let ids = self.records.read().keys().cloned().collect::<Vec<_>>();
         for id in ids {
-            self.refresh_expiry(&id);
+            self.refresh_expiry(&id)?;
         }
+        Ok(())
     }
 }
 

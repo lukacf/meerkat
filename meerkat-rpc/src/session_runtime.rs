@@ -652,6 +652,36 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
+fn approval_service_from_persistence(
+    persistence: &PersistenceBundle,
+) -> meerkat_core::ApprovalService {
+    let Some(store_path) = persistence.store_path() else {
+        return meerkat_core::ApprovalService::new();
+    };
+    let path = store_path.join("approvals.json");
+    match meerkat_store::FileApprovalStore::open(&path) {
+        Ok(store) => match meerkat_core::ApprovalService::with_store(Arc::new(store)) {
+            Ok(service) => service,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to load approval records; falling back to process-local approvals"
+                );
+                meerkat_core::ApprovalService::new()
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "failed to open approval store; falling back to process-local approvals"
+            );
+            meerkat_core::ApprovalService::new()
+        }
+    }
+}
+
 impl SessionRuntime {
     fn turn_keep_alive_policy(
         requested: Option<bool>,
@@ -769,6 +799,7 @@ impl SessionRuntime {
                 schedule_service.clone(),
             ))),
         );
+        let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         let service = Arc::new(service);
@@ -813,7 +844,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
-            approval_service: meerkat_core::ApprovalService::new(),
+            approval_service,
         }
     }
 
@@ -841,6 +872,7 @@ impl SessionRuntime {
                 schedule_service.clone(),
             ))),
         );
+        let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         let service = Arc::new(service);
@@ -885,7 +917,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
-            approval_service: meerkat_core::ApprovalService::new(),
+            approval_service,
         }
     }
 
@@ -5428,6 +5460,79 @@ mod tests {
             meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         )
+    }
+
+    fn approval_request() -> meerkat_core::ApprovalRequest {
+        meerkat_core::ApprovalRequest {
+            requester: meerkat_core::ApprovalPrincipalId::new("human:alice").expect("principal"),
+            owner: meerkat_core::ApprovalOwnerRef::Runtime,
+            resource: meerkat_core::ApprovalResourceRef {
+                kind: meerkat_core::ApprovalResourceKind::Runtime,
+                id: "local".to_string(),
+            },
+            proposed_action: meerkat_core::ApprovalProposedAction {
+                kind: meerkat_core::ApprovalActionKind::Other,
+                summary: "manual gate".to_string(),
+                body: None,
+            },
+            risk: meerkat_core::ApprovalRisk::Medium,
+            request_body: None,
+            allowed_decisions: std::collections::BTreeSet::from([
+                meerkat_core::ApprovalDecision::Approve,
+                meerkat_core::ApprovalDecision::Deny,
+            ]),
+            expires_at: None,
+            metadata: meerkat_core::SurfaceMetadata::default(),
+            request_provenance: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_service_reopens_from_realm_persistence_store_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_manifest, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("open persistence");
+        let runtime = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-a")),
+            Config::default(),
+            10,
+            bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(runtime.approval_service().is_persistent());
+        let record = runtime
+            .approval_service()
+            .request(approval_request())
+            .expect("request approval");
+
+        let (_manifest, reopened_bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("reopen persistence");
+        let reopened = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-b")),
+            Config::default(),
+            10,
+            reopened_bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(reopened.approval_service().is_persistent());
+        let loaded = reopened
+            .approval_service()
+            .get(&record.approval_id)
+            .expect("load approval after runtime reconstruction");
+        assert_eq!(loaded.approval_id, record.approval_id);
+        assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
     }
 
     fn self_hosted_test_config(server: &str, inline_video: bool) -> Config {

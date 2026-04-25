@@ -86,7 +86,7 @@ pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
     ApprovalListFilter, ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction,
     ApprovalRecord, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk,
-    ApprovalService, ApprovalStatus,
+    ApprovalService, ApprovalStatus, ApprovalStore, ApprovalStoreError, InMemoryApprovalStore,
 };
 pub use artifact::{
     ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,

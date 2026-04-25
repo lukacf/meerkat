@@ -4,8 +4,8 @@
 //! using Nushell as the backend.
 
 use async_trait::async_trait;
-use meerkat_core::ToolDef;
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
+use meerkat_core::{ExecutionPlacement, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -252,14 +252,17 @@ impl ShellTool {
         let mut cmd = Command::new(&shell_path);
         cmd.arg("-c").arg(command);
 
-        // Set working directory — fall back to cwd if project_root is empty.
+        // Set working directory and capture it as placement metadata. The path
+        // is mechanical context only; it is not operation identity.
         let effective_dir = if let Some(dir) = working_dir {
             dir.to_path_buf()
-        } else if self.config.project_root.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         } else {
-            self.config.project_root.clone()
+            self.config.default_working_dir_async().await?
         };
+        let placement = self
+            .config
+            .execution_placement_for_working_dir_async(&effective_dir)
+            .await?;
         cmd.current_dir(&effective_dir);
         cmd.env("PWD", &effective_dir);
 
@@ -335,6 +338,7 @@ impl ShellTool {
             duration_secs,
             stdout_lossy,
             stderr_lossy,
+            placement: Some(placement),
         })
     }
 }
@@ -362,6 +366,9 @@ pub struct ShellOutput {
     /// True if stderr contained invalid UTF-8 bytes that were replaced
     #[serde(default)]
     pub stderr_lossy: bool,
+    /// Execution placement metadata for this shell command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ExecutionPlacement>,
 }
 
 /// Input arguments for the shell tool
@@ -1035,6 +1042,7 @@ mod tests {
             duration_secs: 1.234,
             stdout_lossy: false,
             stderr_lossy: false,
+            placement: None,
         };
 
         let json = serde_json::to_string(&output).unwrap();
@@ -1047,6 +1055,7 @@ mod tests {
         assert!((parsed.duration_secs - output.duration_secs).abs() < f64::EPSILON);
         assert_eq!(parsed.stdout_lossy, output.stdout_lossy);
         assert_eq!(parsed.stderr_lossy, output.stderr_lossy);
+        assert_eq!(parsed.placement, None);
     }
 
     #[test]
@@ -1059,6 +1068,7 @@ mod tests {
             duration_secs: 30.0,
             stdout_lossy: false,
             stderr_lossy: false,
+            placement: None,
         };
 
         let json_value = serde_json::to_value(&output).unwrap();

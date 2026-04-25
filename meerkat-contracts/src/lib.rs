@@ -25,6 +25,7 @@ pub use capability::{
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use event_catalog::KNOWN_AGENT_EVENT_TYPES;
+pub use meerkat_core::{ExecutionPlacement, ExecutionPlacementIdentity};
 pub use protocol::Protocol;
 pub use rest_catalog::{
     RestOperationDescriptor, RestPathDescriptor, rest_documented_paths, rest_path_catalog,

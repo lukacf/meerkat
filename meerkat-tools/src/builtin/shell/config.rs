@@ -4,8 +4,8 @@
 //! and [`ShellError`] for shell-related errors.
 
 use super::security::SecurityEngine;
-use meerkat_core::ShellDefaults;
 use meerkat_core::types::SecurityMode;
+use meerkat_core::{ExecutionPlacement, ShellDefaults};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -43,6 +43,10 @@ pub enum ShellError {
     /// Background execution not configured
     #[error("Background execution not configured")]
     BackgroundNotConfigured,
+
+    /// Execution placement metadata could not be represented safely
+    #[error("Invalid placement metadata: {0}")]
+    InvalidPlacement(String),
 
     /// IO error during shell operations
     #[error("IO error: {0}")]
@@ -285,6 +289,44 @@ impl ShellConfig {
         }
 
         Ok(canonical)
+    }
+
+    /// Resolve the default working root used when a shell call omits
+    /// `working_dir`.
+    pub async fn default_working_dir_async(&self) -> Result<PathBuf, ShellError> {
+        let root = if self.project_root.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            self.project_root.clone()
+        };
+
+        tokio::fs::canonicalize(&root)
+            .await
+            .map_err(|_| ShellError::WorkingDirNotFound(root.display().to_string()))
+    }
+
+    /// Build observable execution-placement metadata for an already resolved
+    /// shell working root.
+    ///
+    /// This does not make placement authoritative. It records the mechanics
+    /// established by shell validation so downstream surfaces do not have to
+    /// infer execution context from transcript text.
+    pub async fn execution_placement_for_working_dir_async(
+        &self,
+        working_root: &Path,
+    ) -> Result<ExecutionPlacement, ShellError> {
+        let mut allowed_roots = Vec::new();
+        if self.restrict_to_project {
+            allowed_roots.push(self.default_working_dir_async().await?);
+        }
+
+        ExecutionPlacement::new(
+            None::<String>,
+            Some(working_root.to_path_buf()),
+            allowed_roots,
+            None::<String>,
+        )
+        .map_err(|error| ShellError::InvalidPlacement(error.to_string()))
     }
 
     /// Resolve the shell executable path using config and environment (sync).
@@ -651,6 +693,70 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[tokio::test]
+    async fn test_shell_config_execution_placement_records_bounded_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+        let subdir = project_root.join("src");
+        tokio::fs::create_dir(&subdir).await.unwrap();
+
+        let config = ShellConfig::with_project_root(project_root.clone());
+        let working_root = config
+            .validate_working_dir_async(Path::new("src"))
+            .await
+            .unwrap();
+        let placement = config
+            .execution_placement_for_working_dir_async(&working_root)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            placement.working_root.as_deref(),
+            Some(working_root.as_path())
+        );
+        assert_eq!(
+            placement.allowed_roots,
+            vec![project_root.canonicalize().unwrap()]
+        );
+        assert_eq!(placement.identity().host_id, None);
+        assert_eq!(placement.identity().worktree_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_shell_config_execution_placement_rejects_spoofed_relative_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let result = config
+            .execution_placement_for_working_dir_async(Path::new("relative"))
+            .await;
+
+        assert!(matches!(result, Err(ShellError::InvalidPlacement(_))));
+    }
+
+    #[tokio::test]
+    async fn test_shell_config_unrestricted_placement_does_not_spoof_project_bound() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+        let outside_root = TempDir::new().unwrap();
+        let mut config = ShellConfig::with_project_root(project_root);
+        config.restrict_to_project = false;
+
+        let working_root = outside_root.path().canonicalize().unwrap();
+        let placement = config
+            .execution_placement_for_working_dir_async(&working_root)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            placement.working_root.as_deref(),
+            Some(working_root.as_path())
+        );
+        assert!(
+            placement.allowed_roots.is_empty(),
+            "unrestricted shell placement must not claim a project-root bound"
+        );
+    }
+
     // ==================== ShellError Tests ====================
 
     #[test]
@@ -681,6 +787,9 @@ mod tests {
 
         let err = ShellError::BackgroundNotConfigured;
         assert_eq!(err.to_string(), "Background execution not configured");
+
+        let err = ShellError::InvalidPlacement("bad root".to_string());
+        assert_eq!(err.to_string(), "Invalid placement metadata: bad root");
     }
 
     #[test]
@@ -705,6 +814,9 @@ mod tests {
 
         let err = ShellError::BackgroundNotConfigured;
         assert!(matches!(err, ShellError::BackgroundNotConfigured));
+
+        let err = ShellError::InvalidPlacement("bad root".to_string());
+        assert!(matches!(err, ShellError::InvalidPlacement(_)));
 
         let err = ShellError::Io(std::io::Error::other("io error"));
         assert!(matches!(err, ShellError::Io(_)));

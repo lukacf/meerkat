@@ -361,6 +361,15 @@ impl JobManager {
         } else {
             None
         };
+        let effective_dir = if let Some(dir) = resolved_dir.as_ref() {
+            dir.clone()
+        } else {
+            self.config.default_working_dir_async().await?
+        };
+        let placement = self
+            .config
+            .execution_placement_for_working_dir_async(&effective_dir)
+            .await?;
 
         let job_id = JobId::new();
         let started_at_unix = SystemTime::now()
@@ -385,6 +394,7 @@ impl JobManager {
             id: job_id.clone(),
             command: command.to_string(),
             working_dir: resolved_dir.as_ref().map(|path| path.display().to_string()),
+            placement: Some(placement),
             timeout_secs,
             started_at_unix,
             status: JobStatus::Running { started_at_unix },
@@ -475,6 +485,15 @@ impl JobManager {
         } else {
             None
         };
+        let effective_dir = if let Some(dir) = resolved_dir.as_ref() {
+            dir.clone()
+        } else {
+            self.config.default_working_dir_async().await?
+        };
+        let placement = self
+            .config
+            .execution_placement_for_working_dir_async(&effective_dir)
+            .await?;
 
         // Find shell executable (fail fast if not installed)
         let shell_path = self.resolved_shell_path().await?;
@@ -505,6 +524,7 @@ impl JobManager {
             id: job_id.clone(),
             command: command.to_string(),
             working_dir: resolved_dir.as_ref().map(|p| p.display().to_string()),
+            placement: Some(placement),
             timeout_secs,
             started_at_unix,
             status: JobStatus::Running { started_at_unix },
@@ -514,13 +534,10 @@ impl JobManager {
         let mut cmd = Command::new(&shell_path);
         cmd.arg("-c").arg(command);
 
-        // Set working directory — fall back to cwd if project_root is empty.
-        let work_dir = resolved_dir.as_ref().unwrap_or(&self.config.project_root);
-        let work_dir = if work_dir.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        } else {
-            work_dir.clone()
-        };
+        // Set working directory. Placement metadata records this path as
+        // mechanical context only; job identity remains the app-facing job id
+        // and canonical operation id.
+        let work_dir = effective_dir;
         cmd.current_dir(&work_dir);
         cmd.env("PWD", &work_dir);
 
@@ -1188,7 +1205,7 @@ impl meerkat_core::completion_feed::CompletionEnrichmentProvider for JobManager 
 mod tests {
     use super::*;
     use crate::builtin::shell::security::SecurityMode;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn bound_job_manager(config: ShellConfig) -> JobManager {
@@ -1267,6 +1284,7 @@ mod tests {
                 id: JobId::new(),
                 command: "sleep 30".to_string(),
                 working_dir: None,
+                placement: None,
                 timeout_secs: 30,
                 started_at_unix: 123,
                 status: JobStatus::TimedOut {
@@ -1312,6 +1330,37 @@ mod tests {
                 .status,
             OperationStatus::Running
         );
+    }
+
+    #[tokio::test]
+    async fn synthetic_running_job_records_execution_placement_without_identity_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+        let subdir = project_root.join("worker");
+        tokio::fs::create_dir(&subdir).await.unwrap();
+        let manager = bound_job_manager(ShellConfig::with_project_root(project_root.clone()));
+
+        let job_id = manager
+            .register_synthetic_running_job(
+                "shell:synthetic-placement",
+                Some(Path::new("worker")),
+                30,
+            )
+            .await
+            .expect("synthetic running job should register");
+        let job = manager.get_status(&job_id).await.expect("job status");
+        let placement = job.placement.expect("placement metadata");
+
+        assert_eq!(
+            placement.working_root.as_deref(),
+            Some(subdir.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(
+            placement.allowed_roots,
+            vec![project_root.canonicalize().unwrap()]
+        );
+        assert_eq!(placement.identity().host_id, None);
+        assert_eq!(placement.identity().worktree_id, None);
     }
 
     // ==================== Spawn Job Tests ====================
@@ -1472,6 +1521,7 @@ mod tests {
                 id: job_id.clone(),
                 command: "echo done".to_string(),
                 working_dir: None,
+                placement: None,
                 timeout_secs: 10,
                 started_at_unix,
                 status: JobStatus::Completed {

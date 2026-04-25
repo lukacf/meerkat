@@ -2,6 +2,7 @@
 //!
 //! This module defines the app-facing types for shell job management including
 //! [`JobId`], [`JobStatus`], [`BackgroundJob`], and [`JobSummary`].
+use meerkat_core::ExecutionPlacement;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for background jobs
@@ -100,6 +101,9 @@ pub struct BackgroundJob {
     pub command: String,
     /// Working directory for the command (None means current directory)
     pub working_dir: Option<String>,
+    /// Execution placement metadata for the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ExecutionPlacement>,
     /// Timeout in seconds for the command
     pub timeout_secs: u64,
     /// Unix timestamp when the job started (preserved across status transitions)
@@ -326,6 +330,7 @@ mod tests {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
             command: "cargo build".to_string(),
             working_dir: Some("/project".to_string()),
+            placement: None,
             timeout_secs: 300,
             started_at_unix: 1706123456,
             status: JobStatus::Running {
@@ -347,6 +352,7 @@ mod tests {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
             command: "cargo test".to_string(),
             working_dir: None,
+            placement: None,
             timeout_secs: 60,
             started_at_unix: 1706123400,
             status: JobStatus::Completed {
@@ -363,6 +369,7 @@ mod tests {
         assert_eq!(parsed.id, job.id);
         assert_eq!(parsed.command, job.command);
         assert_eq!(parsed.working_dir, job.working_dir);
+        assert_eq!(parsed.placement, None);
         assert_eq!(parsed.timeout_secs, job.timeout_secs);
         assert_eq!(parsed.started_at_unix, job.started_at_unix);
 

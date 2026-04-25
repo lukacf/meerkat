@@ -48,6 +48,7 @@ pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_correlation;
 pub mod peer_meta;
+pub mod placement;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
 pub mod provider;
@@ -96,6 +97,7 @@ pub use peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };
 pub use peer_meta::PeerMeta;
+pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 
 pub use completion_feed::{
     CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,

@@ -20,8 +20,8 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
 use meerkat_machine_schema::identity::{
-    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, PhaseId,
-    SignalVariantId, TransitionId,
+    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, NamedTypeId,
+    PhaseId, SignalVariantId, TransitionId,
 };
 
 fn input(slug: &str) -> InputVariantId {
@@ -56,6 +56,20 @@ fn enum_variant(slug: &str) -> EnumVariantId {
     EnumVariantId::parse(slug).expect("valid enum variant slug")
 }
 
+fn named_string(type_name: &str, value: &str) -> KernelValue {
+    KernelValue::Named {
+        type_name: NamedTypeId::parse(type_name).expect("valid named type slug"),
+        value: Box::new(KernelValue::String(value.into())),
+    }
+}
+
+fn named_u64(type_name: &str, value: u64) -> KernelValue {
+    KernelValue::Named {
+        type_name: NamedTypeId::parse(type_name).expect("valid named type slug"),
+        value: Box::new(KernelValue::U64(value)),
+    }
+}
+
 #[test]
 fn applying_typed_input_yields_typed_transition_outcome() {
     let kernel = GeneratedMachineKernel::new(meerkat_machine());
@@ -86,7 +100,7 @@ fn applying_typed_input_yields_typed_transition_outcome() {
                 variant: input("RegisterSession"),
                 fields: BTreeMap::from([(
                     field("session_id"),
-                    KernelValue::String("sess-1".into()),
+                    named_string("SessionId", "sess-1"),
                 )]),
             },
         )
@@ -96,7 +110,7 @@ fn applying_typed_input_yields_typed_transition_outcome() {
         register.next_state.fields.get(&field("session_id")),
         Some(&KernelValue::Map(BTreeMap::from([(
             KernelValue::String("value".into()),
-            KernelValue::String("sess-1".into()),
+            named_string("SessionId", "sess-1"),
         )])))
     );
     for key in register.next_state.fields.keys() {
@@ -118,18 +132,18 @@ fn mob_spawn_produces_typed_effect_variants() {
                 fields: BTreeMap::from([
                     (
                         field("agent_identity"),
-                        KernelValue::String("agent.worker".into()),
+                        named_string("AgentIdentity", "agent.worker"),
                     ),
                     (
                         field("agent_runtime_id"),
-                        KernelValue::String("runtime.worker.1".into()),
+                        named_string("AgentRuntimeId", "runtime.worker.1"),
                     ),
-                    (field("fence_token"), KernelValue::U64(1)),
-                    (field("generation"), KernelValue::U64(1)),
+                    (field("fence_token"), named_u64("FenceToken", 1)),
+                    (field("generation"), named_u64("Generation", 1)),
                     (field("external_addressable"), KernelValue::Bool(false)),
                     (
                         field("bridge_session_id"),
-                        KernelValue::String("bridge.worker.1".into()),
+                        named_string("SessionId", "bridge.worker.1"),
                     ),
                     (field("replacing"), KernelValue::None),
                 ]),
@@ -209,7 +223,7 @@ fn no_matching_transition_refusal_carries_typed_route_variant() {
                 variant: input("RegisterSession"),
                 fields: BTreeMap::from([(
                     field("session_id"),
-                    KernelValue::String("sess-early".into()),
+                    named_string("SessionId", "sess-early"),
                 )]),
             },
         )

@@ -22674,14 +22674,14 @@ fn mob_modeled_default_kernel_value(
         meerkat_machine_schema::TypeRef::String => {
             meerkat_machine_kernels::test_oracle::KernelValue::String(String::new())
         }
-        meerkat_machine_schema::TypeRef::Named(name)
-            if matches!(name.as_str(), "FenceToken" | "Generation") =>
-        {
-            meerkat_machine_kernels::test_oracle::KernelValue::U64(0)
-        }
-        meerkat_machine_schema::TypeRef::Named(_) => {
-            meerkat_machine_kernels::test_oracle::KernelValue::String(String::new())
-        }
+        meerkat_machine_schema::TypeRef::Named(name) => mob_modeled_named_value(
+            name,
+            if mob_modeled_named_type_is_u64(name.as_str()) {
+                meerkat_machine_kernels::test_oracle::KernelValue::U64(0)
+            } else {
+                meerkat_machine_kernels::test_oracle::KernelValue::String(String::new())
+            },
+        ),
         meerkat_machine_schema::TypeRef::Enum(name) => {
             meerkat_machine_kernels::test_oracle::KernelValue::NamedVariant {
                 enum_name: name.clone(),
@@ -22701,6 +22701,129 @@ fn mob_modeled_default_kernel_value(
         meerkat_machine_schema::TypeRef::Map(_, _) => {
             meerkat_machine_kernels::test_oracle::KernelValue::Map(BTreeMap::new())
         }
+    }
+}
+
+fn mob_modeled_named_type_is_u64(name: &str) -> bool {
+    matches!(name, "FenceToken" | "Generation")
+}
+
+fn mob_modeled_named_value(
+    type_name: &meerkat_machine_schema::identity::NamedTypeId,
+    value: meerkat_machine_kernels::test_oracle::KernelValue,
+) -> meerkat_machine_kernels::test_oracle::KernelValue {
+    if matches!(
+        &value,
+        meerkat_machine_kernels::test_oracle::KernelValue::Named {
+            type_name: existing,
+            ..
+        } if existing == type_name
+    ) {
+        return value;
+    }
+
+    let value = if mob_modeled_named_type_is_u64(type_name.as_str()) {
+        match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::U64(value) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::U64(value)
+            }
+            meerkat_machine_kernels::test_oracle::KernelValue::String(value) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::U64(
+                    serde_json::from_str::<u64>(&value)
+                        .ok()
+                        .or_else(|| value.parse::<u64>().ok())
+                        .unwrap_or_default(),
+                )
+            }
+            _ => meerkat_machine_kernels::test_oracle::KernelValue::U64(0),
+        }
+    } else {
+        match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::String(value) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::String(value)
+            }
+            meerkat_machine_kernels::test_oracle::KernelValue::U64(value) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::String(value.to_string())
+            }
+            other => meerkat_machine_kernels::test_oracle::KernelValue::String(
+                serde_json::to_string(&mob_modeled_json_from_kernel_value(&other))
+                    .unwrap_or_default(),
+            ),
+        }
+    };
+
+    meerkat_machine_kernels::test_oracle::KernelValue::Named {
+        type_name: type_name.clone(),
+        value: Box::new(value),
+    }
+}
+
+fn mob_modeled_coerce_value_to_type(
+    ty: &meerkat_machine_schema::TypeRef,
+    value: meerkat_machine_kernels::test_oracle::KernelValue,
+) -> meerkat_machine_kernels::test_oracle::KernelValue {
+    match ty {
+        meerkat_machine_schema::TypeRef::Named(name) => mob_modeled_named_value(name, value),
+        meerkat_machine_schema::TypeRef::Option(inner) => match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::None => {
+                meerkat_machine_kernels::test_oracle::KernelValue::None
+            }
+            meerkat_machine_kernels::test_oracle::KernelValue::Map(mut entries)
+                if entries.len() == 1
+                    && entries.contains_key(
+                        &meerkat_machine_kernels::test_oracle::KernelValue::String(
+                            "value".to_string(),
+                        ),
+                    ) =>
+            {
+                let key =
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("value".to_string());
+                let inner_value = entries
+                    .remove(&key)
+                    .unwrap_or(meerkat_machine_kernels::test_oracle::KernelValue::None);
+                mob_modeled_option_some(mob_modeled_coerce_value_to_type(inner, inner_value))
+            }
+            other => mob_modeled_option_some(mob_modeled_coerce_value_to_type(inner, other)),
+        },
+        meerkat_machine_schema::TypeRef::Set(inner) => match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::Set(items) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::Set(
+                    items
+                        .into_iter()
+                        .map(|item| mob_modeled_coerce_value_to_type(inner, item))
+                        .collect(),
+                )
+            }
+            other => other,
+        },
+        meerkat_machine_schema::TypeRef::Seq(inner) => match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::Seq(items) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::Seq(
+                    items
+                        .into_iter()
+                        .map(|item| mob_modeled_coerce_value_to_type(inner, item))
+                        .collect(),
+                )
+            }
+            other => other,
+        },
+        meerkat_machine_schema::TypeRef::Map(key_ty, value_ty) => match value {
+            meerkat_machine_kernels::test_oracle::KernelValue::Map(entries) => {
+                meerkat_machine_kernels::test_oracle::KernelValue::Map(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                mob_modeled_coerce_value_to_type(key_ty, key),
+                                mob_modeled_coerce_value_to_type(value_ty, value),
+                            )
+                        })
+                        .collect(),
+                )
+            }
+            other => other,
+        },
+        _ => value,
     }
 }
 
@@ -22741,16 +22864,24 @@ fn mob_modeled_kernel_value_from_json(
         meerkat_machine_schema::TypeRef::Named(name)
             if matches!(name.as_str(), "FenceToken" | "Generation") =>
         {
-            meerkat_machine_kernels::test_oracle::KernelValue::U64(value.as_u64().unwrap_or(0))
+            meerkat_machine_kernels::test_oracle::KernelValue::Named {
+                type_name: name.clone(),
+                value: Box::new(meerkat_machine_kernels::test_oracle::KernelValue::U64(
+                    value.as_u64().unwrap_or(0),
+                )),
+            }
         }
-        meerkat_machine_schema::TypeRef::Named(_) => {
+        meerkat_machine_schema::TypeRef::Named(name) => {
             let normalized = value
                 .as_str()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .unwrap_or_else(|| value.clone());
-            meerkat_machine_kernels::test_oracle::KernelValue::String(
-                serde_json::to_string(&normalized).unwrap_or_else(|_| "null".into()),
-            )
+            meerkat_machine_kernels::test_oracle::KernelValue::Named {
+                type_name: name.clone(),
+                value: Box::new(meerkat_machine_kernels::test_oracle::KernelValue::String(
+                    serde_json::to_string(&normalized).unwrap_or_else(|_| "null".into()),
+                )),
+            }
         }
         meerkat_machine_schema::TypeRef::Enum(name) => {
             meerkat_machine_kernels::test_oracle::KernelValue::NamedVariant {
@@ -22832,6 +22963,9 @@ fn mob_modeled_json_from_kernel_value(
         }
         meerkat_machine_kernels::test_oracle::KernelValue::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        meerkat_machine_kernels::test_oracle::KernelValue::Named { value, .. } => {
+            mob_modeled_json_from_kernel_value(value)
         }
         meerkat_machine_kernels::test_oracle::KernelValue::NamedVariant { variant, .. } => {
             serde_json::Value::String(variant.as_str().to_string())
@@ -22974,7 +23108,10 @@ fn mob_modeled_kernel_state(
             .get(field.name.as_str())
             .map(|raw| mob_modeled_kernel_value_from_raw(&field.ty, raw))
             .unwrap_or_else(|| mob_modeled_default_kernel_value(&field.ty));
-        fields.insert(field.name.clone(), value);
+        fields.insert(
+            field.name.clone(),
+            mob_modeled_coerce_value_to_type(&field.ty, value),
+        );
     }
 
     meerkat_machine_kernels::test_oracle::KernelState {
@@ -23060,7 +23197,10 @@ fn mob_modeled_kernel_input(
             "work_id" => mob_modeled_named_string("\"<work-id>\"".to_string()),
             _ => mob_modeled_default_kernel_value(&field.ty),
         };
-        fields.insert(field.name.clone(), value);
+        fields.insert(
+            field.name.clone(),
+            mob_modeled_coerce_value_to_type(&field.ty, value),
+        );
     }
 
     Ok(meerkat_machine_kernels::test_oracle::KernelInput { variant, fields })

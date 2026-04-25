@@ -7,8 +7,8 @@ use std::fs;
 use super::*;
 #[cfg(feature = "machine-authority")]
 use meerkat_machine_schema::{
-    EnumSchema, InitSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema,
-    VariantSchema,
+    EnumSchema, InitSchema, MachineSchema, RustBinding, SemanticCoverageEntry, StateSchema,
+    TransitionSchema, VariantSchema,
 };
 use tempfile::tempdir;
 
@@ -46,6 +46,31 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let mob = owner_test_specs_for_machine("mob_machine");
     assert_eq!(mob.len(), 1);
     assert!(mob.iter().all(|spec| spec.package == "meerkat-mob"));
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn semantic_coverage_rejects_all_anchor_all_scenario_entries() {
+    let anchors = BTreeSet::from(["runtime", "schema"]);
+    let scenarios = BTreeSet::from(["happy", "failure"]);
+    let err = validate_semantic_entries(
+        "machine TestMachine",
+        "transition",
+        &["Apply".to_string()],
+        &[SemanticCoverageEntry {
+            name: "Apply".to_string(),
+            anchor_ids: vec!["runtime".to_string(), "schema".to_string()],
+            scenario_ids: vec!["happy".to_string(), "failure".to_string()],
+        }],
+        &anchors,
+        &scenarios,
+    )
+    .expect_err("all-anchor/all-scenario coverage should be rejected");
+
+    assert!(
+        err.to_string().contains("not tautological"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]

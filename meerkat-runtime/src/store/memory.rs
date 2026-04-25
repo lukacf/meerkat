@@ -122,11 +122,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<StoredInputState>,
-        _session_store_key: Option<meerkat_core::types::SessionId>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
-        // InMemoryRuntimeStore ignores session_store_key — there's no shared
-        // sessions table in memory. The session snapshot is stored in the
-        // runtime's own snapshot map.
         let mut inner = self.inner.lock().await;
 
         // All writes in one lock acquisition (atomic for in-memory)
@@ -134,6 +131,21 @@ impl RuntimeStore for InMemoryRuntimeStore {
 
         // Session delta
         if let Some(delta) = session_delta {
+            if let Some(session_store_key) = session_store_key {
+                let session: meerkat_core::Session =
+                    serde_json::from_slice(&delta.session_snapshot)
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if session.id() != &session_store_key {
+                    return Err(RuntimeStoreError::SessionKeyMismatch {
+                        expected: session_store_key,
+                        actual: session.id().clone(),
+                    });
+                }
+                inner.sessions.insert(
+                    session_store_key.to_string(),
+                    delta.session_snapshot.clone(),
+                );
+            }
             inner.sessions.insert(rid.clone(), delta.session_snapshot);
         }
 
@@ -393,6 +405,61 @@ mod tests {
             states[0].seed.phase,
             crate::input_state::InputLifecycleState::Queued
         );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_honors_session_store_key() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-key");
+        let session = meerkat_core::Session::new();
+        let session_id = session.id().clone();
+        let snapshot = serde_json::to_vec(&session).unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), 0),
+                vec![],
+                Some(session_id.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_session_snapshot(&LogicalRuntimeId::new(session_id.to_string()))
+                .await
+                .unwrap(),
+            Some(snapshot)
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_rejects_mismatched_session_store_key() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-key");
+        let session = meerkat_core::Session::new();
+        let wrong_session_id = meerkat_core::Session::new().id().clone();
+        let snapshot = serde_json::to_vec(&session).unwrap();
+
+        let err = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot,
+                }),
+                make_receipt(RunId::new(), 0),
+                vec![],
+                Some(wrong_session_id),
+            )
+            .await
+            .expect_err("mismatched session_store_key should fail");
+
+        assert!(matches!(err, RuntimeStoreError::SessionKeyMismatch { .. }));
+        assert!(store.load_session_snapshot(&rid).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -240,7 +240,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
             input_updates: Vec<StoredInputState>,
-            _session_store_key: Option<meerkat_core::types::SessionId>,
+            session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -252,6 +252,15 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
                             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
                     })
                     .transpose()?;
+                if let (Some(session), Some(session_store_key)) =
+                    (session_snapshot.as_ref(), session_store_key.as_ref())
+                    && session.id() != session_store_key
+                {
+                    return Err(RuntimeStoreError::SessionKeyMismatch {
+                        expected: session_store_key.clone(),
+                        actual: session.id().clone(),
+                    });
+                }
 
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -642,6 +651,44 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             );
             let states = store.load_input_states(&runtime_id).await.unwrap();
             assert_eq!(states.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn atomic_apply_rejects_mismatched_session_store_key() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let session = meerkat_core::Session::new();
+            let wrong_session_id = meerkat_core::Session::new().id().clone();
+            let snapshot = serde_json::to_vec(&session).unwrap();
+
+            let err = store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot,
+                    }),
+                    RunBoundaryReceipt {
+                        run_id: RunId(uuid::Uuid::new_v4()),
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: vec![],
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    vec![input_state()],
+                    Some(wrong_session_id),
+                )
+                .await
+                .expect_err("mismatched session_store_key should fail");
+
+            assert!(matches!(err, RuntimeStoreError::SessionKeyMismatch { .. }));
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         #[tokio::test]

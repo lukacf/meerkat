@@ -1213,6 +1213,30 @@ mod tests {
 
     #[test]
     fn dsl_dispatch_matches_kernel() {
+        fn named_string(
+            type_name: &str,
+            value: &str,
+        ) -> meerkat_machine_kernels::test_oracle::KernelValue {
+            meerkat_machine_kernels::test_oracle::KernelValue::Named {
+                type_name: meerkat_machine_schema::identity::NamedTypeId::parse(type_name).unwrap(),
+                value: Box::new(meerkat_machine_kernels::test_oracle::KernelValue::String(
+                    value.into(),
+                )),
+            }
+        }
+
+        fn named_u64(
+            type_name: &str,
+            value: u64,
+        ) -> meerkat_machine_kernels::test_oracle::KernelValue {
+            meerkat_machine_kernels::test_oracle::KernelValue::Named {
+                type_name: meerkat_machine_schema::identity::NamedTypeId::parse(type_name).unwrap(),
+                value: Box::new(meerkat_machine_kernels::test_oracle::KernelValue::U64(
+                    value,
+                )),
+            }
+        }
+
         let schema = MobMachineState::schema();
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
@@ -1237,20 +1261,14 @@ mod tests {
             fields: std::collections::BTreeMap::from([
                 (
                     fid("agent_identity"),
-                    meerkat_machine_kernels::test_oracle::KernelValue::String("agent-1".into()),
+                    named_string("AgentIdentity", "agent-1"),
                 ),
                 (
                     fid("agent_runtime_id"),
-                    meerkat_machine_kernels::test_oracle::KernelValue::String("rt-1".into()),
+                    named_string("AgentRuntimeId", "rt-1"),
                 ),
-                (
-                    fid("fence_token"),
-                    meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
-                ),
-                (
-                    fid("generation"),
-                    meerkat_machine_kernels::test_oracle::KernelValue::U64(0),
-                ),
+                (fid("fence_token"), named_u64("FenceToken", 1)),
+                (fid("generation"), named_u64("Generation", 0)),
                 (
                     fid("external_addressable"),
                     meerkat_machine_kernels::test_oracle::KernelValue::Bool(true),

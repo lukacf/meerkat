@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::SessionStore;
 use meerkat_core::BlobStore;
 use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_session::event_store::{EventStore, FileEventStore};
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_session::projector::SessionProjector;
 
 #[cfg(feature = "session-store")]
 use meerkat_runtime::{MeerkatMachine, RuntimeStore, RuntimeStoreError};
@@ -46,6 +50,10 @@ pub struct PersistenceBundle {
     #[cfg(feature = "session-store")]
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    event_store: Option<Arc<dyn EventStore>>,
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    projector: Option<Arc<SessionProjector>>,
     #[cfg(feature = "session-store")]
     runtime_adapter: Arc<MeerkatMachine>,
 }
@@ -88,6 +96,10 @@ impl PersistenceBundle {
             schedule_store,
             runtime_store,
             blob_store,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            event_store: None,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            projector: None,
             runtime_adapter,
         }
     }
@@ -111,6 +123,10 @@ impl PersistenceBundle {
             session_store,
             schedule_store,
             blob_store,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            event_store: None,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            projector: None,
         }
     }
 
@@ -118,6 +134,7 @@ impl PersistenceBundle {
     pub fn with_realm_context(
         manifest: RealmManifest,
         store_path: PathBuf,
+        projection_root: PathBuf,
         session_store: Arc<dyn SessionStore>,
         runtime_store: Option<Arc<dyn RuntimeStore>>,
         blob_store: Arc<dyn BlobStore>,
@@ -125,6 +142,13 @@ impl PersistenceBundle {
     ) -> Self {
         let mut bundle =
             Self::new_with_schedule_store(session_store, runtime_store, blob_store, schedule_store);
+        let event_store: Arc<dyn EventStore> = Arc::new(FileEventStore::new(
+            projection_root.join(".rkat").join("events"),
+        ));
+        bundle.event_store = Some(event_store);
+        bundle.projector = Some(Arc::new(SessionProjector::new(
+            projection_root.join(".rkat"),
+        )));
         bundle.manifest = Some(manifest);
         bundle.store_path = Some(store_path);
         bundle
@@ -160,6 +184,11 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn runtime_adapter(&self) -> Arc<MeerkatMachine> {
         self.runtime_adapter.clone()
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn event_projection(&self) -> Option<(Arc<dyn EventStore>, Arc<SessionProjector>)> {
+        Some((self.event_store.clone()?, self.projector.clone()?))
     }
 
     #[cfg(feature = "session-store")]
@@ -202,6 +231,7 @@ pub async fn open_realm_persistence_in(
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
+                paths.root,
                 session_store,
                 None,
                 blob_store,
@@ -223,6 +253,7 @@ pub async fn open_realm_persistence_in(
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
+                paths.root,
                 sqlite_store as Arc<dyn SessionStore>,
                 Some(runtime_store),
                 blob_store,
@@ -238,6 +269,7 @@ pub async fn open_realm_persistence_in(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_core::event::AgentEvent;
     use meerkat_core::{Session, SessionId, SessionMeta};
     use meerkat_runtime::store::RuntimeStoreError;
     #[cfg(feature = "memory-store")]
@@ -308,6 +340,38 @@ mod tests {
 
         assert!(bundle.runtime_store().is_some());
         assert!(bundle.blob_store().is_persistent());
+        let (event_store, projector) = bundle
+            .event_projection()
+            .expect("realm persistence must wire event projection");
+        let expected_paths = realm_paths_in(temp.path(), "sqlite-realm");
+        assert_eq!(projector.output_dir(), expected_paths.root.join(".rkat"));
+
+        let session_id = SessionId::new();
+        event_store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await?;
+        assert!(
+            expected_paths
+                .root
+                .join(".rkat")
+                .join("events")
+                .join(format!("{session_id}.jsonl"))
+                .exists(),
+            "realm append log must live under the .rkat subtree"
+        );
+        projector
+            .project(event_store.as_ref(), &session_id, 1)
+            .await?;
+        assert!(
+            expected_paths
+                .root
+                .join(".rkat")
+                .join("sessions")
+                .join(session_id.to_string())
+                .join("events.jsonl")
+                .exists(),
+            "realm event projection must materialize under the realm root"
+        );
         Ok(())
     }
 
@@ -327,6 +391,10 @@ mod tests {
 
         assert!(bundle.runtime_store().is_none());
         assert!(bundle.blob_store().is_persistent());
+        assert!(
+            bundle.event_projection().is_some(),
+            "jsonl realms still need the append-only event projection bridge"
+        );
         Ok(())
     }
 

@@ -19,6 +19,7 @@ use meerkat_core::types::SessionId;
 use std::path::{Path, PathBuf};
 
 /// Projector that materializes session files from the event store.
+#[derive(Debug, Clone)]
 pub struct SessionProjector {
     output_dir: PathBuf,
 }
@@ -43,7 +44,7 @@ impl SessionProjector {
             .join(session_id.to_string())
     }
 
-    async fn project_with_mode<E: EventStore>(
+    async fn project_with_mode<E: EventStore + ?Sized>(
         &self,
         event_store: &E,
         session_id: &SessionId,
@@ -124,7 +125,7 @@ impl SessionProjector {
     ///
     /// Reads events from `from_seq` onward and writes/appends to output files.
     /// Returns the sequence number of the last processed event.
-    pub async fn project<E: EventStore>(
+    pub async fn project<E: EventStore + ?Sized>(
         &self,
         event_store: &E,
         session_id: &SessionId,
@@ -160,7 +161,7 @@ impl SessionProjector {
     }
 
     /// Replay from checkpoint 0, producing identical output to a full projection.
-    pub async fn replay<E: EventStore>(
+    pub async fn replay<E: EventStore + ?Sized>(
         &self,
         event_store: &E,
         session_id: &SessionId,
@@ -186,7 +187,7 @@ impl SessionProjector {
     }
 
     /// Resume projection from the last checkpoint.
-    pub async fn resume<E: EventStore>(
+    pub async fn resume<E: EventStore + ?Sized>(
         &self,
         event_store: &E,
         session_id: &SessionId,

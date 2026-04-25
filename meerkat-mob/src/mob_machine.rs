@@ -230,6 +230,11 @@ pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
         "FlowTrackerCounts",
         "OrchestratorSnapshot",
         "LifecycleSnapshot",
+        "EnsureMember",
+        "Reconcile",
+        "ListMembersMatching",
+        "Wire",
+        "Unwire",
     ] {
         variants.shift_remove(excluded);
     }

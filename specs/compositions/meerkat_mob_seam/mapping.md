@@ -37,35 +37,36 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `meerkat_mob_seam`
 
 ### Code Anchors
-- `mob_meerkat_seam`: `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization
-- `meerkat_runtime_entry`: `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming seam traffic
+- `mob_meerkat_seam`: `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress
+- `meerkat_runtime_entry`: `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic
 
 ### Scenarios
 - `binding_round_trip` — mob runtime binding request becomes a Meerkat binding and feeds readiness back to Mob
 - `work_round_trip` — mob submits work into Meerkat and observes terminal work outcomes back across the seam
+- `peer-ingress-and-cancellation` — peer input admission and cancellation requests cross the MobMachine to MeerkatMachine seam with explicit lifecycle notice feedback
 
 ### Routes
 - `binding_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - anchors: `mob_meerkat_seam`
+  - scenarios: `binding_round_trip`
 - `work_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - anchors: `mob_meerkat_seam`
+  - scenarios: `binding_round_trip`, `work_round_trip`, `peer-ingress-and-cancellation`
 - `retire_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - anchors: `mob_meerkat_seam`
+  - scenarios: `binding_round_trip`, `peer-ingress-and-cancellation`
 - `destroy_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - anchors: `mob_meerkat_seam`
+  - scenarios: `binding_round_trip`, `peer-ingress-and-cancellation`
 - `runtime_bound_reaches_mob`
   - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - scenarios: `binding_round_trip`
 - `runtime_retired_reaches_mob`
   - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - scenarios: `binding_round_trip`
 - `runtime_destroyed_reaches_mob`
   - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`, `work_round_trip`
+  - scenarios: `binding_round_trip`
 
 ### Scheduler Rules
 - `(none)`

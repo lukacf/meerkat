@@ -831,8 +831,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface
-- `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution
+- `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, bind, rotate, release, spawn, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, task, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, wiring graph, and session binding
 
 ### Scenarios
 - `spawn-work-terminal` — member spawn, runtime-ready observation, work submission, and terminal work closure
-- `retire-respawn-destroy` — member retires, respawns with a new runtime incarnation, and destroys cleanly
+- `retire-respawn-destroy` — member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable
+- `wiring-and-session-binding` — wire and unwire members, bind rotate release member session, enforce known identity for bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
+- `task-flow-and-run-lifecycle` — task create or update pending/in progress/completed/cancelled, run flow, start flow, create run, start run, complete flow, finish run, mark completed, flow terminalized, and force cancel running work
+- `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, task, terminal, and wiring notices
+- `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
+- `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs

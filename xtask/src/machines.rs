@@ -1398,6 +1398,16 @@ fn validate_semantic_entries(
                 entry.name
             );
         }
+        if anchor_ids.len() > 1
+            && scenario_ids.len() > 1
+            && entry.anchor_ids.len() == anchor_ids.len()
+            && entry.scenario_ids.len() == scenario_ids.len()
+        {
+            bail!(
+                "{owner} semantic coverage entry `{}` maps to every code anchor and every scenario; coverage must be semantic, not tautological",
+                entry.name
+            );
+        }
 
         for anchor_id in &entry.anchor_ids {
             if !anchor_ids.contains(anchor_id.as_str()) {
@@ -1545,13 +1555,15 @@ fn maybe_run_tlc_in_dir_with_config(
     let config = dir.join(config_name);
 
     if !model.exists() || !config.exists() {
-        println!("  tlc skipped for {slug} (no checked-in model/config)");
-        return Ok(None);
+        bail!(
+            "missing checked-in model/config for {slug} at {} / {}",
+            model.display(),
+            config.display()
+        );
     }
 
     if which::which("tlc").is_err() {
-        println!("  tlc skipped for {slug} (tlc not on PATH)");
-        return Ok(None);
+        bail!("tlc not on PATH; machine-verify requires the TLC CLI");
     }
 
     let root = repo_root()?;

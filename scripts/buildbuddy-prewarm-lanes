@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="${1:-dev}"
+
+wait_for_all() {
+  local status=0
+  local pid
+  for pid in "$@"; do
+    if ! wait "${pid}"; then
+      status=1
+    fi
+  done
+  return "${status}"
+}
+
+run_lane() {
+  local lane="$1"
+  local command="$2"
+  shift 2
+  (
+    export RUST_LANE_ID="${RUST_LANE_ID_PREFIX:-prewarm}-${lane}"
+    export BUILDBUDDY_BAZEL_COMMAND="${command}"
+    if [[ "${command}" == "build" ]]; then
+      export BUILDBUDDY_BAZEL_CONFIG="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    fi
+    ./scripts/buildbuddy-bazel-poc "$@"
+  )
+}
+
+case "${profile}" in
+  dev)
+    run_lane source build //meerkat-machine-dsl-core:meerkat_machine_dsl_core --jobs=64 --color=no --curses=no &
+    pid_source=$!
+    run_lane exact-test fast-test //meerkat-mob:member_session_bindings_test --jobs=64 &
+    pid_exact=$!
+    run_lane support-local fast-test-local //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test --color=no --curses=no &
+    pid_support=$!
+    wait_for_all "${pid_source}" "${pid_exact}" "${pid_support}"
+    ;;
+  ci)
+    run_lane fast fast-test --jobs=64 &
+    pid_fast=$!
+    run_lane clippy clippy --jobs=64 --color=no --curses=no &
+    pid_clippy=$!
+    wait_for_all "${pid_fast}" "${pid_clippy}"
+    ;;
+  *)
+    cat >&2 <<'EOF'
+usage: buildbuddy-prewarm-lanes [dev|ci]
+
+Profiles:
+  dev  Prewarm common source, exact-test, and support-file feedback lanes.
+  ci   Prewarm/run fast-test and clippy lanes in parallel.
+EOF
+    exit 2
+    ;;
+esac

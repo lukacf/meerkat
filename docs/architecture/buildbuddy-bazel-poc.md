@@ -70,6 +70,14 @@ modes:
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
 
+`scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
+
+- `dev`: source-owned-build, exact-test, and support-local feedback lanes.
+- `ci`: fast-test and clippy lanes in parallel.
+
+The prewarm helper uses direct Bazel labels instead of path selectors so several
+startup lanes do not contend on Cargo metadata/package-cache locks.
+
 ## Observed Results
 
 Representative measurements from the POC environment:
@@ -88,6 +96,8 @@ Representative measurements from the POC environment:
 | Prewarmed temp worktree source edit probe | `3.85s` wall |
 | Prewarmed temp worktree exact-test edit probe | `5.62s` wall |
 | Prewarmed temp worktree support-local edit probe | `5.62s` wall |
+| Direct-label dev prewarm, first touch | `46.13s` wall |
+| Direct-label dev prewarm, warm | `4.62s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |

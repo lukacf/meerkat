@@ -58,6 +58,8 @@ modes:
 - `same-worktree`: two same-checkout agents using distinct lanes.
 - `same-command`: two same-checkout agents running the same command with
   distinct lanes.
+- `support-file`: exact selector behavior for a shared integration-test support
+  file, measured with remote and local-spawn execution.
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
@@ -72,6 +74,8 @@ Representative measurements from the POC environment:
 | Warm full clippy aspect (`288` targets) | `4.99s` wall |
 | Same-worktree, two different warmed lanes | `6.42s` / `6.70s` wall |
 | Same-worktree, same command, warmed lanes | `4.44s` / `4.34s` wall |
+| Shared test-support edit, exact remote selector | `19.10s` wall |
+| Shared test-support edit, exact local-spawn selector | `8.25s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |
@@ -86,6 +90,10 @@ client startup path rather than Rust compilation.
   `owned-fast-test`.
 - For an integration test file edit, pass the test file path to
   `owned-fast-test`; the selector targets the exact Bazel test when it is fast.
+- For a shared integration-test support file edit, pass the support path to
+  `owned-fast-test`; the selector targets only the fast tests that import it.
+  If the local lane is warm, `owned-fast-test-local` can beat remote execution
+  for this shape.
 - For deeper shared crates, use `affected-*` when you need reverse-dependency
   confidence, and expect broad closures for high-fanout crates.
 - For CI, run fast-test and clippy in parallel with separate `RUST_LANE_ID`s.

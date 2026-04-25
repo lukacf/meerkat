@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -97,6 +97,57 @@ function crateName(name) {
   return name.replaceAll("-", "_");
 }
 
+function testSourcePaths(target, pkg) {
+  const packageRoot = dirname(pkg.manifest_path);
+  const seen = new Set();
+  const paths = new Set();
+
+  function visit(file) {
+    if (seen.has(file)) return;
+    seen.add(file);
+    if (!file.startsWith(`${packageRoot}/`)) return;
+    const rel = relative(root, file).replaceAll("\\", "/");
+    if (!rel || rel.startsWith("..")) return;
+    paths.add(rel);
+
+    const source = readFileSync(file, "utf8");
+    const lineRe = /#[ \t]*\[[ \t]*path[ \t]*=[ \t]*"([^"]+)"[ \t]*\][ \t]*|(?:^|\n)[ \t]*(?:pub[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;/g;
+    let pendingPath = null;
+    for (const match of source.matchAll(lineRe)) {
+      if (match[1]) {
+        pendingPath = match[1];
+        continue;
+      }
+      const modName = match[2];
+      if (!modName) continue;
+      if (pendingPath) {
+        visit(resolve(dirname(file), pendingPath));
+        pendingPath = null;
+        continue;
+      }
+
+      const flat = resolve(dirname(file), `${modName}.rs`);
+      const nested = resolve(dirname(file), modName, "mod.rs");
+      try {
+        if (statSync(flat).isFile()) {
+          visit(flat);
+          continue;
+        }
+      } catch {
+        // Try nested module layout below.
+      }
+      try {
+        if (statSync(nested).isFile()) visit(nested);
+      } catch {
+        // Missing modules are reported by rustc during validation.
+      }
+    }
+  }
+
+  visit(target.src_path);
+  return paths;
+}
+
 function isFastTest(pkg, target) {
   const haystack = `${packageDir(pkg)} ${target.name} ${relative(root, target.src_path)}`.toLowerCase();
   return !["e2e", "system", "live", "integration", "trybuild", "snapshot", "fixture", "slow"]
@@ -105,14 +156,15 @@ function isFastTest(pkg, target) {
 
 function exactFastTestLabelForFile(file, pkg) {
   const normalized = file.replaceAll("\\", "/").replace(/^\.\//, "");
+  const labels = [];
   for (const target of pkg.targets) {
     if (!target.kind.includes("test")) continue;
     if (!isFastTest(pkg, target)) continue;
-    if (normalized === relative(root, target.src_path)) {
-      return `//${packageDir(pkg)}:${crateName(target.name)}_test`;
+    if (testSourcePaths(target, pkg).has(normalized)) {
+      labels.push(`//${packageDir(pkg)}:${crateName(target.name)}_test`);
     }
   }
-  return null;
+  return labels;
 }
 
 function buildLabels(pkg) {
@@ -166,8 +218,8 @@ for (const file of files) {
     const exactLabel = args.kind === "test" && args.mode === "owned"
       ? exactFastTestLabelForFile(file, pkg)
       : null;
-    if (exactLabel) {
-      exactLabels.add(exactLabel);
+    if (exactLabel?.length) {
+      for (const label of exactLabel) exactLabels.add(label);
     } else {
       seedIds.add(pkg.id);
     }

@@ -11,6 +11,7 @@ Scenarios:
   warm-noop          Run warm fast-test and clippy no-op checks.
   same-worktree      Run two same-checkout agents in parallel with distinct lanes.
   same-command       Run two same-checkout agents using the same command in parallel.
+  support-file       Run exact selectors for a shared integration-test support file.
   multi-worktree     Create two temporary git worktrees and run parallel agents.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
@@ -143,6 +144,17 @@ async function sameCommand(root) {
   return results.some((result) => result.code !== 0) ? 1 : 0;
 }
 
+async function supportFile(root) {
+  console.log("\n== support-file ==");
+  const path = "meerkat/tests/support/test_session_store.rs";
+  const results = [
+    await repoCommand(root, {}, "owned-fast-test", [path], ["--jobs=64"]),
+    await repoCommand(root, {}, "owned-fast-test-local", [path], ["--color=no", "--curses=no"]),
+  ];
+  for (const result of results) printResult(result);
+  return results.some((result) => result.code !== 0) ? 1 : 0;
+}
+
 async function multiWorktree(root) {
   console.log("\n== multi-worktree ==");
   const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-worktrees-"));
@@ -251,13 +263,14 @@ if (requested.includes("--help") || requested.includes("-h")) {
   process.exit(0);
 }
 const scenarios = requested.length === 0 || requested.includes("all")
-  ? ["warm-noop", "same-worktree", "same-command", "multi-worktree", "ci-cold", "ci-parallel"]
+  ? ["warm-noop", "same-worktree", "same-command", "support-file", "multi-worktree", "ci-cold", "ci-parallel"]
   : requested;
 
 const runners = new Map([
   ["warm-noop", warmNoop],
   ["same-worktree", sameWorktree],
   ["same-command", sameCommand],
+  ["support-file", supportFile],
   ["multi-worktree", multiWorktree],
   ["ci-cold", ciCold],
   ["ci-parallel", ciParallel],

@@ -13,9 +13,9 @@
 //!   (a) surface the failure as
 //!       `CommsTrustReconcileError::AddTrustFailed` with the typed
 //!       peer id echoed back,
-//!   (b) NOT advance its internal applied view — later reconciles
-//!       see the same "empty" state, so a retry will try to add the
-//!       same peer again rather than the reconciler leaking a
+//!   (b) NOT mutate the canonical trust store — later reconciles
+//!       re-read the same "empty" state, so a retry will try to add
+//!       the same peer again rather than the reconciler leaking a
 //!       phantom "already applied" entry.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -25,8 +25,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use meerkat_core::agent::CommsRuntime;
+use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
+use meerkat_core::{
+    PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
+};
 use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconcileError, CommsTrustReconciler};
 use meerkat_runtime::meerkat_machine::dsl::{
     PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
@@ -83,6 +86,22 @@ impl CommsRuntime for AddFailingCommsRuntime {
     async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
         Ok(true)
     }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+    ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
+        Ok(PeerIngressRuntimeSnapshot {
+            self_peer_id: meerkat_core::comms::PeerId::parse(
+                "00000000-0000-4000-8000-000000000000",
+            )
+            .expect("valid test peer id"),
+            auth_required: true,
+            authority_phase: PeerIngressAuthorityPhase::Received,
+            trusted_peers: self.successful_add_calls(),
+            submission_queue_len: 0,
+            queue: PeerIngressQueueSnapshot::default(),
+        })
+    }
 }
 
 impl AddFailingCommsRuntime {
@@ -95,11 +114,10 @@ impl AddFailingCommsRuntime {
 }
 
 /// Add failure surfaces a typed `AddTrustFailed` error. The
-/// reconciler's applied view is NOT advanced — a subsequent retry
-/// with the same peer set sees the peer as absent and tries the
-/// add again.
+/// canonical trust store is NOT mutated — a subsequent retry with the
+/// same peer set re-reads the peer as absent and tries the add again.
 #[tokio::test]
-async fn add_failure_surfaces_typed_error_and_preserves_applied_view() {
+async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
     let comms = Arc::new(AddFailingCommsRuntime::default());
     comms.fail_next_add.store(true, Ordering::SeqCst);
     let reconciler = CommsTrustReconciler::new(comms.clone());
@@ -119,27 +137,16 @@ async fn add_failure_surfaces_typed_error_and_preserves_applied_view() {
         other => panic!("expected AddTrustFailed, got {other:?}"),
     }
 
-    // Applied view must NOT have been advanced — still empty at
-    // epoch 0.
-    let (applied_epoch, applied_peers) = reconciler.applied_snapshot().await;
-    assert_eq!(
-        applied_epoch, 0,
-        "applied epoch must NOT advance past a failed reconcile",
-    );
-    assert!(
-        applied_peers.is_empty(),
-        "applied peers must NOT contain the peer that failed to add",
-    );
+    // Canonical store must still be empty; the only attempted add
+    // errored before it could commit.
     assert!(
         comms.successful_add_calls().is_empty(),
         "no successful trust-store adds yet — the only attempt errored",
     );
 
     // Retry the same reconcile at the same epoch. Now the failure
-    // flag is cleared; the retry succeeds. The applied view advances
-    // because the peer is newly-present-in-effective-set from the
-    // reconciler's perspective (its internal view was not mutated
-    // by the earlier failure).
+    // flag is cleared; the retry succeeds because the reconciler
+    // re-reads the canonical store and still sees the peer absent.
     let retry = reconciler
         .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
         .await
@@ -152,11 +159,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_applied_view() {
         1,
         "trust store now carries peer A after the retry",
     );
-    let (applied_epoch_after_retry, applied_peers_after_retry) =
-        reconciler.applied_snapshot().await;
-    assert_eq!(applied_epoch_after_retry, 1);
-    assert_eq!(
-        applied_peers_after_retry,
-        BTreeSet::from([endpoint("A", UUID_A)]),
-    );
+    let trusted_after_retry = comms.successful_add_calls();
+    assert_eq!(trusted_after_retry.len(), 1);
+    assert_eq!(trusted_after_retry[0].peer_id.to_string(), UUID_A);
 }

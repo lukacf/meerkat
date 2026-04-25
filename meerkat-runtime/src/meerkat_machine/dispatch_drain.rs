@@ -174,12 +174,17 @@ impl MeerkatMachine {
                         .map(|(sid, _)| sid.clone())
                         .collect()
                 };
+                let mut accepted_session_ids = Vec::new();
                 for sid in &session_ids {
-                    self.stage_drain_stop_dsl(sid).await;
+                    if self.stage_drain_stop_dsl(sid).await {
+                        accepted_session_ids.push(sid.clone());
+                    }
                 }
                 let mut sessions = self.sessions.write().await;
-                for (_, entry) in sessions.iter_mut() {
-                    abort_slot(&mut entry.drain_slot);
+                for sid in accepted_session_ids {
+                    if let Some(entry) = sessions.get_mut(&sid) {
+                        abort_slot(&mut entry.drain_slot);
+                    }
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
@@ -201,8 +206,8 @@ impl MeerkatMachine {
                         })
                         .unwrap_or(false)
                 };
-                if drain_is_running {
-                    self.stage_drain_stop_dsl(&session_id).await;
+                if drain_is_running && !self.stage_drain_stop_dsl(&session_id).await {
+                    return Ok(MeerkatMachineCommandResult::Unit);
                 }
                 let mut sessions = self.sessions.write().await;
                 if let Some(entry) = sessions.get_mut(&session_id) {
@@ -255,7 +260,7 @@ impl MeerkatMachine {
                     } else {
                         "DrainExitedClean(safety)"
                     };
-                    {
+                    let dsl_accepted = {
                         let mut sessions = self.sessions.write().await;
                         if let Some(entry) = sessions.get_mut(&session_id) {
                             let mut authority = entry
@@ -272,18 +277,25 @@ impl MeerkatMachine {
                                     error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
                                     "DSL rejected drain exit safety net"
                                 );
+                                false
+                            } else {
+                                true
                             }
+                        } else {
+                            false
                         }
-                    }
+                    };
                     tracing::warn!(
                         "comms_drain: task exited without notifying authority (likely panicked), \
                          submitting Failed safety net"
                     );
-                    let mut sessions = self.sessions.write().await;
-                    if let Some(entry) = sessions.get_mut(&session_id) {
-                        entry.drain_slot.mark_task_exit_if_running_for_safety(
-                            crate::meerkat_machine::DrainExitReason::Failed,
-                        );
+                    if dsl_accepted {
+                        let mut sessions = self.sessions.write().await;
+                        if let Some(entry) = sessions.get_mut(&session_id) {
+                            entry.drain_slot.mark_task_exit_if_running_for_safety(
+                                crate::meerkat_machine::DrainExitReason::Failed,
+                            );
+                        }
                     }
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
@@ -293,15 +305,13 @@ impl MeerkatMachine {
     }
 
     /// Fire the typed `StopDrain` DSL input for `session_id` if the session
-    /// still has a live DSL authority. A guard rejection (e.g. the drain
-    /// was never `Running` for this session) is downgraded to a warn so the
-    /// caller's abort-cleanup flow proceeds — `StopDrain` is idempotent by
-    /// DSL construction, so "already stopped" is the only legitimate
-    /// rejection shape at this seam.
-    async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) {
+    /// still has a live DSL authority. Returns whether the machine accepted
+    /// the transition; callers use that gate before applying shell-side abort
+    /// projection.
+    async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) -> bool {
         let mut sessions = self.sessions.write().await;
         let Some(entry) = sessions.get_mut(session_id) else {
-            return;
+            return false;
         };
         let mut authority = entry
             .dsl_authority
@@ -314,8 +324,11 @@ impl MeerkatMachine {
             tracing::warn!(
                 %session_id,
                 error = %crate::meerkat_machine::dsl_authority::map_error(err, "StopDrain"),
-                "DSL rejected StopDrain; proceeding with abort"
+                "DSL rejected StopDrain; skipping drain abort"
             );
+            false
+        } else {
+            true
         }
     }
 }

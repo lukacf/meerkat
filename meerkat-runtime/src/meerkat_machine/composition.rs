@@ -335,13 +335,23 @@ fn project_str<'a>(
         })
 }
 
-fn parse_work_origin(slug: &str) -> Result<mm_dsl::WorkOrigin, String> {
-    match slug {
-        "External" => Ok(mm_dsl::WorkOrigin::External),
-        "Internal" => Ok(mm_dsl::WorkOrigin::Internal),
-        "Ingest" => Ok(mm_dsl::WorkOrigin::Ingest),
-        other => Err(format!("unknown WorkOrigin slug `{other}`")),
-    }
+fn project_work_origin(
+    fields: &[(FieldId, OwnedFieldValue)],
+    name: &str,
+) -> Result<mm_dsl::WorkOrigin, String> {
+    fields
+        .iter()
+        .find(|(id, _)| id.as_str() == name)
+        .ok_or_else(|| format!("missing projected field `{name}`"))
+        .and_then(|(_, v)| match v {
+            OwnedFieldValue::Opaque(value) => value
+                .downcast_ref::<mm_dsl::WorkOrigin>()
+                .copied()
+                .ok_or_else(|| format!("projected field `{name}` is not WorkOrigin")),
+            other => Err(format!(
+                "projected field `{name}` is not WorkOrigin: {other:?}"
+            )),
+        })
 }
 
 #[async_trait]
@@ -377,8 +387,7 @@ impl ConsumerSurface for MeerkatConsumerSurface {
                 // `work_id`; producer `origin` → consumer `origin`.
                 let rt = project_str(&projected, "runtime_id")?;
                 let work_id = project_str(&projected, "work_id")?;
-                let origin_slug = project_str(&projected, "origin")?;
-                let origin = parse_work_origin(origin_slug)?;
+                let origin = project_work_origin(&projected, "origin")?;
                 mm_dsl::MeerkatMachineInput::Ingest {
                     runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
                     work_id: mm_dsl::WorkId::from(work_id.to_string()),
@@ -549,7 +558,10 @@ mod tests {
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-other".into())),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
-                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                    (
+                        fld("origin"),
+                        OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
+                    ),
                     (
                         fld("session_id"),
                         OwnedFieldValue::Str(session_id.to_string()),
@@ -574,7 +586,10 @@ mod tests {
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-match".into())),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
-                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                    (
+                        fld("origin"),
+                        OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
+                    ),
                 ],
             )
             .await
@@ -595,7 +610,10 @@ mod tests {
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-missing".into())),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
-                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                    (
+                        fld("origin"),
+                        OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
+                    ),
                 ],
             )
             .await
@@ -623,7 +641,10 @@ mod tests {
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-shared".into())),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
-                    (fld("origin"), OwnedFieldValue::Str("Ingest".into())),
+                    (
+                        fld("origin"),
+                        OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
+                    ),
                 ],
             )
             .await

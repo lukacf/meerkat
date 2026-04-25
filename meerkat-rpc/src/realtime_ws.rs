@@ -1337,11 +1337,6 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 .await
                                                 {
                                                     Ok(Some(rotation)) => {
-                                                        let _ = state
-                                                            .runtime
-                                                            .runtime_adapter()
-                                                            .detach_live(&rotation.previous_session_id)
-                                                            .await;
                                                         if let Some(session_factory) =
                                                             state.host.session_factory()
                                                         {
@@ -1392,19 +1387,36 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                                     continue;
                                                                 }
                                                             }
-                                                        } else if let Err(error) = state
-                                                            .runtime
-                                                            .runtime_adapter()
-                                                            .attach_live(&rotation.current_session_id)
-                                                            .await
-                                                            .map_err(|err| runtime_error_frame(err, "attach"))
-                                                        {
-                                                            let _ = send_server_frame(
-                                                                &mut socket,
-                                                                &RealtimeServerFrame::ChannelError(error),
-                                                            )
-                                                            .await;
-                                                            continue;
+                                                        } else {
+                                                            let status = state
+                                                                .runtime
+                                                                .runtime_adapter()
+                                                                .realtime_attachment_status(
+                                                                    &rotation.current_session_id,
+                                                                )
+                                                                .await
+                                                                .map(RealtimeChannelStatus::from)
+                                                                .map_err(|err| runtime_error_frame(err, "status"));
+                                                            match status {
+                                                                Ok(status) => {
+                                                                    let _ = emit_status_update(
+                                                                        &mut socket,
+                                                                        &mut last_visible_status,
+                                                                        status,
+                                                                        false,
+                                                                        Some((state.host.as_ref(), &registered)),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                Err(error) => {
+                                                                    let _ = send_server_frame(
+                                                                        &mut socket,
+                                                                        &RealtimeServerFrame::ChannelError(error),
+                                                                    )
+                                                                    .await;
+                                                                    continue;
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     Ok(None) => {}
@@ -2558,11 +2570,6 @@ async fn bind_realtime_target(
                         bridge: Some(bridge),
                     })
                 } else {
-                    runtime
-                        .runtime_adapter()
-                        .attach_live(&session_id)
-                        .await
-                        .map_err(|err| runtime_error_frame(err, "attach"))?;
                     let status = runtime
                         .runtime_adapter()
                         .realtime_attachment_status(&session_id)
@@ -2663,11 +2670,6 @@ async fn bind_realtime_target(
                     bridge: Some(bridge),
                 })
             } else {
-                runtime
-                    .runtime_adapter()
-                    .attach_live(&current_session_id)
-                    .await
-                    .map_err(|err| runtime_error_frame(err, "attach"))?;
                 let status = runtime
                     .runtime_adapter()
                     .realtime_attachment_status(&current_session_id)
@@ -2713,15 +2715,26 @@ async fn open_product_session_bridge(
         .realtime_session_open_config(session_id, turning_mode)
         .await
         .map_err(session_error_frame)?;
-    let authority = runtime
+    let authority = match runtime
         .runtime_adapter()
-        .attach_live(session_id)
+        .apply_capability_driven_realtime_transport(session_id)
         .await
-        .map_err(|err| runtime_error_frame(err, "attach"))?;
+        .map_err(|err| runtime_error_frame(err, "attach"))?
+    {
+        Some(authority) => authority,
+        None => runtime
+            .runtime_adapter()
+            .current_realtime_attachment_authority(session_id)
+            .await
+            .map_err(|err| runtime_error_frame(err, "authority"))?,
+    };
     let session = match session_factory.open_session(&open_config).await {
         Ok(session) => session,
         Err(error) => {
-            let _ = runtime.runtime_adapter().detach_live(session_id).await;
+            let _ = runtime
+                .runtime_adapter()
+                .require_realtime_attachment_reattach_for_authority(authority)
+                .await;
             return Err(realtime_client_error_frame(error, "open"));
         }
     };
@@ -2733,7 +2746,10 @@ async fn open_product_session_bridge(
         )
         .await
     {
-        let _ = runtime.runtime_adapter().detach_live(session_id).await;
+        let _ = runtime
+            .runtime_adapter()
+            .require_realtime_attachment_reattach_for_authority(authority)
+            .await;
         return Err(runtime_error_frame(error, "bind_ready"));
     }
 
@@ -2757,25 +2773,13 @@ async fn open_product_session_bridge(
 }
 
 async fn cleanup_realtime_binding(
-    runtime: &SessionRuntime,
-    binding: Option<&RealtimeSocketBinding>,
+    _runtime: &SessionRuntime,
+    _binding: Option<&RealtimeSocketBinding>,
 ) -> Result<(), RealtimeChannelErrorFrame> {
-    let Some(binding) = binding else {
-        return Ok(());
-    };
-    // Observer channels do not own the runtime attachment; detach is a
-    // primary-only responsibility. MobMember primaries detach the current
-    // bridge session — whichever session the observer-driven
-    // `current_session_id` resolves to now (the one the WS was last
-    // actively pinned to before close).
-    if !binding.is_primary() {
-        return Ok(());
-    }
-    runtime
-        .runtime_adapter()
-        .detach_live(binding.current_session_id())
-        .await
-        .map_err(|err| runtime_error_frame(err, "detach"))
+    // Realtime attachment lifecycle is capability-driven by the runtime. A
+    // websocket close only releases the channel-local product bridge; it does
+    // not caller-drive `DetachRealtimeBinding`.
+    Ok(())
 }
 
 /// Wave-c C-9c R4: project the realtime-WS reconnect-overlay's current
@@ -2925,8 +2929,9 @@ async fn attempt_realtime_reconnect(
     } else {
         runtime
             .runtime_adapter()
-            .attach_live(session_id)
+            .apply_capability_driven_realtime_transport(session_id)
             .await
+            .map(|_| ())
             .map_err(|err| runtime_error_frame(err, "reattach"))?;
         Ok(None)
     }

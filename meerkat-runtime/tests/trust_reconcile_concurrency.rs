@@ -14,13 +14,12 @@
 //!
 //! Invariants pinned:
 //!
-//! * §6 #1 — Concurrent reconciles serialize through the reconciler's
-//!   async mutex; there is no race between overlapping `reconcile()`
-//!   calls.
-//! * §6 #2 — A stale-epoch reconcile (arriving after a newer one has
-//!   committed) short-circuits inside the critical section without
-//!   mutating the trust store. The applied-epoch watermark never
-//!   regresses.
+//! * §6 #1 — Concurrent reconciles read from the canonical trust store;
+//!   there is no helper-local applied view for overlapping calls to
+//!   corrupt.
+//! * §6 #2 — Epoch is reported for observability only. A lower-epoch
+//!   reconcile still diffs against canonical runtime trust, not against
+//!   a reconciler-local watermark.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -29,8 +28,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use meerkat_core::agent::CommsRuntime;
+use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
+use meerkat_core::{
+    PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
+};
 use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconciler, ReconcileReport};
 use meerkat_runtime::meerkat_machine::dsl::{
     PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
@@ -49,14 +51,14 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
 }
 
 /// Mock `CommsRuntime` that records every trust-store interaction and
-/// exposes the accumulated history for assertion. The calls-vector
-/// mutex is `std::sync::Mutex` because we never hold it across an
-/// `.await`; the reconciler's own async mutex guards the critical
-/// section we're testing.
+/// exposes the accumulated history and current canonical trust store for
+/// assertion. The mutexes are `std::sync::Mutex` because we never hold them
+/// across an `.await`.
 #[derive(Default)]
 struct RecordingCommsRuntime {
     adds: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
     removes: std::sync::Mutex<Vec<String>>,
+    trusted: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
     add_count: AtomicUsize,
     remove_count: AtomicUsize,
 }
@@ -82,6 +84,10 @@ impl CommsRuntime for RecordingCommsRuntime {
         self.adds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(peer.clone());
+        self.trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(peer);
         Ok(())
     }
@@ -92,7 +98,33 @@ impl CommsRuntime for RecordingCommsRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(peer_id.to_string());
-        Ok(true)
+        let mut trusted = self
+            .trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = trusted.len();
+        trusted.retain(|peer| peer.peer_id.to_string() != peer_id);
+        Ok(before != trusted.len())
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+    ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
+        Ok(PeerIngressRuntimeSnapshot {
+            self_peer_id: meerkat_core::comms::PeerId::parse(
+                "00000000-0000-4000-8000-000000000000",
+            )
+            .expect("valid test peer id"),
+            auth_required: true,
+            authority_phase: PeerIngressAuthorityPhase::Received,
+            trusted_peers: self
+                .trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            submission_queue_len: 0,
+            queue: PeerIngressQueueSnapshot::default(),
+        })
     }
 }
 
@@ -103,17 +135,24 @@ impl RecordingCommsRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    fn trusted_peer_ids(&self) -> BTreeSet<String> {
+        self.trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|peer| peer.peer_id.to_string())
+            .collect()
+    }
 }
 
-/// §6 #1 — concurrent reconciles are serialized end-to-end.
+/// §6 #1 — concurrent reconciles use canonical trust as their only state.
 ///
-/// Two reconciles spawn in parallel; whichever wins the mutex first
-/// runs to completion (including all trust-store awaits) before the
-/// other observes any state. After both complete, the applied view
-/// reflects the newer epoch exactly, and the trust store is
-/// consistent with the winner's peer set.
+/// Two reconciles spawn in parallel. Their exact interleaving is not
+/// semantically owned by the reconciler; the invariant is that no helper-local
+/// applied view exists for either call to corrupt.
 #[tokio::test]
-async fn concurrent_reconciles_are_serialised_and_stale_short_circuits() {
+async fn concurrent_reconciles_complete_against_canonical_store() {
     let comms = Arc::new(RecordingCommsRuntime::default());
     let reconciler = Arc::new(CommsTrustReconciler::new(comms.clone()));
 
@@ -138,37 +177,22 @@ async fn concurrent_reconciles_are_serialised_and_stale_short_circuits() {
         .expect("newer task joins")
         .expect("newer reconcile ok");
 
-    // Final applied view reflects the newer epoch, always.
-    let (applied_epoch, applied_peers) = reconciler.applied_snapshot().await;
-    assert_eq!(applied_epoch, 2);
-    assert_eq!(applied_peers, BTreeSet::from([endpoint("B", UUID_B)]));
-
-    // The newer reconcile's applied_epoch is 2 regardless of ordering.
-    assert_eq!(
-        newer_res.applied_epoch, 2,
-        "newer reconcile must apply its epoch (never stale against older): got {}",
-        newer_res.applied_epoch,
-    );
-    // The older one either reports 1 (ran first) or 2 (stale short-
-    // circuit after newer committed). Both are legal outcomes of
-    // serialization.
+    assert_eq!(older_res.applied_epoch, 1);
+    assert_eq!(newer_res.applied_epoch, 2);
+    let trusted = comms.trusted_peer_ids();
     assert!(
-        older_res.applied_epoch == 1 || older_res.applied_epoch == 2,
-        "older reconcile's applied_epoch must be 1 or 2: got {}",
-        older_res.applied_epoch,
+        !trusted.is_empty(),
+        "at least one reconcile must update canonical trust",
+    );
+    assert!(
+        trusted.is_subset(&BTreeSet::from([UUID_A.to_string(), UUID_B.to_string()])),
+        "canonical trust must contain only reconciled peers, got {trusted:?}",
     );
 }
 
-/// §6 #2 — a stale-epoch reconcile arriving after a newer one has
-/// committed short-circuits inside the critical section. Trust store
-/// is NOT touched for the stale reconcile's peer set; applied
-/// watermark does not regress.
-///
-/// Uses a sequential form because serialization is now strict —
-/// overlapping reconciles wait on the mutex, so the concurrency
-/// invariant reduces to the sequential one after ordering resolves.
+/// §6 #2 — lower-epoch reconciles still diff against canonical trust.
 #[tokio::test]
-async fn stale_reconcile_after_newer_commit_does_not_touch_trust_store() {
+async fn lower_epoch_reconcile_reads_canonical_store() {
     let comms = Arc::new(RecordingCommsRuntime::default());
     let reconciler = CommsTrustReconciler::new(comms.clone());
 
@@ -181,43 +205,38 @@ async fn stale_reconcile_after_newer_commit_does_not_touch_trust_store() {
     assert_eq!(comms.add_count.load(Ordering::SeqCst), 1);
     assert_eq!(comms.remove_count.load(Ordering::SeqCst), 0);
 
-    // Stale arrives at epoch=3 with a different set {B}. Expected:
-    // empty report, applied_epoch stays at 5, no trust-store calls.
-    let stale = reconciler
+    // Lower epoch arrives with a different set {B}. Expected: canonical diff
+    // removes A and adds B; no helper-local watermark short-circuits it.
+    let lower = reconciler
         .reconcile(3, BTreeSet::from([endpoint("B", UUID_B)]))
         .await
-        .expect("stale reconcile accepted as no-op");
-    assert!(stale.added.is_empty(), "stale added must be empty");
-    assert!(stale.removed.is_empty(), "stale removed must be empty");
-    assert_eq!(
-        stale.applied_epoch, 5,
-        "stale report must reflect the newer watermark",
-    );
+        .expect("lower-epoch reconcile");
+    assert_eq!(lower.applied_epoch, 3);
+    assert_eq!(lower.added, vec![endpoint("B", UUID_B)]);
+    assert_eq!(lower.removed, vec![endpoint("A", UUID_A)]);
 
-    // Trust store was not touched by the stale reconcile.
     assert_eq!(
         comms.add_count.load(Ordering::SeqCst),
-        1,
-        "stale reconcile must not leak add_trusted_peer calls",
+        2,
+        "lower-epoch reconcile adds peer B from canonical diff",
     );
     assert_eq!(
         comms.remove_count.load(Ordering::SeqCst),
-        0,
-        "stale reconcile must not leak remove_trusted_peer calls",
+        1,
+        "lower-epoch reconcile removes peer A from canonical diff",
     );
-    let added_peer_ids: Vec<String> = comms
+    let added_peer_ids: BTreeSet<String> = comms
         .add_calls()
         .into_iter()
         .map(|d| d.peer_id.to_string())
         .collect();
     assert_eq!(
         added_peer_ids,
-        vec![UUID_A.to_string()],
-        "only the newer reconcile's peer A must be in the trust store",
+        BTreeSet::from([UUID_A.to_string(), UUID_B.to_string()]),
+        "both successful adds should be recorded",
     );
-
-    // Applied view reflects only the newer reconcile.
-    let (applied_epoch, applied_peers) = reconciler.applied_snapshot().await;
-    assert_eq!(applied_epoch, 5);
-    assert_eq!(applied_peers, BTreeSet::from([endpoint("A", UUID_A)]));
+    assert_eq!(
+        comms.trusted_peer_ids(),
+        BTreeSet::from([UUID_B.to_string()])
+    );
 }

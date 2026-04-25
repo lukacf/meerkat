@@ -329,6 +329,15 @@ mod tests {
         OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
     };
     use meerkat_runtime::completion::CompletionOutcome;
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    use meerkat_runtime::{
+        HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
+        SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
+    };
     use meerkat_runtime::{Input, PromptInput, RuntimeState};
     use tempfile::TempDir;
     #[cfg(all(
@@ -967,6 +976,117 @@ mod tests {
         feature = "openai-realtime",
         not(target_arch = "wasm32")
     ))]
+    struct RuntimeBackedRealtimeTestReconfigureHost {
+        identity: meerkat_core::SessionLlmIdentity,
+        capability_surface: SessionLlmCapabilitySurface,
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    #[async_trait]
+    impl SessionLlmReconfigureHost for RuntimeBackedRealtimeTestReconfigureHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: self.identity.clone(),
+                current_visibility_state: Default::default(),
+                current_capability_surface: Some(self.capability_surface.clone()),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: Default::default(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Ok(ResolvedSessionLlmReconfigure {
+                target_identity: self.identity.clone(),
+                target_capability_surface: self.capability_surface.clone(),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    fn realtime_test_capability_surface() -> SessionLlmCapabilitySurface {
+        SessionLlmCapabilitySurface {
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            inline_video: false,
+            vision: false,
+            image_tool_results: false,
+            supports_web_search: false,
+            realtime: true,
+            call_timeout_secs: None,
+        }
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    fn install_realtime_test_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
+        adapter.set_session_llm_reconfigure_host(Arc::new(
+            RuntimeBackedRealtimeTestReconfigureHost {
+                identity: meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    connection_ref: None,
+                },
+                capability_surface: realtime_test_capability_surface(),
+            },
+        ));
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     #[async_trait]
     impl RealtimeAttachmentToolDispatchHost for RuntimeBackedRealtimeAttachmentToolDispatchHost {
         async fn dispatch_external_tool_call(
@@ -995,11 +1115,14 @@ mod tests {
     async fn runtime_backed_openai_live_orchestrator_routes_tool_calls_through_service_host() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
+        install_realtime_test_reconfigure_host(&adapter);
+        let mut request = make_request(SessionBuildOptions::default());
+        request.model = "gpt-realtime".to_string();
         let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
-            make_request(SessionBuildOptions::default()),
+            request,
             {
                 let service = Arc::clone(&service);
                 let adapter = Arc::clone(&adapter);
@@ -1046,7 +1169,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_runtime_backed").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 

@@ -131,6 +131,14 @@ pub(crate) struct MobStartupKickoffSnapshot {
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MobMemberMachineProjection {
+    pub runtime_id: Option<crate::machines::mob_machine::AgentRuntimeId>,
+    pub state_marker: Option<crate::machines::mob_machine::MobMemberState>,
+    pub live_runtime: bool,
+    pub bound_session_id: Option<crate::machines::mob_machine::SessionId>,
+}
+
 /// Heap-allocated payload for `MobCommand::SubmitWork`. Boxing keeps the
 /// command-channel variant width bounded by the pointer, not by the full
 /// `ContentInput` + render metadata footprint.
@@ -252,6 +260,10 @@ pub(super) enum MobCommand {
     },
     StartupKickoffSnapshot {
         reply_tx: oneshot::Sender<MobStartupKickoffSnapshot>,
+    },
+    MemberMachineProjection {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<MobMemberMachineProjection>,
     },
     /// W3-H: query the current realtime binding for an identity. Returns
     /// the bridge session id currently bound (projected from the canonical

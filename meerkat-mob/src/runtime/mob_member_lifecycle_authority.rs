@@ -54,7 +54,7 @@ impl CanonicalMemberSnapshotMaterial {
             CanonicalMemberStatus::Broken => MobMemberStatus::Broken,
             CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
         };
-        let is_final = MobMemberLifecycleAuthority::is_terminal(self);
+        let is_final = MobMemberLifecycleProjection::is_terminal(self);
         MobMemberSnapshot {
             status,
             agent_runtime_id: self.agent_runtime_id.clone(),
@@ -96,11 +96,13 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
+    pub(super) machine_state_marker: Option<crate::machines::mob_machine::MobMemberState>,
+    pub(super) machine_runtime_live: bool,
 }
 
-pub(super) struct MobMemberLifecycleAuthority;
+pub(super) struct MobMemberLifecycleProjection;
 
-impl MobMemberLifecycleAuthority {
+impl MobMemberLifecycleProjection {
     pub(super) fn materialize(input: MobMemberLifecycleInput) -> CanonicalMemberSnapshotMaterial {
         if let Some(reason) = input.restore_failure {
             return CanonicalMemberSnapshotMaterial {
@@ -125,15 +127,20 @@ impl MobMemberLifecycleAuthority {
         let status = match (
             input.member_present,
             input.roster_state,
+            input.machine_state_marker,
+            input.machine_runtime_live,
             input.session_observation,
         ) {
-            (false, _, _) => CanonicalMemberStatus::Unknown,
-            (true, Some(MemberState::Retiring), _) => CanonicalMemberStatus::Retiring,
-            (true, Some(MemberState::Active), CanonicalSessionObservation::Missing) => {
+            (false, _, _, _, _) => CanonicalMemberStatus::Unknown,
+            (true, _, Some(crate::machines::mob_machine::MobMemberState::Retiring), _, _) => {
+                CanonicalMemberStatus::Retiring
+            }
+            (true, Some(MemberState::Retiring), _, _, _) => CanonicalMemberStatus::Retiring,
+            (true, Some(MemberState::Active), _, false, CanonicalSessionObservation::Missing) => {
                 CanonicalMemberStatus::Completed
             }
-            (true, Some(MemberState::Active), _) => CanonicalMemberStatus::Active,
-            (true, None, _) => CanonicalMemberStatus::Unknown,
+            (true, Some(MemberState::Active), _, _, _) => CanonicalMemberStatus::Active,
+            (true, None, _, _, _) => CanonicalMemberStatus::Unknown,
         };
 
         CanonicalMemberSnapshotMaterial {
@@ -186,7 +193,7 @@ mod tests {
 
     #[test]
     fn restore_failure_breaks_present_member() {
-        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+        let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
             roster_state: Some(MemberState::Active),
             session_observation: CanonicalSessionObservation::Active,
@@ -198,6 +205,8 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
+            machine_runtime_live: true,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
         assert_eq!(material.error.as_deref(), Some("restore mismatch"));
@@ -205,7 +214,7 @@ mod tests {
 
     #[test]
     fn missing_active_session_means_completed_not_broken() {
-        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+        let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
             roster_state: Some(MemberState::Active),
             session_observation: CanonicalSessionObservation::Missing,
@@ -217,14 +226,16 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
+            machine_runtime_live: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
-        assert!(MobMemberLifecycleAuthority::is_terminal(&material));
+        assert!(MobMemberLifecycleProjection::is_terminal(&material));
     }
 
     #[test]
     fn unknown_active_sessionless_member_stays_non_terminal() {
-        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+        let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
             roster_state: Some(MemberState::Active),
             session_observation: CanonicalSessionObservation::Unknown,
@@ -236,14 +247,16 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
+            machine_runtime_live: true,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Active);
-        assert!(!MobMemberLifecycleAuthority::is_terminal(&material));
+        assert!(!MobMemberLifecycleProjection::is_terminal(&material));
     }
 
     #[test]
     fn retiring_member_is_non_terminal_even_if_session_missing() {
-        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+        let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
             roster_state: Some(MemberState::Retiring),
             session_observation: CanonicalSessionObservation::Missing,
@@ -255,8 +268,10 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Retiring),
+            machine_runtime_live: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
-        assert!(!MobMemberLifecycleAuthority::is_terminal(&material));
+        assert!(!MobMemberLifecycleProjection::is_terminal(&material));
     }
 }

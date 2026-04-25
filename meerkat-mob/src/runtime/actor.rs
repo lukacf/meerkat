@@ -1100,35 +1100,34 @@ impl MobActor {
     }
 
     async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        self.dsl_authority
-            .state
-            .member_kickoff_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_starting
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_callback_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_started
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_failed
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_cancelled
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_error
-            .remove(&agent_identity.to_string());
-        self.roster.write().await.set_kickoff(agent_identity, None);
+        match self
+            .apply_kickoff_input(
+                agent_identity,
+                mob_dsl::MobMachineInput::KickoffClear {
+                    member_id: agent_identity.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(true) => {
+                self.roster.write().await.set_kickoff(agent_identity, None);
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    "kickoff clear rejected by MobMachine; roster projection left unchanged"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "kickoff clear failed"
+                );
+            }
+        }
     }
 
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
@@ -2391,6 +2390,27 @@ impl MobActor {
                     let _ = reply_tx.send(super::state::MobStartupKickoffSnapshot {
                         pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
                         ready_runtime_ids: self.ready_runtime_ids_from_dsl(),
+                    });
+                }
+                MobCommand::MemberMachineProjection {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                    let dsl = &self.dsl_authority.state;
+                    let runtime_id = dsl.identity_to_runtime.get(&dsl_identity).cloned();
+                    let state_marker = runtime_id
+                        .as_ref()
+                        .and_then(|runtime_id| dsl.member_state_markers.get(runtime_id).copied());
+                    let live_runtime = runtime_id
+                        .as_ref()
+                        .is_some_and(|runtime_id| dsl.live_runtime_ids.contains(runtime_id));
+                    let bound_session_id = dsl.member_session_bindings.get(&dsl_identity).cloned();
+                    let _ = reply_tx.send(super::state::MobMemberMachineProjection {
+                        runtime_id,
+                        state_marker,
+                        live_runtime,
+                        bound_session_id,
                     });
                 }
                 MobCommand::CurrentRealtimeBinding {
@@ -3972,10 +3992,85 @@ impl MobActor {
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         let overlay_record =
             self.external_binding_overlay_record(&identity, generation, provision.member_ref());
+
+        // Resolve `external_addressable` from the effective profile so we
+        // can inform the DSL (see the `MobMachineInput::Spawn` dispatch
+        // below). Honours any override previously applied via
+        // `SpawnTooling::Profile` resolution.
+        let external_addressable = if let Some(profile) = effective_profile_override.as_ref() {
+            profile.external_addressable
+        } else {
+            self.definition
+                .resolve_profile(profile_name, self.realm_profile_store.as_ref())
+                .await
+                .map(|profile| profile.external_addressable)
+                .unwrap_or(false)
+        };
+
+        // Feed `Spawn` into the MobMachine DSL so it populates
+        // `live_runtime_ids` + `externally_addressable_runtime_ids` and
+        // downstream guards (Retire, SubmitWork, …) operate on authoritative
+        // membership state.
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        let bridge_session_id = match provision.member_ref().bridge_session_id() {
+            Some(sid) => mob_dsl::SessionId::from_domain(sid),
+            None => mob_dsl::SessionId::default(),
+        };
+        let replacing = self
+            .dsl_authority
+            .state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::Spawn {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                generation: mob_dsl::Generation::from_domain(generation),
+                external_addressable,
+                bridge_session_id,
+                replacing,
+            },
+            "finalize_spawn_from_pending_dsl_spawn",
+        )?;
+
         if let Some(overlay_record) = overlay_record.as_ref() {
-            self.runtime_metadata
+            if let Err(error) = self
+                .runtime_metadata
                 .upsert_external_binding_overlay(&self.definition.id, overlay_record)
-                .await?;
+                .await
+            {
+                let _ = self.apply_dsl_input(
+                    mob_dsl::MobMachineInput::Retire {
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                        agent_identity: dsl_identity.clone(),
+                        releasing: self
+                            .dsl_authority
+                            .state
+                            .member_session_bindings
+                            .get(&dsl_identity)
+                            .cloned(),
+                        session_id: self
+                            .dsl_authority
+                            .state
+                            .member_session_bindings
+                            .get(&dsl_identity)
+                            .cloned()
+                            .unwrap_or_else(mob_dsl::SessionId::default),
+                    },
+                    "finalize_spawn_overlay_failed_retire_dsl",
+                );
+                if let Some(session_id) = provision.member_ref().bridge_session_id() {
+                    self.discard_pending_routed_effects_for_session(session_id);
+                }
+                if let Err(rollback_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "spawn overlay upsert failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                    )));
+                }
+                return Err(error.into());
+            }
         }
         if let Err(append_error) = self
             .events
@@ -4005,6 +4100,29 @@ impl MobActor {
                     .delete_external_binding_overlay_for_member(&identity, generation)
                     .await;
             }
+            let _ = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::Retire {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                    agent_identity: dsl_identity.clone(),
+                    releasing: self
+                        .dsl_authority
+                        .state
+                        .member_session_bindings
+                        .get(&dsl_identity)
+                        .cloned(),
+                    session_id: self
+                        .dsl_authority
+                        .state
+                        .member_session_bindings
+                        .get(&dsl_identity)
+                        .cloned()
+                        .unwrap_or_else(mob_dsl::SessionId::default),
+                },
+                "finalize_spawn_append_failed_retire_dsl",
+            );
+            if let Some(session_id) = provision.member_ref().bridge_session_id() {
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
                     "spawn append failed for '{agent_identity}': {append_error}; archive compensation failed: {rollback_error}"
@@ -4019,56 +4137,6 @@ impl MobActor {
         let member_ref = provision.commit()?;
         if let Some(comms) = self.provisioner_comms(&member_ref).await {
             self.install_supervisor_private_trust(&comms).await?;
-        }
-
-        // Resolve `external_addressable` from the effective profile so we
-        // can inform the DSL (see the `MobMachineInput::Spawn` dispatch
-        // below). Honours any override previously applied via
-        // `SpawnTooling::Profile` resolution.
-        let external_addressable = if let Some(profile) = effective_profile_override.as_ref() {
-            profile.external_addressable
-        } else {
-            self.definition
-                .resolve_profile(profile_name, self.realm_profile_store.as_ref())
-                .await
-                .map(|profile| profile.external_addressable)
-                .unwrap_or(false)
-        };
-
-        // Feed `Spawn` into the MobMachine DSL so it populates
-        // `live_runtime_ids` + `externally_addressable_runtime_ids` and
-        // downstream guards (Retire, SubmitWork, …) operate on authoritative
-        // membership state.
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
-        let bridge_session_id = match member_ref.bridge_session_id() {
-            Some(sid) => mob_dsl::SessionId::from_domain(sid),
-            None => mob_dsl::SessionId::default(),
-        };
-        let replacing = self
-            .dsl_authority
-            .state
-            .member_session_bindings
-            .get(&dsl_identity)
-            .cloned();
-        if let Err(error) = self.apply_dsl_input(
-            mob_dsl::MobMachineInput::Spawn {
-                agent_identity: dsl_identity.clone(),
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
-                generation: mob_dsl::Generation::from_domain(generation),
-                external_addressable,
-                bridge_session_id,
-                replacing,
-            },
-            "finalize_spawn_from_pending_dsl_spawn",
-        ) {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                agent_identity = %agent_identity,
-                agent_runtime_id = %agent_runtime_id,
-                %error,
-                "Spawn DSL input rejected; downstream DSL membership guards may diverge from roster"
-            );
         }
         self.restore_diagnostics
             .write()
@@ -5641,18 +5709,11 @@ impl MobActor {
         }
     }
 
-    /// D-external-peer (#31): wire a local member to an external trusted peer.
+    /// Wire a local member to an external trusted peer.
     ///
-    /// Shell-mechanical trust install followed by an `ExternalPeerWired`
-    /// event append and roster projection. The event round-trips the full
-    /// [`TrustedPeerDescriptor`] so resume can reinstate trust
-    /// deterministically without a live comms runtime.
-    ///
-    /// Unlike local↔local wiring, external wiring is shell-authority over
-    /// the shape of trusted peers on the local session runtime only: the
-    /// MobMachine DSL has no opinion about external peer identities today.
-    /// Local↔local wiring still flows through [`Self::handle_wire`]'s
-    /// DSL-driven path.
+    /// `MobMachineInput::WireMembers` owns the identity-level topology edge;
+    /// the shell mechanically installs the trust descriptor and projects the
+    /// event only after the machine admits the edge.
     ///
     /// Idempotent: a second wire of the same (local, external_name) edge
     /// with the same descriptor is treated as a no-op success.
@@ -5668,6 +5729,10 @@ impl MobActor {
                 "wire requires distinct members (got '{local}')"
             )));
         }
+        let edge = mob_dsl::WiringEdge::new(
+            mob_dsl::AgentIdentity::from_domain(&local_identity),
+            mob_dsl::AgentIdentity::from_domain(&external_identity),
+        );
 
         // Look up the local member's roster entry and session binding.
         let (member_ref, already_wired_with_same_spec) = {
@@ -5684,6 +5749,7 @@ impl MobActor {
         };
 
         if already_wired_with_same_spec {
+            let _ = self.apply_wire_members_idempotent(&edge)?;
             return Ok(());
         }
 
@@ -5694,8 +5760,13 @@ impl MobActor {
             ))
         })?;
 
+        let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+
         // Install trust on the local's session comms runtime.
-        comms.add_trusted_peer(spec.clone()).await?;
+        if let Err(error) = comms.add_trusted_peer(spec.clone()).await {
+            self.rollback_external_wire_dsl(&edge, dsl_added).await;
+            return Err(MobError::from(error));
+        }
 
         // Append ExternalPeerWired — if the append fails, compensate by
         // rolling back the trust install so failure leaves no side effect.
@@ -5721,6 +5792,7 @@ impl MobActor {
                         "failed to rollback external trust install after event append failure"
                     );
                 }
+                self.rollback_external_wire_dsl(&edge, dsl_added).await;
                 return Err(MobError::from(append_err));
             }
         };
@@ -5729,6 +5801,21 @@ impl MobActor {
         // as MembersWired in `handle_wire`.
         self.roster.write().await.apply_event(&stored);
         Ok(())
+    }
+
+    async fn rollback_external_wire_dsl(&mut self, edge: &mob_dsl::WiringEdge, dsl_added: bool) {
+        if dsl_added
+            && let Err(error) = self.apply_dsl_input(
+                mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
+                "external_wire_rollback",
+            )
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                %error,
+                "external wire rollback: failed to revert DSL wire"
+            );
+        }
     }
 
     /// D-external-peer (#31): unwire a local member from an external trusted peer.
@@ -5747,6 +5834,10 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(local.as_str());
         let external_identity = AgentIdentity::from(peer_name.as_str());
+        let edge = mob_dsl::WiringEdge::new(
+            mob_dsl::AgentIdentity::from_domain(&local_identity),
+            mob_dsl::AgentIdentity::from_domain(&external_identity),
+        );
 
         // Look up the prior descriptor so we can compensate on append
         // failure. Idempotent: absent projection stays success, but a
@@ -5762,12 +5853,29 @@ impl MobActor {
         };
 
         let Some(prior_spec) = prior_spec else {
+            let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
             if let Some(spec) = stale_cleanup_spec
                 && let Some(comms) = self.provisioner_comms(&member_ref).await
             {
-                let _ = comms
+                if let Err(error) = comms
                     .remove_trusted_peer(&Self::trusted_peer_removal_key(&spec))
-                    .await?;
+                    .await
+                {
+                    if dsl_removed
+                        && let Err(rollback_err) = self.apply_dsl_input(
+                            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                            "external_unwire_stale_cleanup_rollback",
+                        )
+                    {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            local = %local,
+                            error = %rollback_err,
+                            "failed to rollback external DSL unwire after stale cleanup failure"
+                        );
+                    }
+                    return Err(MobError::from(error));
+                }
             }
             return Ok(());
         };
@@ -5778,10 +5886,28 @@ impl MobActor {
             ))
         })?;
 
+        let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
+
         // Remove trust on the local session runtime.
-        let _ = comms
+        if let Err(error) = comms
             .remove_trusted_peer(&Self::trusted_peer_removal_key(&prior_spec))
-            .await?;
+            .await
+        {
+            if dsl_removed
+                && let Err(rollback_err) = self.apply_dsl_input(
+                    mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                    "external_unwire_trust_remove_rollback",
+                )
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    local = %local,
+                    error = %rollback_err,
+                    "failed to rollback external DSL unwire after trust removal failure"
+                );
+            }
+            return Err(MobError::from(error));
+        }
 
         let event = NewMobEvent {
             mob_id: self.definition.id.clone(),
@@ -5802,6 +5928,19 @@ impl MobActor {
                         local = %local,
                         error = %rollback_err,
                         "failed to rollback external trust removal after event append failure"
+                    );
+                }
+                if dsl_removed
+                    && let Err(rollback_err) = self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+                        "external_unwire_rollback",
+                    )
+                {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        local = %local,
+                        error = %rollback_err,
+                        "failed to rollback external DSL unwire after event append failure"
                     );
                 }
                 return Err(MobError::from(append_err));

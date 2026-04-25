@@ -773,7 +773,7 @@ impl MeerkatMachine {
     /// (runtime state == Attached or Running). Callers hitting Idle sessions
     /// get `RuntimeDriverError::NotReady`, matching the pre-DSL contract used
     /// by the realtime attachment host.
-    pub async fn attach_live(
+    pub(crate) async fn attach_live(
         &self,
         session_id: &SessionId,
     ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
@@ -809,6 +809,19 @@ impl MeerkatMachine {
         .await
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         self.read_session_realtime_authority(session_id, "replace_realtime_attachment")
+            .await
+    }
+
+    /// Read the current runtime-owned realtime binding authority without
+    /// changing attachment lifecycle state. Provider hosts use this after the
+    /// capability-driven transport policy has already decided that a binding
+    /// should exist.
+    pub async fn current_realtime_attachment_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        self.read_session_realtime_authority(session_id, "current_realtime_attachment_authority")
             .await
     }
 
@@ -876,7 +889,10 @@ impl MeerkatMachine {
 
     /// Detach the runtime-owned binding. Preserves the durable intent bit so
     /// `realtime_attachment_status` can still project `IntentPresentUnbound`.
-    pub async fn detach_live(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+    pub(crate) async fn detach_live(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::DetachRealtimeBinding,

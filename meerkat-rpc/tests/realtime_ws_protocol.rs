@@ -419,7 +419,7 @@ async fn create_materialized_session(runtime: &Arc<SessionRuntime>) -> meerkat_c
         .create_session(
             AgentBuildConfig {
                 override_builtins: ToolCategoryOverride::Enable,
-                ..AgentBuildConfig::new("claude-sonnet-4-5")
+                ..AgentBuildConfig::new("gpt-realtime")
             },
             None,
             None,
@@ -455,15 +455,20 @@ async fn create_materialized_session(runtime: &Arc<SessionRuntime>) -> meerkat_c
 #[tokio::test]
 async fn channel_open_attaches_runtime_and_reports_opening_status() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    register_live_session(&runtime, session_id).await;
+    let session_id = create_materialized_session(&runtime).await;
+    let session_id_text = session_id.to_string();
+    runtime
+        .runtime_adapter()
+        .apply_capability_driven_realtime_transport(&session_id)
+        .await
+        .expect("runtime should bind realtime-capable session");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        session_id,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -503,7 +508,7 @@ async fn channel_open_attaches_runtime_and_reports_opening_status() {
     let runtime_status =
         <meerkat_runtime::MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
             runtime.runtime_adapter().as_ref(),
-            &meerkat_core::SessionId::parse(session_id).expect("session_id should parse"),
+            &session_id,
         )
         .await
         .expect("registered session should expose runtime live status");
@@ -2505,15 +2510,20 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
 #[tokio::test]
 async fn reattach_required_primary_channel_retries_and_returns_to_opening_status() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    register_live_session(&runtime, session_id).await;
+    let session_id_value = create_materialized_session(&runtime).await;
+    let session_id = session_id_value.to_string();
+    runtime
+        .runtime_adapter()
+        .apply_capability_driven_realtime_transport(&session_id_value)
+        .await
+        .expect("runtime should bind realtime-capable session");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info_with_policy(
         host.as_ref(),
-        session_id,
+        &session_id,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
         Some(RealtimeReconnectPolicy {
@@ -2530,8 +2540,6 @@ async fn reattach_required_primary_channel_retries_and_returns_to_opening_status
         serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
     });
 
-    let session_id_value =
-        meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
     let mut ws_stream = connect_and_open(
         &ws_url,
         &open_info,

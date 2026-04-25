@@ -6,7 +6,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime::MobLifecycleSnapshot;
 use crate::runtime::mob_member_lifecycle_authority::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
-    MobMemberLifecycleAuthority, MobMemberLifecycleInput,
+    MobMemberLifecycleInput, MobMemberLifecycleProjection,
 };
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
@@ -663,6 +663,20 @@ impl MobHandle {
         reply_rx.await.map_err(|_| {
             crate::MobError::Internal("mob actor dropped CurrentRealtimeBinding reply".to_string())
         })
+    }
+
+    async fn member_machine_projection(
+        &self,
+        agent_identity: &MeerkatId,
+    ) -> super::state::MobMemberMachineProjection {
+        self.send_actor_command(
+            |reply_tx| super::state::MobCommand::MemberMachineProjection {
+                agent_identity: AgentIdentity::from(agent_identity.as_str()),
+                reply_tx,
+            },
+        )
+        .await
+        .unwrap_or_default()
     }
 }
 
@@ -1653,6 +1667,12 @@ impl MobHandle {
                 None => (roster.snapshot(), None, None, None),
             }
         };
+        let machine_projection = self.member_machine_projection(agent_identity).await;
+        let machine_bridge_session_id = machine_projection
+            .bound_session_id
+            .as_ref()
+            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
+        let current_bridge_session_id = current_bridge_session_id.or(machine_bridge_session_id);
 
         let restore_failure = {
             self.restore_diagnostics
@@ -1662,7 +1682,7 @@ impl MobHandle {
                 .cloned()
         };
         if let Some(diag) = restore_failure {
-            return MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+            return MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                 member_present: roster_state.is_some(),
                 roster_state,
                 session_observation: CanonicalSessionObservation::Missing,
@@ -1684,11 +1704,13 @@ impl MobHandle {
                 kickoff: roster_entry
                     .as_ref()
                     .and_then(|entry| entry.kickoff.clone()),
+                machine_state_marker: machine_projection.state_marker,
+                machine_runtime_live: machine_projection.live_runtime,
             });
         }
 
         match (roster_state, current_bridge_session_id) {
-            (None, _) => MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+            (None, _) => MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                 member_present: false,
                 roster_state: None,
                 session_observation: CanonicalSessionObservation::Missing,
@@ -1702,6 +1724,8 @@ impl MobHandle {
                 current_bridge_session_id: None,
                 peer_connectivity: None,
                 kickoff: None,
+                machine_state_marker: machine_projection.state_marker,
+                machine_runtime_live: machine_projection.live_runtime,
             }),
             (Some(roster_state), None) => {
                 let session_observation = match roster_entry.as_ref().map(|entry| &entry.member_ref)
@@ -1711,7 +1735,7 @@ impl MobHandle {
                     }) => CanonicalSessionObservation::Unknown,
                     _ => CanonicalSessionObservation::Missing,
                 };
-                MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+                MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     roster_state: Some(roster_state),
                     session_observation,
@@ -1733,6 +1757,8 @@ impl MobHandle {
                     kickoff: roster_entry
                         .as_ref()
                         .and_then(|entry| entry.kickoff.clone()),
+                    machine_state_marker: machine_projection.state_marker,
+                    machine_runtime_live: machine_projection.live_runtime,
                 })
             }
             (Some(roster_state), Some(bridge_session_id)) => {
@@ -1773,7 +1799,7 @@ impl MobHandle {
                 } else {
                     None
                 };
-                MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+                MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     roster_state: Some(roster_state),
                     session_observation: observation,
@@ -1793,6 +1819,8 @@ impl MobHandle {
                     current_bridge_session_id: Some(bridge_session_id),
                     peer_connectivity,
                     kickoff: roster_entry.and_then(|entry| entry.kickoff),
+                    machine_state_marker: machine_projection.state_marker,
+                    machine_runtime_live: machine_projection.live_runtime,
                 })
             }
         }
@@ -3179,7 +3207,7 @@ impl MobHandle {
     ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
         loop {
             let material = self.canonical_member_list_material(agent_identity).await;
-            if MobMemberLifecycleAuthority::is_terminal(&material) {
+            if MobMemberLifecycleProjection::is_terminal(&material) {
                 return Ok(material);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

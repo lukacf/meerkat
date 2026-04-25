@@ -2,7 +2,7 @@
 //!
 //! The LLM wire-client trait + plumbing moved to `meerkat-llm-core`;
 //! per-provider clients (`AnthropicClient`, `OpenAiClient`, `GeminiClient`,
-//! `OpenAiLiveClient`, `OpenAiCompatibleClient`, `OpenAiRealtimeAttachmentOrchestrator`)
+//! `OpenAiLiveClient`, `OpenAiCompatibleClient`)
 //! moved to `meerkat-anthropic`, `meerkat-openai`, `meerkat-gemini`.
 //! Provider-runtime types moved to `meerkat-core::provider_runtime`.
 //! Auth primitives moved to `meerkat-auth-core`.
@@ -20,6 +20,12 @@ pub use meerkat_llm_core::{
 #[cfg(feature = "anthropic")]
 pub use meerkat_anthropic::AnthropicClient;
 
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+pub use meerkat_openai::OpenAiLiveClient;
 #[cfg(feature = "openai")]
 pub use meerkat_openai::client_compatible::OpenAiCompatibleMode;
 #[cfg(all(
@@ -41,12 +47,6 @@ pub use meerkat_openai::live::{
 pub use meerkat_openai::realtime_attachment::RealtimeAttachmentToolDispatchHost;
 #[cfg(feature = "openai")]
 pub use meerkat_openai::{OpenAiClient, OpenAiCompatibleClient};
-#[cfg(all(
-    feature = "openai",
-    feature = "openai-realtime",
-    not(target_arch = "wasm32")
-))]
-pub use meerkat_openai::{OpenAiLiveClient, OpenAiRealtimeAttachmentOrchestrator};
 
 #[cfg(feature = "gemini")]
 pub use meerkat_gemini::GeminiClient;

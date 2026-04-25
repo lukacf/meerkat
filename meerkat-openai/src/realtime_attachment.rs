@@ -68,9 +68,9 @@ impl OpenAiRealtimeAttachmentOrchestrator {
         }
     }
 
-    /// Attach a runtime session to an OpenAI Realtime call and mark the live
-    /// attachment binding as ready once the provider transport is connected.
-    pub async fn attach(
+    /// Ensure the runtime-owned capability-driven realtime binding has an
+    /// OpenAI provider session and mark it ready once connected.
+    pub async fn ensure_attached_for_capable_session(
         &self,
         session_id: &SessionId,
         target: &OpenAiLiveCallTarget,
@@ -87,8 +87,23 @@ impl OpenAiRealtimeAttachmentOrchestrator {
             tasks.insert(session_id.clone(), OpenAiLiveTaskState::Connecting);
         }
 
-        let authority = match self.runtime.attach_live(session_id).await {
-            Ok(authority) => authority,
+        let authority = match self
+            .runtime
+            .apply_capability_driven_realtime_transport(session_id)
+            .await
+        {
+            Ok(Some(authority)) => authority,
+            Ok(None) => match self
+                .runtime
+                .current_realtime_attachment_authority(session_id)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    self.tasks.lock().await.remove(session_id);
+                    return Err(error);
+                }
+            },
             Err(error) => {
                 self.tasks.lock().await.remove(session_id);
                 return Err(error);
@@ -99,7 +114,10 @@ impl OpenAiRealtimeAttachmentOrchestrator {
             Ok(session) => session,
             Err(error) => {
                 self.tasks.lock().await.remove(session_id);
-                self.runtime.detach_live(session_id).await?;
+                let _ = self
+                    .runtime
+                    .require_realtime_attachment_reattach_for_authority(authority)
+                    .await;
                 return Err(map_openai_live_error(error));
             }
         };
@@ -113,7 +131,10 @@ impl OpenAiRealtimeAttachmentOrchestrator {
             .await
         {
             self.tasks.lock().await.remove(session_id);
-            self.runtime.detach_live(session_id).await?;
+            let _ = self
+                .runtime
+                .require_realtime_attachment_reattach_for_authority(authority)
+                .await;
             return Err(error);
         }
 
@@ -139,23 +160,17 @@ impl OpenAiRealtimeAttachmentOrchestrator {
         Ok(())
     }
 
-    /// Detach the currently orchestrated provider session, abort its event pump,
-    /// and clear the runtime binding while preserving durable intent.
-    ///
-    /// Wave-c C-9b R9 invariant: this is the sole production `handle.abort()`
-    /// on a realtime attachment task across the workspace. `abort()` is
-    /// immediately paired with `runtime.detach_live(session_id)` so the DSL
-    /// authority never observes an orphaned binding when the event-pump task
-    /// is cancelled mid-`.await`. Any new realtime-task cancellation path must
-    /// follow the same ordering: abort-then-detach, never abort alone.
-    /// Verified by `rg "\.abort\(\)" meerkat-openai/ meerkat-rpc/` returning
-    /// only this site plus `#[cfg(test)]` harness aborts.
-    pub async fn detach(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+    /// Stop the currently orchestrated provider session. Runtime attachment
+    /// lifecycle remains capability-driven by `MeerkatMachine`.
+    pub async fn stop_provider_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
         let task = self.tasks.lock().await.remove(session_id);
         if let Some(OpenAiLiveTaskState::Attached(handle)) = task {
             handle.abort();
         }
-        self.runtime.detach_live(session_id).await
+        Ok(())
     }
 }
 
@@ -285,7 +300,6 @@ mod tests {
         OpenAiLiveSessionFactory,
     };
     use async_trait::async_trait;
-    use meerkat_core::ToolDispatchOutcome;
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
@@ -294,13 +308,16 @@ mod tests {
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{SessionId, ToolCall, ToolResult};
+    use meerkat_core::{Provider, SessionLlmIdentity, ToolDispatchOutcome};
     use serde_json::json;
     use tokio::sync::{Mutex, Notify};
 
     use super::{OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost};
     use meerkat_llm_core::LlmError;
     use meerkat_runtime::{
-        Input, MeerkatMachine, PromptInput, RealtimeAttachmentStatus, RuntimeDriverError,
+        HydratedSessionLlmState, Input, MeerkatMachine, PromptInput, RealtimeAttachmentStatus,
+        ResolvedSessionLlmReconfigure, RuntimeDriverError, SessionLlmCapabilitySurface,
+        SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
         SessionServiceRuntimeExt,
     };
 
@@ -440,8 +457,98 @@ mod tests {
         }
     }
 
+    struct RealtimeTestReconfigureHost {
+        identity: SessionLlmIdentity,
+        capability_surface: SessionLlmCapabilitySurface,
+    }
+
+    #[async_trait]
+    impl SessionLlmReconfigureHost for RealtimeTestReconfigureHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: self.identity.clone(),
+                current_visibility_state: Default::default(),
+                current_capability_surface: Some(self.capability_surface.clone()),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: Default::default(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &SessionLlmIdentity,
+        ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Ok(ResolvedSessionLlmReconfigure {
+                target_identity: self.identity.clone(),
+                target_capability_surface: self.capability_surface.clone(),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &SessionLlmIdentity,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+    }
+
+    fn realtime_test_capability_surface() -> SessionLlmCapabilitySurface {
+        SessionLlmCapabilitySurface {
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            inline_video: false,
+            vision: false,
+            image_tool_results: false,
+            supports_web_search: false,
+            realtime: true,
+            call_timeout_secs: None,
+        }
+    }
+
+    fn install_realtime_test_reconfigure_host(runtime: &Arc<MeerkatMachine>) {
+        runtime.set_session_llm_reconfigure_host(Arc::new(RealtimeTestReconfigureHost {
+            identity: SessionLlmIdentity {
+                model: "gpt-realtime".to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                connection_ref: None,
+            },
+            capability_surface: realtime_test_capability_surface(),
+        }));
+    }
+
     async fn runtime_with_live_executor() -> (Arc<MeerkatMachine>, SessionId) {
         let runtime = Arc::new(MeerkatMachine::ephemeral());
+        install_realtime_test_reconfigure_host(&runtime);
         let session_id = SessionId::new();
         runtime
             .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
@@ -465,6 +572,7 @@ mod tests {
     async fn runtime_with_recording_executor()
     -> (Arc<MeerkatMachine>, SessionId, Arc<Mutex<Vec<String>>>) {
         let runtime = Arc::new(MeerkatMachine::ephemeral());
+        install_realtime_test_reconfigure_host(&runtime);
         let session_id = SessionId::new();
         let applied_prompts = Arc::new(Mutex::new(Vec::new()));
         runtime
@@ -535,6 +643,7 @@ mod tests {
         }
 
         let runtime = Arc::new(MeerkatMachine::ephemeral());
+        install_realtime_test_reconfigure_host(&runtime);
         let session_id = SessionId::new();
         let cancel_calls = Arc::new(AtomicUsize::new(0));
         let apply_started = Arc::new(Notify::new());
@@ -588,7 +697,7 @@ mod tests {
             .expect("non-empty call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -604,7 +713,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_live_orchestrator_attach_failure_restores_unbound_status() {
+    async fn openai_live_orchestrator_attach_failure_marks_reattach_required() {
         let (runtime, session_id) = runtime_with_live_executor().await;
         let factory = Arc::new(FakeFactory {
             sessions: Mutex::new(VecDeque::from([Err(LlmError::InvalidRequest {
@@ -620,7 +729,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_attach_fail").expect("call target should succeed");
 
         let error = orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect_err("attach should surface provider rejection");
         assert!(matches!(error, RuntimeDriverError::ValidationFailed { .. }));
@@ -631,7 +740,7 @@ mod tests {
         )
         .await
         .expect("runtime status should resolve");
-        assert_eq!(status, RealtimeAttachmentStatus::IntentPresentUnbound);
+        assert_eq!(status, RealtimeAttachmentStatus::ReattachRequired);
     }
 
     #[tokio::test]
@@ -667,7 +776,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_disconnect").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -683,7 +792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_live_orchestrator_detach_clears_binding_and_stops_task() {
+    async fn openai_live_orchestrator_stop_provider_session_keeps_runtime_binding() {
         let (runtime, session_id) = runtime_with_live_executor().await;
         let hold_open = Arc::new(Notify::new());
         let sent_events = Arc::new(Mutex::new(Vec::new()));
@@ -704,11 +813,11 @@ mod tests {
         let target = OpenAiLiveCallTarget::new("call_detach").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
         orchestrator
-            .detach(&session_id)
+            .stop_provider_session(&session_id)
             .await
             .expect("detach should succeed");
 
@@ -718,7 +827,7 @@ mod tests {
         )
         .await
         .expect("runtime status should resolve");
-        assert_eq!(status, RealtimeAttachmentStatus::IntentPresentUnbound);
+        assert_eq!(status, RealtimeAttachmentStatus::BindingReady);
 
         hold_open.notify_waiters();
     }
@@ -746,7 +855,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_stale_disconnect").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -796,7 +905,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_transcript").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -851,7 +960,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_interrupt").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -949,7 +1058,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_tool_success").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 
@@ -1034,7 +1143,7 @@ mod tests {
             OpenAiLiveCallTarget::new("call_tool_error").expect("call target should succeed");
 
         orchestrator
-            .attach(&session_id, &target)
+            .ensure_attached_for_capable_session(&session_id, &target)
             .await
             .expect("attach should succeed");
 

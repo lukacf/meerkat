@@ -30,9 +30,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::agent::CommsRuntime;
+use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
 use meerkat_core::types::SessionId;
+use meerkat_core::{
+    PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
+};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_runtime::meerkat_machine::dsl::{
     PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
@@ -55,6 +58,7 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
 struct RecordingCommsRuntime {
     adds: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
     removes: std::sync::Mutex<Vec<String>>,
+    trusted: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
 }
 
 impl std::fmt::Debug for RecordingCommsRuntime {
@@ -77,6 +81,10 @@ impl CommsRuntime for RecordingCommsRuntime {
         self.adds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(peer.clone());
+        self.trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(peer);
         Ok(())
     }
@@ -86,7 +94,33 @@ impl CommsRuntime for RecordingCommsRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(peer_id.to_string());
-        Ok(true)
+        let mut trusted = self
+            .trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = trusted.len();
+        trusted.retain(|peer| peer.peer_id.as_str() != peer_id);
+        Ok(before != trusted.len())
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+    ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
+        Ok(PeerIngressRuntimeSnapshot {
+            self_peer_id: meerkat_core::comms::PeerId::parse(
+                "00000000-0000-4000-8000-000000000000",
+            )
+            .expect("valid test peer id"),
+            auth_required: true,
+            authority_phase: PeerIngressAuthorityPhase::Received,
+            trusted_peers: self
+                .trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            submission_queue_len: 0,
+            queue: PeerIngressQueueSnapshot::default(),
+        })
     }
 }
 

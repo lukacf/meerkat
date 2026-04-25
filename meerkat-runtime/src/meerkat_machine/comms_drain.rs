@@ -392,25 +392,26 @@ impl MeerkatMachine {
             None => return false,
         };
 
-        // Wave-c C-H2: drain slot now lives on `RuntimeSessionEntry`, so
-        // one `sessions.write()` lock suffices for the "session exists +
-        // start the slot" gate. No separate drain-slots map to keep in
-        // sync with `sessions`.
+        // Inspect first, then stage the DSL transition, then mutate the
+        // mechanical slot. A rejected `SpawnDrain` must leave the shell slot
+        // untouched.
         let (needs_rebind, needs_spawn) = {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get_mut(session_id) else {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
                 tracing::warn!(
                     %session_id,
                     "refusing to spawn comms drain for unregistered session"
                 );
                 return false;
             };
-            let slot = &mut entry.drain_slot;
-            let needs_rebind = slot.begin_rebind(mode, comms.clone());
+            let slot = &entry.drain_slot;
+            let needs_rebind = slot.phase == CommsDrainPhase::Running
+                && slot.mode == Some(mode)
+                && !slot.bound_runtime_matches(&comms);
             let needs_spawn = if needs_rebind {
                 false
             } else {
-                slot.begin_running(mode, comms.clone())
+                slot.can_ensure_running()
             };
             (needs_rebind, needs_spawn)
         };
@@ -443,8 +444,6 @@ impl MeerkatMachine {
                         error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
                         "DSL rejected SpawnDrain; skipping drain spawn"
                     );
-                    entry.drain_slot.phase = CommsDrainPhase::Stopped;
-                    entry.drain_slot.bound_runtime = None;
                     return false;
                 }
             } else {
@@ -473,6 +472,15 @@ impl MeerkatMachine {
         );
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
+            let slot_started = if needs_rebind {
+                entry.drain_slot.begin_rebind(mode, comms.clone())
+            } else {
+                entry.drain_slot.begin_running(mode, comms.clone())
+            };
+            if !slot_started {
+                handle.abort();
+                return false;
+            }
             entry.drain_slot.handle = Some(handle);
             entry.drain_slot.mark_task_spawned();
         }

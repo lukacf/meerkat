@@ -51,6 +51,7 @@ use meerkat_runtime::composition::{
     DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
     RouteTable, SignalConsumerSurface,
 };
+use meerkat_runtime::meerkat_machine::dsl as meerkat_dsl;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -198,7 +199,7 @@ impl MobProducerEffect {
                 }
                 "fence_token" => Some(FieldValue::U64(fence_token.0)),
                 "work_id" => Some(FieldValue::Str(work_id.0.as_str())),
-                "origin" => Some(FieldValue::Str(work_origin_slug(origin))),
+                "origin" => Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin)))),
                 _ => None,
             },
             Self::RequestRuntimeRetire { session_id } => match id.as_str() {
@@ -213,17 +214,11 @@ impl MobProducerEffect {
     }
 }
 
-/// Stable slug for a DSL [`mob_dsl::WorkOrigin`] used as the routed-effect
-/// field value. The DSL enum carries an `Ingest` variant the mob side
-/// never produces (it models the meerkat-side admission-kind), so emit a
-/// distinct slug for it — the consumer surface rejects it explicitly if
-/// it ever appears here, which would be a DSL bug rather than a silent
-/// drop.
-fn work_origin_slug(origin: &mob_dsl::WorkOrigin) -> &'static str {
+fn meerkat_work_origin(origin: &mob_dsl::WorkOrigin) -> meerkat_dsl::WorkOrigin {
     match origin {
-        mob_dsl::WorkOrigin::External => "External",
-        mob_dsl::WorkOrigin::Internal => "Internal",
-        mob_dsl::WorkOrigin::Ingest => "Ingest",
+        mob_dsl::WorkOrigin::External => meerkat_dsl::WorkOrigin::External,
+        mob_dsl::WorkOrigin::Internal => meerkat_dsl::WorkOrigin::Internal,
+        mob_dsl::WorkOrigin::Ingest => meerkat_dsl::WorkOrigin::Ingest,
     }
 }
 
@@ -609,10 +604,13 @@ mod tests {
                 .expect("agent_runtime_id alias"),
             FieldValue::Str("rt-x"),
         ));
-        assert!(matches!(
-            effect.field(&fid("origin")).expect("origin"),
-            FieldValue::Str("External"),
-        ));
+        match effect.field(&fid("origin")).expect("origin") {
+            FieldValue::Opaque(value) => assert!(matches!(
+                value.downcast_ref::<meerkat_dsl::WorkOrigin>(),
+                Some(meerkat_dsl::WorkOrigin::External)
+            )),
+            other => panic!("origin should stay typed, got {other:?}"),
+        }
     }
 
     #[test]

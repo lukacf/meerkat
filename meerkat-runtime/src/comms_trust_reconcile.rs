@@ -15,9 +15,9 @@
 //!   post-transition `peer_projection_epoch` — the DSL emits the fact
 //!   "reconcile needed at epoch N", the shell does the mechanical
 //!   diff.
-//! * This handler owns the mechanical reconciliation: it maintains an
-//!   "applied trust store" view and, given a fresh effective peer
-//!   set, computes the add / remove delta and calls
+//! * This handler owns the mechanical reconciliation: it reads the
+//!   canonical trust store, computes the add / remove delta against a
+//!   fresh effective peer set, and calls
 //!   `CommsRuntime::add_trusted_peer` / `remove_trusted_peer`
 //!   mechanically. No semantic decisions live here; failures surface
 //!   through typed errors.
@@ -39,24 +39,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use meerkat_core::agent::CommsRuntime;
+use crate::meerkat_machine::dsl::PeerEndpoint;
+use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
     PeerAddress, PeerId, PeerName, PeerTransport, SendError, TrustedPeerDescriptor,
 };
-// `tokio::sync::Mutex` (async) rather than `std::sync::Mutex` (sync)
-// so the lock can be held across `.await` points. This lets the
-// reconcile path serialize end-to-end — trust-store mutations AND
-// the applied-view commit run inside the same critical section,
-// closing the TOCTOU class where a stale reconcile's mutations
-// could orphan peers in the trust store while its commit was
-// skipped (PR #340 re-review item).
-//
-// Use `crate::tokio::sync::Mutex` (the crate-level re-export) so the
-// WASM target picks up `tokio_with_wasm::alias::sync::Mutex` instead
-// of the plain `tokio` crate, which is not wasm32-compatible.
-use crate::tokio::sync::Mutex;
-
-use crate::meerkat_machine::dsl::PeerEndpoint;
 
 /// Typed error surfaced by the reconciliation handler.
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +69,9 @@ pub enum CommsTrustReconcileError {
     /// the contract visible.
     #[error("invalid peer endpoint `{peer_id}`: {detail}")]
     InvalidEndpoint { peer_id: String, detail: String },
+    /// The bound runtime does not expose its canonical trust-store snapshot.
+    #[error("canonical trust-store snapshot unavailable: {0}")]
+    TrustSnapshotUnavailable(#[from] CommsCapabilityError),
 }
 
 /// Structured summary of a single reconciliation pass.
@@ -100,95 +90,40 @@ pub struct ReconcileReport {
 
 /// Mechanical trust reconciliation handler.
 ///
-/// Holds a reference to a `CommsRuntime` and an applied view the
-/// reconciler uses to compute deltas. Thread-safe; the applied
-/// view is guarded by a single `Mutex`.
+/// Holds a reference to a `CommsRuntime`. Deltas are computed from the
+/// runtime's canonical trust-store snapshot on every pass.
 pub struct CommsTrustReconciler {
     comms: Arc<dyn CommsRuntime>,
-    applied: Mutex<AppliedView>,
 }
 
 impl std::fmt::Debug for CommsTrustReconciler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `dyn CommsRuntime` does not implement `Debug`; print a
-        // structural placeholder. Reading the applied view requires
-        // an async lock acquisition, which is not available from
-        // `Debug::fmt` — tests use `applied_snapshot()` for the
-        // view contents instead.
         f.debug_struct("CommsTrustReconciler")
             .finish_non_exhaustive()
     }
 }
 
-#[derive(Debug, Default)]
-struct AppliedView {
-    /// Peers currently registered in the trust store (per the
-    /// reconciler's view; failures are self-correcting on the next
-    /// pass).
-    peers: BTreeSet<PeerEndpoint>,
-    /// Highest epoch applied so far. Reconciles with strictly-lower
-    /// epoch are rejected to prevent out-of-order deliveries
-    /// regressing the trust view.
-    epoch: u64,
-}
-
 impl CommsTrustReconciler {
     /// Construct a reconciler bound to the given comms runtime.
-    /// Initial applied view is empty at epoch 0.
     pub fn new(comms: Arc<dyn CommsRuntime>) -> Self {
-        Self {
-            comms,
-            applied: Mutex::new(AppliedView::default()),
-        }
+        Self { comms }
     }
 
     /// Reconcile the trust store against `effective_peers`.
     ///
     /// Returns a [`ReconcileReport`] describing the add / remove
-    /// calls the reconciler made. Out-of-order epochs (epoch <
-    /// currently-applied) return `Ok` with an empty report — the
-    /// reconciler treats them as stale.
+    /// calls the reconciler made.
     ///
     /// Trust-store failures surface as
-    /// [`CommsTrustReconcileError`]; the applied view is only
-    /// advanced for peers the trust store acknowledged, so failed
-    /// adds/removes are retried on the next pass.
-    ///
-    /// Concurrency (PR #340 re-review fix): the entire reconcile
-    /// path — stale-epoch check, trust-store add/remove calls, and
-    /// applied-view commit — runs inside a single `tokio::sync::Mutex`
-    /// critical section. Stale reconciles fail the epoch check at
-    /// the TOP of the critical section and short-circuit WITHOUT
-    /// touching the trust store, preventing the earlier TOCTOU
-    /// class where a stale reconcile's mutations could orphan
-    /// peers in the trust store while its commit was skipped.
-    ///
-    /// The lock is tokio's async mutex (not `std::sync::Mutex`) so
-    /// it can be held across `.await` points for the trust-store
-    /// calls. The critical section is short relative to mob
-    /// topology changes — overlay reconciliation fires at the
-    /// rate of topology-change events, not per-message — so
-    /// holding the lock across awaits is well within the
-    /// reconciler's latency budget.
+    /// [`CommsTrustReconcileError`]. There is no helper-local applied
+    /// truth: if a prior mutation failed, the next pass re-reads the
+    /// canonical trust store and retries whatever delta remains.
     pub async fn reconcile(
         &self,
         epoch: u64,
         effective_peers: BTreeSet<PeerEndpoint>,
     ) -> Result<ReconcileReport, CommsTrustReconcileError> {
-        let mut guard = self.applied.lock().await;
-
-        if epoch < guard.epoch {
-            // Stale delivery — short-circuit INSIDE the lock.
-            // The trust store is not touched, so no orphaned
-            // mutations.
-            return Ok(ReconcileReport {
-                added: Vec::new(),
-                removed: Vec::new(),
-                applied_epoch: guard.epoch,
-            });
-        }
-
-        let previous_peers: BTreeSet<PeerEndpoint> = guard.peers.clone();
+        let previous_peers = self.canonical_trusted_peer_snapshot().await?;
 
         let to_add: Vec<PeerEndpoint> = effective_peers
             .iter()
@@ -206,9 +141,7 @@ impl CommsTrustReconciler {
 
         // Perform adds first so a concurrent peer-send from the same
         // session sees the new peer available even if a remove for
-        // an older session hasn't completed. Both adds and removes
-        // happen while the async mutex is held — concurrent
-        // reconciles wait their turn.
+        // an older session hasn't completed.
         for endpoint in to_add {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
             self.comms
@@ -232,30 +165,22 @@ impl CommsTrustReconciler {
             removed.push(endpoint);
         }
 
-        // Commit the applied view under the same lock. No race
-        // possible — we've held the lock across the entire
-        // trust-store interaction.
-        guard.peers = effective_peers;
-        guard.epoch = epoch;
-        let applied_epoch = epoch;
-
         Ok(ReconcileReport {
             added,
             removed,
-            applied_epoch,
+            applied_epoch: epoch,
         })
     }
 
-    /// Snapshot of the reconciler's current applied view.
-    ///
-    /// Observability/test accessor. Production call sites should rely on
-    /// [`ReconcileReport`] returned from [`Self::reconcile`] instead —
-    /// the snapshot only reflects the reconciler's internal `AppliedView`
-    /// and is not authoritative for the trust store itself.
-    #[doc(hidden)]
-    pub async fn applied_snapshot(&self) -> (u64, BTreeSet<PeerEndpoint>) {
-        let guard = self.applied.lock().await;
-        (guard.epoch, guard.peers.clone())
+    async fn canonical_trusted_peer_snapshot(
+        &self,
+    ) -> Result<BTreeSet<PeerEndpoint>, CommsTrustReconcileError> {
+        let snapshot = self.comms.peer_ingress_runtime_snapshot().await?;
+        snapshot
+            .trusted_peers
+            .iter()
+            .map(descriptor_to_endpoint)
+            .collect()
     }
 }
 
@@ -307,11 +232,25 @@ fn parse_peer_address(raw: &str) -> Result<PeerAddress, String> {
     Ok(PeerAddress::new(transport, endpoint))
 }
 
+fn descriptor_to_endpoint(
+    descriptor: &TrustedPeerDescriptor,
+) -> Result<PeerEndpoint, CommsTrustReconcileError> {
+    Ok(PeerEndpoint {
+        name: crate::meerkat_machine::dsl::PeerName(descriptor.name.as_str().to_owned()),
+        peer_id: crate::meerkat_machine::dsl::PeerId(descriptor.peer_id.to_string()),
+        address: crate::meerkat_machine::dsl::PeerAddress(descriptor.address.to_string()),
+        signing_key: crate::meerkat_machine::dsl::PeerSigningKey(descriptor.pubkey),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_core::{
+        PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Build a `PeerEndpoint` with a valid UUID `peer_id` and an
@@ -340,6 +279,7 @@ mod tests {
     struct RecordingCommsRuntime {
         adds: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
         removes: std::sync::Mutex<Vec<String>>,
+        trusted: std::sync::Mutex<BTreeSet<PeerEndpoint>>,
         fail_next_add: AtomicBool,
         fail_next_remove: AtomicBool,
     }
@@ -367,7 +307,11 @@ mod tests {
             self.adds
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(peer);
+                .push(peer.clone());
+            self.trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(descriptor_to_endpoint(&peer).expect("test descriptor should map"));
             Ok(())
         }
 
@@ -379,7 +323,33 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(peer_id.to_string());
+            self.trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|endpoint| endpoint.peer_id.0 != peer_id);
             Ok(true)
+        }
+
+        async fn peer_ingress_runtime_snapshot(
+            &self,
+        ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
+            let trusted_peers = self
+                .trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(endpoint_to_descriptor)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| CommsCapabilityError::Unsupported(err.to_string()))?;
+            Ok(PeerIngressRuntimeSnapshot {
+                self_peer_id: PeerId::parse("00000000-0000-4000-8000-000000000000")
+                    .expect("valid test peer id"),
+                auth_required: true,
+                authority_phase: PeerIngressAuthorityPhase::Received,
+                trusted_peers,
+                submission_queue_len: 0,
+                queue: PeerIngressQueueSnapshot::default(),
+            })
         }
     }
 
@@ -466,7 +436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_epoch_reconcile_is_accepted_as_no_op() {
+    async fn reconcile_reads_canonical_store_not_local_applied_view() {
         let comms = Arc::new(RecordingCommsRuntime::default());
         let reconciler = CommsTrustReconciler::new(comms.clone());
 
@@ -475,20 +445,31 @@ mod tests {
             .await
             .expect("first reconcile");
 
-        let report = reconciler
-            .reconcile(4, BTreeSet::from([endpoint("B", UUID_B)]))
-            .await
-            .expect("stale reconcile accepted");
-        assert!(report.added.is_empty());
-        assert!(report.removed.is_empty());
-        assert_eq!(
-            report.applied_epoch, 5,
-            "applied_epoch must remain at the newer watermark",
-        );
+        // Mutate the canonical trust store outside the reconciler. A helper-
+        // local applied view would still believe A is present and B absent;
+        // the correct reconciler re-reads canonical truth and restores A while
+        // removing B.
+        comms
+            .trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        comms
+            .trusted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(endpoint("B", UUID_B));
 
-        // Only the first reconcile's add made it to the trust store.
-        assert_eq!(comms.add_calls().len(), 1);
-        assert_eq!(comms.remove_calls().len(), 0);
+        let report = reconciler
+            .reconcile(4, BTreeSet::from([endpoint("A", UUID_A)]))
+            .await
+            .expect("reconcile should read canonical trust store");
+        assert_eq!(report.added, vec![endpoint("A", UUID_A)]);
+        assert_eq!(report.removed, vec![endpoint("B", UUID_B)]);
+        assert_eq!(report.applied_epoch, 4);
+
+        assert_eq!(comms.add_calls().len(), 2);
+        assert_eq!(comms.remove_calls(), vec![UUID_B.to_string()]);
     }
 
     #[tokio::test]

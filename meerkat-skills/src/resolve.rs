@@ -34,22 +34,37 @@ pub async fn resolve_repositories_with_roots(
     user_root: Option<&Path>,
     cache_root: Option<&Path>,
 ) -> Result<Option<CompositeSkillSource>, SkillError> {
-    #[cfg(target_arch = "wasm32")]
-    let _ = (context_root, cache_root);
-
     if !config.enabled {
         return Ok(None);
     }
 
-    let mut sources: Vec<NamedSource> = vec![NamedSource {
-        name: "embedded".to_string(),
-        source: SourceNode::Embedded(EmbeddedSkillSource::new()),
-    }];
-    for repo in &config.repositories {
-        match &repo.transport {
-            SkillRepoTransport::Filesystem { path } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (context_root, user_root, cache_root);
+        if let Some(repo) = config.repositories.first() {
+            let transport = match &repo.transport {
+                SkillRepoTransport::Filesystem { .. } => "filesystem",
+                SkillRepoTransport::Http { .. } => "HTTP",
+                SkillRepoTransport::Stdio { .. } => "stdio",
+                SkillRepoTransport::Git { .. } => "Git",
+            };
+            return Err(unavailable_on_wasm(transport));
+        }
+        Ok(Some(CompositeSkillSource::from_named(vec![NamedSource {
+            name: "embedded".to_string(),
+            source: SourceNode::Embedded(EmbeddedSkillSource::new()),
+        }])))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut sources: Vec<NamedSource> = vec![NamedSource {
+            name: "embedded".to_string(),
+            source: SourceNode::Embedded(EmbeddedSkillSource::new()),
+        }];
+        for repo in &config.repositories {
+            match &repo.transport {
+                SkillRepoTransport::Filesystem { path } => {
                     let resolution_root = context_root
                         .or(cache_root)
                         .unwrap_or_else(|| Path::new("."));
@@ -68,68 +83,62 @@ pub async fn resolve_repositories_with_roots(
                         )),
                     });
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = path;
-                    return Err(unavailable_on_wasm("filesystem"));
+                SkillRepoTransport::Http {
+                    url,
+                    auth_header,
+                    auth_token,
+                    refresh_seconds,
+                    timeout_seconds,
+                } => {
+                    #[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
+                    {
+                        let auth = match (auth_header, auth_token) {
+                            (Some(name), Some(value)) => Some(HttpSkillAuth::Header {
+                                name: name.clone(),
+                                value: value.clone(),
+                            }),
+                            (None, Some(value)) => Some(HttpSkillAuth::Bearer(value.clone())),
+                            _ => None,
+                        };
+                        sources.push(NamedSource {
+                            name: repo.name.clone(),
+                            source: SourceNode::Http(Box::new(
+                                HttpSkillSource::new_with_thresholds(
+                                    repo.source_uuid.clone(),
+                                    url.clone(),
+                                    auth,
+                                    Duration::from_secs(*refresh_seconds),
+                                    Duration::from_secs(*timeout_seconds),
+                                    config.health_thresholds,
+                                ),
+                            )),
+                        });
+                    }
+                    #[cfg(any(not(feature = "skills-http"), target_arch = "wasm32"))]
+                    {
+                        let _ = (
+                            url,
+                            auth_header,
+                            auth_token,
+                            refresh_seconds,
+                            timeout_seconds,
+                        );
+                        #[cfg(target_arch = "wasm32")]
+                        return Err(unavailable_on_wasm("HTTP"));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        return Err(SkillError::Load(
+                            "HTTP skill repository configured but skills-http feature is disabled"
+                                .into(),
+                        ));
+                    }
                 }
-            }
-            SkillRepoTransport::Http {
-                url,
-                auth_header,
-                auth_token,
-                refresh_seconds,
-                timeout_seconds,
-            } => {
-                #[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
-                {
-                    let auth = match (auth_header, auth_token) {
-                        (Some(name), Some(value)) => Some(HttpSkillAuth::Header {
-                            name: name.clone(),
-                            value: value.clone(),
-                        }),
-                        (None, Some(value)) => Some(HttpSkillAuth::Bearer(value.clone())),
-                        _ => None,
-                    };
-                    sources.push(NamedSource {
-                        name: repo.name.clone(),
-                        source: SourceNode::Http(Box::new(HttpSkillSource::new_with_thresholds(
-                            repo.source_uuid.clone(),
-                            url.clone(),
-                            auth,
-                            Duration::from_secs(*refresh_seconds),
-                            Duration::from_secs(*timeout_seconds),
-                            config.health_thresholds,
-                        ))),
-                    });
-                }
-                #[cfg(any(not(feature = "skills-http"), target_arch = "wasm32"))]
-                {
-                    let _ = (
-                        url,
-                        auth_header,
-                        auth_token,
-                        refresh_seconds,
-                        timeout_seconds,
-                    );
-                    #[cfg(target_arch = "wasm32")]
-                    return Err(unavailable_on_wasm("HTTP"));
-                    #[cfg(not(target_arch = "wasm32"))]
-                    return Err(SkillError::Load(
-                        "HTTP skill repository configured but skills-http feature is disabled"
-                            .into(),
-                    ));
-                }
-            }
-            SkillRepoTransport::Stdio {
-                command,
-                args,
-                cwd,
-                env,
-                timeout_seconds,
-            } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
+                SkillRepoTransport::Stdio {
+                    command,
+                    args,
+                    cwd,
+                    env,
+                    timeout_seconds,
+                } => {
                     let resolved_cwd = cwd.as_ref().map(|path| {
                         if Path::new(path).is_relative() {
                             context_root.unwrap_or_else(|| Path::new(".")).join(path)
@@ -154,24 +163,16 @@ pub async fn resolve_repositories_with_roots(
                         )),
                     });
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (command, args, cwd, env, timeout_seconds);
-                    return Err(unavailable_on_wasm("stdio"));
-                }
-            }
-            SkillRepoTransport::Git {
-                url,
-                git_ref,
-                ref_type,
-                skills_root,
-                auth_token,
-                ssh_key,
-                refresh_seconds,
-                depth,
-            } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
+                SkillRepoTransport::Git {
+                    url,
+                    git_ref,
+                    ref_type,
+                    skills_root,
+                    auth_token,
+                    ssh_key,
+                    refresh_seconds,
+                    depth,
+                } => {
                     let cache_base = cache_root
                         .or(context_root)
                         .or(user_root)
@@ -205,40 +206,24 @@ pub async fn resolve_repositories_with_roots(
                         }))),
                     });
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (
-                        url,
-                        git_ref,
-                        ref_type,
-                        skills_root,
-                        auth_token,
-                        ssh_key,
-                        refresh_seconds,
-                        depth,
-                        user_root,
-                    );
-                    return Err(unavailable_on_wasm("Git"));
-                }
             }
         }
-    }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(root) = context_root {
-        let default_project_skills = root.join(".rkat/skills");
-        if default_project_skills.is_dir() {
-            sources.push(NamedSource {
-                name: "project".to_string(),
-                source: SourceNode::Filesystem(FilesystemSkillSource::new(
-                    default_project_skills,
-                    SkillScope::Project,
-                )),
-            });
+        if let Some(root) = context_root {
+            let default_project_skills = root.join(".rkat/skills");
+            if default_project_skills.is_dir() {
+                sources.push(NamedSource {
+                    name: "project".to_string(),
+                    source: SourceNode::Filesystem(FilesystemSkillSource::new(
+                        default_project_skills,
+                        SkillScope::Project,
+                    )),
+                });
+            }
         }
-    }
 
-    Ok(Some(CompositeSkillSource::from_named(sources)))
+        Ok(Some(CompositeSkillSource::from_named(sources)))
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

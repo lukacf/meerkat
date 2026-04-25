@@ -197,6 +197,7 @@ fn kernel_seam_retains_coverage_metadata() {
             "schedule_bundle",
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
+            "auth_lease_bundle",
         ]
     );
 }

@@ -36,6 +36,7 @@ case "${command}" in
     host_cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
     extra_args+=(
       --test_env="MEERKAT_HOST_CARGO_HOME=${host_cargo_home}"
+      --build_tests_only
       --test_output=errors
       --test_summary=terse
       --color=no
@@ -47,6 +48,7 @@ case "${command}" in
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//..."
     extra_args+=(
+      --build_tests_only
       --test_tag_filters=-local
       --test_output=errors
       --test_summary=terse
@@ -61,6 +63,7 @@ case "${command}" in
     host_cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
     extra_args+=(
       --test_env="MEERKAT_HOST_CARGO_HOME=${host_cargo_home}"
+      --build_tests_only
       --spawn_strategy=local
       --jobs="${BUILDBUDDY_LOCAL_JOBS:-8}"
       --test_output=errors
@@ -146,6 +149,17 @@ case "${command}" in
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//..."
     extra_args+=(
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
+      --output_groups="+clippy_checks"
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
+  clippy-rbe)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//..."
+    extra_args+=(
+      --build_tag_filters=-local
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings

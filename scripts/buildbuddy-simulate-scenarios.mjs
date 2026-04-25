@@ -23,7 +23,7 @@ Scenarios:
   multi-worktree     Create two temporary git worktrees and run parallel agents.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
-  ci-workspace       Run workspace-test-rbe and clippy in parallel.
+  ci-workspace       Run workspace-test-rbe and clippy-rbe in parallel.
   all                Run the default scenario set.
 `);
 }
@@ -381,7 +381,7 @@ async function ciWorkspace(root) {
       repoCommand(
         root,
         { ...commonEnv, RUST_LANE_ID: "ci-workspace-clippy" },
-        "clippy",
+        "clippy-rbe",
         [],
         ["--jobs=64", "--color=no", "--curses=no"],
       ),

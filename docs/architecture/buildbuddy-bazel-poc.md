@@ -22,6 +22,8 @@ Use `scripts/buildbuddy-bazel-poc` with `BUILDBUDDY_BAZEL_COMMAND`:
 - `workspace-test-rbe`: run the remote-compatible workspace test suite,
   excluding local-only Cargo/trybuild fixtures.
 - `workspace-test-local`: run the full workspace test suite with local spawns.
+- `clippy-rbe`: run the rules_rust clippy aspect with `-D warnings`,
+  excluding local-only Cargo/trybuild fixtures.
 - `owned-build <path>`: build the owning package target for a changed path.
 - `affected-build <path>`: build the reverse-dependency closure for a changed path.
 - `owned-fast-test <path>`: run the owning fast suite, or the exact test target
@@ -79,7 +81,7 @@ modes:
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
-- `ci-workspace`: parallel CI-like `workspace-test-rbe` and clippy on fresh
+- `ci-workspace`: parallel CI-like `workspace-test-rbe` and `clippy-rbe` on fresh
   output bases.
 
 `scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
@@ -97,9 +99,9 @@ Representative measurements from the POC environment:
 | Scenario | Result |
 | --- | ---: |
 | Full workspace test lane (`152` tests), remote/cache | `23.25s` wall |
-| Full workspace test lane (`152` tests), warm remote/cache | `3.96s` wall |
-| Remote-compatible workspace lane (`151` tests), first touch | `31.02s` wall |
-| Remote-compatible workspace lane (`151` tests), warm | `5.33s` wall |
+| Full workspace test lane (`152` tests), warm remote/cache | `3.96-5.33s` wall |
+| Remote-compatible workspace lane (`151` tests), first touch | `22.27s` wall |
+| Remote-compatible workspace lane (`151` tests), warm | `4.10-4.38s` wall |
 | Full workspace test lane (`152` tests), local-spawn first pass | `67.01s` wall |
 | Full workspace test lane (`152` tests), warm local-spawn | `4.75s` wall |
 | Warm root fast suite (`117` tests) | `3.99s` wall |
@@ -121,7 +123,7 @@ Representative measurements from the POC environment:
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |
-| CI-like workspace-RBE + clippy, fresh output bases | `55.78s` max wall |
+| CI-like workspace-RBE + clippy-RBE, fresh output bases | `26-37.14s` max wall |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel

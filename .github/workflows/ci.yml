@@ -285,7 +285,9 @@ jobs:
           prefix-key: integration-fast
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -333,7 +335,9 @@ jobs:
           prefix-key: e2e-system
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

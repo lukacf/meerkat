@@ -481,10 +481,10 @@ fn invalid(from: TurnPhase, input: &TurnExecutionInput) -> DslTransitionError {
 /// so the caller can drive a terminal transition (BudgetExhausted,
 /// TurnLimitReached, etc.) from the expected phase.
 ///
-/// Tests that directly invoke `agent.run_loop(None)` with pre-staged
-/// `agent.state = LoopState::CallingLlm` never call `primitive_applied`,
-/// so the stub would otherwise panic on the first terminal-routing
-/// transition. This helper keeps the stub permissive for such tests.
+/// Tests that directly invoke `agent.run_loop(None)` without a surface-staged
+/// primitive never call `primitive_applied`, so the stub would otherwise panic
+/// on the first terminal-routing transition. This helper keeps the stub
+/// permissive for such tests.
 fn ensure_active_conversation_run(state: &mut LocalState) -> Result<(), DslTransitionError> {
     let is_terminal = matches!(
         state.phase,

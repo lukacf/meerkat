@@ -9,7 +9,6 @@ use crate::ops::ConcurrencyLimits;
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::{SESSION_TOOL_VISIBILITY_STATE_KEY, Session, SessionToolVisibilityState};
-use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
@@ -294,7 +293,6 @@ impl AgentBuilder {
             session,
             budget,
             retry_policy: self.retry_policy,
-            state: LoopState::CallingLlm,
             depth: self.depth,
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,

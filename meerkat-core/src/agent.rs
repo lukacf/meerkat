@@ -817,7 +817,6 @@ where
     session: Session,
     budget: Budget,
     retry_policy: RetryPolicy,
-    state: LoopState,
     depth: u32,
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,

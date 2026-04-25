@@ -412,8 +412,10 @@ where
     }
 
     /// Get the current state
-    pub fn state(&self) -> &LoopState {
-        &self.state
+    pub fn state(&self) -> LoopState {
+        self.execution_snapshot()
+            .map(|snapshot| snapshot.loop_state)
+            .unwrap_or(LoopState::CallingLlm)
     }
 
     /// Snapshot the agent's live execution state for diagnostics and mapping.
@@ -847,10 +849,6 @@ where
         if self.runtime_execution_kind.is_none() {
             self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
         }
-        self.state = self
-            .turn_phase()
-            .map(crate::turn_execution_authority::TurnPhase::to_loop_state)
-            .unwrap_or(LoopState::CallingLlm);
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -949,10 +947,6 @@ where
             self.runtime_execution_kind =
                 Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
         }
-        self.state = self
-            .turn_phase()
-            .map(crate::turn_execution_authority::TurnPhase::to_loop_state)
-            .unwrap_or(LoopState::CallingLlm);
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;

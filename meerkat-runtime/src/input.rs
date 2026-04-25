@@ -10,8 +10,9 @@ use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
-    BlobStore, BlobStoreError, MissingBlobBehavior, externalize_content_blocks,
-    hydrate_content_blocks,
+    BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
+    PeerResponseProgressProjectionPhase, PeerResponseTerminalProjectionStatus,
+    externalize_content_blocks, hydrate_content_blocks,
 };
 use serde::{Deserialize, Serialize};
 
@@ -484,6 +485,96 @@ pub struct OperationInput {
     pub operation_id: OperationId,
     /// Typed lifecycle event for the operation.
     pub event: OpEvent,
+}
+
+/// Build the core-owned peer conversation projection for a runtime peer input.
+///
+/// The runtime loop consumes this classification but does not own the peer
+/// response semantic mapping. That mapping belongs at the input boundary,
+/// where typed peer convention/status fields are still present.
+pub(crate) fn peer_projection_from_peer_input(
+    peer: &PeerInput,
+) -> Option<PeerConversationProjection> {
+    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
+
+    match &peer.convention {
+        Some(PeerConvention::Message) => Some(PeerConversationProjection::Message {
+            peer_id: peer_id.clone(),
+        }),
+        Some(PeerConvention::Request { request_id, intent }) => {
+            Some(PeerConversationProjection::Request {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                intent: intent.clone(),
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(PeerConvention::ResponseProgress { request_id, phase }) => {
+            Some(PeerConversationProjection::ResponseProgress {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                phase: match phase {
+                    ResponseProgressPhase::Accepted => {
+                        PeerResponseProgressProjectionPhase::Accepted
+                    }
+                    ResponseProgressPhase::InProgress => {
+                        PeerResponseProgressProjectionPhase::InProgress
+                    }
+                    ResponseProgressPhase::PartialResult => {
+                        PeerResponseProgressProjectionPhase::PartialResult
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        Some(PeerConvention::ResponseTerminal { request_id, status }) => {
+            Some(PeerConversationProjection::ResponseTerminal {
+                peer_id: peer_id.clone(),
+                request_id: request_id.clone(),
+                status: match status {
+                    ResponseTerminalStatus::Completed => {
+                        PeerResponseTerminalProjectionStatus::Completed
+                    }
+                    ResponseTerminalStatus::Failed => PeerResponseTerminalProjectionStatus::Failed,
+                    ResponseTerminalStatus::Cancelled => {
+                        PeerResponseTerminalProjectionStatus::Cancelled
+                    }
+                },
+                payload: peer.payload.clone(),
+            })
+        }
+        None => None,
+    }
+}
+
+/// Lift an [`Input`] to its core peer projection when it is a peer input with a
+/// peer-origin header.
+pub(crate) fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
+    let Input::Peer(peer) = input else {
+        return None;
+    };
+    peer_projection_from_peer_input(peer)
+}
+
+/// Rendered prompt-text projection for a peer input.
+pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
+    peer_projection_from_peer_input(peer)
+        .map(|projection| {
+            let prompt = projection.prompt_text();
+            if prompt.is_empty() {
+                peer.body.clone()
+            } else {
+                prompt
+            }
+        })
+        .unwrap_or_else(|| peer.body.clone())
+}
+
+/// Optional block prefix for peer message inputs.
+pub(crate) fn peer_block_prefix_text(peer: &PeerInput) -> Option<String> {
+    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
 }
 
 /// Classify an input's typed execution intent for the runtime loop.

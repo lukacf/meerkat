@@ -902,9 +902,7 @@ where
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
-            let loop_state = self.turn_phase()?.to_loop_state();
-            self.state = loop_state.clone();
-            match loop_state {
+            match self.turn_phase()?.to_loop_state() {
                 LoopState::CallingLlm => {
                     // 0. Auth lease refresh loop (Phase 1.5-rev).
                     //    The canonical auth-state owner is the MeerkatMachine
@@ -2192,8 +2190,6 @@ where
 
         let outcome = self.turn_terminal_outcome()?;
         let classification = classify_terminal(&outcome);
-        self.state = self.turn_phase()?.to_loop_state();
-
         match classification {
             Some(SurfaceResultClass::HardFailure) => {
                 // Consume the pending diagnostic once — prefer the originating
@@ -4420,7 +4416,6 @@ mod tests {
         // must be routed to BudgetExhausted -> Success, not raw Err.
         let mut agent = build_agent(Arc::new(HighUsageLlmClient)).await;
         agent.config.max_turns = Some(10);
-        agent.state = LoopState::CallingLlm;
         agent.budget = Budget::new(BudgetLimits {
             max_tokens: Some(100),
             max_duration: None,
@@ -4435,7 +4430,7 @@ mod tests {
              not escape as raw AgentError: {:?}",
             result.err()
         );
-        assert_eq!(agent.state, LoopState::Completed);
+        assert_eq!(agent.state(), LoopState::Completed);
     }
 
     /// Regression test: tool-call budget exhaustion detected anywhere in the
@@ -4444,7 +4439,6 @@ mod tests {
     async fn tool_call_budget_exhausted_routes_through_authority() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.config.max_turns = Some(10);
-        agent.state = LoopState::CallingLlm;
         agent.budget = Budget::new(BudgetLimits {
             max_tokens: None,
             max_duration: None,
@@ -4458,7 +4452,7 @@ mod tests {
              not escape as raw AgentError: {:?}",
             result.err()
         );
-        assert_eq!(agent.state, LoopState::Completed);
+        assert_eq!(agent.state(), LoopState::Completed);
     }
 
     // -- Retry delay hint tests (PR #156 port) --

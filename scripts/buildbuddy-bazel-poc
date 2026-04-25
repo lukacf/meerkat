@@ -174,6 +174,10 @@ if [[ -z "${BUILDBUDDY_NO_DEFAULT_OUTPUT_BASE:-}" ]]; then
     cache_root="${MEERKAT_BUILDBUDDY_OUTPUT_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-bazel}"
     workspace_hash="$(printf '%s' "${workspace_root}" | shasum -a 256 | awk '{print substr($1, 1, 16)}')"
     lane_key="${BUILDBUDDY_OUTPUT_LANE:-${requested_command}-${config}}"
+    agent_lane="${BUILDBUDDY_AGENT_LANE:-${RUST_LANE_ID:-${CODEX_AGENT_ID:-}}}"
+    if [[ -n "${agent_lane}" ]]; then
+      lane_key="${lane_key}-${agent_lane}"
+    fi
     lane_key="$(printf '%s' "${lane_key}" | tr -c 'A-Za-z0-9_.-' '-')"
     BUILDBUDDY_OUTPUT_BASE="${cache_root}/$(basename "${workspace_root}")-${workspace_hash}-${lane_key}"
   fi

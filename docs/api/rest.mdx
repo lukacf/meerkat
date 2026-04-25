@@ -804,24 +804,28 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 </ParamField>
 
 <ParamField body="kind" type="string" required>
-  Command kind: `"peer_message"`, `"peer_request"`, or `"peer_response"`.
+  Command kind: `"input"`, `"peer_message"`, `"peer_lifecycle"`, `"peer_request"`, or `"peer_response"`.
 </ParamField>
 
 <ParamField body="to" type="string | null">
-  Peer name to send to (required for `peer_message` and `peer_request`).
+  Peer name to send to (required for `peer_message`, `peer_lifecycle`, `peer_request`, and `peer_response`).
 </ParamField>
 
 <ParamField body="body" type="string | null">
-  Message body (required for `peer_message`).
+  Message body (required for `input` and `peer_message`).
 </ParamField>
 
 <ParamField body="handling_mode" type="string | null">
-  Handling mode for `peer_message` and `peer_request`. Local callers must provide `"queue"` or `"steer"`.
+  Handling mode for `input`, `peer_message`, `peer_request`, and `peer_response`. Local callers must provide `"queue"` or `"steer"`.
 </ParamField>
 
 <Note>
-`peer_message` is the default collaboration primitive. `peer_request` is only a structured ask with correlated replies. The old peer-side reservation stream option was removed; requests no longer accept a `stream` field.
+`peer_message` is the default collaboration primitive. `peer_lifecycle` is a one-way topology notification. `peer_request` is only a structured ask with correlated replies.
 </Note>
+
+<ParamField body="lifecycle_kind" type="string | null">
+  Lifecycle event kind: `"mob.peer_added"`, `"mob.peer_retired"`, or `"mob.peer_unwired"` (required for `peer_lifecycle`).
+</ParamField>
 
 <ParamField body="intent" type="string | null">
   Request intent (required for `peer_request`, e.g. `"review"`, `"delegate"`).
@@ -848,7 +852,7 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 </ParamField>
 
 <ParamField body="stream" type="string | null">
-  Optional stream identifier.
+  Optional input stream mode: `"none"` or `"reserve_interaction"` (for `input` and `peer_request`).
 </ParamField>
 
 <ParamField body="allow_self_session" type="bool | null">

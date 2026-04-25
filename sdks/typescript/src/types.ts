@@ -49,8 +49,8 @@ export interface SkillKey {
   readonly skillName: string;
 }
 
-/** A skill reference — either a {@link SkillKey} or a legacy string. */
-export type SkillRef = SkillKey | string;
+/** A structured skill reference. */
+export type SkillRef = SkillKey;
 
 /** Inline image content accepted by input-bearing APIs. */
 export interface InlineImageBlock {
@@ -184,7 +184,6 @@ export interface SessionIngressOptions {
 /** Per-turn options for normal turns and deferred first turns. */
 export interface TurnOptions {
   readonly skillRefs?: SkillRef[];
-  readonly skillReferences?: string[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
   readonly keepAlive?: boolean;
@@ -398,8 +397,15 @@ export interface CommsInputCommand {
 export interface CommsPeerMessageCommand {
   kind: "peer_message";
   to: string;
-  body?: string;
+  body: string;
   handling_mode?: CommsHandlingMode;
+}
+
+export interface CommsPeerLifecycleCommand {
+  kind: "peer_lifecycle";
+  to: string;
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  params?: unknown;
 }
 
 export interface CommsPeerRequestCommand {
@@ -407,7 +413,6 @@ export interface CommsPeerRequestCommand {
   to: string;
   intent: string;
   params?: Record<string, unknown>;
-  body?: string;
   handling_mode?: CommsHandlingMode;
   stream?: CommsInputStreamMode;
 }
@@ -425,6 +430,7 @@ export interface CommsPeerResponseCommand {
 export type CommsCommand =
   | CommsInputCommand
   | CommsPeerMessageCommand
+  | CommsPeerLifecycleCommand
   | CommsPeerRequestCommand
   | CommsPeerResponseCommand;
 
@@ -586,9 +592,8 @@ export interface SessionOptions {
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
-  preloadSkills?: string[];
+  preloadSkills?: SkillRef[];
   skillRefs?: SkillRef[];
-  skillReferences?: string[];
   labels?: Readonly<Record<string, string>>;
   additionalInstructions?: readonly string[];
   appContext?: unknown;

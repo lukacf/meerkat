@@ -70,10 +70,6 @@
       "name": "auth/profile/delete"
     },
     {
-      "description": "Dry-run the auth profile's resolve path and return its status",
-      "name": "auth/profile/test"
-    },
-    {
       "description": "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
       "name": "auth/login/start"
     },
@@ -205,6 +201,30 @@
     {
       "description": "Inspect one skill",
       "name": "skills/inspect"
+    },
+    {
+      "description": "Get a session's current runtime state",
+      "name": "session/status"
+    },
+    {
+      "description": "Accept a runtime input for a session",
+      "name": "session/submit"
+    },
+    {
+      "description": "Retire a session runtime",
+      "name": "session/retire"
+    },
+    {
+      "description": "Reset a session runtime",
+      "name": "session/reset"
+    },
+    {
+      "description": "Get a runtime input state",
+      "name": "session/submission"
+    },
+    {
+      "description": "List active runtime inputs",
+      "name": "session/submissions"
     },
     {
       "description": "Get bootstrap metadata for opening a realtime channel",

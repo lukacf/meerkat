@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
+use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
@@ -107,14 +108,15 @@ pub struct CreateSessionParams {
     /// Override the realm-scoped connection binding for this session.
     #[serde(default)]
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
-    /// Skill IDs to preload into the system prompt.
+    /// Structured skill keys to preload into the system prompt.
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<SkillKey>>,
     /// Skill IDs to resolve and inject for the first turn.
     #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,
-    /// Legacy compatibility refs to resolve and inject for the first turn.
-    #[serde(default)]
+    /// Retired legacy string refs. Kept only to return a typed ingress error
+    /// when old clients send the field.
+    #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     /// Key-value labels attached to the session for filtering and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,13 +144,7 @@ fn default_structured_output_retries() -> u32 {
 fn canonical_skill_ids(
     _runtime: &SessionRuntime,
     skill_refs: Option<Vec<SkillRef>>,
-    _skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
-    // Post-wave-a dogma: `SkillsParams.skill_references` (legacy string path) was
-    // removed; the wire surface retains the field on `StartTurnParams`/
-    // `CreateSessionParams` for compatibility with older clients, but the runtime
-    // only consults the typed `skill_refs` path. Legacy ingress is silently
-    // dropped here.
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
@@ -309,11 +305,7 @@ pub async fn handle_create(
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
-    // Post-wave-a: `BuildConfig.preload_skills` is typed `Option<Vec<SkillKey>>`;
-    // legacy string ingress (`params.preload_skills: Option<Vec<String>>`) is
-    // dropped here. Typed ingress flows via `skill_refs`.
-    let _ = &params.preload_skills;
-    build_config.preload_skills = None;
+    build_config.preload_skills = params.preload_skills;
 
     // Wire callback tools backed by the live registered_tools list.
     // Tools added later via tools/register are picked up dynamically at each
@@ -347,8 +339,7 @@ pub async fn handle_create(
 
     // Validate and canonicalize skill refs before creating a pending session.
     // This prevents invalid requests from consuming session slots.
-    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
-    {
+    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs) {
         Ok(r) => r,
         Err(e) => {
             return RpcResponse::error(

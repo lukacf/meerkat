@@ -9,8 +9,21 @@
 use std::sync::Arc;
 
 use meerkat_core::skills::{SkillFilter, SkillRuntime};
+use serde::{Deserialize, Deserializer};
 
 use crate::protocol::{RpcId, RpcResponse};
+
+pub(crate) fn reject_retired_skill_references<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+    Err(serde::de::Error::custom(
+        "skill_references is retired; use structured skill_refs",
+    ))
+}
 
 /// Handle `skills/list` — list all skills with provenance information.
 pub async fn handle_list(

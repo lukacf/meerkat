@@ -89,7 +89,7 @@ export interface CommsParams {
 
 export interface SkillsParams {
   skills_enabled: boolean;
-  skill_references: string[];
+  skill_refs: Array<{ source_uuid: string; skill_name: string }>;
 }
 
 export interface McpAddParams {
@@ -202,7 +202,27 @@ export interface McpLiveOpResponse {
 
 export type InputStateResult = WireInputState | null;
 
-export type WireContentBlock = Record<string, unknown>;
+export interface WireContentBlockText {
+  text: string;
+  type: "text";
+}
+
+export interface WireContentBlockImage {
+  media_type: string;
+  type: "image";
+}
+
+export interface WireContentBlockVideo {
+  duration_ms: number;
+  media_type: string;
+  type: "video";
+}
+
+export interface WireContentBlockUnknown {
+  type: "unknown";
+}
+
+export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
 
 export type WireContentInput = string | Record<string, unknown>[];
 
@@ -222,7 +242,18 @@ export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" 
 
 export type WireRealtimeAttachmentStatus = "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
 
-export type RealtimeChannelTarget = Record<string, unknown>;
+export interface RealtimeChannelTargetSessionTarget {
+  session_id: string;
+  type: "session_target";
+}
+
+export interface RealtimeChannelTargetMobMember {
+  agent_identity: string;
+  mob_id: string;
+  type: "mob_member";
+}
+
+export type RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | RealtimeChannelTargetMobMember;
 
 export type RealtimeChannelRole = "primary" | "observer";
 
@@ -234,15 +265,164 @@ export type RealtimeOutputKind = "text" | "audio" | "video";
 
 export type RealtimeChannelState = "opening" | "ready" | "interrupted" | "reconnecting" | "closed" | "error";
 
-export type RealtimeInputChunk = Record<string, unknown>;
+export interface RealtimeInputChunkTextChunk {
+  kind: "text_chunk";
+}
 
-export type RealtimeOutputChunk = Record<string, unknown>;
+export interface RealtimeInputChunkAudioChunk {
+  kind: "audio_chunk";
+}
 
-export type RealtimeEvent = Record<string, unknown>;
+export interface RealtimeInputChunkVideoChunk {
+  kind: "video_chunk";
+}
 
-export type RealtimeClientFrame = Record<string, unknown>;
+export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk;
 
-export type RealtimeServerFrame = Record<string, unknown>;
+export interface RealtimeOutputChunkTextDelta {
+  kind: "text_delta";
+}
+
+export interface RealtimeOutputChunkAudioChunk {
+  kind: "audio_chunk";
+}
+
+export interface RealtimeOutputChunkVideoChunk {
+  kind: "video_chunk";
+}
+
+export type RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk;
+
+export interface RealtimeEventInputTranscriptPartial {
+  text: string;
+  type: "input_transcript_partial";
+}
+
+export interface RealtimeEventInputTranscriptFinal {
+  prosody_hint?: string;
+  text: string;
+  type: "input_transcript_final";
+}
+
+export interface RealtimeEventTurnStarted {
+  type: "turn_started";
+}
+
+export interface RealtimeEventTurnCommitted {
+  type: "turn_committed";
+}
+
+export interface RealtimeEventTurnCompleted {
+  type: "turn_completed";
+}
+
+export interface RealtimeEventOutputTextDelta {
+  delta: string;
+  type: "output_text_delta";
+}
+
+export interface RealtimeEventOutputAudioChunk {
+  chunk: Record<string, unknown>;
+  type: "output_audio_chunk";
+}
+
+export interface RealtimeEventOutputVideoChunk {
+  chunk: Record<string, unknown>;
+  type: "output_video_chunk";
+}
+
+export interface RealtimeEventInterrupted {
+  type: "interrupted";
+}
+
+export interface RealtimeEventToolCallRequested {
+  call_id: string;
+  tool_name: string;
+  type: "tool_call_requested";
+}
+
+export interface RealtimeEventToolCallCompleted {
+  call_id: string;
+  type: "tool_call_completed";
+}
+
+export interface RealtimeEventToolCallFailed {
+  call_id: string;
+  error: string;
+  type: "tool_call_failed";
+}
+
+export interface RealtimeEventToolCallTimedOut {
+  call_id: string;
+  elapsed_ms: number;
+  type: "tool_call_timed_out";
+}
+
+export interface RealtimeEventAssistantTranscriptTruncated {
+  audio_played_ms: number;
+  item_id: string;
+  truncated_text?: string;
+  type: "assistant_transcript_truncated";
+}
+
+export interface RealtimeEventStatusChanged {
+  status: Record<string, unknown>;
+  type: "status_changed";
+}
+
+export interface RealtimeEventNeedsReattach {
+  type: "needs_reattach";
+}
+
+export type RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscriptFinal | RealtimeEventTurnStarted | RealtimeEventTurnCommitted | RealtimeEventTurnCompleted | RealtimeEventOutputTextDelta | RealtimeEventOutputAudioChunk | RealtimeEventOutputVideoChunk | RealtimeEventInterrupted | RealtimeEventToolCallRequested | RealtimeEventToolCallCompleted | RealtimeEventToolCallFailed | RealtimeEventToolCallTimedOut | RealtimeEventAssistantTranscriptTruncated | RealtimeEventStatusChanged | RealtimeEventNeedsReattach;
+
+export interface RealtimeClientFrameChannelOpen {
+  type: "channel.open";
+}
+
+export interface RealtimeClientFrameChannelInput {
+  type: "channel.input";
+}
+
+export interface RealtimeClientFrameChannelCommitTurn {
+  type: "channel.commit_turn";
+}
+
+export interface RealtimeClientFrameChannelInterrupt {
+  type: "channel.interrupt";
+}
+
+export interface RealtimeClientFrameChannelBargeInTruncate {
+  type: "channel.barge_in_truncate";
+}
+
+export interface RealtimeClientFrameChannelClose {
+  type: "channel.close";
+}
+
+export type RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChannelInput | RealtimeClientFrameChannelCommitTurn | RealtimeClientFrameChannelInterrupt | RealtimeClientFrameChannelBargeInTruncate | RealtimeClientFrameChannelClose;
+
+export interface RealtimeServerFrameChannelOpened {
+  type: "channel.opened";
+}
+
+export interface RealtimeServerFrameChannelStatus {
+  type: "channel.status";
+}
+
+export interface RealtimeServerFrameChannelEvent {
+  type: "channel.event";
+}
+
+export interface RealtimeServerFrameChannelError {
+  type: "channel.error";
+}
+
+export interface RealtimeServerFrameChannelClosed {
+  type: "channel.closed";
+}
+
+export type RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed;
 
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
@@ -252,9 +432,52 @@ export type WireStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequ
 
 export type WireToolResultContent = string | Record<string, unknown>[];
 
-export type WireModelTier = string;
+export type WireModelTier = "recommended" | "supported";
 
-export type CommsCommandRequest = Record<string, unknown>;
+export interface CommsCommandInput {
+  allow_self_session?: boolean;
+  blocks?: Record<string, unknown>[];
+  body: string;
+  handling_mode?: "queue" | "steer";
+  kind: "input";
+  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
+  stream?: "none" | "reserve_interaction";
+}
+
+export interface CommsCommandPeerMessage {
+  blocks?: Record<string, unknown>[];
+  body: string;
+  handling_mode?: "queue" | "steer";
+  kind: "peer_message";
+  to: string;
+}
+
+export interface CommsCommandPeerLifecycle {
+  kind: "peer_lifecycle";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  params?: unknown;
+  to: string;
+}
+
+export interface CommsCommandPeerRequest {
+  handling_mode?: "queue" | "steer";
+  intent: string;
+  kind: "peer_request";
+  params?: unknown;
+  stream?: "none" | "reserve_interaction";
+  to: string;
+}
+
+export interface CommsCommandPeerResponse {
+  handling_mode?: "queue" | "steer";
+  in_reply_to: string;
+  kind: "peer_response";
+  result?: unknown;
+  status: "accepted" | "completed" | "failed";
+  to: string;
+}
+
+export type CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse;
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
@@ -375,7 +598,7 @@ export interface RealtimeChannelEventFrame {
 }
 
 export interface RealtimeChannelErrorFrame {
-  code: string;
+  code: "invalid_frame" | "expected_channel_open" | "invalid_open_token" | "open_token_expired" | "role_mismatch" | "turning_mode_mismatch" | "unsupported_turning_mode" | "target_busy" | "unsupported_protocol_version" | "audio_format_mismatch" | "unauthorized_realm" | "tool_call_timeout" | "internal_error" | "reconnect_exhausted" | "invalid_target" | "channel_not_bound" | "runtime_internal" | "runtime_not_ready" | "provider_session_closed" | "provider_session_failed" | "provider_session_unavailable" | "unsupported_input_kind" | "no_pending_turn" | "observer_read_only" | "unexpected_channel_open" | "commit_turn_unavailable" | "channel_reconnecting" | "binding_released" | "authentication_failed" | "content_filtered" | "model_not_found" | "invalid_request";
   details?: Record<string, unknown>;
   message: string;
 }
@@ -469,7 +692,7 @@ export interface CatalogModelEntry {
   max_output_tokens?: number;
   profile?: Record<string, unknown>;
   server_id?: string;
-  tier: string;
+  tier: "recommended" | "supported";
 }
 
 export interface ProviderCatalog {
@@ -543,4 +766,50 @@ export interface WireAuthStatus {
   state: string;
 }
 
-export type WireAuthError = Record<string, unknown>;
+export interface WireAuthErrorMissingSecret {
+  kind: "missing_secret";
+}
+
+export interface WireAuthErrorUnsupportedCombination {
+  auth: string;
+  backend: string;
+  kind: "unsupported_combination";
+}
+
+export interface WireAuthErrorMissingRequiredMetadata {
+  field: string;
+  kind: "missing_required_metadata";
+}
+
+export interface WireAuthErrorWorkspaceMismatch {
+  kind: "workspace_mismatch";
+}
+
+export interface WireAuthErrorExpired {
+  kind: "expired";
+}
+
+export interface WireAuthErrorRefreshFailed {
+  detail: string;
+  kind: "refresh_failed";
+}
+
+export interface WireAuthErrorInteractiveLoginRequired {
+  kind: "interactive_login_required";
+}
+
+export interface WireAuthErrorHostOwnedUnavailable {
+  kind: "host_owned_unavailable";
+}
+
+export interface WireAuthErrorIo {
+  detail: string;
+  kind: "io";
+}
+
+export interface WireAuthErrorOther {
+  detail: string;
+  kind: "other";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;

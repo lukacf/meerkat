@@ -8,6 +8,7 @@ code for Python and TypeScript SDKs.
 import argparse
 import json
 import keyword
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,66 @@ def _python_identifier(name: str) -> str:
 
 
 def _pascal_case(name: str) -> str:
-    return "".join(part.capitalize() for part in name.split("_"))
+    return "".join(part.capitalize() for part in re.split(r"[^0-9A-Za-z]+", name) if part)
+
+
+def _schema_root_with_local_defs(root_schema: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    schema_root = dict(root_schema)
+    schema_root["$defs"] = {
+        **root_schema.get("$defs", {}),
+        **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+    }
+    return schema_root
+
+
+def _variant_type_prefix(name: str) -> str:
+    return name.removesuffix("Request")
+
+
+def _typed_dict_variant_name(alias_name: str, discriminator_value: str) -> str:
+    return f"{_variant_type_prefix(alias_name)}{_pascal_case(discriminator_value)}"
+
+
+def _const_variants(variants: list[Any]) -> list[Any] | None:
+    values: list[Any] = []
+    for variant in variants:
+        if not isinstance(variant, dict) or "const" not in variant:
+            return None
+        value = variant["const"]
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _one_of_typed_dict_variants(schema: Any) -> tuple[str, list[tuple[str, dict[str, Any]]]] | None:
+    if not isinstance(schema, dict) or not isinstance(schema.get("oneOf"), list):
+        return None
+
+    discriminator: str | None = None
+    variants: list[tuple[str, dict[str, Any]]] = []
+    for variant in schema["oneOf"]:
+        if not isinstance(variant, dict) or variant.get("type") != "object":
+            return None
+        properties = variant.get("properties")
+        if not isinstance(properties, dict):
+            return None
+        const_fields = [
+            (field_name, field_schema["const"])
+            for field_name, field_schema in properties.items()
+            if isinstance(field_schema, dict) and isinstance(field_schema.get("const"), str)
+        ]
+        if len(const_fields) != 1:
+            return None
+        field_name, discriminator_value = const_fields[0]
+        if discriminator is None:
+            discriminator = field_name
+        elif discriminator != field_name:
+            return None
+        variants.append((discriminator_value, variant))
+
+    if discriminator is None or not variants:
+        return None
+    return (discriminator, variants)
 
 
 def _python_type_from_schema(
@@ -75,6 +135,10 @@ def _python_type_from_schema(
             if len(non_null) == 1:
                 inner_type, inner_optional = _python_type_from_schema(root, non_null[0], local_defs)
                 return (inner_type, optional or inner_optional)
+            const_values = _const_variants(non_null)
+            if const_values is not None:
+                values = ", ".join(repr(value) for value in const_values)
+                return (f"Literal[{values}]", optional)
             variant_types: list[str] = []
             for variant in non_null:
                 inner_type, _ = _python_type_from_schema(root, variant, local_defs)
@@ -90,6 +154,9 @@ def _python_type_from_schema(
         if ref_name and resolved and ref_name not in (local_defs or set()):
             return (ref_name, False)
         return _python_type_from_schema(root, resolved, local_defs)
+
+    if "const" in field_schema:
+        return (f"Literal[{field_schema['const']!r}]", False)
 
     schema_type = field_schema.get("type")
     optional = False
@@ -150,6 +217,10 @@ def _typescript_type_from_schema(
             if len(non_null) == 1:
                 inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0], local_defs)
                 return (inner_type, optional or inner_optional)
+            const_values = _const_variants(non_null)
+            if const_values is not None:
+                values = " | ".join(json.dumps(value) for value in const_values)
+                return (values, optional)
             variant_types: list[str] = []
             for variant in non_null:
                 inner_type, _ = _typescript_type_from_schema(root, variant, local_defs)
@@ -165,6 +236,9 @@ def _typescript_type_from_schema(
         if ref_name and resolved and ref_name not in (local_defs or set()):
             return (ref_name, False)
         return _typescript_type_from_schema(root, resolved, local_defs)
+
+    if "const" in field_schema:
+        return (json.dumps(field_schema["const"]), False)
 
     schema_type = field_schema.get("type")
     optional = False
@@ -220,7 +294,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content = "from __future__ import annotations\n\n"
     types_content += f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
     types_content += "from dataclasses import dataclass, field\n"
-    types_content += "from typing import Any, Literal, Optional\n\n\n"
+    types_content += "from typing import Any, Literal, NotRequired, Optional, Required, TypedDict\n\n\n"
     types_content += f'CONTRACT_VERSION = "{contract_version}"\n\n\n'
 
     # WireUsage
@@ -317,7 +391,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += "\n@dataclass\nclass SkillsParams:\n"
         types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
         types_content += "    skills_enabled: bool = False\n"
-        types_content += "    skill_references: list[str] = field(default_factory=list)\n\n"
+        types_content += "    skill_refs: list[dict[str, str]] = field(default_factory=list)\n\n"
 
     params_schema = schemas.get("params", {})
     wire_schema = schemas.get("wire-types", {})
@@ -336,6 +410,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         }
         types_content += f"\n@dataclass\nclass {name}:\n"
         types_content += f'    """{doc}"""\n'
+
+        required_lines: list[str] = []
+        optional_lines: list[str] = []
         for field_name, field_schema in properties.items():
             python_field_name = _python_identifier(field_name)
             field_type, is_optional_type = _python_type_from_schema(
@@ -345,39 +422,54 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
             )
             is_required = field_name in required
             annotation = field_type
-            if is_optional_type and not is_required:
+            if not is_required or is_optional_type:
                 annotation = f"Optional[{field_type}]"
-            if is_optional_type and not is_required:
-                default_expr = "None"
-            elif field_type == "bool":
-                default_expr = "False"
-            elif field_type == "str":
-                default_expr = "''"
-            elif field_type in {"int", "float"}:
-                default_expr = "0"
-            elif field_type == "list[Any]" or field_type.startswith("list["):
-                default_expr = "field(default_factory=list)"
-            elif field_type == "dict[str, Any]":
-                default_expr = "field(default_factory=dict)"
+            if is_required:
+                required_lines.append(f"    {python_field_name}: {annotation}\n")
             else:
-                default_expr = "None"
-            types_content += f"    {python_field_name}: {annotation} = {default_expr}\n"
+                optional_lines.append(f"    {python_field_name}: {annotation} = None\n")
+        for line in required_lines + optional_lines:
+            types_content += line
         types_content += "\n"
 
     def append_python_alias(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
         nonlocal types_content
         schema = _lookup_named_schema(root_schema, name)
         local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
-        schema_root = dict(root_schema)
-        schema_root["$defs"] = {
-            **root_schema.get("$defs", {}),
-            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
-        }
+        schema_root = _schema_root_with_local_defs(root_schema, schema)
+        typed_dict_variants = _one_of_typed_dict_variants(schema)
+        if typed_dict_variants is not None:
+            doc = schema.get("description", default_doc)
+            doc_lines = str(doc).splitlines() or [""]
+            doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
+            types_content += f"\n{doc_block}\n"
+            variant_names: list[str] = []
+            for discriminator_value, variant in typed_dict_variants[1]:
+                properties = variant.get("properties", {})
+                variant_name = _typed_dict_variant_name(name, discriminator_value)
+                variant_names.append(variant_name)
+                required = set(variant.get("required", []))
+                local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                types_content += f"class {variant_name}(TypedDict, total=False):\n"
+                for field_name, field_schema in properties.items():
+                    field_type, _ = _python_type_from_schema(
+                        schema_root,
+                        field_schema,
+                        local_variant_defs,
+                    )
+                    wrapper = "Required" if field_name in required else "NotRequired"
+                    types_content += (
+                        f"    {_python_identifier(field_name)}: {wrapper}[{field_type}]\n"
+                    )
+                types_content += "\n"
+            if variant_names:
+                types_content += f"{name} = {' | '.join(variant_names)}\n"
+                return
         alias_type, _ = _python_type_from_schema(schema_root, schema, local_defs)
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
         # Ensure multi-line descriptions are fully commented out.
         doc_lines = str(doc).splitlines() or [""]
-        doc_block = "\n".join(f"# {line}" for line in doc_lines)
+        doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
 
     append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
@@ -623,7 +715,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     if has_skills:
         types_content += "\nexport interface SkillsParams {\n"
         types_content += "  skills_enabled: boolean;\n"
-        types_content += "  skill_references: string[];\n"
+        types_content += "  skill_refs: Array<{ source_uuid: string; skill_name: string }>;\n"
         types_content += "}\n"
 
     params_schema = schemas.get("params", {})
@@ -655,11 +747,29 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         nonlocal types_content
         schema = _lookup_named_schema(root_schema, name)
         local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
-        schema_root = dict(root_schema)
-        schema_root["$defs"] = {
-            **root_schema.get("$defs", {}),
-            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
-        }
+        schema_root = _schema_root_with_local_defs(root_schema, schema)
+        typed_dict_variants = _one_of_typed_dict_variants(schema)
+        if typed_dict_variants is not None:
+            variant_names: list[str] = []
+            for discriminator_value, variant in typed_dict_variants[1]:
+                properties = variant.get("properties", {})
+                variant_name = _typed_dict_variant_name(name, discriminator_value)
+                variant_names.append(variant_name)
+                required = set(variant.get("required", []))
+                local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                types_content += f"\nexport interface {variant_name} {{\n"
+                for field_name, field_schema in properties.items():
+                    field_type, _ = _typescript_type_from_schema(
+                        schema_root,
+                        field_schema,
+                        local_variant_defs,
+                    )
+                    optional = "" if field_name in required else "?"
+                    types_content += f"  {field_name}{optional}: {field_type};\n"
+                types_content += "}\n"
+            if variant_names:
+                types_content += f"\nexport type {name} = {' | '.join(variant_names)};\n"
+                return
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
 

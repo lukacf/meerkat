@@ -205,26 +205,18 @@ export interface ConnectOptions {
 }
 
 /**
- * Normalize a SkillRef to the wire format { source_uuid, skill_name }.
- *
- * SkillKey objects are converted from camelCase to snake_case.
- * Legacy strings are parsed and emit a console warning.
+ * Normalize a structured SkillRef to the wire format { source_uuid, skill_name }.
  */
 function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: string } {
-  if (typeof ref !== "string") {
-    return { source_uuid: ref.sourceUuid, skill_name: ref.skillName };
+  if (
+    ref === null ||
+    typeof ref !== "object" ||
+    typeof ref.sourceUuid !== "string" ||
+    typeof ref.skillName !== "string"
+  ) {
+    throw new Error("Skill references must be SkillKey objects");
   }
-  const value = ref.startsWith("/") ? ref.slice(1) : ref;
-  const [sourceUuid, ...rest] = value.split("/");
-  if (!sourceUuid || rest.length === 0) {
-    throw new Error(
-      `Invalid skill reference '${ref}'. Expected '<source_uuid>/<skill_name>'.`,
-    );
-  }
-  console.warn(
-    `[meerkat-sdk] legacy skill reference '${ref}' is deprecated; pass { sourceUuid, skillName } instead.`,
-  );
-  return { source_uuid: sourceUuid, skill_name: rest.join("/") };
+  return { source_uuid: ref.sourceUuid, skill_name: ref.skillName };
 }
 
 function skillRefsToWire(refs: SkillRef[] | undefined): Array<{ source_uuid: string; skill_name: string }> | undefined {
@@ -1717,9 +1709,6 @@ export class MeerkatClient {
     if (wireRefs) {
       params.skill_refs = wireRefs;
     }
-    if (options?.skillReferences) {
-      params.skill_references = options.skillReferences;
-    }
     if (options?.flowToolOverlay) {
       params.flow_tool_overlay = {
         allowed_tools: options.flowToolOverlay.allowedTools,
@@ -1765,9 +1754,6 @@ export class MeerkatClient {
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
-    }
-    if (options?.skillReferences) {
-      params.skill_references = options.skillReferences;
     }
     if (options?.flowToolOverlay) {
       params.flow_tool_overlay = {
@@ -1895,15 +1881,6 @@ export class MeerkatClient {
     return result as unknown as RuntimeRealtimeAttachmentStatusResult;
   }
 
-  /** Batch realtime attachment statuses for multiple session IDs. */
-  async runtimeRealtimeAttachmentStatuses(
-    sessionIds: string[],
-  ): Promise<Record<string, unknown>> {
-    return await this.request("session/realtime_attachment_statuses", {
-      session_ids: sessionIds,
-    });
-  }
-
   /** Idempotent spawn: spawns or returns the existing member entry. */
   async mobEnsureMember(
     mobId: string,
@@ -2011,13 +1988,6 @@ export class MeerkatClient {
     return this.request("auth/profile/delete", {
       realm_id: realmId,
       profile_id: profileId,
-    });
-  }
-
-  async authProfileTest(realmId: string, bindingId: string): Promise<unknown> {
-    return this.request("auth/profile/test", {
-      realm_id: realmId,
-      binding_id: bindingId,
     });
   }
 
@@ -2791,10 +2761,11 @@ export class MeerkatClient {
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams != null) params.provider_params = options.providerParams;
-    if (options.preloadSkills != null) params.preload_skills = options.preloadSkills;
+    if (options.preloadSkills != null) {
+      params.preload_skills = skillRefsToWire(options.preloadSkills);
+    }
     const wireRefs = skillRefsToWire(options.skillRefs);
     if (wireRefs) params.skill_refs = wireRefs;
-    if (options.skillReferences != null) params.skill_references = options.skillReferences;
     if (options.labels != null) params.labels = options.labels;
     if (options.additionalInstructions != null) {
       params.additional_instructions = options.additionalInstructions;

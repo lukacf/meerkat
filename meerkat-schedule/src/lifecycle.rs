@@ -874,7 +874,7 @@ mod tests {
                     prompt: ContentInput::from("scheduled hello"),
                     system_prompt: None,
                     render_metadata: None,
-                    skill_references: Vec::new(),
+                    skill_refs: Vec::new(),
                     additional_instructions: Vec::new(),
                 },
             }),

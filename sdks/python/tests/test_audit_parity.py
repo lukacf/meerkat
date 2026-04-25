@@ -43,7 +43,6 @@ CANONICAL_APP_RPC_METHODS = {
     "realtime/capabilities",
     "session/status",
     "session/realtime_attachment_status",
-    "session/realtime_attachment_statuses",
     "session/submission",
     "session/submissions",
     "session/submit",
@@ -115,10 +114,6 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "realtime/capabilities": (MeerkatClient, "realtime_capabilities"),
     "session/status": (MeerkatClient, "status"),
     "session/realtime_attachment_status": (MeerkatClient, "runtime_realtime_attachment_status"),
-    "session/realtime_attachment_statuses": (
-        MeerkatClient,
-        "runtime_realtime_attachment_statuses",
-    ),
     "session/submission": (MeerkatClient, "submission"),
     "session/submissions": (MeerkatClient, "submissions"),
     "session/submit": (MeerkatClient, "submit"),
@@ -273,7 +268,7 @@ async def test_spawn_many_uses_explicit_rpc_method():
 
 
 @pytest.mark.asyncio
-async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
+async def test_role_name_is_canonical_for_helper_calls():
     client = MeerkatClient()
     client._process = MagicMock()
     client._dispatcher = MagicMock()
@@ -289,7 +284,7 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
     await client.spawn_mob_helper(
         "mob1",
         "hello",
-        profile_name="legacy-role",
+        role_name="worker",
     )
     client._request.assert_called_with(
         "mob/spawn_helper",
@@ -297,7 +292,7 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
             "mob_id": "mob1",
             "prompt": "hello",
             "agent_identity": None,
-            "role_name": "legacy-role",
+            "role_name": "worker",
             "runtime_mode": None,
             "backend": None,
         },
@@ -368,6 +363,31 @@ def test_sdk_never_uses_deprecated_runtime_or_input_method_strings():
             assert needle not in text, (
                 f"Deprecated method string {needle!r} must not appear in {path}"
             )
+
+
+def test_sdk_never_uses_retired_public_method_strings():
+    """Surface-alignment regression gate: methods retired from the RPC
+    catalog must not linger as SDK wrapper strings.
+    """
+    import pathlib
+
+    retired_methods = [
+        '"auth/profile/test"',
+        '"session/realtime_attachment_statuses"',
+    ]
+    sdk_roots = [
+        pathlib.Path(__file__).parent.parent / "meerkat",
+        pathlib.Path(__file__).parents[2] / "typescript" / "src",
+    ]
+    for root in sdk_roots:
+        for path in root.rglob("*"):
+            if path.suffix not in {".py", ".ts"}:
+                continue
+            text = path.read_text()
+            for needle in retired_methods:
+                assert needle not in text, (
+                    f"Retired method string {needle!r} must not appear in {path}"
+                )
 
 
 def test_encode_agent_runtime_ref_is_opaque_and_strict():

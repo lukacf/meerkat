@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use meerkat_core::ops::ToolAccessPolicy;
+use meerkat_core::skills::SkillRef;
 use meerkat_core::types::RenderMetadata;
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
 use serde::{Deserialize, Serialize};
@@ -407,7 +408,7 @@ pub enum ScheduledSessionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_metadata: Option<RenderMetadata>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        skill_references: Vec<String>,
+        skill_refs: Vec<SkillRef>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_instructions: Vec<String>,
     },
@@ -699,13 +700,10 @@ pub struct ResolvedSpawnSnapshot {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelperOptionsSpec {
     /// Role name (profile key) for the helper in the mob roster.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "profile_name"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<ScheduledMobRuntimeMode>,
@@ -1373,10 +1371,13 @@ mod tests {
     }
 
     #[test]
-    fn helper_options_spec_profile_name_alias_deserializes() {
+    fn helper_options_spec_rejects_profile_name_alias() {
         let json = r#"{"profile_name":"legacy-worker"}"#;
-        let parsed: HelperOptionsSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.role_name, Some("legacy-worker".into()));
+        let err = serde_json::from_str::<HelperOptionsSpec>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("profile_name"),
+            "unexpected error: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1391,7 +1392,7 @@ mod tests {
                 prompt: ContentInput::from("scheduled hello"),
                 system_prompt: None,
                 render_metadata: None,
-                skill_references: Vec::new(),
+                skill_refs: Vec::new(),
                 additional_instructions: Vec::new(),
             },
         });

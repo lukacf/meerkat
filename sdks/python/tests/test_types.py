@@ -446,7 +446,12 @@ async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper()
 
 
 def test_live_mcp_contract_types_exported():
-    add = McpAddParams(session_id="s1", server_name="filesystem", persisted=False)
+    add = McpAddParams(
+        session_id="s1",
+        server_config={"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]},
+        server_name="filesystem",
+        persisted=False,
+    )
     response = McpLiveOpResponse(
         session_id="s1",
         operation="remove",
@@ -1480,7 +1485,7 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
     client._request = fake_request  # type: ignore[method-assign]
 
     helper = await client.spawn_mob_helper("mob-1", "help", role_name="worker")
-    forked = await client.fork_mob_helper("mob-1", "agent-a", "help", profile_name="legacy")
+    forked = await client.fork_mob_helper("mob-1", "agent-a", "help", role_name="worker")
     respawned = await client.respawn_mob_member("mob-1", "agent-a")
 
     # App-facing receipts expose only `member_ref`; binding-era

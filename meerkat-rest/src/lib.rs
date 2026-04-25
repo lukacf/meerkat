@@ -914,7 +914,7 @@ pub struct CreateSessionRequest {
     pub provider_params: Option<Value>,
     /// Skills to preload into the system prompt.
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -946,24 +946,6 @@ fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
         || req.hooks_override.is_some()
         || req.comms_name.is_some()
         || req.peer_meta.is_some()
-}
-
-/// Parse the REST wire `preload_skills: Option<Vec<String>>` into the typed
-/// `Option<Vec<SkillKey>>` consumed by the session build path.
-///
-/// Each string is parsed as a `SkillName` and wrapped in a builtin-source
-/// `SkillKey`, matching the CLI convention for unqualified skill ids.
-fn parse_preload_skill_keys(
-    ids: Option<Vec<String>>,
-) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
-    let Some(ids) = ids else { return Ok(None) };
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let skill_name = meerkat_core::skills::SkillName::parse(&id)
-            .map_err(|e| format!("invalid preload_skills entry `{id}`: {e}"))?;
-        out.push(meerkat_core::skills::SkillKey::builtin(skill_name));
-    }
-    Ok(Some(out))
 }
 
 async fn canonical_skill_keys_for_state(
@@ -1660,7 +1642,7 @@ struct SpawnHelperRequest {
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
@@ -1704,7 +1686,7 @@ struct ForkHelperRequest {
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
@@ -2892,12 +2874,7 @@ async fn create_session_inner(
         override_mob: ToolCategoryOverride::Inherit,
         schedule_tools: None,
         mob_tool_authority_context: None,
-        preload_skills: match parse_preload_skill_keys(req.preload_skills.clone()) {
-            Ok(keys) => keys,
-            Err(err) => {
-                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
-            }
-        },
+        preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),

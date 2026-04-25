@@ -77,9 +77,8 @@ class SkillKey:
     skill_name: str
 
 
-SkillRef = Union[SkillKey, str]
-"""A skill reference — either a :class:`SkillKey` or a legacy string like
-``"<source_uuid>/<skill_name>"``."""
+SkillRef = SkillKey
+"""A skill reference, expressed as a structured :class:`SkillKey`."""
 
 
 class TextBlock(TypedDict):

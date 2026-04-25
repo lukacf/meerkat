@@ -625,10 +625,10 @@ fn scheduled_session_action_schema() -> Value {
                         "description": "Only supported when materializing a new session."
                     },
                     "render_metadata": { "type": "object" },
-                    "skill_references": {
+                    "skill_refs": {
                         "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Canonical skill references in source_uuid/skill-name form."
+                        "items": { "type": "object" },
+                        "description": "Structured skill references."
                     },
                     "additional_instructions": {
                         "type": "array",
@@ -856,7 +856,7 @@ mod tests {
                     prompt: ContentInput::from("tool surface"),
                     system_prompt: None,
                     render_metadata: None,
-                    skill_references: Vec::new(),
+                    skill_refs: Vec::new(),
                     additional_instructions: Vec::new(),
                 },
             }),

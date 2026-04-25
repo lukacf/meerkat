@@ -148,6 +148,14 @@ export class Session {
 
   async invokeSkill(skillRef: SkillRef, prompt: string | ContentBlock[]): Promise<RunResult> {
     this._client.requireCapability("skills");
+    if (
+      skillRef === null ||
+      typeof skillRef !== "object" ||
+      typeof skillRef.sourceUuid !== "string" ||
+      typeof skillRef.skillName !== "string"
+    ) {
+      throw new Error("Skill references must be SkillKey objects");
+    }
     return this.turn(prompt, { skillRefs: [skillRef] });
   }
 
@@ -169,7 +177,6 @@ export class Session {
 /** Turn-time override options for deferred sessions. */
 export interface DeferredTurnOptions {
   skillRefs?: SkillRef[];
-  skillReferences?: string[];
   flowToolOverlay?: TurnOptions["flowToolOverlay"];
   additionalInstructions?: TurnOptions["additionalInstructions"];
   keepAlive?: TurnOptions["keepAlive"];

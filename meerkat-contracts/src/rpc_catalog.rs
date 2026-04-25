@@ -116,10 +116,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::basic("auth/profile/create", "Create an auth profile"),
         RpcMethodDescriptor::basic("auth/profile/delete", "Delete an auth profile"),
         RpcMethodDescriptor::basic(
-            "auth/profile/test",
-            "Dry-run the auth profile's resolve path and return its status",
-        ),
-        RpcMethodDescriptor::basic(
             "auth/login/start",
             "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
         ),
@@ -532,5 +528,14 @@ mod tests {
         assert!(notifications.iter().any(|n| n == "session/stream_end"));
         assert!(notifications.iter().any(|n| n == "mob/stream_event"));
         assert!(notifications.iter().any(|n| n == "mob/stream_end"));
+    }
+
+    #[test]
+    fn documented_surface_excludes_retired_auth_probe() {
+        let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
+        assert!(
+            !methods.iter().any(|m| m == "auth/profile/test"),
+            "retired auth/profile/test must not be advertised by public catalogs"
+        );
     }
 }

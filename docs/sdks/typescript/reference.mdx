@@ -59,8 +59,8 @@ import type {
 
 The package exports more than the core session lifecycle. The `MeerkatClient` also exposes:
 
-- realtime helpers: `runtimeRealtimeAttachmentStatus`, `runtimeRealtimeAttachmentStatuses`, `realtimeOpenInfo`, `realtimeStatus`, `realtimeCapabilities`
-- auth-profile helpers: `authProfileList`, `authProfileGet`, `authProfileCreate`, `authProfileDelete`, `authProfileTest`
+- realtime helpers: `runtimeRealtimeAttachmentStatus`, `realtimeOpenInfo`, `realtimeStatus`, `realtimeCapabilities`
+- auth-profile helpers: `authProfileList`, `authProfileGet`, `authProfileCreate`, `authProfileDelete`
 - auth-login helpers: `authLoginStart`, `authLoginComplete`, `authLoginDeviceStart`, `authLoginDeviceComplete`, `authLoginProvisionApiKey`, `authStatusGet`, `authLogout`
 - realm helpers: `realmList`, `realmGet`
 - typed ingress helper: `sendPeerResponseTerminal`
@@ -222,7 +222,7 @@ interface SchemaWarning {
 
 ### SkillKey
 
-Structured skill identifier. Preferred over legacy string references.
+Structured skill identifier.
 
 ```typescript
 interface SkillKey {
@@ -233,10 +233,10 @@ interface SkillKey {
 
 ### SkillRef
 
-A skill reference is either a `SkillKey` or a legacy string in the form `"<source_uuid>/<skill_name>"`. Legacy strings emit a deprecation warning.
+A skill reference is a structured `SkillKey`.
 
 ```typescript
-type SkillRef = SkillKey | string;
+type SkillRef = SkillKey;
 ```
 
 ### SkillRuntimeDiagnostics
@@ -558,12 +558,15 @@ class SkillNotFoundError extends MeerkatError {}
 
 ## Skills
 
-Both `createSession()` and `session.turn()` accept skill parameters. Use `SkillKey` objects (preferred) or legacy strings.
+Both `createSession()` and `session.turn()` accept structured skill parameters.
 
 ```typescript
 // Preload skills into the system prompt at session creation
 const session = await client.createSession("Hello!", {
-  preloadSkills: ["extraction/email", "formatting/markdown"],
+  preloadSkills: [
+    { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "extraction-email" },
+    { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "formatting-markdown" },
+  ],
 });
 
 // Inject a skill for a specific turn via session.turn()

@@ -2094,7 +2094,7 @@ struct MobSpawnHelperOptions {
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
     connection_ref: Option<String>,
@@ -2110,7 +2110,7 @@ struct MobForkHelperOptions {
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
     connection_ref: Option<String>,

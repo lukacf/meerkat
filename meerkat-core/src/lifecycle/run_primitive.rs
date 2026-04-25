@@ -432,12 +432,36 @@ pub struct OpenAiProviderTag {
     pub supports_reasoning_override: Option<bool>,
 }
 
+/// Gemini 3 reasoning levels accepted by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeminiThinkingLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl GeminiThinkingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 /// Typed shape of Gemini's thinking knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GeminiThinkingConfig {
     /// Whether reasoning output is included in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_thoughts: Option<bool>,
+    /// Gemini 3 reasoning level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<GeminiThinkingLevel>,
     /// Reasoning token budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
@@ -453,6 +477,9 @@ pub struct GeminiProviderTag {
     /// round-trip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    /// Gemini 3 flat thinking level override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<GeminiThinkingLevel>,
     /// Top-K sampling override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
@@ -704,6 +731,11 @@ impl GeminiProviderTag {
                             LegacyProviderParamsError::unknown_shape("thinking_budget")
                         })?;
                     tag.thinking_budget = Some(b);
+                }
+                "thinking_level" => {
+                    let level = serde_json::from_value::<GeminiThinkingLevel>(v.clone())
+                        .map_err(|_| LegacyProviderParamsError::unknown_shape("thinking_level"))?;
+                    tag.thinking_level = Some(level);
                 }
                 "top_k" => {
                     let n = v

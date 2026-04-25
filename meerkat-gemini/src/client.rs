@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
+use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, GeminiThinkingLevel, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use meerkat_llm_core::LlmError;
@@ -283,18 +283,31 @@ impl GeminiClient {
         }
 
         if let Some(tag) = gemini_tag(request) {
-            // Thinking: typed GeminiThinkingConfig with nested thinking_budget,
-            // or flat tag.thinking_budget for V3-legacy rows.
+            // Thinking: Gemini 3 uses thinking_level; legacy rows may still
+            // supply thinking_budget through the nested or flat shape.
+            let thinking_level = tag
+                .thinking
+                .as_ref()
+                .and_then(|cfg| cfg.thinking_level)
+                .or(tag.thinking_level);
             let thinking_budget = tag
                 .thinking
                 .as_ref()
                 .and_then(|cfg| cfg.thinking_budget)
                 .or(tag.thinking_budget);
 
-            if let Some(budget) = thinking_budget {
-                body["generationConfig"]["thinkingConfig"] = serde_json::json!({
-                    "thinkingBudget": budget,
-                });
+            if thinking_level.is_some() || thinking_budget.is_some() {
+                let mut thinking_config = Map::new();
+                if let Some(level) = thinking_level {
+                    thinking_config
+                        .insert("thinkingLevel".into(), Value::String(level.as_str().into()));
+                } else if let Some(budget) = thinking_budget {
+                    thinking_config.insert(
+                        "thinkingBudget".into(),
+                        Value::Number(serde_json::Number::from(budget)),
+                    );
+                }
+                body["generationConfig"]["thinkingConfig"] = Value::Object(thinking_config);
             }
 
             if let Some(top_k) = tag.top_k {
@@ -1123,6 +1136,31 @@ mod tests {
             .ok_or("missing budget")?;
 
         assert_eq!(thinking_budget.as_i64(), Some(10000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_with_thinking_level() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-flash-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_gemini_tag_merge(|t| t.thinking_level = Some(GeminiThinkingLevel::Low));
+
+        let body = client.build_request_body(&request)?;
+
+        let thinking_config = body
+            .get("generationConfig")
+            .and_then(|config| config.get("thinkingConfig"))
+            .ok_or("missing thinking")?;
+        assert_eq!(
+            thinking_config
+                .get("thinkingLevel")
+                .and_then(serde_json::Value::as_str),
+            Some("low")
+        );
+        assert!(thinking_config.get("thinkingBudget").is_none());
         Ok(())
     }
 

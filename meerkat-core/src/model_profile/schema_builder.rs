@@ -168,32 +168,39 @@ fn build_openai_schema(caps: &ModelCapabilities) -> Value {
 // ---------------------------------------------------------------------------
 // Gemini
 //
-// Current hand-written shape (matched for parity):
-// - thinking: object { thinking_budget: integer }     (legacy shape)
+// Current hand-written shape:
+// - thinking: object { thinking_level, thinking_budget }
+// - thinking_level: string enum                       (Gemini 3 authoritative knob)
 // - thinking_budget: integer                          (legacy flat alternative)
 // - top_k: integer
 // - top_p: number
-//
-// Note: `thinking_level` (Gemini 3.x authoritative knob) is intentionally NOT
-// advertised yet — the meerkat-client adapter does not read it today. A
-// follow-up PR will wire `thinking_level` through the client and update this
-// schema accordingly.
 // ---------------------------------------------------------------------------
 
 fn build_gemini_schema(caps: &ModelCapabilities) -> Value {
     let mut props = serde_json::Map::new();
 
     if caps.thinking != ThinkingSupport::None {
+        let thinking_props = match caps.thinking {
+            ThinkingSupport::GeminiThinkingLevel => json!({
+                "thinking_level": gemini_thinking_level_schema(),
+                "thinking_budget": { "type": "integer", "minimum": 0 }
+            }),
+            _ => json!({
+                "thinking_budget": { "type": "integer", "minimum": 0 }
+            }),
+        };
         props.insert(
             "thinking".into(),
             json!({
-                "description": "Thinking configuration (nested). Reads thinking.thinking_budget today.",
+                "description": "Thinking configuration.",
                 "type": "object",
-                "properties": {
-                    "thinking_budget": { "type": "integer", "minimum": 0 }
-                }
+                "additionalProperties": false,
+                "properties": thinking_props
             }),
         );
+        if caps.thinking == ThinkingSupport::GeminiThinkingLevel {
+            props.insert("thinking_level".into(), gemini_thinking_level_schema());
+        }
         if caps.supports_thinking_budget_legacy {
             props.insert(
                 "thinking_budget".into(),
@@ -236,6 +243,14 @@ fn object_schema(properties: serde_json::Map<String, Value>) -> Value {
 
 fn integer_nonneg_schema() -> Value {
     json!({ "type": "integer", "minimum": 0 })
+}
+
+fn gemini_thinking_level_schema() -> Value {
+    json!({
+        "description": "Gemini 3 reasoning level.",
+        "type": "string",
+        "enum": ["minimal", "low", "medium", "high"]
+    })
 }
 
 fn string_enum_schema(description: &str, values: &[&str]) -> Value {
@@ -384,6 +399,25 @@ mod tests {
             !keys.contains("effort"),
             "sonnet 4.5 must not advertise effort"
         );
+    }
+
+    #[test]
+    fn gemini_3_schema_exposes_thinking_level() {
+        let caps =
+            capabilities_for("gemini", "gemini-3-flash-preview").expect("gemini 3 flash row");
+        let schema = build_params_schema(caps);
+        let keys = property_keys(&schema);
+        assert!(
+            keys.contains("thinking_level"),
+            "gemini 3 must advertise thinking_level"
+        );
+
+        let values = enum_values_for(&schema, "thinking_level").expect("thinking_level enum");
+        let expected: std::collections::BTreeSet<String> = ["high", "low", "medium", "minimal"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(values, expected);
     }
 
     #[test]

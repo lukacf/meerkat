@@ -8,6 +8,7 @@
 pub mod error;
 pub mod lease;
 pub mod metadata;
+pub mod principal;
 pub mod status;
 pub mod token_store;
 
@@ -20,6 +21,11 @@ pub use metadata::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthMetadata, AuthMetadataDefaults, AuthRouteHints,
     GoogleAuthMetadata, GoogleRouteHints, OpenAiAuthMetadata, OpenAiRouteHints,
     ProviderAuthMetadata,
+};
+pub use principal::{
+    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalContractError, PrincipalId,
+    PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
+    metadata_grants_no_visibility,
 };
 pub use status::{AuthErrorSummary, AuthStatus};
 pub use token_store::{

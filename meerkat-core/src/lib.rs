@@ -92,6 +92,11 @@ pub use artifact::{
     ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,
     ArtifactOwner, ArtifactPayload, ArtifactRecord, ArtifactStore, ArtifactType,
 };
+pub use auth::{
+    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalContractError, PrincipalId,
+    PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
+    metadata_grants_no_visibility,
+};
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;

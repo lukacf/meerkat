@@ -2,6 +2,7 @@
 
 mod approval;
 mod artifact;
+mod auth;
 mod comms;
 mod connection;
 mod event;
@@ -40,6 +41,10 @@ pub use connection::{
 pub use artifact::{
     ArtifactDownloadParams, ArtifactDownloadResult, ArtifactIdParams, ArtifactListParams,
     ArtifactListResult,
+};
+pub use auth::{
+    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind, PrincipalRef,
+    VisibilityClass,
 };
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,

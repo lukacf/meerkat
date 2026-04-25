@@ -499,7 +499,11 @@ impl PersistentRuntimeDriver {
                 }),
                 receipt.clone(),
                 input_updates,
-                None,
+                session_snapshot
+                    .and_then(|snapshot| {
+                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
+                    })
+                    .map(|session| session.id().clone()),
             )
             .await
             .map_err(|e| {

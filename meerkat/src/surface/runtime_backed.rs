@@ -27,12 +27,18 @@ pub fn build_runtime_backed_service(
     Arc<MeerkatMachine>,
 ) {
     let runtime_adapter = persistence.runtime_adapter();
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    let event_projection = persistence.event_projection();
     let (store, runtime_store, blob_store) = persistence.into_parts();
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
         &store,
     ))));
-    let service =
+    let mut service =
         PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    if let Some((event_store, projector)) = event_projection {
+        service = service.with_event_projection(event_store, projector);
+    }
     (service, runtime_adapter)
 }
 
@@ -314,35 +320,64 @@ fn ensure_materialized_session_id_matches(
 mod tests {
     use super::*;
 
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use async_trait::async_trait;
     use meerkat_client::TestClient;
     use meerkat_core::SessionBuildOptions;
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use meerkat_llm_core::LlmError;
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use meerkat_openai::live::{
         OpenAiLiveCallTarget, OpenAiLiveClientEvent, OpenAiLiveServerEvent, OpenAiLiveSession,
         OpenAiLiveSessionFactory,
     };
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use meerkat_openai::realtime_attachment::{
         OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
     };
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, PromptInput, RuntimeState};
     use tempfile::TempDir;
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use tokio::sync::{Mutex, Notify};
     use tokio::time::Duration;
 
     #[cfg(feature = "comms")]
     use crate::CommsRuntime;
     use crate::{PersistenceBundle, SessionStore, SessionStoreError};
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     use meerkat_runtime::{RealtimeAttachmentStatus, SessionServiceRuntimeExt};
 
     fn make_request(build: SessionBuildOptions) -> CreateSessionRequest {
@@ -411,6 +446,30 @@ mod tests {
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
         let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), runtime_adapter)
+    }
+
+    #[tokio::test]
+    async fn build_runtime_backed_service_installs_realm_event_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_manifest, persistence) = crate::open_realm_persistence_in(
+            temp.path(),
+            "surface-realm",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Explicit),
+        )
+        .await
+        .expect("open realm persistence");
+
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+
+        let (service, _runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
+
+        assert!(
+            service.has_event_projection(),
+            "runtime-backed service must install the realm event projection bridge"
+        );
     }
 
     async fn expect_prompt_completion(
@@ -819,14 +878,22 @@ mod tests {
         adapter.unregister_session(&result.session_id).await;
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     struct FakeOpenAiLiveSession {
         events: VecDeque<OpenAiLiveServerEvent>,
         close_gate: Option<Arc<Notify>>,
         sent_events: Arc<Mutex<Vec<OpenAiLiveClientEvent>>>,
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     #[async_trait]
     impl OpenAiLiveSession for FakeOpenAiLiveSession {
         async fn send_raw(&mut self, event: OpenAiLiveClientEvent) -> Result<(), LlmError> {
@@ -845,12 +912,20 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     struct FakeOpenAiLiveFactory {
         sessions: Mutex<VecDeque<Result<Box<dyn OpenAiLiveSession>, LlmError>>>,
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     #[async_trait]
     impl OpenAiLiveSessionFactory for FakeOpenAiLiveFactory {
         async fn open_session(
@@ -876,12 +951,20 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     struct RuntimeBackedRealtimeAttachmentToolDispatchHost {
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     #[async_trait]
     impl RealtimeAttachmentToolDispatchHost for RuntimeBackedRealtimeAttachmentToolDispatchHost {
         async fn dispatch_external_tool_call(
@@ -901,7 +984,11 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "openai")]
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
     #[tokio::test]
     async fn runtime_backed_openai_live_orchestrator_routes_tool_calls_through_service_host() {
         let temp = tempfile::tempdir().expect("tempdir");

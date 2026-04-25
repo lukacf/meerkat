@@ -99,6 +99,74 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
     )
 }
 
+/// Schema inputs that are intentionally internal to the MeerkatMachine DSL
+/// authority and therefore do not appear on the public runtime command
+/// manifest.
+pub const MEERKAT_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
+    "AbortLiveTopologyBeforeDetach",
+    "AddDirectPeerEndpoint",
+    "AdvanceSessionContext",
+    "ApplyLiveTopologyIdentity",
+    "ApplyLiveTopologyVisibility",
+    "ApplyMobPeerOverlay",
+    "AttachMobIngress",
+    "AttachSessionIngress",
+    "AuthorizeSupervisor",
+    "BeginLiveTopologyReconfigure",
+    "BeginRealtimeBinding",
+    "BindSupervisor",
+    "ClassifyRealtimeClientInputSubmitted",
+    "ClassifyRealtimeMidTurnActivity",
+    "ClassifyRealtimeTurnTerminated",
+    "ClearLocalEndpoint",
+    "ClearRealtimeReconnectProgress",
+    "CompleteLiveTopology",
+    "DetachIngress",
+    "DetachRealtimeBinding",
+    "FailLiveTopologyAfterDetach",
+    "InteractionStreamAttached",
+    "InteractionStreamClosedEarly",
+    "InteractionStreamCompleted",
+    "InteractionStreamExpired",
+    "InteractionStreamReserved",
+    "MarkLiveTopologyDetached",
+    "McpServerConnectPending",
+    "McpServerConnected",
+    "McpServerDisconnected",
+    "McpServerFailed",
+    "McpServerReload",
+    "OpsBarrierSatisfied",
+    "PeerRequestReceived",
+    "PeerRequestSent",
+    "PeerRequestTimedOut",
+    "PeerResponseProgressArrived",
+    "PeerResponseReplied",
+    "PeerResponseTerminalArrived",
+    "PendingFailed",
+    "PendingSucceeded",
+    "ProductOutputStarted",
+    "ProductTurnCommitted",
+    "ProductTurnInFlight",
+    "ProductTurnInterrupted",
+    "ProductTurnTerminal",
+    "ProjectRealtimeIntent",
+    "ProjectRealtimeReconnectProgress",
+    "PublishLocalEndpoint",
+    "PublishRealtimeSignal",
+    "RealtimeProjectionAdvanceObserved",
+    "RealtimeProjectionRefreshed",
+    "RealtimeProjectionReset",
+    "RemoveDirectPeerEndpoint",
+    "ReplaceRealtimeBinding",
+    "RequireRealtimeReattach",
+    "RevokeSupervisor",
+    "SnapshotAligned",
+    "SupervisorTrustEdgePublishFailed",
+    "SupervisorTrustEdgePublished",
+    "SupervisorTrustEdgeRevokeFailed",
+    "SupervisorTrustEdgeRevoked",
+];
+
 pub fn dsl_mob_machine() -> MachineSchema {
     with_named_types(
         mob_machine::MobMachineState::schema(),
@@ -119,6 +187,19 @@ pub fn dsl_mob_machine() -> MachineSchema {
         ],
     )
 }
+
+/// Schema inputs that are intentionally internal to the MobMachine DSL
+/// authority and therefore do not appear on the public runtime command
+/// manifest.
+pub const MOB_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
+    "BindMemberSession",
+    "ReleaseMemberSession",
+    "RotateMemberSession",
+    "SessionIngressDetachFailedForMobDestroy",
+    "SessionIngressDetachedForMobDestroy",
+    "UnwireMembers",
+    "WireMembers",
+];
 
 pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
     with_named_types(

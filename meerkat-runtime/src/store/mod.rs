@@ -25,6 +25,12 @@ pub enum RuntimeStoreError {
     /// Read failed.
     #[error("Store read failed: {0}")]
     ReadFailed(String),
+    /// The explicit session-store key does not match the serialized session.
+    #[error("Session store key mismatch: expected {expected}, actual {actual}")]
+    SessionKeyMismatch {
+        expected: meerkat_core::types::SessionId,
+        actual: meerkat_core::types::SessionId,
+    },
     /// Not found.
     #[error("Not found: {0}")]
     NotFound(String),

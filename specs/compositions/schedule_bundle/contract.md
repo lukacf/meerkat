@@ -32,10 +32,11 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/service.rs` — schedule service precursor for revision supersession and rolling planning
-- `meerkat-schedule/src/store.rs` — schedule store contract precursor for transactional claim and supersede persistence
+- `meerkat-schedule/src/service.rs` — schedule service precursor for revision supersession, rolling planning, occurrence materialization, pause resume, and delete lifecycle routing
+- `meerkat-schedule/src/store.rs` — schedule store contract precursor for transactional claim, supersede persistence, occurrence progress, and revision-aware planning cursor updates
 - `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule bundle composition
 
 ### Scenarios
 - `revision-supersede-route` — revision-affecting schedule updates supersede pending future occurrences through the explicit route
 - `pause-resume-without-revision` — pause and resume leave schedule revision unchanged while preserving typed ownership
+- `rolling-planning-occurrence-materialization` — rolling planning records a planning window and materializes or supersedes pending occurrences through revision-aware schedule routes

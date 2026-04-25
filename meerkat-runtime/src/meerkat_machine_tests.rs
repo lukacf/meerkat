@@ -12661,15 +12661,14 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::Bool => KernelValue::Bool(false),
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
-        TypeRef::Named(name)
-            if matches!(
-                name.as_str(),
-                "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
-            ) =>
-        {
-            KernelValue::U64(0)
-        }
-        TypeRef::Named(_) => KernelValue::String(String::new()),
+        TypeRef::Named(name) => runtime_modeled_named_value(
+            name,
+            if runtime_modeled_named_type_is_u64(name.as_str()) {
+                KernelValue::U64(0)
+            } else {
+                KernelValue::String(String::new())
+            },
+        ),
         TypeRef::Enum(name) => KernelValue::NamedVariant {
             enum_name: name.clone(),
             variant: meerkat_machine_schema::identity::EnumVariantId::parse("_")
@@ -12679,6 +12678,111 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
         TypeRef::Map(_, _) => KernelValue::Map(BTreeMap::new()),
+    }
+}
+
+fn runtime_modeled_named_type_is_u64(name: &str) -> bool {
+    matches!(
+        name,
+        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+    )
+}
+
+fn runtime_modeled_named_value(
+    type_name: &meerkat_machine_schema::identity::NamedTypeId,
+    value: KernelValue,
+) -> KernelValue {
+    if matches!(
+        &value,
+        KernelValue::Named {
+            type_name: existing,
+            ..
+        } if existing == type_name
+    ) {
+        return value;
+    }
+
+    let value = if runtime_modeled_named_type_is_u64(type_name.as_str()) {
+        match value {
+            KernelValue::U64(value) => KernelValue::U64(value),
+            KernelValue::String(value) => KernelValue::U64(
+                serde_json::from_str::<u64>(&value)
+                    .ok()
+                    .or_else(|| value.parse::<u64>().ok())
+                    .unwrap_or_default(),
+            ),
+            _ => KernelValue::U64(0),
+        }
+    } else {
+        match value {
+            KernelValue::String(value) => KernelValue::String(value),
+            KernelValue::U64(value) => KernelValue::String(value.to_string()),
+            other => KernelValue::String(
+                serde_json::to_string(&runtime_modeled_json_from_kernel_value(&other))
+                    .unwrap_or_default(),
+            ),
+        }
+    };
+
+    KernelValue::Named {
+        type_name: type_name.clone(),
+        value: Box::new(value),
+    }
+}
+
+fn runtime_modeled_coerce_value_to_type(ty: &TypeRef, value: KernelValue) -> KernelValue {
+    match ty {
+        TypeRef::Named(name) => runtime_modeled_named_value(name, value),
+        TypeRef::Option(inner) => match value {
+            KernelValue::None => KernelValue::None,
+            KernelValue::Map(mut entries)
+                if entries.len() == 1
+                    && entries.contains_key(&KernelValue::String("value".to_string())) =>
+            {
+                let key = KernelValue::String("value".to_string());
+                let inner_value = entries.remove(&key).unwrap_or(KernelValue::None);
+                runtime_modeled_option_some(runtime_modeled_coerce_value_to_type(
+                    inner,
+                    inner_value,
+                ))
+            }
+            other => {
+                runtime_modeled_option_some(runtime_modeled_coerce_value_to_type(inner, other))
+            }
+        },
+        TypeRef::Set(inner) => match value {
+            KernelValue::Set(items) => KernelValue::Set(
+                items
+                    .into_iter()
+                    .map(|item| runtime_modeled_coerce_value_to_type(inner, item))
+                    .collect(),
+            ),
+            other => other,
+        },
+        TypeRef::Seq(inner) => match value {
+            KernelValue::Seq(items) => KernelValue::Seq(
+                items
+                    .into_iter()
+                    .map(|item| runtime_modeled_coerce_value_to_type(inner, item))
+                    .collect(),
+            ),
+            other => other,
+        },
+        TypeRef::Map(key_ty, value_ty) => match value {
+            KernelValue::Map(entries) => KernelValue::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            runtime_modeled_coerce_value_to_type(key_ty, key),
+                            runtime_modeled_coerce_value_to_type(value_ty, value),
+                        )
+                    })
+                    .collect(),
+            ),
+            other => other,
+        },
+        _ => value,
     }
 }
 
@@ -12709,11 +12813,17 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
             ) =>
         {
-            KernelValue::U64(value.as_u64().unwrap_or(0))
+            KernelValue::Named {
+                type_name: name.clone(),
+                value: Box::new(KernelValue::U64(value.as_u64().unwrap_or(0))),
+            }
         }
-        TypeRef::Named(_) => {
-            KernelValue::String(serde_json::to_string(value).unwrap_or_else(|_| "null".into()))
-        }
+        TypeRef::Named(name) => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(KernelValue::String(
+                serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
+            )),
+        },
         TypeRef::Enum(name) => KernelValue::NamedVariant {
             enum_name: name.clone(),
             variant: meerkat_machine_schema::identity::EnumVariantId::parse(
@@ -12782,6 +12892,7 @@ fn runtime_modeled_json_from_kernel_value(value: &KernelValue) -> serde_json::Va
         KernelValue::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
         }
+        KernelValue::Named { value, .. } => runtime_modeled_json_from_kernel_value(value),
         KernelValue::NamedVariant { variant, .. } => {
             serde_json::Value::String(variant.as_str().to_string())
         }
@@ -12897,11 +13008,26 @@ fn modeled_kernel_input(
     variant: &str,
     fields: impl IntoIterator<Item = (&'static str, KernelValue)>,
 ) -> KernelInput {
+    let schema = modeled_meerkat_kernel::schema();
+    let input_variant = schema
+        .inputs
+        .variant_named(variant)
+        .expect("input variant should exist in modeled schema");
     KernelInput {
         variant: modeled_input_variant(variant),
         fields: fields
             .into_iter()
-            .map(|(name, value)| (modeled_field_id(name), value))
+            .map(|(name, value)| {
+                let field = input_variant
+                    .fields
+                    .iter()
+                    .find(|field| field.name.as_str() == name)
+                    .expect("field should exist in modeled input variant");
+                (
+                    modeled_field_id(name),
+                    runtime_modeled_coerce_value_to_type(&field.ty, value),
+                )
+            })
             .collect(),
     }
 }
@@ -12924,7 +13050,10 @@ fn runtime_modeled_kernel_state(
                 "active_fence_token" => runtime_modeled_option_some(KernelValue::U64(0)),
                 _ => runtime_modeled_default_kernel_value(&field.ty),
             });
-        fields.insert(field.name.clone(), value);
+        fields.insert(
+            field.name.clone(),
+            runtime_modeled_coerce_value_to_type(&field.ty, value),
+        );
     }
     KernelState {
         phase: meerkat_machine_schema::identity::PhaseId::parse(before.phase.as_str())
@@ -13046,7 +13175,10 @@ fn runtime_modeled_kernel_input(
             "kind" => KernelValue::String("runtime_created".to_string()),
             _ => runtime_modeled_default_kernel_value(&field.ty),
         };
-        fields.insert(field.name.clone(), value);
+        fields.insert(
+            field.name.clone(),
+            runtime_modeled_coerce_value_to_type(&field.ty, value),
+        );
     }
 
     Ok(KernelInput { variant, fields })

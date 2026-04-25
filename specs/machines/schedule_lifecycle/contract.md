@@ -111,7 +111,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over the DSL
+- `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, revision, and planning cursor rules
 
 ### Scenarios
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision
+- `schedule_revision_and_planning` — active or paused schedules revise, record planning windows, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor

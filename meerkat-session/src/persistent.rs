@@ -9,6 +9,7 @@
 #![cfg_attr(test, allow(dead_code))]
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use indexmap::IndexMap;
 use meerkat_core::BlobStore;
 use meerkat_core::PendingSystemContextAppend;
@@ -38,10 +39,12 @@ use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
+use crate::event_store::EventStore;
+use crate::projector::SessionProjector;
 
 /// Re-export of the crate-root `migrations` module so the canonical
 /// path `meerkat_session::persistent::migrations` (as named in the
@@ -49,6 +52,109 @@ use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 pub use crate::migrations;
 
 const SESSION_ARCHIVED_KEY: &str = "session_archived";
+
+fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
+    match event {
+        meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
+        | meerkat_core::event::AgentEvent::RunCompleted { session_id, .. }
+        | meerkat_core::event::AgentEvent::RunFailed { session_id, .. } => Some(session_id.clone()),
+        _ => None,
+    }
+}
+
+async fn append_and_project_event(
+    event_store: &Arc<dyn EventStore>,
+    projector: &Arc<SessionProjector>,
+    session_id: &SessionId,
+    event: meerkat_core::event::AgentEvent,
+) {
+    let events = [event];
+    match event_store.append(session_id, &events).await {
+        Ok(seq) => {
+            if let Err(error) = projector
+                .project(event_store.as_ref(), session_id, seq)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to project persistent session events"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to append persistent session event"
+            );
+        }
+    }
+}
+
+async fn flush_projected_events(
+    event_store: &Arc<dyn EventStore>,
+    projector: &Arc<SessionProjector>,
+    session_id: &SessionId,
+    pending: &mut Vec<meerkat_core::event::AgentEvent>,
+) {
+    for event in pending.drain(..) {
+        append_and_project_event(event_store, projector, session_id, event).await;
+    }
+}
+
+async fn project_create_time_events(
+    event_store: Arc<dyn EventStore>,
+    projector: Arc<SessionProjector>,
+    mut projection_rx: mpsc::Receiver<
+        meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
+    >,
+    mut session_rx: watch::Receiver<Option<SessionId>>,
+    caller_event_tx: Option<
+        mpsc::Sender<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
+    >,
+) {
+    let mut session_id = session_rx.borrow().clone();
+    let mut pending = Vec::new();
+
+    loop {
+        tokio::select! {
+            envelope = projection_rx.recv() => {
+                let Some(envelope) = envelope else {
+                    break;
+                };
+                if session_id.is_none() {
+                    session_id = session_id_from_event(&envelope.payload);
+                }
+                let event = envelope.payload.clone();
+                if let Some(tx) = caller_event_tx.as_ref()
+                    && tx.send(envelope).await.is_err()
+                {
+                    tracing::warn!("session event stream receiver dropped; continuing event projection");
+                }
+                if let Some(session_id) = session_id.as_ref() {
+                    pending.push(event);
+                    flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
+                } else {
+                    pending.push(event);
+                }
+            }
+            changed = session_rx.changed(), if session_id.is_none() => {
+                if changed.is_err() {
+                    break;
+                }
+                session_id = session_rx.borrow().clone();
+                if let Some(session_id) = session_id.as_ref() {
+                    flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
+                }
+            }
+        }
+    }
+
+    if let Some(session_id) = session_id.as_ref() {
+        flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
+    }
+}
 
 fn write_system_context_state(
     session: &mut Session,
@@ -209,6 +315,8 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     store: Arc<dyn SessionStore>,
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
+    event_store: Option<Arc<dyn EventStore>>,
+    projector: Option<Arc<SessionProjector>>,
     /// Process-local bounded cache of archived full sessions to avoid
     /// immediately reloading durable archived snapshots on hot history reads.
     archived_sessions: Mutex<IndexMap<SessionId, Session>>,
@@ -699,11 +807,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             store,
             runtime_store,
             blob_store,
+            event_store: None,
+            projector: None,
             archived_sessions: Mutex::new(IndexMap::new()),
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Attach the append-only event log and derived file projector used by
+    /// persistent sessions.
+    ///
+    /// Projection is best-effort derived state. Append/project failures are
+    /// logged and do not fail the session turn; callers must continue to treat
+    /// `SessionStore`/`RuntimeStore` as the source of truth, not the projected
+    /// JSONL files. The spawned projection tasks exit when their session event
+    /// streams close, and create-time events without a correlated session id are
+    /// discarded when the create-time stream closes.
+    pub fn with_event_projection(
+        mut self,
+        event_store: Arc<dyn EventStore>,
+        projector: Arc<SessionProjector>,
+    ) -> Self {
+        self.event_store = Some(event_store);
+        self.projector = Some(projector);
+        self
     }
 
     pub fn runtime_mode(&self) -> RuntimeMode {
@@ -714,8 +843,58 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.runtime_store.clone()
     }
 
+    pub fn has_event_projection(&self) -> bool {
+        self.event_store.is_some() && self.projector.is_some()
+    }
+
     pub fn blob_store(&self) -> Arc<dyn BlobStore> {
         self.blob_store.clone()
+    }
+
+    fn install_create_time_event_projection(
+        &self,
+        req: &mut CreateSessionRequest,
+    ) -> Option<watch::Sender<Option<SessionId>>> {
+        let (Some(event_store), Some(projector)) =
+            (self.event_store.clone(), self.projector.clone())
+        else {
+            return None;
+        };
+
+        let caller_event_tx = req.event_tx.take();
+        let (projection_tx, projection_rx) = mpsc::channel(128);
+        let (session_tx, session_rx) = watch::channel(None);
+        req.event_tx = Some(projection_tx);
+
+        tokio::spawn(project_create_time_events(
+            event_store,
+            projector,
+            projection_rx,
+            session_rx,
+            caller_event_tx,
+        ));
+
+        Some(session_tx)
+    }
+
+    async fn spawn_event_projection_task(&self, id: &SessionId) {
+        let (Some(event_store), Some(projector)) =
+            (self.event_store.clone(), self.projector.clone())
+        else {
+            return;
+        };
+        let session_id = id.clone();
+        let stream = self.inner.subscribe_session_events(&session_id).await;
+        let Ok(mut stream) = stream else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            while let Some(envelope) = stream.next().await {
+                append_and_project_event(&event_store, &projector, &session_id, envelope.payload)
+                    .await;
+            }
+        });
     }
 
     async fn normalized_session_for_persistence(
@@ -1059,6 +1238,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let build = req.build.get_or_insert_with(Default::default);
         build.checkpointer = Some(checkpointer.clone());
         build.blob_store_override = Some(Arc::clone(&self.blob_store));
+        let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
         let callback_session_id = req
             .build
             .as_ref()
@@ -1083,6 +1263,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 .await
                 .insert(result.session_id.clone(), gate);
         }
+        if let Some(session_tx) = create_projection_session_tx {
+            let _ = session_tx.send(Some(result.session_id.clone()));
+        }
+        self.spawn_event_projection_task(&result.session_id).await;
 
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
@@ -1883,8 +2067,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
+    use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
     use meerkat_core::ToolDispatchOutcome;
     use meerkat_core::checkpoint::SessionCheckpointer;
+    use meerkat_core::event::AgentEvent;
     use meerkat_core::service::{
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
         SessionServiceControlExt,
@@ -1900,6 +2086,97 @@ mod tests {
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    struct RecordingEventStore {
+        events: Mutex<HashMap<SessionId, Vec<StoredEvent>>>,
+        notify: tokio::sync::Notify,
+    }
+
+    impl Default for RecordingEventStore {
+        fn default() -> Self {
+            Self {
+                events: Mutex::new(HashMap::new()),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    impl RecordingEventStore {
+        async fn wait_for_seq(&self, session_id: &SessionId, target_seq: u64) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if self.last_seq(session_id).await.unwrap() >= target_seq {
+                        return;
+                    }
+                    self.notify.notified().await;
+                }
+            })
+            .await
+            .expect("event store projection did not reach expected sequence");
+        }
+    }
+
+    async fn read_projected_events_after(events_path: &std::path::Path, expected: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Ok(projected) = tokio::fs::read_to_string(events_path).await
+                    && projected.contains(expected)
+                {
+                    return projected;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("projected events.jsonl did not contain expected event")
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for RecordingEventStore {
+        async fn append(
+            &self,
+            session_id: &SessionId,
+            events: &[AgentEvent],
+        ) -> Result<u64, EventStoreError> {
+            let mut all_events = self.events.lock().await;
+            let session_events = all_events.entry(session_id.clone()).or_default();
+            for event in events {
+                let seq = session_events.len() as u64 + 1;
+                session_events.push(StoredEvent {
+                    seq,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    timestamp: meerkat_core::time_compat::SystemTime::now(),
+                    event: event.clone(),
+                });
+            }
+            let last_seq = session_events.len() as u64;
+            drop(all_events);
+            self.notify.notify_waiters();
+            Ok(last_seq)
+        }
+
+        async fn read_from(
+            &self,
+            session_id: &SessionId,
+            from_seq: u64,
+        ) -> Result<Vec<StoredEvent>, EventStoreError> {
+            let all_events = self.events.lock().await;
+            Ok(all_events
+                .get(session_id)
+                .into_iter()
+                .flat_map(|events| events.iter())
+                .filter(|event| event.seq >= from_seq)
+                .cloned()
+                .collect())
+        }
+
+        async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError> {
+            let all_events = self.events.lock().await;
+            Ok(all_events
+                .get(session_id)
+                .map_or(0, |events| events.len() as u64))
+        }
     }
 
     fn test_runtime_bindings(session_id: SessionId) -> meerkat_core::SessionRuntimeBindings {
@@ -1989,31 +2266,34 @@ mod tests {
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             let session_id = self.session_id();
-            let mut session = match self.session.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            session.push(meerkat_core::types::Message::User(
-                meerkat_core::types::UserMessage::text(prompt.text_content()),
-            ));
-            session.push(meerkat_core::types::Message::Assistant(
-                meerkat_core::types::AssistantMessage {
-                    content: "ok".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: meerkat_core::types::StopReason::EndTurn,
+            let result = {
+                let mut session = match self.session.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                session.push(meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::text(prompt.text_content()),
+                ));
+                session.push(meerkat_core::types::Message::Assistant(
+                    meerkat_core::types::AssistantMessage {
+                        content: "ok".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: meerkat_core::types::StopReason::EndTurn,
+                        usage: meerkat_core::types::Usage::default(),
+                    },
+                ));
+                RunResult {
+                    text: "ok".to_string(),
+                    session_id,
                     usage: meerkat_core::types::Usage::default(),
-                },
-            ));
-            Ok(RunResult {
-                text: "ok".to_string(),
-                session_id,
-                usage: meerkat_core::types::Usage::default(),
-                turns: 1,
-                tool_calls: 0,
-                structured_output: None,
-                schema_warnings: None,
-                skill_diagnostics: None,
-            })
+                    turns: 1,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                }
+            };
+            Ok(result)
         }
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
@@ -2192,6 +2472,118 @@ mod tests {
         }
     }
 
+    struct EventfulDummyAgent {
+        inner: DummyAgent,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgent for EventfulDummyAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: meerkat_core::types::ContentInput,
+            event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            let session_id = self.inner.session_id();
+            let prompt_text = prompt.text_content();
+            let _ = event_tx
+                .send(AgentEvent::RunStarted {
+                    session_id: session_id.clone(),
+                    prompt: prompt_text,
+                })
+                .await;
+            let result = self.inner.run_with_events(prompt, event_tx.clone()).await?;
+            let _ = event_tx
+                .send(AgentEvent::RunCompleted {
+                    session_id,
+                    result: result.text.clone(),
+                    usage: result.usage.clone(),
+                })
+                .await;
+            Ok(result)
+        }
+
+        fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+            self.inner.set_skill_references(refs);
+        }
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.set_flow_tool_overlay(overlay)
+        }
+
+        fn cancel(&mut self) {
+            self.inner.cancel();
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.hot_swap_llm_identity(client, identity)
+        }
+
+        fn stage_external_tool_filter(
+            &mut self,
+            filter: meerkat_core::ToolFilter,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.stage_external_tool_filter(filter)
+        }
+
+        fn set_tool_visibility_state(
+            &mut self,
+            state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.set_tool_visibility_state(state)
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.inner.session_id()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            self.inner.snapshot()
+        }
+
+        fn session_clone(&self) -> Session {
+            self.inner.session_clone()
+        }
+
+        fn update_keep_alive(&mut self, keep_alive: bool) {
+            self.inner.update_keep_alive(keep_alive);
+        }
+
+        fn update_mob_tool_authority_context(
+            &mut self,
+            authority_context: Option<MobToolAuthorityContext>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner
+                .update_mob_tool_authority_context(authority_context)
+        }
+
+        fn update_system_prompt(
+            &mut self,
+            system_prompt: String,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.update_system_prompt(system_prompt)
+        }
+
+        fn apply_runtime_system_context(
+            &mut self,
+            appends: &[meerkat_core::PendingSystemContextAppend],
+        ) {
+            self.inner.apply_runtime_system_context(appends);
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            self.inner.system_context_state()
+        }
+    }
+
     struct DummyBuilder;
 
     #[async_trait::async_trait]
@@ -2212,6 +2604,32 @@ mod tests {
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+            })
+        }
+    }
+
+    struct EventfulBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for EventfulBuilder {
+        type Agent = EventfulDummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(EventfulDummyAgent {
+                inner: DummyAgent {
+                    session: Arc::new(std::sync::Mutex::new(session)),
+                    system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                },
             })
         }
     }
@@ -4019,6 +4437,101 @@ mod tests {
             }
             other => panic!("expected run_completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_event_store_projection_records_persistent_session_events() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let run = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "project this durable event".to_string(),
+                    source: Some("test".to_string()),
+                    idempotency_key: Some("test".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("apply context append");
+
+        event_store.wait_for_seq(&session_id, 2).await;
+        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
+        let events_path = dir
+            .path()
+            .join(".rkat")
+            .join("sessions")
+            .join(session_id.to_string())
+            .join("events.jsonl");
+        let projected = read_projected_events_after(&events_path, "run_completed").await;
+        assert!(projected.contains("run_started"));
+        assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_event_store_projection_records_eager_initial_turn_events() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            EventfulBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let run = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        event_store.wait_for_seq(&session_id, 2).await;
+        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
+        let events_path = dir
+            .path()
+            .join(".rkat")
+            .join("sessions")
+            .join(session_id.to_string())
+            .join("events.jsonl");
+        let projected = read_projected_events_after(&events_path, "run_completed").await;
+        assert!(projected.contains("run_started"));
+        assert!(projected.contains("run_completed"));
     }
 
     /// Create a session request that seeds initial SessionMetadata so

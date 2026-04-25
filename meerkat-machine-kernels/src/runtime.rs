@@ -16,6 +16,10 @@ pub enum KernelValue {
     Bool(bool),
     U64(u64),
     String(String),
+    Named {
+        type_name: meerkat_machine_schema::identity::NamedTypeId,
+        value: Box<KernelValue>,
+    },
     NamedVariant {
         enum_name: EnumTypeId,
         variant: EnumVariantId,
@@ -37,6 +41,10 @@ enum KernelValueRepr {
     },
     String {
         value: String,
+    },
+    Named {
+        type_name: meerkat_machine_schema::identity::NamedTypeId,
+        value: Box<KernelValue>,
     },
     NamedVariant {
         enum_name: EnumTypeId,
@@ -60,6 +68,10 @@ impl From<&KernelValue> for KernelValueRepr {
             KernelValue::Bool(value) => Self::Bool { value: *value },
             KernelValue::U64(value) => Self::U64 { value: *value },
             KernelValue::String(value) => Self::String {
+                value: value.clone(),
+            },
+            KernelValue::Named { type_name, value } => Self::Named {
+                type_name: type_name.clone(),
                 value: value.clone(),
             },
             KernelValue::NamedVariant { enum_name, variant } => Self::NamedVariant {
@@ -89,6 +101,7 @@ impl From<KernelValueRepr> for KernelValue {
             KernelValueRepr::Bool { value } => Self::Bool(value),
             KernelValueRepr::U64 { value } => Self::U64(value),
             KernelValueRepr::String { value } => Self::String(value),
+            KernelValueRepr::Named { type_name, value } => Self::Named { type_name, value },
             KernelValueRepr::NamedVariant { enum_name, variant } => {
                 Self::NamedVariant { enum_name, variant }
             }
@@ -891,6 +904,7 @@ impl GeneratedMachineKernel {
                         _ => false,
                     },
                     KernelValue::NamedVariant { .. }
+                    | KernelValue::Named { .. }
                     | KernelValue::Bool(_)
                     | KernelValue::U64(_)
                     | KernelValue::None => false,
@@ -922,6 +936,7 @@ impl GeneratedMachineKernel {
                     KernelValue::Map(items) => items.len(),
                     KernelValue::String(items) => items.chars().count(),
                     KernelValue::NamedVariant { .. }
+                    | KernelValue::Named { .. }
                     | KernelValue::Bool(_)
                     | KernelValue::U64(_)
                     | KernelValue::None => {
@@ -1196,8 +1211,14 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
         TypeRef::Bool => KernelValue::Bool(false),
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
-        TypeRef::Named(name) if named_type_is_u64(name.as_str()) => KernelValue::U64(0),
-        TypeRef::Named(_) => KernelValue::String(String::new()),
+        TypeRef::Named(name) => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(if named_type_is_u64(name.as_str()) {
+                KernelValue::U64(0)
+            } else {
+                KernelValue::String(String::new())
+            }),
+        },
         TypeRef::Enum(name) =>
         {
             #[allow(clippy::expect_used)]
@@ -1218,8 +1239,13 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
         (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (KernelValue::String(_), TypeRef::String) => true,
-        (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name.as_str()) => true,
-        (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name.as_str()) => true,
+        (KernelValue::Named { type_name, value }, TypeRef::Named(name)) if type_name == name => {
+            if named_type_is_u64(name.as_str()) {
+                matches!(value.as_ref(), KernelValue::U64(_))
+            } else {
+                matches!(value.as_ref(), KernelValue::String(_))
+            }
+        }
         (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) if enum_name == name => {
             true
         }
@@ -1258,12 +1284,13 @@ mod tests {
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     };
     use meerkat_machine_schema::identity::{
-        EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, PhaseId,
+        EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, NamedTypeId, PhaseId,
         SignalVariantId, TransitionId,
     };
 
     use super::{
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
+        default_value_for_type,
     };
 
     fn input_id(slug: &str) -> InputVariantId {
@@ -1279,6 +1306,25 @@ mod tests {
     fn field_id(slug: &str) -> FieldId {
         #[allow(clippy::expect_used)]
         FieldId::parse(slug).expect("valid field slug")
+    }
+
+    fn named_type_id(slug: &str) -> NamedTypeId {
+        #[allow(clippy::expect_used)]
+        NamedTypeId::parse(slug).expect("valid named type slug")
+    }
+
+    fn named_string(type_name: &str, value: &str) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id(type_name),
+            value: Box::new(KernelValue::String(value.to_owned())),
+        }
+    }
+
+    fn named_u64(type_name: &str, value: u64) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id(type_name),
+            value: Box::new(KernelValue::U64(value)),
+        }
     }
 
     fn phase_id(slug: &str) -> PhaseId {
@@ -1314,6 +1360,27 @@ mod tests {
             let state = kernel.initial_state().expect("initial state");
             assert_eq!(state.phase, schema.state.init.phase);
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn named_type_defaults_are_typed_kernel_values() {
+        assert!(matches!(
+            default_value_for_type(&meerkat_machine_schema::TypeRef::Named(named_type_id(
+                "AgentRuntimeId"
+            ))),
+            KernelValue::Named { type_name, value }
+                if type_name == named_type_id("AgentRuntimeId")
+                    && matches!(value.as_ref(), KernelValue::String(value) if value.is_empty())
+        ));
+        assert!(matches!(
+            default_value_for_type(&meerkat_machine_schema::TypeRef::Named(named_type_id(
+                "FenceToken"
+            ))),
+            KernelValue::Named { type_name, value }
+                if type_name == named_type_id("FenceToken")
+                    && matches!(value.as_ref(), KernelValue::U64(0))
+        ));
     }
 
     #[allow(clippy::expect_used)]
@@ -1357,7 +1424,7 @@ mod tests {
                     variant: input_id("RegisterSession"),
                     fields: BTreeMap::from([(
                         field_id("session_id"),
-                        KernelValue::String("session-1".into()),
+                        named_string("SessionId", "session-1"),
                     )]),
                 },
             )
@@ -1369,8 +1436,8 @@ mod tests {
                     variant: input_id("PrepareBindings"),
                     fields: BTreeMap::from([
                         (field_id("agent_runtime_id"), KernelValue::U64(7)),
-                        (field_id("fence_token"), KernelValue::U64(3)),
-                        (field_id("generation"), KernelValue::U64(1)),
+                        (field_id("fence_token"), named_u64("FenceToken", 3)),
+                        (field_id("generation"), named_u64("Generation", 1)),
                     ]),
                 },
             )
@@ -1395,21 +1462,21 @@ mod tests {
                     fields: BTreeMap::from([
                         (
                             field_id("agent_identity"),
-                            KernelValue::String("agent.worker".into()),
+                            named_string("AgentIdentity", "agent.worker"),
                         ),
                         (
                             field_id("agent_runtime_id"),
-                            KernelValue::String("runtime.worker.1".into()),
+                            named_string("AgentRuntimeId", "runtime.worker.1"),
                         ),
-                        (field_id("fence_token"), KernelValue::U64(41)),
-                        (field_id("generation"), KernelValue::U64(2)),
+                        (field_id("fence_token"), named_u64("FenceToken", 41)),
+                        (field_id("generation"), named_u64("Generation", 2)),
                         (field_id("external_addressable"), KernelValue::Bool(false)),
                         // W3-H-1: new realtime-binding fields. `replacing`
                         // is None (no prior binding) so the Fresh branch
                         // fires.
                         (
                             field_id("bridge_session_id"),
-                            KernelValue::String("bridge.worker.1".into()),
+                            named_string("SessionId", "bridge.worker.1"),
                         ),
                         (field_id("replacing"), KernelValue::None),
                     ]),
@@ -1432,10 +1499,10 @@ mod tests {
                     fields: BTreeMap::from([
                         (
                             field_id("agent_runtime_id"),
-                            KernelValue::String("runtime.worker.1".into()),
+                            named_string("AgentRuntimeId", "runtime.worker.1"),
                         ),
-                        (field_id("fence_token"), KernelValue::U64(41)),
-                        (field_id("work_id"), KernelValue::String("work-1".into())),
+                        (field_id("fence_token"), named_u64("FenceToken", 41)),
+                        (field_id("work_id"), named_string("WorkId", "work-1")),
                         (
                             field_id("origin"),
                             KernelValue::NamedVariant {

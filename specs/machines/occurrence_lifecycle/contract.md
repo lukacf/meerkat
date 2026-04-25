@@ -128,7 +128,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::apply domain-facing lifecycle transition seam over the DSL
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::apply domain-facing lifecycle transition seam over claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
+- `occurrence_claim_dispatch_completion` — claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
+- `occurrence_lease_recovery` — lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

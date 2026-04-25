@@ -514,6 +514,18 @@ mod tests {
 
     #[test]
     fn dsl_dispatch_matches_kernel() {
+        fn named_string(
+            type_name: &str,
+            value: &str,
+        ) -> meerkat_machine_kernels::test_oracle::KernelValue {
+            meerkat_machine_kernels::test_oracle::KernelValue::Named {
+                type_name: meerkat_machine_schema::identity::NamedTypeId::parse(type_name).unwrap(),
+                value: Box::new(meerkat_machine_kernels::test_oracle::KernelValue::String(
+                    value.into(),
+                )),
+            }
+        }
+
         let schema = OccurrenceLifecycleMachineState::schema();
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
@@ -547,10 +559,7 @@ mod tests {
                     fid("lease_expires_at_utc_ms"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(2),
                 ),
-                (
-                    fid("claim_token"),
-                    meerkat_machine_kernels::test_oracle::KernelValue::String("t".into()),
-                ),
+                (fid("claim_token"), named_string("ClaimToken", "t")),
             ]),
         };
         let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();

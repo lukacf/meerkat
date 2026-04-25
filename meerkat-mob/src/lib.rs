@@ -46,6 +46,7 @@ pub mod tokio {
 
 pub mod backend;
 mod build;
+pub mod coordination;
 pub mod definition;
 pub mod error;
 pub mod event;
@@ -70,6 +71,12 @@ pub mod validate;
 
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
+pub use coordination::{
+    CoordinationOwner, CoordinationRecordRefs, CoordinationResourceRef, MobCoordinationBoard,
+    MobCoordinationError, MobCoordinationEvent, MobCoordinationEventKind, MobCoordinationSnapshot,
+    NewResourceClaim, NewWorkIntent, ResourceClaim, ResourceClaimId, ResourceClaimKind,
+    ResourceClaimStatus, WorkIntent, WorkIntentId, WorkIntentStatus,
+};
 pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};

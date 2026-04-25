@@ -200,7 +200,7 @@ fn build_run() -> (RunId, MobRun) {
     let run = MobRun::pending(
         MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        meerkat_mob::generated::flow_run::initial_state(),
+        meerkat_mob::run::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -968,7 +968,7 @@ async fn test_empty_frame_terminalize() {
     let frame_snap = run.frames.get(&frame_id).expect("frame persisted");
     assert_eq!(
         frame_snap.kernel_state.phase,
-        meerkat_mob::generated::flow_frame::Phase::Completed,
+        meerkat_mob::run::flow_frame::Phase::Completed,
         "empty frame must terminalize to Completed in the store"
     );
 }
@@ -1026,14 +1026,14 @@ async fn test_empty_loop_body_frame_does_not_stall() {
     let root_frame = run.frames.get(&frame_id).expect("root frame");
     assert_eq!(
         root_frame.kernel_state.phase,
-        meerkat_mob::generated::flow_frame::Phase::Completed,
+        meerkat_mob::run::flow_frame::Phase::Completed,
         "root frame should complete after empty loop body processing"
     );
     let loop_instance_id = meerkat_mob::ids::LoopInstanceId::from("empty-loop-root::loop-node");
     let loop_snapshot = run.loops.get(&loop_instance_id).expect("loop snapshot");
     assert_eq!(
         loop_snapshot.kernel_state.phase,
-        meerkat_mob::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::run::loop_iteration::Phase::Completed,
         "empty loop body should still advance the loop lifecycle to Completed"
     );
 }
@@ -1086,7 +1086,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
     assert!(
         effects.iter().any(|effect| matches!(
             effect,
-            meerkat_mob::generated::flow_frame::Effect::StartLoopNode(_)
+            meerkat_mob::run::flow_frame::Effect::StartLoopNode(_)
         )),
         "admitting the loop node should emit StartLoopNode"
     );
@@ -1097,15 +1097,14 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
             &run_id,
             &loop_instance_id,
             LoopSnapshot {
-                kernel_state: meerkat_mob::generated::loop_iteration::State {
-                    phase: meerkat_mob::generated::loop_iteration::Phase::Completed,
+                kernel_state: meerkat_mob::run::loop_iteration::State {
+                    phase: meerkat_mob::run::loop_iteration::Phase::Completed,
                     loop_instance_id: loop_instance_id.clone(),
                     parent_frame_id: frame_id.clone(),
                     parent_node_id: loop_node_id.clone(),
                     loop_id: loop_id.clone(),
                     depth: 1,
-                    stage:
-                        meerkat_mob::generated::loop_iteration::LoopIterationStage::AwaitingUntil,
+                    stage: meerkat_mob::run::loop_iteration::LoopIterationStage::AwaitingUntil,
                     current_iteration: 1,
                     last_completed_iteration: 0,
                     max_iterations: 1,
@@ -1136,7 +1135,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
     let root_frame = run.frames.get(&frame_id).expect("root frame");
     assert_eq!(
         root_frame.kernel_state.phase,
-        meerkat_mob::generated::flow_frame::Phase::Completed,
+        meerkat_mob::run::flow_frame::Phase::Completed,
         "parent frame should complete after projecting terminal loop snapshot"
     );
     assert_eq!(
@@ -1144,7 +1143,7 @@ async fn test_resume_projects_terminal_loop_snapshot_to_parent() {
             .kernel_state
             .node_status
             .get(loop_node_id.as_str()),
-        Some(&meerkat_mob::generated::flow_frame::NodeRunStatus::Completed),
+        Some(&meerkat_mob::run::flow_frame::NodeRunStatus::Completed),
         "loop node should be completed on resume"
     );
 }
@@ -1215,7 +1214,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
         .cloned()
         .expect("body frame snapshot");
     let mut body_frame = rootish_body_frame.clone();
-    body_frame.kernel_state.frame_scope = meerkat_mob::generated::flow_frame::FrameScope::Body;
+    body_frame.kernel_state.frame_scope = meerkat_mob::run::flow_frame::FrameScope::Body;
     body_frame.kernel_state.loop_instance_id = loop_instance_id.clone();
     body_frame.kernel_state.iteration = 0;
     assert!(
@@ -1235,15 +1234,14 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             &run_id,
             &loop_instance_id,
             LoopSnapshot {
-                kernel_state: meerkat_mob::generated::loop_iteration::State {
-                    phase: meerkat_mob::generated::loop_iteration::Phase::Running,
+                kernel_state: meerkat_mob::run::loop_iteration::State {
+                    phase: meerkat_mob::run::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.clone(),
                     parent_frame_id: frame_id.clone(),
                     parent_node_id: loop_node_id.clone(),
                     loop_id: loop_id.clone(),
                     depth: 1,
-                    stage:
-                        meerkat_mob::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
+                    stage: meerkat_mob::run::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 1,
@@ -1277,7 +1275,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             .expect("loop snapshot")
             .kernel_state
             .phase,
-        meerkat_mob::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::run::loop_iteration::Phase::Completed,
         "completed body frame should advance the loop to Completed on resume"
     );
     assert_eq!(
@@ -1286,7 +1284,7 @@ async fn test_resume_advances_terminal_body_frame_without_stall() {
             .expect("root frame")
             .kernel_state
             .phase,
-        meerkat_mob::generated::flow_frame::Phase::Completed,
+        meerkat_mob::run::flow_frame::Phase::Completed,
         "root frame should complete after resuming the terminal body frame"
     );
 }
@@ -1304,7 +1302,7 @@ async fn test_max_frame_depth_enforced_for_nested_loops() {
         let run = MobRun::pending(
             meerkat_mob::MobId::from("depth-test"),
             meerkat_mob::FlowId::from("depth-flow"),
-            meerkat_mob::generated::flow_run::initial_state(),
+            meerkat_mob::run::flow_run::initial_state(),
             serde_json::json!({}),
         );
         let id = run.run_id.clone();
@@ -1426,10 +1424,10 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
     // Inject a pre-existing frame snapshot where node-a is Running (orphaned)
     // and ready_queue is empty — simulating a crash mid-step.
     let orphaned_snapshot = FrameSnapshot {
-        kernel_state: meerkat_mob::generated::flow_frame::State {
-            phase: meerkat_mob::generated::flow_frame::Phase::Running,
+        kernel_state: meerkat_mob::run::flow_frame::State {
+            phase: meerkat_mob::run::flow_frame::Phase::Running,
             frame_id: frame_id.clone(),
-            frame_scope: meerkat_mob::generated::flow_frame::FrameScope::Root,
+            frame_scope: meerkat_mob::run::flow_frame::FrameScope::Root,
             loop_instance_id: meerkat_mob::LoopInstanceId::from(""),
             iteration: 0,
             last_admitted_node: meerkat_mob::FlowNodeId::from("node-a"),
@@ -1446,11 +1444,11 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
             node_kind: std::collections::BTreeMap::from([
                 (
                     meerkat_mob::FlowNodeId::from("node-a"),
-                    meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
+                    meerkat_mob::run::flow_frame::FlowNodeKind::Step,
                 ),
                 (
                     meerkat_mob::FlowNodeId::from("node-b"),
-                    meerkat_mob::generated::flow_frame::FlowNodeKind::Step,
+                    meerkat_mob::run::flow_frame::FlowNodeKind::Step,
                 ),
             ]),
             node_dependencies: std::collections::BTreeMap::from([
@@ -1463,11 +1461,11 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
             node_dependency_modes: std::collections::BTreeMap::from([
                 (
                     meerkat_mob::FlowNodeId::from("node-a"),
-                    meerkat_mob::generated::flow_frame::DependencyMode::All,
+                    meerkat_mob::run::flow_frame::DependencyMode::All,
                 ),
                 (
                     meerkat_mob::FlowNodeId::from("node-b"),
-                    meerkat_mob::generated::flow_frame::DependencyMode::All,
+                    meerkat_mob::run::flow_frame::DependencyMode::All,
                 ),
             ]),
             node_branches: std::collections::BTreeMap::from([
@@ -1478,11 +1476,11 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
             node_status: std::collections::BTreeMap::from([
                 (
                     meerkat_mob::FlowNodeId::from("node-a"),
-                    meerkat_mob::generated::flow_frame::NodeRunStatus::Running,
+                    meerkat_mob::run::flow_frame::NodeRunStatus::Running,
                 ),
                 (
                     meerkat_mob::FlowNodeId::from("node-b"),
-                    meerkat_mob::generated::flow_frame::NodeRunStatus::Pending,
+                    meerkat_mob::run::flow_frame::NodeRunStatus::Pending,
                 ),
             ]),
             ready_queue: vec![],
@@ -1524,7 +1522,7 @@ async fn test_resumed_frame_with_running_node_fails_orphan() {
     let snap = run.frames.get(&frame_id).expect("frame persisted");
     assert_eq!(
         snap.kernel_state.phase,
-        meerkat_mob::generated::flow_frame::Phase::Failed,
+        meerkat_mob::run::flow_frame::Phase::Failed,
         "frame must be Failed after handling orphaned Running node"
     );
 }
@@ -1599,7 +1597,7 @@ async fn test_completed_loop_persisted_as_completed_not_running() {
         .expect("loop snapshot must be persisted");
     assert_eq!(
         loop_snap.kernel_state.phase,
-        meerkat_mob::generated::loop_iteration::Phase::Completed,
+        meerkat_mob::run::loop_iteration::Phase::Completed,
         "loop must be persisted as Completed after condition is met"
     );
 

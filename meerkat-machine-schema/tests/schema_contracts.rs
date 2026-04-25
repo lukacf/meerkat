@@ -1387,9 +1387,6 @@ mod handoff_binding {
         let compositions = compat_composition_schemas();
         let mut machines = canonical_machine_schemas();
         machines.extend([
-            meerkat_machine_schema::flow_frame_machine(),
-            meerkat_machine_schema::flow_run_machine(),
-            meerkat_machine_schema::loop_iteration_machine(),
             meerkat_machine_schema::ops_barrier_bridge_machine(),
             meerkat_machine_schema::external_tool_surface_bridge_machine(),
             meerkat_machine_schema::auth_lease_bridge_machine(),

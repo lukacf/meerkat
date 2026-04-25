@@ -196,8 +196,8 @@ mod tests {
         async fn cas_flow_state(
             &self,
             run_id: &RunId,
-            expected: &crate::generated::flow_run::State,
-            next: &crate::generated::flow_run::State,
+            expected: &crate::run::flow_run::State,
+            next: &crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner.cas_flow_state(run_id, expected, next).await
         }
@@ -206,9 +206,9 @@ mod tests {
             &self,
             run_id: &RunId,
             expected_status: MobRunStatus,
-            expected_flow_state: &crate::generated::flow_run::State,
+            expected_flow_state: &crate::run::flow_run::State,
             next_status: MobRunStatus,
-            next_flow_state: &crate::generated::flow_run::State,
+            next_flow_state: &crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_run_snapshot(
@@ -281,8 +281,8 @@ mod tests {
         async fn cas_grant_node_slot(
             &self,
             run_id: &RunId,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
@@ -326,8 +326,8 @@ mod tests {
             &self,
             run_id: &RunId,
             loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
@@ -353,8 +353,8 @@ mod tests {
             loop_instance_id: &crate::ids::LoopInstanceId,
             expected_loop: &crate::run::LoopSnapshot,
             next_loop: crate::run::LoopSnapshot,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_loop_request_body_frame(
@@ -377,8 +377,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             initial_frame: crate::run::FrameSnapshot,
             ledger_entry: crate::run::LoopIterationLedgerEntry,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_grant_body_frame_start(
@@ -404,8 +404,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_complete_body_frame(
@@ -431,8 +431,8 @@ mod tests {
             frame_id: &crate::ids::FrameId,
             expected_frame: &crate::run::FrameSnapshot,
             next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &crate::generated::flow_run::State,
-            next_run_state: crate::generated::flow_run::State,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
         ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_complete_loop(

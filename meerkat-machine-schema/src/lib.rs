@@ -18,9 +18,9 @@ pub use catalog::{
     meerkat_mob_seam_composition,
 };
 pub use compat::{
-    auth_lease_bridge_machine, external_tool_surface_bridge_machine, flow_frame_machine,
-    flow_run_machine, loop_iteration_machine, mob_destroy_session_ingress_bridge_machine,
-    ops_barrier_bridge_machine, supervisor_trust_bridge_machine,
+    auth_lease_bridge_machine, external_tool_surface_bridge_machine,
+    mob_destroy_session_ingress_bridge_machine, ops_barrier_bridge_machine,
+    supervisor_trust_bridge_machine,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriver,
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_registry_excludes_compat_flow_machine_schemas() {
+    fn canonical_registry_excludes_absorbed_flow_machine_schemas() {
         let machine_names: Vec<_> = canonical_machine_schemas()
             .into_iter()
             .map(|schema| schema.machine)
@@ -126,7 +126,7 @@ mod tests {
                 !machine_names
                     .iter()
                     .any(|name| name.as_str() == compat_name),
-                "{compat_name} should remain compat-only, not canonical"
+                "{compat_name} should be absorbed into MobMachine, not canonical"
             );
         }
     }

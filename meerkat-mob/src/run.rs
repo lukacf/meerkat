@@ -1,10 +1,9 @@
-//! Flow run data model.
+//! Flow run data model and MobMachine-owned runtime projections.
 
 use crate::definition::{
     DependencyMode, FlowNodeSpec, FlowSpec, FrameSpec, LimitsSpec, SupervisorSpec, TopologySpec,
 };
 use crate::error::MobError;
-use crate::generated::{flow_frame, flow_run, loop_iteration};
 use crate::ids::{
     AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MobId,
     ProfileName, RunId, StepId,
@@ -15,13 +14,17 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
-/// Snapshot of a FlowFrameMachine kernel state stored per-frame in MobRun.
+pub mod flow_frame;
+pub mod flow_run;
+pub mod loop_iteration;
+
+/// Snapshot of MobMachine-owned frame projection state stored per-frame in MobRun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrameSnapshot {
     pub kernel_state: flow_frame::State,
 }
 
-/// Snapshot of a LoopIterationMachine kernel state stored per-loop in MobRun.
+/// Snapshot of MobMachine-owned loop projection state stored per-loop in MobRun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopSnapshot {
     pub kernel_state: loop_iteration::State,

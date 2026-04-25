@@ -18,10 +18,10 @@ pub use sqlite::{
 
 use crate::definition::MobDefinition;
 use crate::event::{MemberRef, MobEvent, NewMobEvent};
-use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
+use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,

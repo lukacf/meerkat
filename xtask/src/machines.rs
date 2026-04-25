@@ -22,7 +22,6 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine,
 };
 use serde::Serialize;
 
@@ -2145,11 +2144,7 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
 }
 
 fn compat_generated_kernel_schemas() -> Vec<MachineSchema> {
-    vec![
-        flow_frame_machine(),
-        flow_run_machine(),
-        loop_iteration_machine(),
-    ]
+    Vec::new()
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {

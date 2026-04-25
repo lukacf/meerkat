@@ -1674,8 +1674,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_flow_state(
         &self,
         run_id: &RunId,
-        expected: &crate::generated::flow_run::State,
-        next: &crate::generated::flow_run::State,
+        expected: &crate::run::flow_run::State,
+        next: &crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner.cas_flow_state(run_id, expected, next).await
     }
@@ -1684,9 +1684,9 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         expected_status: MobRunStatus,
-        expected_flow_state: &crate::generated::flow_run::State,
+        expected_flow_state: &crate::run::flow_run::State,
         next_status: MobRunStatus,
-        next_flow_state: &crate::generated::flow_run::State,
+        next_flow_state: &crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.snapshot_cas_history.write().await.push((
             run_id.clone(),
@@ -1764,8 +1764,8 @@ impl MobRunStore for RecordingRunStore {
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1809,8 +1809,8 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
@@ -1836,8 +1836,8 @@ impl MobRunStore for RecordingRunStore {
         loop_instance_id: &crate::ids::LoopInstanceId,
         expected_loop: &crate::run::LoopSnapshot,
         next_loop: crate::run::LoopSnapshot,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_loop_request_body_frame(
@@ -1860,8 +1860,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         initial_frame: crate::run::FrameSnapshot,
         ledger_entry: crate::run::LoopIterationLedgerEntry,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_grant_body_frame_start(
@@ -1887,8 +1887,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_body_frame(
@@ -1914,8 +1914,8 @@ impl MobRunStore for RecordingRunStore {
         frame_id: &crate::ids::FrameId,
         expected_frame: &crate::run::FrameSnapshot,
         next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &crate::generated::flow_run::State,
-        next_run_state: crate::generated::flow_run::State,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
     ) -> Result<bool, MobStoreError> {
         self.inner
             .cas_complete_loop(
@@ -19245,7 +19245,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        crate::generated::flow_run::initial_state(),
+        crate::run::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19328,7 +19328,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
     assert_eq!(
         frame_snap.kernel_state.phase,
-        crate::generated::flow_frame::Phase::Completed,
+        crate::run::flow_frame::Phase::Completed,
         "frame should be in Completed phase"
     );
 }
@@ -19677,7 +19677,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        crate::generated::flow_run::initial_state(),
+        crate::run::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19732,14 +19732,14 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: crate::generated::loop_iteration::State {
-                    phase: crate::generated::loop_iteration::Phase::Running,
+                kernel_state: crate::run::loop_iteration::State {
+                    phase: crate::run::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.clone(),
                     parent_frame_id: frame_id.clone(),
                     parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
                     loop_id: crate::ids::LoopId::from("retry"),
                     depth: 1,
-                    stage: crate::generated::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
+                    stage: crate::run::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 3,
@@ -19778,7 +19778,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     assert!(
         matches!(
             node_status.get("loop-node"),
-            Some(variant) if *variant == crate::generated::flow_frame::NodeRunStatus::Completed
+            Some(variant) if *variant == crate::run::flow_frame::NodeRunStatus::Completed
         ),
         "running loop node should resume to completion instead of being failed on restart"
     );
@@ -19814,7 +19814,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
     let run = MobRun::pending(
         crate::ids::MobId::from("test-mob"),
         FlowId::from("test-flow"),
-        crate::generated::flow_run::initial_state(),
+        crate::run::flow_run::initial_state(),
         serde_json::json!({}),
     );
     let run_id = run.run_id.clone();
@@ -19870,14 +19870,14 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             &run_id,
             &loop_instance_id,
             crate::run::LoopSnapshot {
-                kernel_state: crate::generated::loop_iteration::State {
-                    phase: crate::generated::loop_iteration::Phase::Running,
+                kernel_state: crate::run::loop_iteration::State {
+                    phase: crate::run::loop_iteration::Phase::Running,
                     loop_instance_id: loop_instance_id.clone(),
                     parent_frame_id: frame_id.clone(),
                     parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
                     loop_id: crate::ids::LoopId::from("retry"),
                     depth: 1,
-                    stage: crate::generated::loop_iteration::LoopIterationStage::BodyFrameActive,
+                    stage: crate::run::loop_iteration::LoopIterationStage::BodyFrameActive,
                     current_iteration: 0,
                     last_completed_iteration: 0,
                     max_iterations: 3,
@@ -19897,7 +19897,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         .await
         .expect("seed body frame");
     let mut body_frame = root_body_frame.clone();
-    body_frame.kernel_state.frame_scope = crate::generated::flow_frame::FrameScope::Body;
+    body_frame.kernel_state.frame_scope = crate::run::flow_frame::FrameScope::Body;
     body_frame.kernel_state.loop_instance_id = loop_instance_id.clone();
     body_frame.kernel_state.iteration = 0;
     assert!(
@@ -20011,7 +20011,7 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         .get("start-node")
         .expect("start node status");
     assert!(
-        *start_status == crate::generated::flow_frame::NodeRunStatus::Failed,
+        *start_status == crate::run::flow_frame::NodeRunStatus::Failed,
         "timed-out root-frame step should not remain Running after terminalization: {start_status:?}"
     );
 }
@@ -20110,7 +20110,7 @@ async fn test_root_frame_max_active_nodes_limits_nested_body_step_admission() {
         let active_node_count = run.flow_state.active_node_count;
         let ready_frames_len = run.flow_state.ready_frames.len() as u64;
         let has_body_frame = run.frames.values().any(|frame| {
-            frame.kernel_state.frame_scope == crate::generated::flow_frame::FrameScope::Body
+            frame.kernel_state.frame_scope == crate::run::flow_frame::FrameScope::Body
         });
 
         if has_body_frame && active_node_count > 0 && ready_frames_len > 0 {
@@ -20191,7 +20191,7 @@ async fn test_root_frame_cancel_cleans_up_inflight_node() {
         .get("start-node")
         .expect("start node status");
     assert!(
-        *start_status != crate::generated::flow_frame::NodeRunStatus::Running,
+        *start_status != crate::run::flow_frame::NodeRunStatus::Running,
         "canceled root-frame step should not remain Running after terminalization: {start_status:?}"
     );
 }

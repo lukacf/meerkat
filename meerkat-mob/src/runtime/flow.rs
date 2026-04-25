@@ -13,8 +13,8 @@ use crate::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::generated::flow_run;
 use crate::ids::{AgentIdentity, FlowId, MeerkatId, RunId, StepId};
+use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
     StepRunStatus,
@@ -248,7 +248,7 @@ impl FlowEngine {
                             .await;
                     }
 
-                    // Project the typed frame outcome into FlowRunMachine once at the
+                    // Project the typed frame outcome into MobMachine-owned run state once at the
                     // run/frame seam. This avoids reconstructing run truth from output
                     // side maps.
                     if let TerminalizationOutcome::Transitioned = self
@@ -439,7 +439,7 @@ impl FlowEngine {
                 }
             }
 
-            // ── FlowRunMachine dispatch transition ──────────────────────
+            // ── MobMachine-owned run dispatch projection ────────────────
             let dispatch_effects = self.dispatch_step_effects(&run_id, &step_id).await?;
             let Some(dispatch_effects) = dispatch_effects else {
                 continue;
@@ -492,7 +492,7 @@ impl FlowEngine {
                         && let Some(step_notice) =
                             find_step_notice_effect(&complete_effects, &step_id)?
                     {
-                        // Ledger entry from FlowRunMachine; step_completed event
+                        // Ledger entry from MobMachine-owned run projection; step_completed event
                         // is already emitted by execute_step_with_all_guards.
                         self.run_store
                             .append_step_entry(
@@ -526,7 +526,7 @@ impl FlowEngine {
                 Ok(StepGuardOutcome::Skipped { reason }) => {
                     // Condition was already checked before dispatch_step_effects,
                     // so Skipped here is unexpected. Treat as a soft failure in the
-                    // FlowRunMachine (step was already dispatched, can't un-dispatch).
+                    // MobMachine-owned run projection (step was already dispatched, can't un-dispatch).
                     let should_escalate = self
                         .record_step_failed(&run_id, &step_id, reason.clone(), true)
                         .await?;
@@ -649,7 +649,7 @@ impl FlowEngine {
     /// Canonical step execution: condition -> topology -> targets -> dispatch ->
     /// retry -> schema -> ledger -> events -> supervisor -> FanOut aggregation.
     ///
-    /// Does NOT touch FlowRunMachine or FlowFrameMachine state. It may emit
+    /// Does NOT touch run or frame machine state. It may emit
     /// step-local target events while work is running, but terminal step/run
     /// projection belongs to the caller-owned machine seam. Returns
     /// `StepGuardOutcome::Completed(output)` on success or

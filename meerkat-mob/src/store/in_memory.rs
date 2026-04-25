@@ -7,11 +7,11 @@ use super::{
 };
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
 use crate::profile::Profile;
+use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,

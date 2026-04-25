@@ -15,7 +15,7 @@ use meerkat_machine_schema::catalog::{
 };
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, RouteTargetKind,
-    WatchedEffect, canonical_machine_schemas, flow_run_machine,
+    WatchedEffect, canonical_machine_schemas,
 };
 
 #[test]
@@ -203,51 +203,6 @@ fn typed_kernel_module_contract_rejects_legacy_kernel_surface() {
         assert!(
             rendered.contains(required),
             "typed kernel module contract should contain `{required}`:\n{rendered}"
-        );
-    }
-}
-
-#[test]
-fn typed_compat_kernel_module_contract_rejects_legacy_kernel_surface() {
-    let rendered = render_machine_kernel_module(&flow_run_machine());
-
-    for forbidden in [
-        "KernelState",
-        "KernelInput",
-        "KernelSignal",
-        "KernelEffect",
-        "KernelValue",
-        "TransitionOutcome",
-        "evaluate_helper(",
-    ] {
-        assert!(
-            !rendered.contains(forbidden),
-            "typed compat kernel module contract should not mention `{forbidden}`:\n{rendered}"
-        );
-    }
-
-    for required in [
-        "pub struct State",
-        "pub enum Phase",
-        "pub enum Input",
-        "pub enum InputKind",
-        "pub enum Effect",
-        "pub enum EffectKind",
-        "pub enum TransitionId",
-        "pub enum GuardId",
-        "pub enum HelperId",
-        "pub struct Outcome",
-        "pub enum TransitionError",
-        "pub enum TransitionRefusal",
-        "pub enum KernelError",
-        "pub trait Context",
-        "pub struct EmptyContext",
-        "pub fn transition<C: Context>(",
-        "pub mod helpers",
-    ] {
-        assert!(
-            rendered.contains(required),
-            "typed compat kernel module contract should contain `{required}`:\n{rendered}"
         );
     }
 }

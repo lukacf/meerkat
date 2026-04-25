@@ -819,6 +819,49 @@ class MeerkatClient:
             data_base64=str(raw.get("data", "")),
         )
 
+    async def get_runtime_host_info(self) -> dict[str, Any]:
+        return await self._request("runtime/host_info", {})
+
+    async def get_runtime_host_capabilities(self) -> dict[str, Any]:
+        return await self._request("runtime/capabilities", {})
+
+    async def get_runtime_host_health(self) -> dict[str, Any]:
+        return await self._request("runtime/health", {})
+
+    async def request_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("approval/request", params)
+
+    async def list_approvals(
+        self, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self._request("approval/list", params or {})
+
+    async def get_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("approval/get", params)
+
+    async def decide_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("approval/decide", params)
+
+    async def list_artifacts(
+        self, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self._request("artifact/list", params or {})
+
+    async def get_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("artifact/get", params)
+
+    async def download_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("artifact/download", params)
+
+    async def latest_event_cursor(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("events/latest_cursor", params)
+
+    async def list_events_since(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("events/list_since", params)
+
+    async def event_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("events/snapshot", params)
+
     # -- Capabilities ------------------------------------------------------
 
     @property
@@ -1289,6 +1332,11 @@ class MeerkatClient:
         )
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
+
+    async def mob_ingress_interaction(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request("mob/ingress_interaction", params)
 
     async def retire_mob_member(self, mob_id: str, agent_identity: str) -> None:
         await self._request(

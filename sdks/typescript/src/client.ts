@@ -688,6 +688,78 @@ export class MeerkatClient {
     };
   }
 
+  async getRuntimeHostInfo(): Promise<Record<string, unknown>> {
+    return this.request("runtime/host_info", {});
+  }
+
+  async getRuntimeHostCapabilities(): Promise<Record<string, unknown>> {
+    return this.request("runtime/capabilities", {});
+  }
+
+  async getRuntimeHostHealth(): Promise<Record<string, unknown>> {
+    return this.request("runtime/health", {});
+  }
+
+  async requestApproval(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("approval/request", params);
+  }
+
+  async listApprovals(
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    return this.request("approval/list", params);
+  }
+
+  async getApproval(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("approval/get", params);
+  }
+
+  async decideApproval(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("approval/decide", params);
+  }
+
+  async listArtifacts(
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    return this.request("artifact/list", params);
+  }
+
+  async getArtifact(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("artifact/get", params);
+  }
+
+  async downloadArtifact(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("artifact/download", params);
+  }
+
+  async latestEventCursor(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("events/latest_cursor", params);
+  }
+
+  async listEventsSince(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("events/list_since", params);
+  }
+
+  async eventSnapshot(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("events/snapshot", params);
+  }
+
   async getModelsCatalog(): Promise<ModelsCatalog> {
     const result = await this.request("models/catalog", {});
     return MeerkatClient.parseModelsCatalog(result);
@@ -1549,6 +1621,12 @@ export class MeerkatClient {
       ? (result.events as Array<Record<string, unknown>>)
       : [];
     return { events };
+  }
+
+  async mobIngressInteraction(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/ingress_interaction", params);
   }
 
   async createMobProfile(name: string, profile: MobProfile): Promise<MobProfileLookupResult> {

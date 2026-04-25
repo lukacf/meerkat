@@ -285,25 +285,31 @@ impl MeerkatMachine {
             // `set_control_projection` call; both are tracked on the DSL
             // side at `dsl.rs::state.lifecycle_phase` + `state.current_run_id`).
             // Project both from the DSL authority so `spine_snapshot` matches
-            // the DSL's view post-retire/destroy/reset. `pre_run_phase` is
-            // still shell-managed (no DSL counterpart — it's a local cache
-            // for driver roll-back semantics).
-            // Mirrors `existing_session_runtime_state` at traits.rs:292-308.
+            // the DSL's visible control contract post-retire/destroy/reset.
+            // A retired drain uses an internal Running/pre_run_phase=Retired
+            // pair to execute preserved work, but remains externally Retired.
+            // `pre_run_phase` is also DSL-owned now, so the spine projects the
+            // whole lifecycle/run tuple from one authority.
+            // Mirrors `existing_session_runtime_state`.
             let mut snapshot = entry.control_snapshot();
-            let (dsl_phase, dsl_current_run_id) = {
+            let (phase, current_run_id, pre_run_phase) = {
                 let authority = entry
                     .dsl_authority
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 (
-                    authority.state.lifecycle_phase,
-                    authority.state.current_run_id.clone(),
+                    crate::meerkat_machine::dsl_authority::visible_runtime_phase_from_authority(
+                        &authority,
+                    ),
+                    crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
+                        &authority,
+                    ),
+                    crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority),
                 )
             };
-            snapshot.phase = crate::meerkat_machine::dsl_authority::write_back_phase(dsl_phase);
-            snapshot.current_run_id = dsl_current_run_id
-                .and_then(|id| uuid::Uuid::parse_str(&id.0).ok())
-                .map(meerkat_core::lifecycle::RunId::from_uuid);
+            snapshot.phase = phase;
+            snapshot.current_run_id = current_run_id;
+            snapshot.pre_run_phase = pre_run_phase;
             (
                 Arc::clone(&entry.driver),
                 snapshot,

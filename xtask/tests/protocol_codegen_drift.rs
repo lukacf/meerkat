@@ -157,3 +157,54 @@ fn terminal_surface_mapping_matches_codegen_output() {
         "terminal_surface_mapping.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
     );
 }
+
+/// Compile canary for generated protocol helper ownership: every helper
+/// emitted by protocol-codegen must land in an owning crate's checked
+/// `src/generated/` module tree, not in an ad-hoc bridge path outside a
+/// package. This does not invoke cargo; it verifies the ownership boundary
+/// that cargo will later compile.
+#[test]
+fn every_protocol_helper_lands_under_an_owning_crate_generated_module() {
+    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+
+    let root = repo_root();
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+
+    let mut checked = 0;
+    for composition in &compositions {
+        for protocol in &composition.handoff_protocols {
+            let module_path = std::path::Path::new(&protocol.rust.module_path);
+            let components: Vec<_> = module_path
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect();
+
+            assert!(
+                components.len() >= 4
+                    && components[1] == "src"
+                    && components[2] == "generated"
+                    && components
+                        .last()
+                        .is_some_and(|file| file.starts_with("protocol_") && file.ends_with(".rs")),
+                "protocol `{}` helper path `{}` must be <owning-crate>/src/generated/protocol_*.rs",
+                protocol.name,
+                protocol.rust.module_path
+            );
+
+            let crate_manifest = root.join(&components[0]).join("Cargo.toml");
+            assert!(
+                crate_manifest.exists(),
+                "protocol `{}` helper path `{}` must belong to a crate with Cargo.toml",
+                protocol.name,
+                protocol.rust.module_path
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no protocols declared in canonical + compat catalogs — test is vacuous"
+    );
+}

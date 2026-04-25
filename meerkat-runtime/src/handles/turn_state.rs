@@ -42,6 +42,13 @@ impl RuntimeTurnStateHandle {
         if !is_bound_running {
             return Ok(());
         }
+        if state
+            .input_run_associations
+            .values()
+            .any(|bound| bound == &run_id.to_string())
+        {
+            return Ok(());
+        }
 
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(

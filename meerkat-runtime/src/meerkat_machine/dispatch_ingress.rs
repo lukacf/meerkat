@@ -322,6 +322,42 @@ impl MeerkatMachine {
                     None => None,
                 };
 
+                {
+                    let driver = driver.lock().await;
+                    if !driver.is_idle_or_attached() {
+                        return Err(Self::normalize_destroyed_error(
+                            RuntimeDriverError::NotReady {
+                                state: self
+                                    .existing_session_runtime_state(&session_id)
+                                    .await
+                                    .unwrap_or(RuntimeState::Destroyed),
+                            },
+                        ));
+                    }
+
+                    let active_input_ids = driver.as_driver().active_input_ids();
+                    if !active_input_ids.is_empty() {
+                        let duplicate_active_input = input
+                            .header()
+                            .idempotency_key
+                            .as_ref()
+                            .and_then(|key| driver.input_id_for_idempotency_key(key));
+                        if let Some(existing_id) = duplicate_active_input {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: format!(
+                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                                ),
+                            });
+                        }
+                        return Err(RuntimeDriverError::NotReady {
+                            state: self
+                                .existing_session_runtime_state(&session_id)
+                                .await
+                                .unwrap_or(RuntimeState::Destroyed),
+                        });
+                    }
+                }
+
                 // DSL-first: validate Prepare transition before driver realizes the effect.
                 let run_id = RunId::new();
                 let previous_dsl_state = match self
@@ -356,50 +392,6 @@ impl MeerkatMachine {
 
                 let prepared = {
                     let mut driver = driver.lock().await;
-                    if !driver.is_idle_or_attached() {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady {
-                                state: self
-                                    .existing_session_runtime_state(&session_id)
-                                    .await
-                                    .unwrap_or(RuntimeState::Destroyed),
-                            },
-                        ));
-                    }
-
-                    let active_input_ids = driver.as_driver().active_input_ids();
-                    if !active_input_ids.is_empty() {
-                        let duplicate_active_input =
-                            input.header().idempotency_key.as_ref().and_then(|key| {
-                                active_input_ids.iter().find(|active_id| {
-                                    driver
-                                        .as_driver()
-                                        .input_state(active_id)
-                                        .and_then(|state| state.idempotency_key.as_ref())
-                                        == Some(key)
-                                })
-                            });
-                        if let Some(existing_id) = duplicate_active_input {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeDriverError::ValidationFailed {
-                                reason: format!(
-                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                                ),
-                            });
-                        }
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeDriverError::NotReady {
-                            state: self
-                                .existing_session_runtime_state(&session_id)
-                                .await
-                                .unwrap_or(RuntimeState::Destroyed),
-                        });
-                    }
-
                     let outcome = match driver
                         .as_driver_mut()
                         .accept_input(input)
@@ -432,19 +424,6 @@ impl MeerkatMachine {
                             });
                         }
                     };
-
-                    if !driver.is_idle_or_attached() {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady {
-                                state: self
-                                    .existing_session_runtime_state(&session_id)
-                                    .await
-                                    .unwrap_or(RuntimeState::Destroyed),
-                            },
-                        ));
-                    }
 
                     let (dequeued_id, dequeued_input) = match driver.dequeue_next() {
                         Some(pair) => pair,

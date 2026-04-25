@@ -1541,11 +1541,22 @@ fn gen_dispositions(def: &MachineDef) -> Vec<TokenStream> {
                 quote! { EffectDisposition::Routed { consumer_machines: vec![#(#consumer_ids),*] } }
             }
         };
+        let handoff_protocol = d
+            .handoff_protocol
+            .as_ref()
+            .map(|protocol| {
+                let protocol = protocol.to_string();
+                typed_id("ProtocolId", &protocol)
+            });
+        let handoff_protocol = match handoff_protocol {
+            Some(protocol) => quote! { Some(#protocol) },
+            None => quote! { None },
+        };
         quote! {
             EffectDispositionRule {
                 effect_variant: #effect_id,
                 disposition: #kind,
-                handoff_protocol: None,
+                handoff_protocol: #handoff_protocol,
             }
         }
     }).collect()

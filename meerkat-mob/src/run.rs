@@ -552,7 +552,7 @@ impl MobRun {
             ),
             loop_id: mob_dsl::LoopId::from(snapshot.kernel_state.loop_id.as_str()),
             depth: snapshot.kernel_state.depth,
-            max_iterations: snapshot.kernel_state.max_iterations,
+            max_iterations: snapshot.kernel_state.max_iterations as u64,
         })
     }
 
@@ -601,6 +601,35 @@ impl MobRun {
             stage,
             active_body_frame_id: active_body_frame_id
                 .map(|frame_id| mob_dsl::FrameId::from(frame_id.as_str())),
+        }
+    }
+
+    pub(crate) fn record_loop_body_frame_completed_input(
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted {
+            loop_instance_id: mob_dsl::LoopInstanceId::from(loop_instance_id.as_str()),
+            iteration: iteration as u64,
+        }
+    }
+
+    pub(crate) fn record_loop_until_condition_feedback_input(
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+        until_met: bool,
+    ) -> mob_dsl::MobMachineInput {
+        let loop_instance_id = mob_dsl::LoopInstanceId::from(loop_instance_id.as_str());
+        if until_met {
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration: iteration as u64,
+            }
+        } else {
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration: iteration as u64,
+            }
         }
     }
 

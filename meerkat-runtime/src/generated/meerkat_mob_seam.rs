@@ -3,7 +3,9 @@
 // Source of truth: catalog::compositions::meerkat_mob_seam
 // Driver: `meerkat_mob_seam_driver` (rust path: `meerkat-runtime/src/generated/meerkat_mob_seam.rs`).
 
-use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId};
+use meerkat_machine_schema::identity::{
+    FieldId, InputVariantId, MachineInstanceId, SignalVariantId,
+};
 
 /// Typed route descriptor resolved for a producer effect.
 ///
@@ -14,6 +16,18 @@ use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceI
 pub struct TypedRoutedInput {
     pub instance_id: MachineInstanceId,
     pub variant: InputVariantId,
+    pub bindings: Vec<(FieldId, FieldId)>,
+}
+
+/// Typed signal-route descriptor resolved for a producer effect.
+///
+/// `bindings` lists producer-field → consumer-field pairs in the
+/// order declared by the composition schema. The signal dispatcher
+/// uses these to construct the typed consumer signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedRoutedSignal {
+    pub instance_id: MachineInstanceId,
+    pub variant: SignalVariantId,
     pub bindings: Vec<(FieldId, FieldId)>,
 }
 
@@ -29,7 +43,7 @@ pub enum MeerkatMobSeamEffect {
 ///
 /// Returns `None` when the effect variant has no declared input
 /// route in this composition (including signal-kind routes, which
-/// are handled by the signal surface, not the dispatcher).
+/// are handled by `route_to_signal`).
 pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput> {
     match effect {
         MeerkatMobSeamEffect::Meerkat(_) => None,
@@ -96,5 +110,63 @@ pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>
             }),
             _ => None,
         },
+    }
+}
+
+/// Resolve a routed producer effect to its typed consumer signal.
+///
+/// Returns `None` when the effect variant has no declared signal
+/// route in this composition.
+pub fn route_to_signal(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedSignal> {
+    match effect {
+        MeerkatMobSeamEffect::Meerkat(inner) => match inner {
+            crate::generated::meerkat::Effect::RuntimeBound(_) => Some(TypedRoutedSignal {
+                instance_id: MachineInstanceId::parse("mob").expect("composition instance slug"),
+                variant: SignalVariantId::parse("ObserveRuntimeReady")
+                    .expect("composition signal slug"),
+                bindings: vec![
+                    (
+                        FieldId::parse("agent_runtime_id").expect("route producer field slug"),
+                        FieldId::parse("agent_runtime_id").expect("route consumer field slug"),
+                    ),
+                    (
+                        FieldId::parse("fence_token").expect("route producer field slug"),
+                        FieldId::parse("fence_token").expect("route consumer field slug"),
+                    ),
+                ],
+            }),
+            crate::generated::meerkat::Effect::RuntimeRetired(_) => Some(TypedRoutedSignal {
+                instance_id: MachineInstanceId::parse("mob").expect("composition instance slug"),
+                variant: SignalVariantId::parse("ObserveRuntimeRetired")
+                    .expect("composition signal slug"),
+                bindings: vec![
+                    (
+                        FieldId::parse("agent_runtime_id").expect("route producer field slug"),
+                        FieldId::parse("agent_runtime_id").expect("route consumer field slug"),
+                    ),
+                    (
+                        FieldId::parse("fence_token").expect("route producer field slug"),
+                        FieldId::parse("fence_token").expect("route consumer field slug"),
+                    ),
+                ],
+            }),
+            crate::generated::meerkat::Effect::RuntimeDestroyed(_) => Some(TypedRoutedSignal {
+                instance_id: MachineInstanceId::parse("mob").expect("composition instance slug"),
+                variant: SignalVariantId::parse("ObserveRuntimeDestroyed")
+                    .expect("composition signal slug"),
+                bindings: vec![
+                    (
+                        FieldId::parse("agent_runtime_id").expect("route producer field slug"),
+                        FieldId::parse("agent_runtime_id").expect("route consumer field slug"),
+                    ),
+                    (
+                        FieldId::parse("fence_token").expect("route producer field slug"),
+                        FieldId::parse("fence_token").expect("route consumer field slug"),
+                    ),
+                ],
+            }),
+            _ => None,
+        },
+        MeerkatMobSeamEffect::Mob(_) => None,
     }
 }

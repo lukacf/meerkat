@@ -7287,9 +7287,6 @@ impl MobActor {
             return Err(error);
         }
 
-        // Best-effort Stop before reset — already stopped is fine.
-        let _ = self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "reset_stop");
-
         // --- Event rewrite phase: append new epoch markers. ---
         // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
         // marker). Projections (roster, task board) clear on MobReset; resume
@@ -7338,63 +7335,16 @@ impl MobActor {
             return Err(error);
         }
 
-        // Wave-c WAR-2: land the mob on Stopped without a shell-side
-        // phase-read guard. We have two DSL entries that can reach
-        // Stopped — `Stop` input (Running → Stopped, also gated by
-        // `active_run_count == 0`) and the `FinishCleanup` signal
-        // (Completed → Stopped). The previous `if phase == Running {
-        // Stop } else if phase == Completed { FinishCleanup }` shape
-        // duplicated the DSL's own per-transition guards in the shell;
-        // the `NoGuardedApply` rule flags that as a second source of
-        // truth.
-        //
-        // Dogma-clean pattern: try `Stop` first; if the authority
-        // accepts, we were Running and the transition completed. If the
-        // authority rejects (meaning we were already past Running), try
-        // `FinishCleanup` to cover the Completed case. Already-Stopped
-        // mobs get rejections from both and fall through as a no-op.
-        // Branching on the *authority's* rejection is not a shell state
-        // read — it's the authority itself reporting "that input does
-        // not apply in my current phase", which is the contract the
-        // rule explicitly endorses ("let the authority reject").
-        let stop_rejected = self
-            .apply_dsl_input(mob_dsl::MobMachineInput::Stop, "stop_reset")
-            .is_err();
-        if stop_rejected
-            && let Err(error) = self.apply_dsl_signal(
-                mob_dsl::MobMachineSignal::FinishCleanup,
-                "finish_cleanup_reset",
-            )
-        {
-            tracing::debug!(
-                error = %error,
-                "reset: FinishCleanup rejected after Stop rejected — mob was already Stopped",
-            );
-        }
-        if self.has_orchestrator {
-            // Check if DSL allows StopOrchestrator
-            {
-                let mut probe =
-                    mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
-                if probe
-                    .apply_signal(mob_dsl::MobMachineSignal::StopOrchestrator)
-                    .is_ok()
-                {
-                    self.apply_dsl_signal(
-                        mob_dsl::MobMachineSignal::StopOrchestrator,
-                        "stop_orchestrator_reset",
-                    )?;
-                }
-            }
-            self.apply_dsl_signal(
-                mob_dsl::MobMachineSignal::ResumeOrchestrator,
-                "resume_orchestrator_reset",
-            )?;
-        }
-        self.apply_dsl_input(mob_dsl::MobMachineInput::Resume, "resume_input_reset")
+        // The command handler already probes Reset before the destructive phase.
+        // Once side effects and epoch events have succeeded, realize that same
+        // typed transition as the single authority-owned lifecycle landing. The
+        // ResetToRunning transition owns active/pending run counters and
+        // coordinator binding, so reset does not need shell Stop/Resume or
+        // orchestrator stop/resume choreography.
+        self.apply_dsl_input(mob_dsl::MobMachineInput::Reset, "reset_to_running")
             .map_err(|error| {
                 MobError::Internal(format!(
-                    "lifecycle Resume transition failed during reset: {error}"
+                    "lifecycle Reset transition failed during reset: {error}"
                 ))
             })?;
         self.ensure_pending_spawn_alignment("handle_reset completion")?;

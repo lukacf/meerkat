@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-//! Phase 1 red-ok chokepoint tests for runtime ingress and control wiring.
+//! Phase 1 chokepoint tests for runtime ingress and control wiring.
 
 use std::sync::Arc;
 
@@ -119,7 +119,6 @@ impl CoreExecutor for RecordingBatchExecutor {
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_handle() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
@@ -164,7 +163,6 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;

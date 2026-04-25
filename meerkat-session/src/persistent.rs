@@ -1411,11 +1411,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 Some(gate) => gate,
                 None => self.gate_for_session(id).await,
             };
-            let gate_guard = gate.cancelled.lock().await;
-            if *gate_guard {
-                return Err(SessionControlError::Session(SessionError::NotFound {
-                    id: id.clone(),
-                }));
+            {
+                let gate_guard = gate.cancelled.lock().await;
+                if *gate_guard {
+                    return Err(SessionControlError::Session(SessionError::NotFound {
+                        id: id.clone(),
+                    }));
+                }
             }
 
             let accepted_at = meerkat_core::time_compat::SystemTime::now();
@@ -1444,7 +1446,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     Some(session) => session,
                     None => {
                         if created_gate {
-                            drop(gate_guard);
                             self.checkpointer_gates.lock().await.remove(id);
                         }
                         return Err(SessionControlError::Session(SessionError::Agent(
@@ -1460,13 +1461,47 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     Ok(session) => session,
                     Err(err) => {
                         if created_gate && matches!(err, SessionError::NotFound { .. }) {
-                            drop(gate_guard);
                             self.checkpointer_gates.lock().await.remove(id);
                         }
                         return Err(SessionControlError::Session(err));
                     }
                 }
             };
+
+            let gate_guard = gate.cancelled.lock().await;
+            if *gate_guard {
+                let rollback_result = {
+                    let mut guard = match state_arc.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!(
+                                session_id = %id,
+                                "system-context state lock poisoned while rolling back cancelled live append"
+                            );
+                            poisoned.into_inner()
+                        }
+                    };
+                    if *guard == persisted_state {
+                        *guard = snapshot_state;
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                };
+                drop(gate_guard);
+                if rollback_result.is_ok() {
+                    let _ = self.inner.sync_system_context_state(id).await;
+                } else {
+                    tracing::warn!(
+                        session_id = %id,
+                        "live system-context state diverged after archive cancelled append; discarding live session"
+                    );
+                    let _ = self.discard_live_session(id).await;
+                }
+                return Err(SessionControlError::Session(SessionError::NotFound {
+                    id: id.clone(),
+                }));
+            }
 
             let persist_result = async {
                 self.reject_if_archived_session(id, &session).await?;

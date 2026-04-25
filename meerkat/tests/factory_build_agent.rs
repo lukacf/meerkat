@@ -278,6 +278,18 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
 }
 
 /// 2. `build_agent` without LLM override fails when no API key is set.
+///
+/// Superseded by `build_agent_without_connection_ref_rejects_ambient_realm_config_api_key`
+/// (test 2b below): the wave-c auth-seam cleanup deleted env-default realm
+/// synthesis and first-matching-provider promotion, so `build_agent` now
+/// rejects at the ConnectionRef gate before ever reaching the API-key check.
+/// This test's original path (config → ambient provider resolution → MissingApiKey)
+/// is unreachable. Environments with `ANTHROPIC_API_KEY` set would early-return
+/// "Skipping"; environments without it now hit `ConnectionResolution` refusal,
+/// not `MissingApiKey` — the assertion at line 309 fails. Ignored rather than
+/// deleted so the pre-wave-c intent stays visible and a future reader can
+/// confirm 2b replaced it.
+#[ignore = "wave-c auth-seam cleanup removed the ambient MissingApiKey path; superseded by test 2b"]
 #[tokio::test]
 async fn build_agent_without_override_fails_missing_api_key() {
     let temp = tempfile::tempdir().unwrap();

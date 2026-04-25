@@ -11,7 +11,9 @@
 //!   `InputVariantId`, and `(FieldId, FieldId)` binding pairs, and
 //! * a `route_to_input(&MeerkatMobSeamEffect) -> Option<TypedRoutedInput>`
 //!   function whose match arms resolve each declared Input-kind route to
-//!   its typed consumer input.
+//!   its typed consumer input,
+//! * a `TypedRoutedSignal` descriptor plus `route_to_signal(...)` for
+//!   Signal-kind routes.
 //!
 //! The shape is asserted via source-text matching. A full dispatcher
 //! integration test that actually invokes the emitted `route_to_input`
@@ -70,7 +72,7 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
     // module cannot compile against typed newtypes.
     assert!(
         rendered.contains(
-            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId};"
+            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId, SignalVariantId};"
         ),
         "missing typed-identity imports:\n{rendered}"
     );
@@ -89,6 +91,21 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
         assert!(
             rendered.contains(field),
             "TypedRoutedInput must declare `{field}`:\n{rendered}"
+        );
+    }
+
+    assert!(
+        rendered.contains("pub struct TypedRoutedSignal"),
+        "missing TypedRoutedSignal struct:\n{rendered}"
+    );
+    for field in [
+        "pub instance_id: MachineInstanceId,",
+        "pub variant: SignalVariantId,",
+        "pub bindings: Vec<(FieldId, FieldId)>,",
+    ] {
+        assert!(
+            rendered.contains(field),
+            "TypedRoutedSignal must declare `{field}`:\n{rendered}"
         );
     }
 }
@@ -174,14 +191,19 @@ fn route_to_input_arm_for_request_runtime_binding_targets_prepare_bindings() {
 }
 
 #[test]
-fn signal_kind_routes_are_excluded_from_route_to_input() {
+fn signal_kind_routes_are_emitted_through_route_to_signal() {
     // `meerkat_mob_seam` declares Signal-kind routes like
-    // `runtime_bound_reaches_mob` → `mob.ObserveRuntimeReady`. These
-    // belong to the signal surface, not the composition dispatcher, so
-    // they must not surface inside `route_to_input`.
+    // `runtime_bound_reaches_mob` → `mob.ObserveRuntimeReady`. These are
+    // resolved by the generated signal surface, not the input resolver.
     let schema = attach_stub_driver(meerkat_mob_seam_composition());
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
+    assert!(
+        rendered.contains(
+            "pub fn route_to_signal(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedSignal>"
+        ),
+        "missing route_to_signal signature:\n{rendered}"
+    );
     for signal_variant in [
         "ObserveRuntimeReady",
         "ObserveRuntimeRetired",
@@ -190,6 +212,10 @@ fn signal_kind_routes_are_excluded_from_route_to_input() {
         assert!(
             !rendered.contains(&format!("InputVariantId::parse(\"{signal_variant}\")")),
             "signal-kind target `{signal_variant}` must not appear in route_to_input:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("SignalVariantId::parse(\"{signal_variant}\")")),
+            "signal-kind target `{signal_variant}` must appear in route_to_signal:\n{rendered}"
         );
     }
 }

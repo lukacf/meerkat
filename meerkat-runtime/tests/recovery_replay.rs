@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-//! Phase 1 red-ok chokepoint tests for runtime/store/input-ledger recovery replay.
+//! Phase 1 chokepoint tests for runtime/store/input-ledger recovery replay.
 
 use std::sync::Arc;
 
@@ -72,7 +72,6 @@ fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok runtime recovery chokepoint suite"]
 async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_persistent_driver() {
     let runtime_id = make_runtime_id("missing-receipt");
     let run_id = RunId::new();

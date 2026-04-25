@@ -17,7 +17,7 @@ use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
-    TurnTerminalOutcome,
+    TurnPrimitiveKind, TurnTerminalOutcome,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
@@ -472,7 +472,7 @@ where
             }
             TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
                 run_id.clone(),
-                crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+                TurnPrimitiveKind::ConversationTurn,
                 "conversation".to_string(),
                 false,
                 false,

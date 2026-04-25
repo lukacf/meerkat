@@ -270,32 +270,71 @@ pub fn mcp_live_response(
     session_id: String,
     operation: meerkat_contracts::McpLiveOperation,
     server_name: Option<String>,
+    persisted: bool,
 ) -> meerkat_contracts::McpLiveOpResponse {
     meerkat_contracts::McpLiveOpResponse {
         session_id,
         operation,
         server_name,
         status: meerkat_contracts::McpLiveOpStatus::Staged,
-        persisted: false,
+        persisted,
         applied_at_turn: None,
     }
 }
 
-/// Resolve the `persisted` flag from a caller request.
-///
-/// Config persistence is not yet implemented — if the caller sends
-/// `persisted=true` we log a warning and always return `false`.
-/// All surfaces call this to avoid semantic drift.
+/// Build the MCP config mutation authority for public live-MCP surfaces.
 #[cfg(feature = "mcp")]
-pub fn resolve_persisted(operation: &str, persisted: bool) -> bool {
-    if persisted {
-        tracing::warn!(
-            operation,
-            "caller sent persisted=true but config persistence is not yet implemented; \
-             responding with persisted=false"
-        );
+pub fn mcp_config_mutation_authority(
+    context_root: Option<std::path::PathBuf>,
+    user_config_root: Option<std::path::PathBuf>,
+) -> meerkat_core::mcp_config::McpConfigMutationAuthority {
+    meerkat_core::mcp_config::McpConfigMutationAuthority::project(context_root, user_config_root)
+}
+
+/// Persist a live MCP add when requested by the caller.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub async fn persist_mcp_add_if_requested(
+    persisted: bool,
+    authority: &meerkat_core::mcp_config::McpConfigMutationAuthority,
+    server: meerkat_core::mcp_config::McpServerConfig,
+) -> Result<Option<meerkat_core::mcp_config::McpConfigRollback>, String> {
+    if !persisted {
+        return Ok(None);
     }
-    false
+    meerkat_core::mcp_config::McpConfig::persist_add_with_rollback(authority, server)
+        .await
+        .map(Some)
+        .map_err(|err| err.to_string())
+}
+
+/// Persist a live MCP remove when requested by the caller.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub async fn persist_mcp_remove_if_requested(
+    persisted: bool,
+    authority: &meerkat_core::mcp_config::McpConfigMutationAuthority,
+    server_name: &str,
+) -> Result<Option<meerkat_core::mcp_config::McpConfigRollback>, String> {
+    if !persisted {
+        return Ok(None);
+    }
+    match meerkat_core::mcp_config::McpConfig::persist_remove_with_rollback(authority, server_name)
+        .await
+    {
+        Ok(rollback) => Ok(Some(rollback)),
+        Err(meerkat_core::mcp_config::McpConfigError::ServerNotFound(_)) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Roll back a persisted MCP config mutation after a coupled live-stage failure.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub async fn rollback_mcp_persisted_mutation(
+    rollback: Option<meerkat_core::mcp_config::McpConfigRollback>,
+) -> Result<(), String> {
+    let Some(rollback) = rollback else {
+        return Ok(());
+    };
+    rollback.rollback().await.map_err(|err| err.to_string())
 }
 
 /// Validate that a reload target exists in the adapter's active server set.

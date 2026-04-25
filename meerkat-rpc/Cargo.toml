@@ -49,7 +49,6 @@ meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
-indexmap = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

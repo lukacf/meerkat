@@ -345,17 +345,21 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
     let rendered =
         render_composition_driver(&composition).expect("driver-bearing composition emits");
 
-    // Typed identity imports + TypedRoutedInput are present; no stringly
+    // Typed identity imports + route descriptors are present; no stringly
     // tuple tables survive.
     assert!(
         rendered.contains(
-            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId};"
+            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId, SignalVariantId};"
         ),
         "rendered module must import typed identity newtypes:\n{rendered}"
     );
     assert!(
         rendered.contains("pub struct TypedRoutedInput"),
         "rendered module must declare TypedRoutedInput:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct TypedRoutedSignal"),
+        "rendered module must declare TypedRoutedSignal:\n{rendered}"
     );
     for forbidden in [
         "pub const WATCHED_EFFECTS",
@@ -401,11 +405,16 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
         "route_to_input must target the PrepareBindings input variant:\n{rendered}"
     );
 
-    // Signal-kind routes are excluded from route_to_input — they belong to
-    // the signal surface, not the composition dispatcher.
+    // Signal-kind routes are emitted through the generated signal surface.
     assert!(
-        !rendered.contains("ObserveRuntimeReady"),
-        "signal-kind routes must not surface in route_to_input:\n{rendered}"
+        rendered.contains(
+            "pub fn route_to_signal(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedSignal>"
+        ),
+        "rendered module must declare route_to_signal:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("SignalVariantId::parse(\"ObserveRuntimeReady\")"),
+        "route_to_signal must target the ObserveRuntimeReady signal variant:\n{rendered}"
     );
 
     assert!(

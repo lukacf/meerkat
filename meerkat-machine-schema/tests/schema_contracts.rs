@@ -1030,7 +1030,10 @@ mod handoff_binding {
 
     fn ok_handle_binding() -> ProtocolRustBinding {
         let mut methods = BTreeMap::new();
-        methods.insert("Ack".into(), "acknowledge".into());
+        methods.insert(
+            InputVariantId::parse("Ack").expect("valid input_variant"),
+            "acknowledge".into(),
+        );
         ProtocolRustBinding {
             module_path: "crate-x/src/generated/proto.rs".into(),
             generation_mode: ProtocolGenerationMode::HandleBridge,
@@ -1179,6 +1182,63 @@ mod handoff_binding {
     }
 
     #[test]
+    fn validate_against_rejects_protocol_without_machine_owned_disposition() {
+        let binding = ProtocolRustBinding {
+            module_path: "crate-x/src/generated/proto.rs".into(),
+            generation_mode: ProtocolGenerationMode::EffectExtractor,
+            required_imports: vec![],
+            authority_type_path: None,
+            mutator_trait_path: None,
+            input_enum_path: None,
+            effect_enum_path: Some("crate::Effect".into()),
+            transition_type_path: None,
+            error_type_path: None,
+            executor_trigger_input_variant: None,
+            bridge_source_type_path: None,
+            helper_return_shape: ProtocolHelperReturnShape::Obligations,
+            handle_trait_path: None,
+            handle_method_names: BTreeMap::new(),
+            handle_arg_accessors: BTreeMap::new(),
+            handle_method_forwarded_fields: BTreeMap::new(),
+            input_payload_module_path: None,
+            additional_modes: vec![],
+        };
+        let protocol = EffectHandoffProtocol {
+            name: ProtocolId::parse("floating_protocol").expect("valid protocol slug"),
+            producer_instance: MachineInstanceId::parse("meerkat")
+                .expect("valid producer_instance"),
+            effect_variant: EffectVariantId::parse("RefreshVisibleSurfaceSet")
+                .expect("valid effect_variant"),
+            realizing_actor: ActorId::parse("surface_owner").expect("valid realizing_actor"),
+            correlation_fields: vec![],
+            obligation_fields: vec![],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+            rust: binding,
+        };
+        let composition = composition_with_protocol(protocol);
+        let machines = canonical_machine_schemas();
+        let machine_refs: Vec<_> = machines.iter().collect();
+
+        let err = composition
+            .validate_against(&machine_refs)
+            .expect_err("protocol must be owned by producer disposition");
+        match err {
+            CompositionSchemaError::HandoffProtocolMismatch {
+                protocol,
+                effect_variant,
+                expected_protocol,
+            } => {
+                assert_eq!(protocol, "floating_protocol");
+                assert_eq!(effect_variant, "RefreshVisibleSurfaceSet");
+                assert_eq!(expected_protocol, "floating_protocol");
+            }
+            other => panic!("expected HandoffProtocolMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn additional_modes_rejects_duplicating_primary_mode() {
         let mut binding = ok_handle_binding();
         binding.additional_modes = vec![ProtocolGenerationMode::HandleBridge];
@@ -1238,7 +1298,10 @@ mod handoff_binding {
         // Minimum valid stacked binding: EffectExtractor primary +
         // HandleBridge secondary, with all required fields for both.
         let mut methods = BTreeMap::new();
-        methods.insert("Ack".into(), "acknowledge".into());
+        methods.insert(
+            InputVariantId::parse("Ack").expect("valid input_variant"),
+            "acknowledge".into(),
+        );
         let binding = ProtocolRustBinding {
             module_path: "crate-x/src/generated/proto.rs".into(),
             generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1475,10 +1538,10 @@ mod handoff_binding {
 // ---------------------------------------------------------------------------
 // Compat bridge parity — guard against silent drift between a compat
 // bridge machine's mirrored effect/input shape and the runtime struct
-// it mirrors. The bridge exists only to host handoff annotations the
-// DSL macro cannot express; if canonical types evolve and the bridge
-// doesn't, composition validation keeps passing while the codegen
-// emits stale obligation/input fields.
+// it mirrors. The bridge exists only to host handoff annotations before
+// the producer is moved to the canonical DSL disposition; if canonical
+// types evolve and the bridge doesn't, composition validation keeps
+// passing while the codegen emits stale obligation/input fields.
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::expect_used, clippy::panic)]

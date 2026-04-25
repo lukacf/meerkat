@@ -13,8 +13,8 @@ use crate::{
     CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionStateLimits,
     CompositionTransactionPlan, CompositionWitness, DriverDispatchRoute, EffectHandoffProtocol,
     EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
-    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
-    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    ProtocolGenerationMode, ProtocolHandleArgKey, ProtocolHelperReturnShape, ProtocolRustBinding,
+    Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
     RouteVariantId, WatchedEffect,
 };
 
@@ -519,8 +519,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         // `CatalogCompositionDispatcher`) consumes. The four `watched_effects`
         // and `dispatch_routes` below mirror the four Input-kind `routes`
         // above (producer=mob, consumer=meerkat); Signal-kind routes are
-        // excluded by `render_composition_driver` and handled by the signal
-        // surface.
+        // emitted through the generated `route_to_signal` surface.
         driver: Some(CompositionDriver {
             name: "meerkat_mob_seam_driver".into(),
             rust: CompositionDriverRustBinding {
@@ -701,149 +700,10 @@ pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
     vec![
         mob_bundle_composition(),
         external_tool_bundle_composition(),
-        flow_frame_loop_composition(),
         supervisor_trust_bundle_composition(),
         mob_destroy_session_ingress_bundle_composition(),
         auth_lease_bundle_composition(),
     ]
-}
-
-/// Host composition for the `flow_loop_until_evaluation` handoff
-/// protocol. The producer is the compat `LoopIterationMachine` whose
-/// `EvaluateUntilCondition` effect is wrapped into an obligation by
-/// the generated `accept_evaluate_until_condition` helper.
-///
-/// Mode: ShellBridge. The `meerkat_mob::runtime::loop_iteration_authority`
-/// module hosts a thin wrapper over the generated `loop_iteration`
-/// kernel so the protocol's `submit_*` helpers can call
-/// `authority.apply(...)` — the same idiom every other `ShellBridge`
-/// protocol uses in this workspace.
-fn flow_frame_loop_composition() -> CompositionSchema {
-    CompositionSchema {
-        name: comp_id("flow_frame_loop"),
-        machines: vec![MachineInstance {
-            instance_id: mi_id("loop_iteration"),
-            machine_name: mach_id("LoopIterationMachine"),
-            actor: act_id("loop_iteration_authority"),
-        }],
-        actors: vec![
-            machine_actor("loop_iteration_authority"),
-            owner_actor("loop_runtime_owner"),
-        ],
-        handoff_protocols: vec![EffectHandoffProtocol {
-            name: protocol_id("flow_loop_until_evaluation"),
-            producer_instance: mi_id("loop_iteration"),
-            effect_variant: ev_id("EvaluateUntilCondition"),
-            realizing_actor: act_id("loop_runtime_owner"),
-            correlation_fields: vec![fld_id("loop_instance_id"), fld_id("iteration")],
-            obligation_fields: vec![
-                fld_id("loop_instance_id"),
-                fld_id("iteration"),
-                fld_id("parent_frame_id"),
-                fld_id("parent_node_id"),
-                fld_id("loop_id"),
-            ],
-            allowed_feedback_inputs: vec![
-                FeedbackInputRef {
-                    machine_instance: mi_id("loop_iteration"),
-                    input_variant: iv_id("UntilConditionMet"),
-                    field_bindings: vec![
-                        FeedbackFieldBinding {
-                            input_field: fld_id("loop_instance_id"),
-                            source: FeedbackFieldSource::ObligationField(fld_id("loop_instance_id")),
-                        },
-                        FeedbackFieldBinding {
-                            input_field: fld_id("iteration"),
-                            source: FeedbackFieldSource::ObligationField(fld_id("iteration")),
-                        },
-                    ],
-                },
-                FeedbackInputRef {
-                    machine_instance: mi_id("loop_iteration"),
-                    input_variant: iv_id("UntilConditionFailed"),
-                    field_bindings: vec![
-                        FeedbackFieldBinding {
-                            input_field: fld_id("loop_instance_id"),
-                            source: FeedbackFieldSource::ObligationField(fld_id("loop_instance_id")),
-                        },
-                        FeedbackFieldBinding {
-                            input_field: fld_id("iteration"),
-                            source: FeedbackFieldSource::ObligationField(fld_id("iteration")),
-                        },
-                    ],
-                },
-            ],
-            closure_policy: ClosurePolicy::AckRequired,
-            liveness_annotation: Some(
-                "eventual feedback under task-scheduling fairness".into(),
-            ),
-            rust: ProtocolRustBinding {
-                module_path:
-                    "meerkat-mob/src/generated/protocol_flow_loop_until_evaluation.rs".into(),
-                generation_mode: ProtocolGenerationMode::ShellBridge,
-                required_imports: vec![
-                    "use crate::error::MobError;".into(),
-                    "use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};".into(),
-                    "use crate::runtime::loop_iteration_authority::{LoopIterationAuthority, LoopIterationInput, LoopIterationMutator, LoopIterationTransition, LoopUntilEvaluationRequested, inputs};".into(),
-                ],
-                authority_type_path: Some(
-                    "crate::runtime::loop_iteration_authority::LoopIterationAuthority".into(),
-                ),
-                mutator_trait_path: Some(
-                    "crate::runtime::loop_iteration_authority::LoopIterationMutator".into(),
-                ),
-                input_enum_path: Some(
-                    "crate::runtime::loop_iteration_authority::LoopIterationInput".into(),
-                ),
-                effect_enum_path: None,
-                transition_type_path: Some(
-                    "crate::runtime::loop_iteration_authority::LoopIterationTransition".into(),
-                ),
-                error_type_path: Some("crate::error::MobError".into()),
-                executor_trigger_input_variant: None,
-                bridge_source_type_path: Some(
-                    "crate::runtime::loop_iteration_authority::LoopUntilEvaluationRequested".into(),
-                ),
-                helper_return_shape: ProtocolHelperReturnShape::Transition,
-                handle_trait_path: None,
-                handle_method_names: BTreeMap::new(),
-                handle_arg_accessors: BTreeMap::new(),
-                handle_method_forwarded_fields: BTreeMap::new(),
-                // Kernel-codegen input enum uses tuple-wrapping
-                // variants: `LoopIterationInput::UntilConditionMet(
-                // inputs::UntilConditionMet { ... })`.
-                input_payload_module_path: Some("inputs".into()),
-                additional_modes: vec![],
-            },
-        }],
-        entry_inputs: vec![],
-        routes: vec![],
-        route_target_selectors: vec![],
-        driver: None,
-        transaction_plans: vec![],
-        actor_priorities: vec![],
-        scheduler_rules: vec![],
-        invariants: vec![CompositionInvariant {
-            name: "flow_loop_until_evaluation_protocol_covered".into(),
-            kind: CompositionInvariantKind::HandoffProtocolCovered {
-                producer_instance: mi_id("loop_iteration"),
-                effect_variant: ev_id("EvaluateUntilCondition"),
-                protocol_name: protocol_id("flow_loop_until_evaluation"),
-            },
-            statement: "loop-iteration authority's UntilCondition evaluation effect is handed off through the explicit `flow_loop_until_evaluation` protocol rather than ad-hoc shell mutation".into(),
-            references_machines: vec![mi_id("loop_iteration")],
-            references_actors: vec![
-                act_id("loop_iteration_authority"),
-                act_id("loop_runtime_owner"),
-            ],
-        }],
-        witnesses: vec![witness("flow_loop_eval_round_trip", &[])],
-        deep_domain_cardinality: 3,
-        deep_domain_overrides: std::collections::BTreeMap::new(),
-        witness_domain_cardinality: 2,
-        ci_limits: Some(default_ci_limits()),
-        closed_world: true,
-    }
 }
 
 /// Host composition for the `ops_barrier_satisfaction` handoff protocol.
@@ -860,13 +720,16 @@ fn flow_frame_loop_composition() -> CompositionSchema {
 /// secondary `HandleBridge` (handle-driven submitter suffixed `_handle`).
 fn mob_bundle_composition() -> CompositionSchema {
     let mut handle_methods = BTreeMap::new();
-    handle_methods.insert("OpsBarrierSatisfied".into(), "ops_barrier_satisfied".into());
+    handle_methods.insert(iv_id("OpsBarrierSatisfied"), "ops_barrier_satisfied".into());
     // Handle method takes `operation_ids: BTreeSet<String>` — the obligation
     // field is `Set<OperationId>` which renders as `Vec<OperationId>`. The
     // accessor rewrites the reference to stringify each operation id.
     let mut handle_accessors = BTreeMap::new();
     handle_accessors.insert(
-        "OpsBarrierSatisfied.operation_ids".into(),
+        ProtocolHandleArgKey {
+            input_variant: iv_id("OpsBarrierSatisfied"),
+            obligation_field: fld_id("operation_ids"),
+        },
         ".iter().map(ToString::to_string).collect()".into(),
     );
     // Handle method takes only `operation_ids`; the obligation carries
@@ -874,16 +737,15 @@ fn mob_bundle_composition() -> CompositionSchema {
     // never consumes (the ops-lifecycle owner matches on it internally,
     // not through the handle).
     let mut handle_forwarded_fields = BTreeMap::new();
-    handle_forwarded_fields.insert("OpsBarrierSatisfied".into(), vec!["operation_ids".into()]);
+    handle_forwarded_fields.insert(iv_id("OpsBarrierSatisfied"), vec![fld_id("operation_ids")]);
 
     CompositionSchema {
         name: comp_id("mob_bundle"),
         // The producer is the compat `OpsBarrierBridgeMachine` which hosts
         // the handoff-annotated `WaitAllSatisfied` effect declaration.
-        // Its shape mirrors the runtime-owned effect; the canonical
-        // `MeerkatMachine` also declares `WaitAllSatisfied` (without the
-        // handoff annotation the DSL macro cannot emit) so the runtime
-        // shell still observes the effect through its own reducer.
+        // Its shape mirrors the runtime-owned effect; the DSL can now
+        // express this handoff directly when this producer moves back to
+        // the canonical `MeerkatMachine` instance.
         machines: vec![MachineInstance {
             instance_id: mi_id("ops_barrier_bridge"),
             machine_name: mach_id("OpsBarrierBridgeMachine"),
@@ -990,8 +852,9 @@ fn mob_bundle_composition() -> CompositionSchema {
 /// Both protocols' producer-side effects are emitted by the runtime's
 /// hand-written `ExternalToolSurfaceAuthority`. The compat
 /// `ExternalToolSurfaceBridgeMachine` mirrors each effect's shape and
-/// hosts the `handoff_protocol` annotation that the canonical DSL
-/// macro cannot express.
+/// hosts handoff annotations in the same DSL/schema shape now available
+/// to the canonical producer, preserving checked helper output while the
+/// bridge module remains the declared producer.
 ///
 /// - `surface_completion` — EffectExtractor (scans `ExternalToolSurfaceEffect`
 ///   for `ScheduleSurfaceCompletion` variants) + HandleBridge
@@ -1002,32 +865,44 @@ fn mob_bundle_composition() -> CompositionSchema {
 ///   (`snapshot_aligned`). Same shape, single field.
 fn external_tool_bundle_composition() -> CompositionSchema {
     let mut completion_methods = BTreeMap::new();
-    completion_methods.insert("PendingSucceeded".into(), "mark_pending_succeeded".into());
-    completion_methods.insert("PendingFailed".into(), "mark_pending_failed".into());
+    completion_methods.insert(iv_id("PendingSucceeded"), "mark_pending_succeeded".into());
+    completion_methods.insert(iv_id("PendingFailed"), "mark_pending_failed".into());
     let mut completion_accessors = BTreeMap::new();
     // Handle takes `String` surface_id; obligation carries typed SurfaceId.
-    completion_accessors.insert("PendingSucceeded.surface_id".into(), ".0".into());
-    completion_accessors.insert("PendingFailed.surface_id".into(), ".0".into());
+    completion_accessors.insert(
+        ProtocolHandleArgKey {
+            input_variant: iv_id("PendingSucceeded"),
+            obligation_field: fld_id("surface_id"),
+        },
+        ".0".into(),
+    );
+    completion_accessors.insert(
+        ProtocolHandleArgKey {
+            input_variant: iv_id("PendingFailed"),
+            obligation_field: fld_id("surface_id"),
+        },
+        ".0".into(),
+    );
     let mut completion_forwarded = BTreeMap::new();
     // `mark_pending_succeeded(surface_id, pending_task_sequence, staged_intent_sequence)`.
     completion_forwarded.insert(
-        "PendingSucceeded".into(),
+        iv_id("PendingSucceeded"),
         vec![
-            "surface_id".into(),
-            "pending_task_sequence".into(),
-            "staged_intent_sequence".into(),
+            fld_id("surface_id"),
+            fld_id("pending_task_sequence"),
+            fld_id("staged_intent_sequence"),
         ],
     );
     // `mark_pending_failed(surface_id, reason)` — `reason` is owner-context.
     completion_forwarded.insert(
-        "PendingFailed".into(),
-        vec!["surface_id".into(), "reason".into()],
+        iv_id("PendingFailed"),
+        vec![fld_id("surface_id"), fld_id("reason")],
     );
 
     let mut snapshot_methods = BTreeMap::new();
-    snapshot_methods.insert("SnapshotAligned".into(), "snapshot_aligned".into());
+    snapshot_methods.insert(iv_id("SnapshotAligned"), "snapshot_aligned".into());
     let mut snapshot_forwarded = BTreeMap::new();
-    snapshot_forwarded.insert("SnapshotAligned".into(), vec!["snapshot_epoch".into()]);
+    snapshot_forwarded.insert(iv_id("SnapshotAligned"), vec![fld_id("snapshot_epoch")]);
 
     CompositionSchema {
         name: comp_id("external_tool_bundle"),
@@ -1687,8 +1562,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
 /// `AuthLeaseBridgeMachine` via a route that mirrors the lifecycle
 /// event into the bridge's input; the bridge then hosts the
 /// `handoff_protocol = Some("auth_lease_lifecycle_publication")`
-/// disposition annotation that the canonical DSL macro cannot express
-/// today. The pattern mirrors `supervisor_trust_bundle_composition`
+/// disposition annotation. The pattern mirrors `supervisor_trust_bundle_composition`
 /// and `mob_bundle_composition`: a minimal compat bridge hosts the
 /// protocol annotation, the canonical machine owns the authoritative
 /// state, and a composition Route wires the producer effect into the

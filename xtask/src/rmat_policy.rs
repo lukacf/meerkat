@@ -396,7 +396,8 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
 ///
 /// Each rule binds a file (by suffix-match on the repo-relative path) to an AST
 /// pattern. Violations are errors unless annotated with
-/// `// RMAT-ALLOW(ForbiddenShellAuthorityReads)` on or above the offending span.
+/// line-scoped `// RMAT-ALLOW(ForbiddenShellAuthorityReads): <reason>` on or
+/// above the offending span.
 #[derive(Debug, Clone)]
 pub struct ForbiddenShellReadRule {
     pub path_suffix: &'static str,
@@ -428,7 +429,7 @@ pub enum ForbiddenShellReadKind {
 
 /// Default forbidden-read rules. These encode what `scripts/rmat-read-seam-lint.sh`
 /// used to enforce via regex, but as AST-precise policy entries that reuse the
-/// existing `RMAT-ALLOW` suppression mechanism.
+/// existing line-scoped `RMAT-ALLOW` suppression mechanism.
 fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
     vec![
         // Mob actor shell: any `.phase()` read off something other than

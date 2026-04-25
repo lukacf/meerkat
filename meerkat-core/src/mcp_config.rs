@@ -171,6 +171,65 @@ pub struct McpServerWithScope {
     pub scope: McpScope,
 }
 
+/// Authority for mutating persisted MCP server configuration.
+///
+/// Public surfaces do not choose ad hoc files. They present the caller's
+/// persisted intent to this authority, which resolves the canonical config path
+/// from the same convention roots used by config loading.
+#[derive(Debug, Clone)]
+pub struct McpConfigMutationAuthority {
+    pub scope: McpScope,
+    pub context_root: Option<PathBuf>,
+    pub user_config_root: Option<PathBuf>,
+}
+
+impl McpConfigMutationAuthority {
+    pub fn project(context_root: Option<PathBuf>, user_config_root: Option<PathBuf>) -> Self {
+        Self {
+            scope: McpScope::Project,
+            context_root,
+            user_config_root,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn path(&self) -> Result<PathBuf, McpConfigError> {
+        match self.scope {
+            McpScope::Project => Ok(self
+                .context_root
+                .as_deref()
+                .map(project_mcp_path_in)
+                .or_else(project_mcp_path)
+                .ok_or(McpConfigError::PathUnavailable { scope: self.scope })?),
+            McpScope::User => Ok(self
+                .user_config_root
+                .as_deref()
+                .map(user_mcp_path_in)
+                .or_else(user_mcp_path)
+                .ok_or(McpConfigError::PathUnavailable { scope: self.scope })?),
+        }
+    }
+}
+
+/// Rollback token returned by persisted mutations.
+///
+/// Surfaces keep this token until the live adapter stages the same mutation. If
+/// staging fails, rolling back restores the exact previous bytes (or removes a
+/// newly-created file).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct McpConfigRollback {
+    path: PathBuf,
+    previous_bytes: Option<Vec<u8>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl McpConfigRollback {
+    pub async fn rollback(self) -> Result<(), McpConfigError> {
+        restore_mcp_file(&self.path, self.previous_bytes.as_deref()).await
+    }
+}
+
 /// Errors that can occur during MCP config operations
 #[derive(Debug, thiserror::Error)]
 pub enum McpConfigError {
@@ -184,6 +243,8 @@ pub enum McpConfigError {
     ServerNotFound(String),
     #[error("Server '{name}' exists in multiple scopes. Specify --scope: {scopes:?}")]
     AmbiguousServer { name: String, scopes: Vec<McpScope> },
+    #[error("Could not determine MCP config path for {scope} scope")]
+    PathUnavailable { scope: McpScope },
     #[error("Missing environment variable '{var}' referenced in {field}")]
     MissingEnvVar { field: String, var: String },
     #[error("Invalid environment variable reference in {field}: '{value}'")]
@@ -322,10 +383,65 @@ impl McpConfig {
 
         Ok(scopes)
     }
+
+    /// Persist a server addition under an explicit mutation authority.
+    ///
+    /// The write is atomic at the file level and returns a rollback token for
+    /// the caller to use if the coupled live operation fails.
+    pub async fn persist_add_with_rollback(
+        authority: &McpConfigMutationAuthority,
+        server: McpServerConfig,
+    ) -> Result<McpConfigRollback, McpConfigError> {
+        let path = authority.path()?;
+        let previous = read_existing_bytes(&path).await?;
+        let mut config = read_mcp_file_raw(Some(&path)).await?;
+        if config
+            .servers
+            .iter()
+            .any(|existing| existing.name == server.name)
+        {
+            return Err(McpConfigError::ServerExists(server.name));
+        }
+        config.servers.push(server);
+        write_mcp_file_atomic(&path, &config).await?;
+        Ok(McpConfigRollback {
+            path,
+            previous_bytes: previous,
+        })
+    }
+
+    /// Persist a server removal under an explicit mutation authority.
+    ///
+    /// The write is atomic at the file level and returns a rollback token for
+    /// the caller to use if the coupled live operation fails.
+    pub async fn persist_remove_with_rollback(
+        authority: &McpConfigMutationAuthority,
+        server_name: &str,
+    ) -> Result<McpConfigRollback, McpConfigError> {
+        let path = authority.path()?;
+        let previous = read_existing_bytes(&path).await?;
+        let mut config = read_mcp_file_raw(Some(&path)).await?;
+        let initial_len = config.servers.len();
+        config.servers.retain(|server| server.name != server_name);
+        if config.servers.len() == initial_len {
+            return Err(McpConfigError::ServerNotFound(server_name.to_string()));
+        }
+        write_mcp_file_atomic(&path, &config).await?;
+        Ok(McpConfigRollback {
+            path,
+            previous_bytes: previous,
+        })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
+    let parsed = read_mcp_file_raw(path).await?;
+    expand_env_in_config(parsed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_mcp_file_raw(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
     let Some(path) = path else {
         return Ok(McpConfig::default());
     };
@@ -342,7 +458,82 @@ async fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError>
         path: path.display().to_string(),
         message: e.to_string(),
     })?;
-    expand_env_in_config(parsed)
+    Ok(parsed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_existing_bytes(path: &Path) -> Result<Option<Vec<u8>>, McpConfigError> {
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(|err| McpConfigError::Io(err.to_string()))?
+    {
+        return Ok(None);
+    }
+    tokio::fs::read(path)
+        .await
+        .map(Some)
+        .map_err(|err| McpConfigError::Io(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn write_mcp_file_atomic(path: &Path, config: &McpConfig) -> Result<(), McpConfigError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|err| McpConfigError::Io(err.to_string()))?;
+    }
+
+    let contents =
+        toml::to_string_pretty(config).map_err(|err| McpConfigError::Io(err.to_string()))?;
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("toml")
+    ));
+    tokio::fs::write(&tmp_path, contents.as_bytes())
+        .await
+        .map_err(|err| McpConfigError::Io(err.to_string()))?;
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|err| McpConfigError::Io(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn restore_mcp_file(path: &Path, previous: Option<&[u8]>) -> Result<(), McpConfigError> {
+    match previous {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|err| McpConfigError::Io(err.to_string()))?;
+            }
+            let tmp_path = path.with_extension(format!(
+                "{}.rollback.tmp",
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("toml")
+            ));
+            tokio::fs::write(&tmp_path, bytes)
+                .await
+                .map_err(|err| McpConfigError::Io(err.to_string()))?;
+            tokio::fs::rename(&tmp_path, path)
+                .await
+                .map_err(|err| McpConfigError::Io(err.to_string()))?;
+        }
+        None => {
+            if tokio::fs::try_exists(path)
+                .await
+                .map_err(|err| McpConfigError::Io(err.to_string()))?
+            {
+                tokio::fs::remove_file(path)
+                    .await
+                    .map_err(|err| McpConfigError::Io(err.to_string()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -837,5 +1028,57 @@ command = "user-only-cmd"
             .await
             .unwrap();
         assert!(merged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_persist_add_uses_project_authority_and_rolls_back_new_file() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let server = McpServerConfig::stdio("persisted", "echo", vec!["ok".into()], HashMap::new());
+
+        let rollback = McpConfig::persist_add_with_rollback(&authority, server)
+            .await
+            .unwrap();
+        let path = temp.path().join(".rkat/mcp.toml");
+        let config = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "persisted");
+
+        rollback.rollback().await.unwrap();
+        assert!(
+            !path.exists(),
+            "rollback should remove a newly-created config"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_remove_rolls_back_previous_bytes() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::create_dir_all(temp.path().join(".rkat"))
+            .await
+            .unwrap();
+        let path = temp.path().join(".rkat/mcp.toml");
+        let original = r#"
+[[servers]]
+name = "keep"
+command = "keep-cmd"
+
+[[servers]]
+name = "remove"
+command = "remove-cmd"
+"#;
+        tokio::fs::write(&path, original).await.unwrap();
+
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let rollback = McpConfig::persist_remove_with_rollback(&authority, "remove")
+            .await
+            .unwrap();
+        let config = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "keep");
+
+        rollback.rollback().await.unwrap();
+        let restored = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(restored, original);
     }
 }

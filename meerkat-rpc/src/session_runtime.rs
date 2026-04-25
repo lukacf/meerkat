@@ -1077,6 +1077,7 @@ impl SessionRuntime {
                     .default_llm_client()
                     .map(encode_llm_client_override_for_service),
                 external_tools: self.recovery_external_tools(),
+                checkpointer: None,
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
                 require_runtime_build_mode: true,
                 realm_id: self.realm_id.as_ref().map(ToString::to_string),
@@ -3557,8 +3558,21 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         server_name: String,
-        mut server_config: serde_json::Value,
+        server_config: serde_json::Value,
     ) -> Result<(), RpcError> {
+        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_stage_add_with_persistence(
+        &self,
+        session_id: &SessionId,
+        server_name: String,
+        mut server_config: serde_json::Value,
+        persisted: bool,
+    ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
         if server_name.trim().is_empty() {
             return Err(RpcError {
@@ -3583,12 +3597,38 @@ impl SessionRuntime {
             })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter.stage_add(config).await.map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: e,
-            data: None,
-        })?;
-        Ok(())
+        let rollback = if persisted {
+            let (context_root, user_root) = self.skill_identity_roots();
+            let authority =
+                meerkat::surface::mcp_config_mutation_authority(context_root, user_root);
+            match meerkat::surface::persist_mcp_add_if_requested(true, &authority, config.clone())
+                .await
+            {
+                Ok(rollback) => rollback,
+                Err(message) => {
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = adapter.stage_add(config).await {
+            let rollback_message =
+                match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                    Ok(()) => String::new(),
+                    Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+                };
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("{e}{rollback_message}"),
+                data: None,
+            });
+        }
+        Ok(rollback.is_some())
     }
 
     #[cfg(feature = "mcp")]
@@ -3597,6 +3637,18 @@ impl SessionRuntime {
         session_id: &SessionId,
         server_name: String,
     ) -> Result<(), RpcError> {
+        self.mcp_stage_remove_with_persistence(session_id, server_name, false)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_stage_remove_with_persistence(
+        &self,
+        session_id: &SessionId,
+        server_name: String,
+        persisted: bool,
+    ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
         if server_name.trim().is_empty() {
             return Err(RpcError {
@@ -3606,15 +3658,38 @@ impl SessionRuntime {
             });
         }
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter
-            .stage_remove(server_name)
-            .await
-            .map_err(|e| RpcError {
+        let rollback = if persisted {
+            let (context_root, user_root) = self.skill_identity_roots();
+            let authority =
+                meerkat::surface::mcp_config_mutation_authority(context_root, user_root);
+            match meerkat::surface::persist_mcp_remove_if_requested(true, &authority, &server_name)
+                .await
+            {
+                Ok(rollback) => rollback,
+                Err(message) => {
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = adapter.stage_remove(server_name).await {
+            let rollback_message =
+                match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                    Ok(()) => String::new(),
+                    Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+                };
+            return Err(RpcError {
                 code: error::INTERNAL_ERROR,
-                message: e,
+                message: format!("{e}{rollback_message}"),
                 data: None,
-            })?;
-        Ok(())
+            });
+        }
+        Ok(rollback.is_some())
     }
 
     #[cfg(feature = "mcp")]

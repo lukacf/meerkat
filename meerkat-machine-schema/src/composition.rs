@@ -131,6 +131,13 @@ pub enum FeedbackFieldSource {
     OwnerContext(String),
 }
 
+/// Typed key for per-feedback handle argument accessors.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProtocolHandleArgKey {
+    pub input_variant: InputVariantId,
+    pub obligation_field: FieldId,
+}
+
 /// Explicit Rust binding metadata for generated protocol helper modules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolRustBinding {
@@ -161,27 +168,27 @@ pub struct ProtocolRustBinding {
     /// Handle trait path used by `HandleBridge` helpers. Required when
     /// `generation_mode` or `additional_modes` contains `HandleBridge`.
     pub handle_trait_path: Option<String>,
-    /// Handle trait method name per feedback input. Keys are
-    /// `FeedbackInputRef::input_variant`, values are the snake_case method
-    /// on `handle_trait_path`. Required for each feedback entry emitted
-    /// through the `HandleBridge` mode.
-    pub handle_method_names: BTreeMap<String, String>,
+    /// Handle trait method name per feedback input. Keys are typed
+    /// `FeedbackInputRef::input_variant` ids, values are the snake_case
+    /// method on `handle_trait_path`. Required for each feedback entry
+    /// emitted through the `HandleBridge` mode.
+    pub handle_method_names: BTreeMap<InputVariantId, String>,
     /// Per-call suffix applied to `obligation.<field>` references when
-    /// constructing handle-method arguments. Keys are
-    /// `"{input_variant}.{obligation_field}"`; values are suffixes like
+    /// constructing handle-method arguments. Keys are typed
+    /// `(input_variant, obligation_field)` pairs; values are suffixes like
     /// `.0`, `.clone()`, `.into()`. Absent entries emit bare
     /// `obligation.<field>`. Lets the schema declare a single newtype
     /// unwrap without ceding typed-field correctness.
-    pub handle_arg_accessors: BTreeMap<String, String>,
+    pub handle_arg_accessors: BTreeMap<ProtocolHandleArgKey, String>,
     /// Per-feedback list of obligation field names (in positional order)
-    /// that get forwarded to the handle method. Keys are
-    /// `FeedbackInputRef::input_variant`. Absent entries fall back to
+    /// that get forwarded to the handle method. Keys are typed
+    /// `FeedbackInputRef::input_variant` ids. Absent entries fall back to
     /// "every obligation-sourced field in binding order," which works
     /// when the handle-method signature mirrors the feedback input. Set
     /// this when the feedback input carries fields the handle method
     /// does not accept (e.g., a correlation `wait_request_id` that the
     /// runtime handle never uses).
-    pub handle_method_forwarded_fields: BTreeMap<String, Vec<String>>,
+    pub handle_method_forwarded_fields: BTreeMap<InputVariantId, Vec<FieldId>>,
     /// Kernel-codegen-emitted input enums wrap each variant in a named
     /// payload struct under an `inputs` submodule
     /// (`Input::VariantName(inputs::VariantName { ... })`). DSL-emitted
@@ -1362,16 +1369,14 @@ impl CompositionSchema {
                 .effect_dispositions
                 .iter()
                 .find(|rule| rule.effect_variant == protocol.effect_variant);
-            if let Some(rule) = disposition_rule {
-                match &rule.handoff_protocol {
-                    Some(hp) if hp == &protocol.name => {}
-                    _ => {
-                        return Err(CompositionSchemaError::HandoffProtocolMismatch {
-                            protocol: protocol.name.as_str().to_owned(),
-                            effect_variant: protocol.effect_variant.as_str().to_owned(),
-                            expected_protocol: protocol.name.as_str().to_owned(),
-                        });
-                    }
+            match disposition_rule.and_then(|rule| rule.handoff_protocol.as_ref()) {
+                Some(hp) if hp == &protocol.name => {}
+                _ => {
+                    return Err(CompositionSchemaError::HandoffProtocolMismatch {
+                        protocol: protocol.name.as_str().to_owned(),
+                        effect_variant: protocol.effect_variant.as_str().to_owned(),
+                        expected_protocol: protocol.name.as_str().to_owned(),
+                    });
                 }
             }
 
@@ -1920,7 +1925,7 @@ fn validate_generation_mode_binding(
             for feedback in &protocol.allowed_feedback_inputs {
                 if !rust
                     .handle_method_names
-                    .contains_key(feedback.input_variant.as_str())
+                    .contains_key(&feedback.input_variant)
                 {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
                         protocol: protocol.name.as_str().to_owned(),

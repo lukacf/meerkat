@@ -18,6 +18,7 @@ use meerkat_core::{
 };
 
 use crate::input::Input;
+use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
@@ -815,8 +816,15 @@ async fn process_queue(
         let dequeued = {
             let mut d = driver.lock().await;
 
-            // Only process if the runtime can process queue (Idle or Retired)
-            if !d.can_process_queue() {
+            // Immediate attached steer pre-binds the DSL run before waking the
+            // loop. Honor that Running/current_run_id pair as a queued batch
+            // that is already prepared by the checked-in machine.
+            let prebound_run_id = if d.runtime_state() == RuntimeState::Running {
+                d.current_run_id()
+            } else {
+                None
+            };
+            if !d.can_process_queue() && prebound_run_id.is_none() {
                 return false;
             }
 
@@ -840,7 +848,7 @@ async fn process_queue(
                 return false;
             }
 
-            let run_id = RunId::new();
+            let run_id = prebound_run_id.unwrap_or_else(RunId::new);
 
             // The checked-in Meerkat machine owns the coarse "this dequeued
             // batch has now become a run" transition, including unwind on
@@ -863,14 +871,14 @@ async fn process_queue(
 
         match dequeued {
             Some((input_ids, staged_ids, run_id, primitive)) => {
-                if crate::meerkat_machine::prepare_runtime_loop_batch_start(
+                if let Err(err) = crate::meerkat_machine::prepare_runtime_loop_batch_start(
                     driver,
                     run_id.clone(),
                     &staged_ids,
                 )
                 .await
-                .is_err()
                 {
+                    tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
                     return false;
                 }
                 if let Err(error) =

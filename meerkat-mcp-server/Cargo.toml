@@ -42,7 +42,6 @@ tracing = { workspace = true }
 schemars = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-chrono = { workspace = true }
 
 [features]
 default = ["comms", "schedule"]

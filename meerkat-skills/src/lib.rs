@@ -13,14 +13,12 @@ pub mod engine;
 pub mod parser;
 pub mod registration;
 pub mod renderer;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod resolve;
 pub mod resolver;
 pub mod source;
 
 pub use engine::DefaultSkillEngine;
 pub use registration::{SkillRegistration, collect_registered_skills};
-#[cfg(not(target_arch = "wasm32"))]
 pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::FilesystemSkillSource;

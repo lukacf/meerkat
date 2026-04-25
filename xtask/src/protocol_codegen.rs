@@ -20,9 +20,8 @@ pub fn run_protocol_codegen() -> Result<()> {
     let mut compositions = canonical_composition_schemas();
     compositions.extend(compat_composition_schemas());
     let mut machines = canonical_machine_schemas();
-    // Compat machines host handoff declarations for effects whose canonical
-    // absorption is still in flight. They must be discoverable by the same
-    // producer-lookup path as canonical machines.
+    // Compat machines remain discoverable by the same producer-lookup path
+    // as canonical machines while bridge-only compositions are retired.
     machines.extend([
         meerkat_machine_schema::flow_frame_machine(),
         meerkat_machine_schema::flow_run_machine(),
@@ -487,9 +486,9 @@ fn generate_effect_extractor_helpers(
 ///
 /// The handle-method mapping is declared on `ProtocolRustBinding`:
 /// `handle_trait_path` names the trait; `handle_method_names` maps each
-/// feedback's `input_variant` to a method on that trait;
-/// `handle_arg_accessors` optionally rewrites obligation-field access
-/// paths (e.g., `surface_id` → `surface_id.0`).
+/// typed feedback `input_variant` to a method on that trait;
+/// `handle_arg_accessors` optionally rewrites typed obligation-field
+/// access paths (e.g., `surface_id` → `surface_id.0`).
 ///
 /// The generator renders positional arguments in field-bindings-declared
 /// order: obligation-sourced fields first, owner-context fields next.
@@ -532,7 +531,7 @@ fn generate_handle_bridge_helpers(
     for feedback in &protocol.allowed_feedback_inputs {
         let method_name = rust
             .handle_method_names
-            .get(feedback.input_variant.as_str())
+            .get(&feedback.input_variant)
             .with_context(|| {
                 format!(
                     "HandleBridge missing handle_method_names entry for `{}`",
@@ -568,9 +567,9 @@ fn generate_handle_bridge_helpers(
         // (they are correlation-only and never reach the handle).
         // Otherwise every obligation-sourced binding is forwarded in
         // declaration order.
-        let forwarded: Option<&Vec<String>> = rust
+        let forwarded: Option<&Vec<meerkat_machine_schema::identity::FieldId>> = rust
             .handle_method_forwarded_fields
-            .get(feedback.input_variant.as_str());
+            .get(&feedback.input_variant);
         let mut owner_params: Vec<String> = Vec::new();
         let mut call_args: Vec<String> = Vec::new();
         for binding in &feedback.field_bindings {
@@ -583,11 +582,10 @@ fn generate_handle_bridge_helpers(
                     {
                         continue;
                     }
-                    let accessor_key = format!(
-                        "{}.{}",
-                        feedback.input_variant,
-                        to_snake_case(field.as_str())
-                    );
+                    let accessor_key = meerkat_machine_schema::ProtocolHandleArgKey {
+                        input_variant: feedback.input_variant.clone(),
+                        obligation_field: field.clone(),
+                    };
                     let suffix = rust
                         .handle_arg_accessors
                         .get(&accessor_key)

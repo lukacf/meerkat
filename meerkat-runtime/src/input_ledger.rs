@@ -76,6 +76,11 @@ impl InputLedger {
         self.states.get(input_id)
     }
 
+    /// Look up the canonical input ID for an idempotency key.
+    pub fn input_id_for_idempotency_key(&self, key: &IdempotencyKey) -> Option<InputId> {
+        self.idempotency_index.get(key).cloned()
+    }
+
     /// Remove an input from the ledger and dedup index.
     pub fn remove(&mut self, input_id: &InputId) -> Option<InputState> {
         let removed = self.states.shift_remove(input_id)?;

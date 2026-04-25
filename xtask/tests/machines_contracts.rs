@@ -223,3 +223,62 @@ fn compat_kernel_modules_and_flow_runtime_mini_machines_are_deleted() {
         );
     }
 }
+
+#[test]
+fn flow_runtime_until_feedback_does_not_use_loop_iteration_authority_bridge() {
+    let root = repo_root().expect("repo root");
+    let flow_engine = root.join("meerkat-mob/src/runtime/flow_frame_engine.rs");
+    let contents = std::fs::read_to_string(&flow_engine)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", flow_engine.display()));
+
+    for forbidden in [
+        "loop_iteration_authority",
+        "protocol_flow_loop_until_evaluation",
+        "submit_until_condition_met",
+        "submit_until_condition_failed",
+    ] {
+        assert!(
+            !contents.contains(forbidden),
+            "flow until feedback must route through MobMachine, not `{forbidden}`, in {}",
+            flow_engine.display()
+        );
+    }
+
+    let schema_src = root.join("meerkat-machine-schema/src");
+    let mut stack = vec![schema_src.clone()];
+    while let Some(path) = stack.pop() {
+        let metadata = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path)
+                .unwrap_or_else(|error| panic!("failed to read dir {}: {error}", path.display()))
+            {
+                stack.push(
+                    entry
+                        .unwrap_or_else(|error| {
+                            panic!("failed to read dir entry in {}: {error}", path.display())
+                        })
+                        .path(),
+                );
+            }
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for forbidden in [
+            "flow_loop_until_evaluation",
+            "loop_iteration_authority",
+            "protocol_flow_loop_until_evaluation",
+        ] {
+            assert!(
+                !contents.contains(forbidden),
+                "machine schema source must not declare deleted loop-until bridge `{forbidden}` in {}",
+                path.display()
+            );
+        }
+    }
+}

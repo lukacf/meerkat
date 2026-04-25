@@ -1,17 +1,24 @@
 //! Skill repository resolution.
-//!
-//! Wave-b stub: the real "config → CompositeSkillSource" pipeline needs the
-//! out-of-allowlist consumer rewrite in wave-c. What remains here are the
-//! public entry points in the shape the facade currently imports — every
-//! configured repository yields a typed `SkillKey`-backed source.
 
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
-use meerkat_core::skills::{SkillError, SkillScope};
+use meerkat_core::skills::SkillError;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::skills::SkillScope;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::skills_config::GitRefType;
 use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
 
 use crate::source::composite::NamedSource;
-use crate::source::{CompositeSkillSource, EmbeddedSkillSource, FilesystemSkillSource, SourceNode};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::source::git::{GitRef, GitSkillAuth, GitSkillConfig, GitSkillSource};
+#[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
+use crate::source::http::{HttpSkillAuth, HttpSkillSource};
+use crate::source::{CompositeSkillSource, EmbeddedSkillSource, SourceNode};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::source::{ExternalSkillSource, FilesystemSkillSource, StdioExternalClient};
 
 pub async fn resolve_repositories(
     config: &SkillsConfig,
@@ -24,9 +31,12 @@ pub async fn resolve_repositories(
 pub async fn resolve_repositories_with_roots(
     config: &SkillsConfig,
     context_root: Option<&Path>,
-    _user_root: Option<&Path>,
+    user_root: Option<&Path>,
     cache_root: Option<&Path>,
 ) -> Result<Option<CompositeSkillSource>, SkillError> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = (context_root, cache_root);
+
     if !config.enabled {
         return Ok(None);
     }
@@ -38,36 +48,183 @@ pub async fn resolve_repositories_with_roots(
     for repo in &config.repositories {
         match &repo.transport {
             SkillRepoTransport::Filesystem { path } => {
-                let resolution_root = context_root
-                    .or(cache_root)
-                    .unwrap_or_else(|| Path::new("."));
-                let full_path = if Path::new(path).is_relative() {
-                    resolution_root.join(path)
-                } else {
-                    path.into()
-                };
-                sources.push(NamedSource {
-                    name: repo.name.clone(),
-                    source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
-                        full_path,
-                        SkillScope::Project,
-                        repo.source_uuid.clone(),
-                        config.health_thresholds,
-                    )),
-                });
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let resolution_root = context_root
+                        .or(cache_root)
+                        .unwrap_or_else(|| Path::new("."));
+                    let full_path = if Path::new(path).is_relative() {
+                        resolution_root.join(path)
+                    } else {
+                        path.into()
+                    };
+                    sources.push(NamedSource {
+                        name: repo.name.clone(),
+                        source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
+                            full_path,
+                            SkillScope::Project,
+                            repo.source_uuid.clone(),
+                            config.health_thresholds,
+                        )),
+                    });
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = path;
+                    return Err(unavailable_on_wasm("filesystem"));
+                }
             }
-            SkillRepoTransport::Http { .. }
-            | SkillRepoTransport::Stdio { .. }
-            | SkillRepoTransport::Git { .. } => {
-                // Wave-b stub: non-filesystem transports are rewired in wave-c.
-                tracing::warn!(
-                    repo = %repo.name,
-                    "non-filesystem skill repos are wave-c-gated"
-                );
+            SkillRepoTransport::Http {
+                url,
+                auth_header,
+                auth_token,
+                refresh_seconds,
+                timeout_seconds,
+            } => {
+                #[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
+                {
+                    let auth = match (auth_header, auth_token) {
+                        (Some(name), Some(value)) => Some(HttpSkillAuth::Header {
+                            name: name.clone(),
+                            value: value.clone(),
+                        }),
+                        (None, Some(value)) => Some(HttpSkillAuth::Bearer(value.clone())),
+                        _ => None,
+                    };
+                    sources.push(NamedSource {
+                        name: repo.name.clone(),
+                        source: SourceNode::Http(Box::new(HttpSkillSource::new_with_thresholds(
+                            repo.source_uuid.clone(),
+                            url.clone(),
+                            auth,
+                            Duration::from_secs(*refresh_seconds),
+                            Duration::from_secs(*timeout_seconds),
+                            config.health_thresholds,
+                        ))),
+                    });
+                }
+                #[cfg(any(not(feature = "skills-http"), target_arch = "wasm32"))]
+                {
+                    let _ = (
+                        url,
+                        auth_header,
+                        auth_token,
+                        refresh_seconds,
+                        timeout_seconds,
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    return Err(unavailable_on_wasm("HTTP"));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return Err(SkillError::Load(
+                        "HTTP skill repository configured but skills-http feature is disabled"
+                            .into(),
+                    ));
+                }
+            }
+            SkillRepoTransport::Stdio {
+                command,
+                args,
+                cwd,
+                env,
+                timeout_seconds,
+            } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let resolved_cwd = cwd.as_ref().map(|path| {
+                        if Path::new(path).is_relative() {
+                            context_root.unwrap_or_else(|| Path::new(".")).join(path)
+                        } else {
+                            path.into()
+                        }
+                    });
+                    let client = StdioExternalClient::new_with_timeout(
+                        command.clone(),
+                        args.clone(),
+                        env.clone(),
+                        resolved_cwd,
+                        Duration::from_secs(*timeout_seconds),
+                    );
+                    sources.push(NamedSource {
+                        name: repo.name.clone(),
+                        source: SourceNode::External(ExternalSkillSource::new_with_source_uuid(
+                            client,
+                            repo.source_uuid.clone(),
+                            Duration::from_secs(300),
+                            config.health_thresholds,
+                        )),
+                    });
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (command, args, cwd, env, timeout_seconds);
+                    return Err(unavailable_on_wasm("stdio"));
+                }
+            }
+            SkillRepoTransport::Git {
+                url,
+                git_ref,
+                ref_type,
+                skills_root,
+                auth_token,
+                ssh_key,
+                refresh_seconds,
+                depth,
+            } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let cache_base = cache_root
+                        .or(context_root)
+                        .or(user_root)
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".rkat/skill-cache/git");
+                    let git_ref = match ref_type {
+                        GitRefType::Branch => GitRef::Branch(git_ref.clone()),
+                        GitRefType::Tag => GitRef::Tag(git_ref.clone()),
+                        GitRefType::Commit => GitRef::Commit(git_ref.clone()),
+                    };
+                    let auth = auth_token
+                        .as_ref()
+                        .map(|token| GitSkillAuth::HttpsToken(token.clone()))
+                        .or_else(|| {
+                            ssh_key
+                                .as_ref()
+                                .map(|key| GitSkillAuth::SshKey(key.clone()))
+                        });
+                    sources.push(NamedSource {
+                        name: repo.name.clone(),
+                        source: SourceNode::Git(Box::new(GitSkillSource::new(GitSkillConfig {
+                            repo_url: url.clone(),
+                            git_ref,
+                            cache_dir: cache_base,
+                            skills_root: skills_root.clone(),
+                            refresh_interval: Duration::from_secs(*refresh_seconds),
+                            auth,
+                            depth: *depth,
+                            source_uuid: repo.source_uuid.clone(),
+                            health_thresholds: config.health_thresholds,
+                        }))),
+                    });
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (
+                        url,
+                        git_ref,
+                        ref_type,
+                        skills_root,
+                        auth_token,
+                        ssh_key,
+                        refresh_seconds,
+                        depth,
+                        user_root,
+                    );
+                    return Err(unavailable_on_wasm("Git"));
+                }
             }
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(root) = context_root {
         let default_project_skills = root.join(".rkat/skills");
         if default_project_skills.is_dir() {
@@ -82,4 +239,11 @@ pub async fn resolve_repositories_with_roots(
     }
 
     Ok(Some(CompositeSkillSource::from_named(sources)))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unavailable_on_wasm(transport: &str) -> SkillError {
+    SkillError::Load(
+        format!("{transport} skill repository configured but unavailable on wasm").into(),
+    )
 }

@@ -530,6 +530,8 @@ pub struct HelperOptions {
     pub backend: Option<MobBackendKind>,
     /// Tool access policy for the helper.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Explicit auth binding used for the helper member's agent build.
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -738,13 +740,11 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Per-member auth binding (deferral §1). When set, this member's
-    /// agent builds with `AgentBuildConfig.connection_ref = Some(this)`
-    /// — scoping credential resolution to the named realm + binding.
-    /// `None` means the member uses env-default / config-realm fallback
-    /// (mob members do NOT currently auto-inherit the spawner's
-    /// binding; that's a separate plumbing concern per dogma §19 —
-    /// we don't add a tri-state until Inherit has real semantics).
+    /// Per-member auth binding. When set, this member's agent builds with
+    /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
+    /// resolution to the named realm + binding. `None` means the caller did not
+    /// provide binding authority; build paths that require a binding must reject
+    /// the spawn instead of promoting an ambient fallback.
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
@@ -3390,6 +3390,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
+        spec.connection_ref = options.connection_ref;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3429,6 +3430,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
+        spec.connection_ref = options.connection_ref;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,

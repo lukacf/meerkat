@@ -4,6 +4,14 @@
 # retried once, everything else runs to completion without retries.
 
 [[profile.default.overrides]]
+# System-lane tests spawn nested cargo invocations and copy binaries into
+# scenario-specific target directories. Running them concurrently under a broad
+# workspace nextest run causes cargo lock contention and 300s wrapper timeouts;
+# the dedicated `cargo e2e-system` alias already passes `--test-threads=1`.
+filter = 'binary(e2e_system_lane)'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
 # D4 / issue #260: provider_tool_use_boundary race. Reduced from ~20% to ~10%
 # by drain-and-clear-dirty logic; full elimination blocked on deeper
 # runtime-append synchronization work.

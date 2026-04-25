@@ -1,9 +1,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Phase 0 external-boundary contract tests for runtime receipt/replay recovery.
 //!
-//! These tests stay out of the fast suite on purpose. They exercise the real
-//! runtime store implementations and both runtime drivers through one outside-in
-//! recovery matrix.
+//! These exercise the real runtime store implementations and both runtime
+//! drivers through one outside-in recovery matrix.
 
 use std::sync::Arc;
 
@@ -154,7 +153,6 @@ async fn retire_runtime(
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn recovery_store_contract_commits_authoritative_receipts_across_supported_backends() {
     for harness in supported_store_harnesses() {
         let runtime_id = make_runtime_id(harness.name);
@@ -276,7 +274,6 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persists_retire_across_supported_backends()
  {
     for harness in supported_store_harnesses() {
@@ -412,7 +409,6 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn recovery_persistent_driver_contract_consumes_committed_boundary_contributors_across_supported_backends()
  {
     for harness in supported_store_harnesses() {
@@ -510,7 +506,6 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of_replay() {
     let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("ephemeral"));
     let first = make_prompt("first ephemeral contribution");

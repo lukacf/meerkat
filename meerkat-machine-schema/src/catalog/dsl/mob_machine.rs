@@ -454,7 +454,7 @@ machine! {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.active_run_count = 0;
             }
-            to Stopped
+            to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 

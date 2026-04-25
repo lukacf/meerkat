@@ -240,12 +240,12 @@ jobs:
       - name: Run browser-contract tests under headless chrome
         env:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-        run: wasm-pack test --headless --chrome meerkat-web-runtime -- --test browser_contract
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract
 
       - name: Run release-targets tests under headless chrome
         env:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-        run: wasm-pack test --headless --chrome meerkat-web-runtime -- --test release_targets
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets
 
   test-unit:
     name: Unit tests

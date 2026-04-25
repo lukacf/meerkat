@@ -305,9 +305,7 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(dsl_authority::write_back_phase(
-            authority.state.lifecycle_phase,
-        ))
+        Some(dsl_authority::runtime_phase_from_authority(&authority))
     }
 
     /// Look up the session entry for a runtime ID, returning a control-plane error

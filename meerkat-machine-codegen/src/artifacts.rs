@@ -910,11 +910,9 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
 /// * a `route_to_input(&SeamEffect) -> Option<TypedRoutedInput>` function
 ///   that resolves routed effects to their typed target input using the
 ///   composition's `RouteId → (MachineInstanceId, InputVariantId, Vec<(FieldId, FieldId)>)`
-///   table.
-///
-/// Routes with `RouteTargetKind::Signal` are excluded from
-/// `route_to_input`: signals are a separate typed surface owned by the
-/// machine-layer signal handler, not the composition dispatcher.
+///   table, and
+/// * a `route_to_signal(&SeamEffect) -> Option<TypedRoutedSignal>` function
+///   for signal-kind routes using the same producer-field binding shape.
 ///
 /// Returns `None` when the composition declares no driver descriptor; the
 /// driver descriptor continues to carry the Rust emission path for xtask
@@ -968,7 +966,7 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
 
     pushln!(
         &mut out,
-        "use meerkat_machine_schema::identity::{{FieldId, InputVariantId, MachineInstanceId}};"
+        "use meerkat_machine_schema::identity::{{FieldId, InputVariantId, MachineInstanceId, SignalVariantId}};"
     );
     for import in &driver.rust.required_imports {
         pushln!(&mut out, "{import}");
@@ -997,6 +995,32 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
     pushln!(&mut out, "pub struct TypedRoutedInput {{");
     pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
     pushln!(&mut out, "    pub variant: InputVariantId,");
+    pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    // TypedRoutedSignal — the signal-route descriptor returned by `route_to_signal`.
+    pushln!(
+        &mut out,
+        "/// Typed signal-route descriptor resolved for a producer effect."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// `bindings` lists producer-field → consumer-field pairs in the"
+    );
+    pushln!(
+        &mut out,
+        "/// order declared by the composition schema. The signal dispatcher"
+    );
+    pushln!(
+        &mut out,
+        "/// uses these to construct the typed consumer signal."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedRoutedSignal {{");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub variant: SignalVariantId,");
     pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
     pushln!(&mut out, "}}");
     out.push('\n');
@@ -1040,10 +1064,7 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
         &mut out,
         "/// route in this composition (including signal-kind routes, which"
     );
-    pushln!(
-        &mut out,
-        "/// are handled by the signal surface, not the dispatcher)."
-    );
+    pushln!(&mut out, "/// are handled by `route_to_signal`).");
     pushln!(
         &mut out,
         "pub fn route_to_input(effect: &{seam_effect_enum}) -> Option<TypedRoutedInput> {{"
@@ -1086,6 +1107,88 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
             pushln!(
                 &mut out,
                 "                variant: InputVariantId::parse(\"{target_variant}\").expect(\"composition input slug\"),"
+            );
+            if route.bindings.is_empty() {
+                pushln!(&mut out, "                bindings: Vec::new(),");
+            } else {
+                pushln!(&mut out, "                bindings: vec![");
+                for binding in &route.bindings {
+                    let from_field = match &binding.source {
+                        RouteBindingSource::Field { from_field, .. } => from_field.as_str(),
+                        RouteBindingSource::Literal(_) | RouteBindingSource::OwnerProvided => {
+                            continue;
+                        }
+                    };
+                    let to_field = binding.to_field.as_str();
+                    pushln!(
+                        &mut out,
+                        "                    (FieldId::parse(\"{from_field}\").expect(\"route producer field slug\"), FieldId::parse(\"{to_field}\").expect(\"route consumer field slug\")),"
+                    );
+                }
+                pushln!(&mut out, "                ],");
+            }
+            pushln!(&mut out, "            }}),");
+        }
+        pushln!(&mut out, "            _ => None,");
+        pushln!(&mut out, "        }},");
+    }
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    // route_to_signal — match arms per signal-kind route.
+    pushln!(
+        &mut out,
+        "/// Resolve a routed producer effect to its typed consumer signal."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// Returns `None` when the effect variant has no declared signal"
+    );
+    pushln!(&mut out, "/// route in this composition.");
+    pushln!(
+        &mut out,
+        "pub fn route_to_signal(effect: &{seam_effect_enum}) -> Option<TypedRoutedSignal> {{"
+    );
+    pushln!(&mut out, "    match effect {{");
+    for (instance_id, machine) in &producers {
+        let variant = to_pascal_case(instance_id);
+        let machine_path = producer_effect_path(machine);
+        let signal_routes: Vec<&Route> = schema
+            .routes
+            .iter()
+            .filter(|route| {
+                route.from_machine.as_str() == *instance_id
+                    && route.to.kind == RouteTargetKind::Signal
+            })
+            .collect();
+        if signal_routes.is_empty() {
+            pushln!(
+                &mut out,
+                "        {seam_effect_enum}::{variant}(_) => None,"
+            );
+            continue;
+        }
+        pushln!(
+            &mut out,
+            "        {seam_effect_enum}::{variant}(inner) => match inner {{"
+        );
+        for route in signal_routes {
+            let effect_variant = route.effect_variant.as_str();
+            let target_machine = route.to.machine.as_str();
+            let target_variant = route.to.input_variant.as_str();
+            pushln!(
+                &mut out,
+                "            {machine_path}::{effect_variant}(_) => Some(TypedRoutedSignal {{"
+            );
+            pushln!(
+                &mut out,
+                "                instance_id: MachineInstanceId::parse(\"{target_machine}\").expect(\"composition instance slug\"),"
+            );
+            pushln!(
+                &mut out,
+                "                variant: SignalVariantId::parse(\"{target_variant}\").expect(\"composition signal slug\"),"
             );
             if route.bindings.is_empty() {
                 pushln!(&mut out, "                bindings: Vec::new(),");

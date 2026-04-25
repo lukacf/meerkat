@@ -238,7 +238,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     assert_eq!(before["run_counter"], 0);
 
     let turn = parse_js_result(
-        start_turn(handle, "Use the echo_browser tool, then answer.", "{}")
+        start_turn(handle, "Use the echo_browser tool, then answer.")
             .await
             .expect("start turn"),
     );

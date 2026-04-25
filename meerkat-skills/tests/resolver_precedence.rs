@@ -15,9 +15,7 @@
 //! - `enabled = false` → `Ok(None)` (skip resolution entirely).
 //! - filesystem repo with **relative path** resolves against
 //!   `context_root` when provided, falling back to `cache_root`, falling
-//!   back to `"."`. Non-filesystem transports are wave-c stubs and do
-//!   not produce a source yet (logged warning only; the resolver still
-//!   returns an empty composite).
+//!   back to `"."`.
 //! - filesystem repo with **absolute path** ignores the roots entirely.
 //! - the resolved source lists what's on disk under the fully-resolved
 //!   path, not just what the config declares.
@@ -30,6 +28,10 @@ use meerkat_core::skills_config::{SkillRepoTransport, SkillRepositoryConfig, Ski
 use meerkat_skills::resolve_repositories_with_roots;
 use std::fs;
 use std::path::Path;
+#[cfg(feature = "skills-http")]
+use wiremock::matchers::{header, method, path};
+#[cfg(feature = "skills-http")]
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn write_skill(root: &Path, skill: &str) {
     let dir = root.join(skill);
@@ -241,14 +243,23 @@ async fn absolute_path_ignores_roots() {
 }
 
 #[tokio::test]
-async fn non_filesystem_repos_are_wavec_stubs_and_contribute_no_sources() {
-    // The resolver logs a warning for http/stdio/git transports but
-    // still returns a composite; those transports are wave-b stubs per
-    // the docstring at `meerkat-skills/src/resolve.rs:3`. Mixing a
-    // filesystem repo with an http one must not let the http one steal
-    // the filesystem's skills.
+#[cfg(feature = "skills-http")]
+async fn http_repository_is_wired_and_preserves_filesystem_precedence() {
     let tmp = tempfile::tempdir().unwrap();
     write_skill(tmp.path(), "fs-skill");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/skills"))
+        .and(header("authorization", "Bearer secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "source_uuid": "fe52aa61-1111-4a22-9999-bbbbbbbbbbbb",
+            "skills": [{
+                "name": "http-skill",
+                "body": "---\nname: http-skill\ndescription: remote\n---\nremote body"
+            }]
+        })))
+        .mount(&server)
+        .await;
 
     let cfg = SkillsConfig {
         repositories: vec![
@@ -257,9 +268,9 @@ async fn non_filesystem_repos_are_wavec_stubs_and_contribute_no_sources() {
                 name: "net".to_string(),
                 source_uuid: source_uuid("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb"),
                 transport: SkillRepoTransport::Http {
-                    url: "http://127.0.0.1:1/skills".to_string(),
+                    url: format!("{}/skills", server.uri()),
                     auth_header: None,
-                    auth_token: None,
+                    auth_token: Some("secret".to_string()),
                     refresh_seconds: 300,
                     timeout_seconds: 15,
                 },
@@ -280,8 +291,38 @@ async fn non_filesystem_repos_are_wavec_stubs_and_contribute_no_sources() {
         .collect();
     assert_eq!(
         names,
-        vec!["fs-skill".to_string()],
-        "only the filesystem repo contributes; http is a wave-c stub. \
-         got {names:?}",
+        vec!["fs-skill".to_string(), "http-skill".to_string()],
+        "filesystem and HTTP repos both contribute in configured precedence; got {names:?}",
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+#[tokio::test]
+async fn git_repository_reports_unavailable_on_wasm() {
+    let cfg = SkillsConfig {
+        repositories: vec![SkillRepositoryConfig {
+            name: "git".to_string(),
+            source_uuid: source_uuid("a93d587d-8f44-438f-8189-6e8cf549f6e7"),
+            transport: SkillRepoTransport::Git {
+                url: "https://example.invalid/skills.git".to_string(),
+                git_ref: "main".to_string(),
+                ref_type: Default::default(),
+                skills_root: None,
+                auth_token: None,
+                ssh_key: None,
+                refresh_seconds: 300,
+                depth: Some(1),
+            },
+        }],
+        ..Default::default()
+    };
+
+    let err = match resolve_repositories_with_roots(&cfg, None, None, None).await {
+        Ok(_) => panic!("wasm Git repos must not resolve successfully"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("Git") && err.to_string().contains("unavailable on wasm"),
+        "wasm Git repos must fail with a typed unavailable transport error, got {err:?}",
     );
 }

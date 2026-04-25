@@ -6,13 +6,13 @@
 //! Clippy allows below are scoped to this compat/ module because the bridge
 //! machine builders are generated-style code: they use `expect()` on local
 //! invariants that cannot fail, and carry wire-shape imports the submodules
-//! selectively use. These allows are temporary until D-GATE closes and the
-//! compat surfaces are retired in a later wave.
+//! selectively use. These allows stay scoped to the bridge modules so their
+//! retirement remains a mechanical deletion target.
 
 // Scoped clippy allows: compat bridge machines are generated-style builders.
 // They use `expect()` on invariants that cannot fail in this construction path,
 // and carry a standard wire-shape import prelude that submodules selectively
-// use. Temporary until D-GATE closes and compat surfaces retire in a later wave.
+// use. Keep this scoped here so compat surface retirement is a mechanical deletion.
 #[allow(
     clippy::expect_used,
     clippy::unwrap_used,

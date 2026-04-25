@@ -765,9 +765,9 @@ machine! {
             loop_definition: Map<LoopInstanceId, LoopId>,
             loop_depth: Map<LoopInstanceId, u32>,
             loop_stage: Map<LoopInstanceId, Enum<LoopIterationStage>>,
-            loop_current_iteration: Map<LoopInstanceId, u32>,
-            loop_last_completed_iteration: Map<LoopInstanceId, u32>,
-            loop_max_iterations: Map<LoopInstanceId, u32>,
+            loop_current_iteration: Map<LoopInstanceId, u64>,
+            loop_last_completed_iteration: Map<LoopInstanceId, u64>,
+            loop_max_iterations: Map<LoopInstanceId, u64>,
             loop_active_body_frame: Map<LoopInstanceId, Option<FrameId>>,
             pending_spawn_count: u64,
             coordinator_bound: bool,
@@ -934,7 +934,19 @@ machine! {
                 parent_node_id: FlowNodeId,
                 loop_id: LoopId,
                 depth: u32,
-                max_iterations: u32,
+                max_iterations: u64,
+            },
+            RecordLoopBodyFrameCompleted {
+                loop_instance_id: LoopInstanceId,
+                iteration: u64,
+            },
+            RecordLoopUntilConditionMet {
+                loop_instance_id: LoopInstanceId,
+                iteration: u64,
+            },
+            RecordLoopUntilConditionFailed {
+                loop_instance_id: LoopInstanceId,
+                iteration: u64,
             },
             ProjectRunStatus {
                 run_id: RunId,
@@ -1454,7 +1466,7 @@ machine! {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.active_run_count = 0;
             }
-            to Stopped
+            to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
@@ -2249,7 +2261,79 @@ machine! {
                 self.loop_definition.insert(loop_instance_id, loop_id);
                 self.loop_depth.insert(loop_instance_id, depth);
                 self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                self.loop_current_iteration.insert(loop_instance_id, 0u64);
+                self.loop_last_completed_iteration.insert(loop_instance_id, 0u64);
                 self.loop_max_iterations.insert(loop_instance_id, max_iterations);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopBodyFrameCompletedRunning {
+            on input RecordLoopBodyFrameCompleted { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "body_frame_active" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::BodyFrameActive) }
+            guard "iteration_matches_current" { self.loop_current_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            update {
+                self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingUntilEvaluation);
+                self.loop_last_completed_iteration.insert(loop_instance_id, iteration);
+                self.loop_current_iteration.insert(loop_instance_id, iteration + 1u64);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionMetRunning {
+            on input RecordLoopUntilConditionMet { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            update {
+                self.loop_phase.insert(loop_instance_id, LoopStatus::Completed);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionFailedRunning {
+            on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            guard "iterations_remaining" {
+                self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                    < self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+            }
+            update {
+                self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                self.loop_active_body_frame.insert(loop_instance_id, None);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+        }
+
+        transition RecordLoopUntilConditionFailedExhausted {
+            on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+            guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+            guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+            guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+            guard "iterations_exhausted" {
+                self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                    >= self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+            }
+            update {
+                self.loop_phase.insert(loop_instance_id, LoopStatus::Exhausted);
                 self.loop_active_body_frame.insert(loop_instance_id, None);
             }
             to Running
@@ -2768,5 +2852,151 @@ mod tests {
             authority.state.loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingBodyFrame)
         );
+        assert_eq!(
+            authority
+                .state
+                .loop_current_iteration
+                .get(&loop_instance_id),
+            Some(&0)
+        );
+        assert_eq!(
+            authority
+                .state
+                .loop_last_completed_iteration
+                .get(&loop_instance_id),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn loop_until_feedback_is_recorded_by_mob_machine() {
+        let mut authority = MobMachineAuthority::new();
+        let loop_instance_id = LoopInstanceId::from("loop-1");
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CreateLoopSeed {
+                loop_instance_id: loop_instance_id.clone(),
+                parent_frame_id: FrameId::from("frame-root"),
+                parent_node_id: FlowNodeId::from("loop-node"),
+                loop_id: LoopId::from("repeat"),
+                depth: 1,
+                max_iterations: 2,
+            },
+        )
+        .expect("CreateLoopSeed should be accepted");
+        authority.state.loop_stage.insert(
+            loop_instance_id.clone(),
+            LoopIterationStage::BodyFrameActive,
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 0,
+            },
+        )
+        .expect("body completion should be accepted");
+        assert_eq!(
+            authority.state.loop_stage.get(&loop_instance_id),
+            Some(&LoopIterationStage::AwaitingUntilEvaluation)
+        );
+        assert_eq!(
+            authority
+                .state
+                .loop_current_iteration
+                .get(&loop_instance_id),
+            Some(&1)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 0,
+            },
+        )
+        .expect("until=false should request another body frame");
+        assert_eq!(
+            authority.state.loop_stage.get(&loop_instance_id),
+            Some(&LoopIterationStage::AwaitingBodyFrame)
+        );
+
+        authority.state.loop_stage.insert(
+            loop_instance_id.clone(),
+            LoopIterationStage::BodyFrameActive,
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 1,
+            },
+        )
+        .expect("second body completion should be accepted");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 1,
+            },
+        )
+        .expect("until=true should complete the loop");
+        assert_eq!(
+            authority.state.loop_phase.get(&loop_instance_id),
+            Some(&LoopStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn observe_runtime_retired_clears_member_binding_without_stopping_mob() {
+        let mut authority = MobMachineAuthority::new();
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        let fence_token = FenceToken(7);
+        authority.state.live_runtime_ids.insert(runtime_id.clone());
+        authority
+            .state
+            .externally_addressable_runtime_ids
+            .insert(runtime_id.clone());
+        authority
+            .state
+            .runtime_fence_tokens
+            .insert(runtime_id.clone(), fence_token);
+        authority
+            .state
+            .member_state_markers
+            .insert(runtime_id.clone(), MobMemberState::Retiring);
+        authority.state.active_run_count = 3;
+
+        let transition = authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("runtime retire observation should be accepted");
+
+        assert_eq!(transition.to_phase, MobPhase::Running);
+        assert_eq!(authority.state.lifecycle_phase, MobPhase::Running);
+        assert!(!authority.state.live_runtime_ids.contains(&runtime_id));
+        assert!(
+            !authority
+                .state
+                .externally_addressable_runtime_ids
+                .contains(&runtime_id)
+        );
+        assert!(
+            !authority
+                .state
+                .runtime_fence_tokens
+                .contains_key(&runtime_id)
+        );
+        assert!(
+            !authority
+                .state
+                .member_state_markers
+                .contains_key(&runtime_id)
+        );
+        assert_eq!(authority.state.active_run_count, 0);
     }
 }

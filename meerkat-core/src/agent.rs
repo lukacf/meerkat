@@ -843,8 +843,11 @@ where
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
-    /// Optional session checkpointer for host-mode persistence.
-    #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
+    /// Optional session checkpointer for keep-alive persistence.
+    ///
+    /// Wired by `AgentBuilder::with_checkpointer`, installed by
+    /// `PersistentSessionService`, and consumed by
+    /// `Agent::checkpoint_current_session`.
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,

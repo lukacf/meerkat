@@ -673,6 +673,7 @@ async fn apply_runtime_turn(
                         .clone()
                         .map(encode_llm_client_override_for_service),
                     external_tools: None,
+                    checkpointer: None,
                     runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
                         bindings,
                     )),
@@ -2066,7 +2067,7 @@ async fn comms_peers(
 
 fn make_runtime_external_event_input(
     event_type: &str,
-    payload: Box<serde_json::value::RawValue>,
+    payload: Value,
     blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
 ) -> Result<meerkat_runtime::Input, ApiError> {
     if event_type.trim().is_empty() {
@@ -2074,12 +2075,6 @@ fn make_runtime_external_event_input(
             "event_type cannot be empty".to_string(),
         ));
     }
-
-    // The wire carries the payload as an opaque `Box<RawValue>` so the
-    // runtime layer can decide how to interpret it. The runtime input type
-    // still expects a `serde_json::Value`, so parse at the boundary.
-    let payload: Value = serde_json::from_str(payload.get())
-        .map_err(|e| ApiError::BadRequest(format!("invalid payload JSON: {e}")))?;
 
     let blocks = blocks
         .map(|blocks| {
@@ -2115,6 +2110,18 @@ fn make_runtime_external_event_input(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RestSessionExternalEventEnvelope {
+    GenericJson {
+        event_type: String,
+        payload: Value,
+        #[serde(default)]
+        blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
+    },
+    PeerResponseTerminal {},
+}
+
+#[derive(Debug, Deserialize)]
 struct RestPeerResponseTerminalBody {
     peer_name: meerkat_core::comms::PeerName,
     request_id: String,
@@ -2131,7 +2138,7 @@ async fn post_external_event(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
-    Json(event): Json<meerkat_contracts::SessionExternalEventEnvelope>,
+    Json(event): Json<RestSessionExternalEventEnvelope>,
 ) -> Result<(StatusCode, Json<Value>), Response> {
     // Webhook auth resolved once at startup, stored in AppState.
     webhook::verify_webhook(&headers, &state.webhook_auth)
@@ -2141,17 +2148,15 @@ async fn post_external_event(
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
 
     let input = match event {
-        meerkat_contracts::SessionExternalEventEnvelope::GenericJson {
+        RestSessionExternalEventEnvelope::GenericJson {
             event_type,
             payload,
             blocks,
         } => make_runtime_external_event_input(&event_type, payload, blocks),
-        meerkat_contracts::SessionExternalEventEnvelope::PeerResponseTerminal { .. } => Err(
-            ApiError::BadRequest(
-                "peer_response_terminal is reserved on /external-events; use /peer-response-terminal"
-                    .to_string(),
-            ),
-        ),
+        RestSessionExternalEventEnvelope::PeerResponseTerminal {} => Err(ApiError::BadRequest(
+            "peer_response_terminal is reserved on /external-events; use /peer-response-terminal"
+                .to_string(),
+        )),
     }
     .map_err(IntoResponse::into_response)?;
 
@@ -2222,6 +2227,7 @@ async fn post_peer_response_terminal(
     admit_runtime_input_via_webhook(&state, &session_id, input, WebhookAdmissionMode::Wakeful).await
 }
 
+#[derive(Debug, Clone, Copy)]
 enum WebhookAdmissionMode {
     /// Stage the input without waking an idle runtime. Used by generic
     /// external events that are explicitly "next turn boundary" work.
@@ -4210,8 +4216,6 @@ async fn mcp_add(
         ));
     }
 
-    meerkat::surface::resolve_persisted("mcp/add", req.persisted);
-
     let adapter = resolve_mcp_adapter(&state, &session_id).await?;
 
     // Inject the server name into the config object.
@@ -4226,15 +4230,32 @@ async fn mcp_add(
     let config: meerkat_core::McpServerConfig = serde_json::from_value(server_config)
         .map_err(|e| ApiError::BadRequest(format!("invalid server_config: {e}")))?;
 
-    adapter
-        .stage_add(config)
-        .await
-        .map_err(ApiError::Internal)?;
+    let rollback = if req.persisted {
+        let authority = meerkat::surface::mcp_config_mutation_authority(
+            state.context_root.clone(),
+            state.user_config_root.clone(),
+        );
+        meerkat::surface::persist_mcp_add_if_requested(true, &authority, config.clone())
+            .await
+            .map_err(ApiError::Internal)?
+    } else {
+        None
+    };
+
+    if let Err(err) = adapter.stage_add(config).await {
+        let rollback_message =
+            match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                Ok(()) => String::new(),
+                Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+            };
+        return Err(ApiError::Internal(format!("{err}{rollback_message}")));
+    }
 
     Ok(Json(meerkat::surface::mcp_live_response(
         req.session_id,
         meerkat_contracts::McpLiveOperation::Add,
         Some(req.server_name),
+        rollback.is_some(),
     )))
 }
 
@@ -4252,18 +4273,33 @@ async fn mcp_remove(
         ));
     }
 
-    meerkat::surface::resolve_persisted("mcp/remove", req.persisted);
-
     let adapter = resolve_mcp_adapter(&state, &session_id).await?;
-    adapter
-        .stage_remove(req.server_name.clone())
-        .await
-        .map_err(ApiError::Internal)?;
+    let rollback = if req.persisted {
+        let authority = meerkat::surface::mcp_config_mutation_authority(
+            state.context_root.clone(),
+            state.user_config_root.clone(),
+        );
+        meerkat::surface::persist_mcp_remove_if_requested(true, &authority, &req.server_name)
+            .await
+            .map_err(ApiError::Internal)?
+    } else {
+        None
+    };
+
+    if let Err(err) = adapter.stage_remove(req.server_name.clone()).await {
+        let rollback_message =
+            match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                Ok(()) => String::new(),
+                Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+            };
+        return Err(ApiError::Internal(format!("{err}{rollback_message}")));
+    }
 
     Ok(Json(meerkat::surface::mcp_live_response(
         req.session_id,
         meerkat_contracts::McpLiveOperation::Remove,
         Some(req.server_name),
+        rollback.is_some(),
     )))
 }
 
@@ -4282,8 +4318,6 @@ async fn mcp_reload(
             "server_name cannot be empty".to_string(),
         ));
     }
-
-    meerkat::surface::resolve_persisted("mcp/reload", req.persisted);
 
     let adapter = resolve_mcp_adapter(&state, &session_id).await?;
     match req.server_name.as_ref() {
@@ -4311,6 +4345,7 @@ async fn mcp_reload(
         req.session_id,
         meerkat_contracts::McpLiveOperation::Reload,
         req.server_name,
+        false,
     )))
 }
 
@@ -6324,6 +6359,7 @@ mod tests {
                 "sid_123".to_string(),
                 meerkat_contracts::McpLiveOperation::Add,
                 Some("test-server".to_string()),
+                false,
             );
             assert_eq!(resp.session_id, "sid_123");
             assert_eq!(resp.operation, meerkat_contracts::McpLiveOperation::Add);
@@ -6334,10 +6370,14 @@ mod tests {
         }
 
         #[test]
-        fn test_resolve_persisted_warns_and_returns_false() {
-            // persisted=true should always return false.
-            assert!(!meerkat::surface::resolve_persisted("test", true));
-            assert!(!meerkat::surface::resolve_persisted("test", false));
+        fn test_mcp_response_shape_tracks_persisted_flag() {
+            let resp = meerkat::surface::mcp_live_response(
+                "sid_123".to_string(),
+                meerkat_contracts::McpLiveOperation::Add,
+                Some("test-server".to_string()),
+                true,
+            );
+            assert!(resp.persisted);
         }
 
         #[test]

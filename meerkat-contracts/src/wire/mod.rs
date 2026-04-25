@@ -1,5 +1,6 @@
 //! Canonical wire response types.
 
+mod approval;
 mod artifact;
 mod comms;
 mod connection;
@@ -18,6 +19,12 @@ pub mod skills;
 pub mod supervisor_bridge;
 mod usage;
 
+pub use approval::{
+    ApprovalActionKind, ApprovalDecideParams, ApprovalDecision, ApprovalDecisionRecord,
+    ApprovalGetParams, ApprovalId, ApprovalListFilter, ApprovalListParams, ApprovalListResult,
+    ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction, ApprovalRecord, ApprovalRequest,
+    ApprovalRequestParams, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
+};
 pub use comms::{
     CommsCommandError, CommsCommandRequest, HandlingMode as WireCommsHandlingMode,
     InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode,

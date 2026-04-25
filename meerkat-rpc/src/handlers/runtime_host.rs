@@ -41,6 +41,7 @@ fn host_surface_options(
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
     options.skills = true;
+    options.approvals = true;
     options.rpc_transport = Some("json_rpc".to_string());
     options.rpc_methods = meerkat_contracts::rpc_method_names(catalog_options);
     options

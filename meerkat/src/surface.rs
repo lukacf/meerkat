@@ -88,6 +88,7 @@ pub struct RuntimeHostSurfaceOptions {
     pub session_streams: bool,
     pub schedules: bool,
     pub skills: bool,
+    pub approvals: bool,
     pub rpc_transport: Option<String>,
     pub rest_base_url: Option<String>,
     pub rpc_methods: Vec<String>,
@@ -112,6 +113,7 @@ impl RuntimeHostSurfaceOptions {
             session_streams: false,
             schedules: false,
             skills: false,
+            approvals: false,
             rpc_transport: None,
             rest_base_url: None,
             rpc_methods: Vec::new(),
@@ -185,7 +187,7 @@ pub fn build_runtime_host_capabilities(
             artifacts: options.artifacts,
             // First slice: these future surfaces are deliberately reported as
             // unsupported until their owning lanes add durable contracts.
-            approvals: false,
+            approvals: options.approvals,
             external_members: false,
             secure_remote_rpc: false,
         },

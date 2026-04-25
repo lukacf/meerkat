@@ -639,6 +639,9 @@ pub struct SessionRuntime {
     /// inject scheduler tools into resumed/runtime-backed agent builds.
     pub builder_schedule_tools_slot:
         Arc<StdRwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
+    /// Runtime-owned approval records. Surfaces only project decisions into
+    /// this service; approval status is service-owned.
+    approval_service: meerkat_core::ApprovalService,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -810,6 +813,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
+            approval_service: meerkat_core::ApprovalService::new(),
         }
     }
 
@@ -881,6 +885,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
+            approval_service: meerkat_core::ApprovalService::new(),
         }
     }
 
@@ -974,6 +979,10 @@ impl SessionRuntime {
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<MeerkatMachine> {
         self.runtime_adapter.clone()
+    }
+
+    pub fn approval_service(&self) -> meerkat_core::ApprovalService {
+        self.approval_service.clone()
     }
 
     /// Project the owning live session into the provider-backed realtime open seam.

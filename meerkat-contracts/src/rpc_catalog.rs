@@ -120,6 +120,30 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Get runtime host health",
             "RuntimeHostHealth",
         ),
+        RpcMethodDescriptor::typed(
+            "approval/request",
+            "Create a durable approval request",
+            "ApprovalRequestParams",
+            "ApprovalRecord",
+        ),
+        RpcMethodDescriptor::typed(
+            "approval/list",
+            "List durable approval requests",
+            "ApprovalListParams",
+            "ApprovalListResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "approval/get",
+            "Get one durable approval request",
+            "ApprovalGetParams",
+            "ApprovalRecord",
+        ),
+        RpcMethodDescriptor::typed(
+            "approval/decide",
+            "Record a durable approval decision",
+            "ApprovalDecideParams",
+            "ApprovalRecord",
+        ),
         RpcMethodDescriptor::result_only(
             "models/catalog",
             "Get the effective model catalog (built-in plus config-backed entries)",
@@ -571,6 +595,10 @@ mod tests {
         assert!(methods.iter().any(|m| m == "events/latest_cursor"));
         assert!(methods.iter().any(|m| m == "events/list_since"));
         assert!(methods.iter().any(|m| m == "events/snapshot"));
+        assert!(methods.iter().any(|m| m == "approval/request"));
+        assert!(methods.iter().any(|m| m == "approval/list"));
+        assert!(methods.iter().any(|m| m == "approval/get"));
+        assert!(methods.iter().any(|m| m == "approval/decide"));
         assert!(
             methods
                 .iter()

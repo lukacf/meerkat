@@ -2375,6 +2375,7 @@ fn rest_runtime_host_surface_options(
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
     options.skills = true;
+    options.approvals = false;
     options.rest_base_url = Some(format!("http://{}:{}", state.rest_host, state.rest_port));
     options.rest_paths = meerkat_contracts::rest_path_catalog()
         .into_iter()

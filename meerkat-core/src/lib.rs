@@ -15,6 +15,7 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod approval;
 pub mod artifact;
 pub mod auth;
 pub mod blob;
@@ -80,6 +81,12 @@ pub use agent::{
     AgentToolDispatcher, BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities,
     ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
     should_compose_tool_catalog_control_plane,
+};
+pub use approval::{
+    ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
+    ApprovalListFilter, ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction,
+    ApprovalRecord, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk,
+    ApprovalService, ApprovalStatus,
 };
 pub use artifact::{
     ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,

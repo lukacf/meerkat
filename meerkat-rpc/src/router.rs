@@ -1274,6 +1274,18 @@ impl MethodRouter {
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
+            "approval/request" => {
+                handlers::approval::handle_request(id, params, self.runtime.clone()).await
+            }
+            "approval/list" => {
+                handlers::approval::handle_list(id, params, self.runtime.clone()).await
+            }
+            "approval/get" => {
+                handlers::approval::handle_get(id, params, self.runtime.clone()).await
+            }
+            "approval/decide" => {
+                handlers::approval::handle_decide(id, params, self.runtime.clone()).await
+            }
             "models/catalog" => {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::models::handle_catalog(id, &config)
@@ -2822,7 +2834,154 @@ mod tests {
             capabilities["result"]["features"]["secure_remote_rpc"],
             false
         );
+        assert_eq!(capabilities["result"]["features"]["approvals"], true);
         assert_eq!(health["result"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn approval_request_get_list_and_decide_round_trip() {
+        let (router, _rx) = test_router().await;
+        let request = make_request(
+            "approval/request",
+            serde_json::json!({
+                "requester": "human:alice",
+                "owner": {"owner_type": "session", "session_id": "session-1"},
+                "resource": {"kind": "shell_command", "id": "shell:rm"},
+                "proposed_action": {
+                    "kind": "shell_command",
+                    "summary": "run destructive shell command",
+                    "body": {"cmd": "rm -rf target/tmp"}
+                },
+                "risk": "high",
+                "request_body": {"why": "cleanup"},
+                "allowed_decisions": ["approve", "deny"],
+                "metadata": {
+                    "labels": {"client.thread_id": "thread-1"},
+                    "app_context": {"client_ref": "opaque"}
+                },
+                "request_provenance": {"tool_call_id": "call-1"}
+            }),
+        );
+
+        let created = router.dispatch(request).await.expect("response");
+        let created = result_value(&created);
+        let approval_id = created["approval_id"]
+            .as_str()
+            .expect("approval id")
+            .to_string();
+        assert_eq!(created["status"], "pending");
+        assert_eq!(created["request_provenance"]["tool_call_id"], "call-1");
+
+        let listed = router
+            .dispatch(make_request(
+                "approval/list",
+                serde_json::json!({"filter": {"status": "pending"}}),
+            ))
+            .await
+            .expect("list response");
+        let listed = result_value(&listed);
+        assert_eq!(listed["approvals"].as_array().expect("approvals").len(), 1);
+
+        let decided = router
+            .dispatch(make_request(
+                "approval/decide",
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": "approve",
+                    "actor": "human:bob",
+                    "reason": "reviewed",
+                    "provenance": {"client": "mobile"}
+                }),
+            ))
+            .await
+            .expect("decide response");
+        let decided = result_value(&decided);
+        assert_eq!(decided["status"], "approved");
+        assert_eq!(decided["decision"]["actor"], "human:bob");
+        assert_eq!(decided["decision"]["provenance"]["client"], "mobile");
+        assert_eq!(decided["request_provenance"]["tool_call_id"], "call-1");
+
+        let fetched = router
+            .dispatch(make_request(
+                "approval/get",
+                serde_json::json!({"approval_id": decided["approval_id"]}),
+            ))
+            .await
+            .expect("get response");
+        let fetched = result_value(&fetched);
+        assert_eq!(fetched["status"], "approved");
+    }
+
+    #[tokio::test]
+    async fn approval_decide_rejects_duplicate_decisions() {
+        let (router, _rx) = test_router().await;
+        let created = router
+            .dispatch(make_request(
+                "approval/request",
+                serde_json::json!({
+                    "requester": "human:alice",
+                    "owner": {"owner_type": "runtime"},
+                    "resource": {"kind": "runtime", "id": "local"},
+                    "proposed_action": {"kind": "other", "summary": "manual gate"},
+                    "risk": "medium",
+                    "allowed_decisions": ["deny"]
+                }),
+            ))
+            .await
+            .expect("request response");
+        let approval_id = result_value(&created)["approval_id"]
+            .as_str()
+            .expect("approval id")
+            .to_string();
+
+        let first = router
+            .dispatch(make_request(
+                "approval/decide",
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": "deny",
+                    "actor": "human:bob"
+                }),
+            ))
+            .await
+            .expect("first decision");
+        assert!(first.error.is_none());
+
+        let duplicate = router
+            .dispatch(make_request(
+                "approval/decide",
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": "deny",
+                    "actor": "human:bob"
+                }),
+            ))
+            .await
+            .expect("duplicate decision");
+        assert_eq!(error_code(&duplicate), error::INVALID_PARAMS);
+        assert!(error_message(&duplicate).contains("already been decided"));
+    }
+
+    #[tokio::test]
+    async fn approval_request_rejects_reserved_metadata_spoofing() {
+        let (router, _rx) = test_router().await;
+        let response = router
+            .dispatch(make_request(
+                "approval/request",
+                serde_json::json!({
+                    "requester": "human:alice",
+                    "owner": {"owner_type": "runtime"},
+                    "resource": {"kind": "runtime", "id": "local"},
+                    "proposed_action": {"kind": "other", "summary": "manual gate"},
+                    "risk": "medium",
+                    "allowed_decisions": ["approve", "deny"],
+                    "metadata": {"labels": {"meerkat.approval_id": "spoof"}}
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(error_code(&response), error::INVALID_PARAMS);
+        assert!(error_message(&response).contains("reserved"));
     }
 
     async fn test_router_with_v9_runtime_and_realtime_ws_host()
@@ -3361,6 +3520,10 @@ mod tests {
         assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
+        assert!(method_names.contains(&"approval/request"));
+        assert!(method_names.contains(&"approval/list"));
+        assert!(method_names.contains(&"approval/get"));
+        assert!(method_names.contains(&"approval/decide"));
         assert!(
             !method_names.contains(&"session/destroy"),
             "generic session/destroy must not appear until it has member-aware mob semantics"

@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+ContentInput = str | list[dict[str, Any]]
+
 
 # ---------------------------------------------------------------------------
 # Shared value types (also re-exported from types.py)
@@ -63,7 +65,7 @@ class RunStarted(Event):
     """Agent run has started."""
 
     session_id: str = ""
-    prompt: str = ""
+    prompt: ContentInput = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,7 @@ class RunFailed(Event):
     """Agent run failed."""
 
     session_id: str = ""
+    error_class: str = ""
     error: str = ""
 
 

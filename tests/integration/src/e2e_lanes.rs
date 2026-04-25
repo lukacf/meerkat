@@ -113,38 +113,50 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
     }
 
     let cwd = workspace_root().join(spec.cwd);
-    let env_overrides = scenario_env(spec)?;
+    let scenario_target_dir = scenario_cargo_target_dir(spec)?;
+    let env_overrides = match scenario_env(spec, &scenario_target_dir) {
+        Ok(env_overrides) => env_overrides,
+        Err(error) => {
+            clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
+            return Err(error);
+        }
+    };
     let (pre_commands, command, output_policy) = build_commands(spec);
 
-    for pre_command in pre_commands {
-        run_pre_command(
-            CommandEntry {
-                spec,
-                command: pre_command,
-            },
-            &cwd,
-            &env_overrides,
-        )
-        .await?;
+    let result = async {
+        for pre_command in pre_commands {
+            run_pre_command(
+                CommandEntry {
+                    spec,
+                    command: pre_command,
+                },
+                &cwd,
+                &env_overrides,
+            )
+            .await?;
+        }
+
+        // macOS 26.3.1+ `codeSigningMonitor=2` SIGKILLs adhoc/linker-signed
+        // binaries whose content hash was invalidated after signing (which
+        // happens when any cargo invocation re-links between scenario runs).
+        // Re-sign every `CARGO_BIN_EXE_*` binary with a fresh adhoc signature
+        // so the scenario can `exec` them cleanly. No-op on non-macOS.
+        ensure_binary_signatures_fresh(spec, &env_overrides).await;
+
+        let completed = run_command(command, &cwd, &env_overrides, spec.timeout_secs).await?;
+        if let Some(problem) = analyze_success_output(output_policy, &completed.output) {
+            return Err(format!(
+                "{}: {} ({problem})",
+                run_label(spec),
+                command_display(command)
+            ));
+        }
+
+        Ok(())
     }
-
-    // macOS 26.3.1+ `codeSigningMonitor=2` SIGKILLs adhoc/linker-signed
-    // binaries whose content hash was invalidated after signing (which
-    // happens when any cargo invocation re-links between scenario runs).
-    // Re-sign every `CARGO_BIN_EXE_*` binary with a fresh adhoc signature
-    // so the scenario can `exec` them cleanly. No-op on non-macOS.
-    ensure_binary_signatures_fresh(spec, &env_overrides).await;
-
-    let completed = run_command(command, &cwd, &env_overrides, spec.timeout_secs).await?;
-    if let Some(problem) = analyze_success_output(output_policy, &completed.output) {
-        return Err(format!(
-            "{}: {} ({problem})",
-            run_label(spec),
-            command_display(command)
-        ));
-    }
-
-    Ok(())
+    .await;
+    clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
+    result
 }
 
 #[allow(clippy::await_holding_lock)] // Lock is explicitly dropped before await
@@ -454,10 +466,9 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
     }
 }
 
-fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
+fn scenario_env(spec: &Spec, cargo_target_dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
-    let cargo_target_dir = scenario_cargo_target_dir(spec)?;
-    std::fs::create_dir_all(&cargo_target_dir).map_err(|error| {
+    std::fs::create_dir_all(cargo_target_dir).map_err(|error| {
         format!(
             "failed to create scenario cargo target dir {}: {error}",
             cargo_target_dir.display()
@@ -491,10 +502,7 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     env.entry("RUST_MIN_STACK".to_string())
         .or_insert_with(|| (16 * 1024 * 1024).to_string());
     for (key, value) in spec.env {
-        env.insert(
-            (*key).to_string(),
-            expand_template(value, &cargo_target_dir),
-        );
+        env.insert((*key).to_string(), expand_template(value, cargo_target_dir));
     }
     for binary in spec.cargo_bin_env {
         env.insert(
@@ -512,6 +520,19 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
         env.insert("MEERKAT_PYTHON_BIN".to_string(), python.to_string());
     }
     Ok(env.into_iter().collect())
+}
+
+fn clean_scenario_target_dir_if_requested(spec: &Spec, cargo_target_dir: &Path) {
+    if !clean_e2e_scenario_targets_enabled() || !cargo_target_dir.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(cargo_target_dir) {
+        eprintln!(
+            "failed to clean e2e scenario target for {} at {}: {error}",
+            run_label(spec),
+            cargo_target_dir.display()
+        );
+    }
 }
 
 fn scenario_cargo_target_dir(spec: &Spec) -> Result<PathBuf, String> {
@@ -740,6 +761,13 @@ fn cargo_target_dir() -> Result<PathBuf, String> {
 fn strict_prereqs_enabled() -> bool {
     matches!(
         std::env::var("MEERKAT_STRICT_E2E_PREREQS").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+fn clean_e2e_scenario_targets_enabled() -> bool {
+    matches!(
+        std::env::var("MEERKAT_CLEAN_E2E_SCENARIO_TARGETS").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
 }

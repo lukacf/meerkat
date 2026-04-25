@@ -61,7 +61,17 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         .collect();
     let runtime_commands: BTreeSet<&str> = canonical_meerkat_machine_command_manifest()
         .into_iter()
-        .filter(|name| *name != "RuntimeRealtimeChannelStatus")
+        .filter(|name| {
+            !matches!(
+                *name,
+                // Diagnostic/status helper, not a DSL semantic input.
+                "RuntimeRealtimeChannelStatus"
+                    // Local resource preparation deliberately does not route
+                    // through DSL authority; authoritative binding remains
+                    // `PrepareBindings`.
+                    | "PrepareLocalSessionBindings"
+            )
+        })
         .collect();
 
     assert_runtime_manifest_matches_schema(

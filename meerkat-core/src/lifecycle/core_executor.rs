@@ -37,6 +37,8 @@ pub enum CoreExecutorError {
 pub enum CoreApplyTerminal {
     /// The run completed and produced a result.
     RunResult(RunResult),
+    /// A resume-pending request reached the session with no pending boundary.
+    NoPendingBoundary,
     /// The run committed a continuation boundary and is waiting for external
     /// tool results before it can continue.
     CallbackPending { tool_name: String, args: Value },

@@ -285,7 +285,9 @@ jobs:
           prefix-key: integration-fast
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -333,13 +335,111 @@ jobs:
           prefix-key: e2e-system
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
       - name: Run e2e-system lane
         run: cargo e2e-system
+
+  e2e-live:
+    name: E2E live lane
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RKAT_ANTHROPIC_API_KEY: ${{ secrets.RKAT_ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      RKAT_OPENAI_API_KEY: ${{ secrets.RKAT_OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      RKAT_GEMINI_API_KEY: ${{ secrets.RKAT_GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-live
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-live lane
+        run: cargo e2e-live
+
+  e2e-smoke:
+    name: E2E smoke lane
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RKAT_ANTHROPIC_API_KEY: ${{ secrets.RKAT_ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      RKAT_OPENAI_API_KEY: ${{ secrets.RKAT_OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      RKAT_GEMINI_API_KEY: ${{ secrets.RKAT_GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-smoke
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-smoke lane
+        run: cargo e2e-smoke
 
   test-minimal:
     name: Minimal feature builds

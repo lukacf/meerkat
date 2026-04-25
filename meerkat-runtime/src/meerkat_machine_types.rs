@@ -322,6 +322,9 @@ pub(crate) enum MeerkatMachineCommand {
     PrepareBindings {
         session_id: SessionId,
     },
+    PrepareLocalSessionBindings {
+        session_id: SessionId,
+    },
     InputState {
         session_id: SessionId,
         input_id: InputId,

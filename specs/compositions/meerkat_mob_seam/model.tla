@@ -3244,7 +3244,7 @@ meerkat_RecycleFromIdleOrRetired ==
        /\ packet.variant = "Recycle"
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle" \/ meerkat_phase = "Retired"
-       /\ (meerkat_active_runtime_id # None)
+       /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
@@ -3265,7 +3265,7 @@ meerkat_RecycleFromAttached ==
        /\ packet.variant = "Recycle"
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
-       /\ (meerkat_active_runtime_id # None)
+       /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
@@ -12592,8 +12592,8 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "PendingFailed") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "SnapshotAligned") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "SnapshotAligned") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
-    \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Idle" \/ meerkat_phase = "Retired") /\ ((meerkat_active_runtime_id # None))
-    \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Attached") /\ ((meerkat_active_runtime_id # None))
+    \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Idle" \/ meerkat_phase = "Retired") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))

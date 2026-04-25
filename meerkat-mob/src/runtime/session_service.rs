@@ -287,7 +287,9 @@ where
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        meerkat_session::EphemeralSessionService::<B>::start_turn(self, session_id, req).await?;
+        let run_result =
+            meerkat_session::EphemeralSessionService::<B>::start_turn(self, session_id, req)
+                .await?;
         let session =
             meerkat_session::EphemeralSessionService::<B>::export_session(self, session_id).await?;
         let receipt = build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
@@ -296,9 +298,10 @@ where
                 "failed to serialize session snapshot for runtime commit: {err}"
             )))
         })?;
-        Ok(CoreApplyOutput::without_terminal(
+        Ok(CoreApplyOutput::with_run_result(
             receipt,
             Some(session_snapshot),
+            run_result,
         ))
     }
 

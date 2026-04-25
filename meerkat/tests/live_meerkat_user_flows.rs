@@ -834,7 +834,7 @@ mod budget_exhaustion {
 
         // Verify agent is in valid state
         assert!(
-            agent.state().is_terminal() || *agent.state() == LoopState::CallingLlm,
+            agent.state().is_terminal() || agent.state() == LoopState::CallingLlm,
             "Agent should be in valid state"
         );
     }

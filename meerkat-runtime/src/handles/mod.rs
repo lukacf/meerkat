@@ -72,10 +72,10 @@ pub use turn_state::RuntimeTurnStateHandle;
 
 /// Shared handle over a session's real `MeerkatMachineAuthority`.
 ///
-/// Constructed by [`crate::meerkat_machine::MeerkatMachine::prepare_bindings`]
-/// from the session's [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`]
-/// `Arc`; cloned into each of the 5 handle impls so all routes mutate the same
-/// underlying authority.
+/// Constructed from the session's
+/// [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`] `Arc`; cloned
+/// into each of the 5 handle impls so all routes mutate the same underlying
+/// authority.
 ///
 /// A standalone ephemeral constructor ([`HandleDslAuthority::ephemeral`]) is
 /// also provided for legacy code paths (recovery fallback, test sites) that

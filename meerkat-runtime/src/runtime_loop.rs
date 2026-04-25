@@ -12,12 +12,8 @@ use meerkat_core::lifecycle::run_primitive::{
     RunApplyBoundary, RunPrimitive, StagedRunInput,
 };
 use meerkat_core::lifecycle::{InputId, RunId};
-use meerkat_core::{
-    PeerConversationProjection, PeerResponseProgressProjectionPhase,
-    PeerResponseTerminalProjectionStatus,
-};
 
-use crate::input::Input;
+use crate::input::{Input, peer_block_prefix_text, peer_projection, peer_prompt_text};
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
@@ -104,12 +100,14 @@ pub(crate) fn for_input(
 
 /// Merge the per-input turn metadata carried by a staged batch into a single
 /// typed carrier. Scalar conflicts (two inputs disagreeing on e.g. `model`)
-/// are refused with a typed error and the batch is treated as if no metadata
-/// could be synthesized safely — the caller falls back to `None` and the
-/// conflict is surfaced through structured tracing.
+/// are refused with a typed error so caller policy is not silently replaced by
+/// shell defaults.
 pub(crate) fn merge_batch_turn_metadata(
     inputs: &[(meerkat_core::lifecycle::InputId, Input)],
-) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+) -> Result<
+    Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+> {
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     let mut acc: Option<RuntimeTurnMetadata> = None;
     for (_, input) in inputs {
@@ -119,18 +117,11 @@ pub(crate) fn merge_batch_turn_metadata(
         match acc.as_mut() {
             None => acc = Some(meta),
             Some(existing) => {
-                if let Err(conflict) = existing.merge(meta) {
-                    tracing::error!(
-                        field = conflict.field,
-                        reason = conflict.reason,
-                        "batch turn-metadata merge conflict; dropping batch metadata"
-                    );
-                    return None;
-                }
+                existing.merge(meta)?;
             }
         }
     }
-    acc.filter(|m| !m.is_empty())
+    Ok(acc.filter(|m| !m.is_empty()))
 }
 
 fn resolve_completion_waiters(
@@ -154,7 +145,7 @@ fn resolve_completion_waiters(
     }
 
     match terminal {
-        Some(CoreApplyTerminal::RunResult(_)) | None => {
+        Some(CoreApplyTerminal::RunResult(_) | CoreApplyTerminal::NoPendingBoundary) | None => {
             for input_id in input_ids {
                 registry.resolve_without_result(input_id);
             }
@@ -283,116 +274,6 @@ fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> S
     meerkat_core::interaction::format_external_event_projection(source_name, body)
 }
 
-/// Build a core-owned [`PeerConversationProjection`] from a runtime
-/// [`crate::input::PeerInput`]. Returns `None` when the input has no
-/// peer-originated source (e.g. a mob-internal peer input without a
-/// `peer_id` header) or carries no convention — both shapes are
-/// legitimate "no projection available" rather than errors, so the
-/// caller falls through to the legacy body-as-text path.
-///
-/// The projection carries the full peer metadata (peer_id, request_id,
-/// intent, payload, phase/status) and owns the semantic rendering
-/// primitives (`prompt_text`, `block_prefix_text`, `context_key`) so
-/// the runtime-loop shell never needs to format peer messages itself.
-fn peer_projection_from_peer_input(
-    peer: &crate::input::PeerInput,
-) -> Option<PeerConversationProjection> {
-    let crate::input::InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
-        return None;
-    };
-
-    match &peer.convention {
-        Some(crate::input::PeerConvention::Message) => Some(PeerConversationProjection::Message {
-            peer_id: peer_id.clone(),
-        }),
-        Some(crate::input::PeerConvention::Request { request_id, intent }) => {
-            Some(PeerConversationProjection::Request {
-                peer_id: peer_id.clone(),
-                request_id: request_id.clone(),
-                intent: intent.clone(),
-                payload: peer.payload.clone(),
-            })
-        }
-        Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }) => {
-            Some(PeerConversationProjection::ResponseProgress {
-                peer_id: peer_id.clone(),
-                request_id: request_id.clone(),
-                phase: match phase {
-                    crate::input::ResponseProgressPhase::Accepted => {
-                        PeerResponseProgressProjectionPhase::Accepted
-                    }
-                    crate::input::ResponseProgressPhase::InProgress => {
-                        PeerResponseProgressProjectionPhase::InProgress
-                    }
-                    crate::input::ResponseProgressPhase::PartialResult => {
-                        PeerResponseProgressProjectionPhase::PartialResult
-                    }
-                },
-                payload: peer.payload.clone(),
-            })
-        }
-        Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }) => {
-            Some(PeerConversationProjection::ResponseTerminal {
-                peer_id: peer_id.clone(),
-                request_id: request_id.clone(),
-                status: match status {
-                    crate::input::ResponseTerminalStatus::Completed => {
-                        PeerResponseTerminalProjectionStatus::Completed
-                    }
-                    crate::input::ResponseTerminalStatus::Failed => {
-                        PeerResponseTerminalProjectionStatus::Failed
-                    }
-                    crate::input::ResponseTerminalStatus::Cancelled => {
-                        PeerResponseTerminalProjectionStatus::Cancelled
-                    }
-                },
-                payload: peer.payload.clone(),
-            })
-        }
-        None => None,
-    }
-}
-
-/// Borrowing shim — lift an [`Input`] to its core peer projection when
-/// the input is a `PeerInput` with a peer-origin header. Used by the
-/// context-append path where the caller already has an `&Input`.
-fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
-    let Input::Peer(peer) = input else {
-        return None;
-    };
-    peer_projection_from_peer_input(peer)
-}
-
-/// Rendered prompt-text projection for a peer input.
-///
-/// For peer-originated inputs this returns the core-owned
-/// `PeerConversationProjection::prompt_text()` (the typed semantic
-/// rendering). For non-peer-originated sources (e.g. mob-internal
-/// peer inputs with no `peer_id` header, or convention=None), the
-/// raw `body` is the shell's best available fallback — the core
-/// projection would return an empty string and the runtime would
-/// otherwise ferry an empty prompt.
-fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
-    peer_projection_from_peer_input(peer)
-        .map(|projection| {
-            let prompt = projection.prompt_text();
-            if prompt.is_empty() {
-                peer.body.clone()
-            } else {
-                prompt
-            }
-        })
-        .unwrap_or_else(|| peer.body.clone())
-}
-
-/// Optional block prefix (`"[COMMS MESSAGE from <peer_id>]"`) for peer
-/// inputs that carry a `PeerConvention::Message`. Returns `None` for
-/// request / response conventions (those route through the
-/// context-append path instead) and for non-peer-originated inputs.
-fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
-    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
-}
-
 /// Convert an `Input` into a `ConversationAppend` on the `User` role,
 /// or `None` if the input contributes no user-visible append. The
 /// main exclusion is `ResponseTerminal` peer inputs — those land on
@@ -474,10 +355,10 @@ fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
     })
 }
 
-pub(crate) fn inputs_to_primitive_with_boundary(
+pub(crate) fn try_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
-) -> RunPrimitive {
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let appends = inputs
         .iter()
         .filter_map(|(_, input)| input_to_append(input))
@@ -491,8 +372,8 @@ pub(crate) fn inputs_to_primitive_with_boundary(
         .map(|(input_id, _)| input_id.clone())
         .collect::<Vec<_>>();
     // Merge turn metadata from ALL inputs in the batch, not just the first.
-    // Later inputs override scalar fields; collection fields accumulate.
-    let turn_metadata = merge_batch_turn_metadata(inputs);
+    // Scalar conflicts are typed errors; collection fields accumulate.
+    let turn_metadata = merge_batch_turn_metadata(inputs)?;
 
     // Derive typed execution intent from the full batch.
     // If ANY input is ContentTurn, the whole batch is ContentTurn (safe default).
@@ -513,16 +394,25 @@ pub(crate) fn inputs_to_primitive_with_boundary(
         Some(meta)
     };
 
-    RunPrimitive::StagedInput(StagedRunInput {
+    Ok(RunPrimitive::StagedInput(StagedRunInput {
         boundary,
         appends,
         context_appends,
         contributing_input_ids,
         turn_metadata,
-    })
+    }))
 }
 
-pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
+pub(crate) fn inputs_to_primitive_with_boundary(
+    inputs: &[(InputId, Input)],
+    boundary: RunApplyBoundary,
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    try_inputs_to_primitive_with_boundary(inputs, boundary)
+}
+
+pub(crate) fn inputs_to_primitive(
+    inputs: &[(InputId, Input)],
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let boundary = inputs
         .first()
         .map(|(_, input)| input_boundary(input))
@@ -531,7 +421,10 @@ pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
-pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimitive {
+pub(crate) fn input_to_primitive(
+    input: &Input,
+    input_id: InputId,
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     inputs_to_primitive(&[(input_id, input.clone())])
 }
 
@@ -861,11 +754,11 @@ async fn process_queue(
                 .first()
                 .map(|(id, _)| crate::meerkat_machine::machine_input_boundary(&d, id))
                 .unwrap_or(RunApplyBoundary::RunStart);
-            let primitive = inputs_to_primitive_with_boundary(&staged_inputs, boundary);
             let contributing_input_ids = staged_inputs
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())
                 .collect::<Vec<_>>();
+            let primitive = try_inputs_to_primitive_with_boundary(&staged_inputs, boundary);
             Some((contributing_input_ids, staged_ids, run_id, primitive))
         };
 
@@ -881,6 +774,24 @@ async fn process_queue(
                     tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
                     return false;
                 }
+                let primitive = match primitive {
+                    Ok(primitive) => primitive,
+                    Err(conflict) => {
+                        tracing::error!(
+                            %run_id,
+                            field = conflict.field,
+                            reason = conflict.reason,
+                            "batch turn-metadata merge conflict"
+                        );
+                        let _ = crate::meerkat_machine::fail_runtime_loop_run(
+                            driver,
+                            run_id,
+                            conflict.to_string(),
+                        )
+                        .await;
+                        return false;
+                    }
+                };
                 if let Err(error) =
                     prepare_turn_state_for_primitive(driver, &run_id, &primitive).await
                 {
@@ -1235,7 +1146,8 @@ mod tests {
     fn input_to_primitive_creates_staged() -> Result<(), String> {
         let input = make_prompt("test prompt");
         let input_id = input.id().clone();
-        let primitive = input_to_primitive(&input, input_id.clone());
+        let primitive = input_to_primitive(&input, input_id.clone())
+            .expect("single input metadata cannot conflict");
 
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1256,7 +1168,8 @@ mod tests {
     fn staged_conversation_input_starts_conversation_turn_state() -> Result<(), String> {
         let input = make_prompt("test prompt");
         let input_id = input.id().clone();
-        let primitive = input_to_primitive(&input, input_id);
+        let primitive =
+            input_to_primitive(&input, input_id).expect("single input metadata cannot conflict");
         let run_id = RunId::new();
 
         let start_input = primitive_turn_start_input(&run_id, &primitive)
@@ -1317,7 +1230,8 @@ mod tests {
         let primitive = inputs_to_primitive_with_boundary(
             &[(input_id.clone(), input)],
             RunApplyBoundary::Immediate,
-        );
+        )
+        .expect("single input metadata cannot conflict");
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
@@ -1377,7 +1291,8 @@ mod tests {
 
         assert_eq!(input_boundary(&input), RunApplyBoundary::RunStart);
 
-        let primitive = inputs_to_primitive(&[(input.id().clone(), input)]);
+        let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
+            .expect("single input metadata cannot conflict");
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
@@ -1423,7 +1338,8 @@ mod tests {
             handling_mode: None,
         });
         let input_id = input.id().clone();
-        let primitive = input_to_primitive(&input, input_id);
+        let primitive =
+            input_to_primitive(&input, input_id).expect("single input metadata cannot conflict");
 
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1478,7 +1394,9 @@ mod tests {
             blocks: Some(blocks.clone()),
             handling_mode: None,
         });
-        let staged = match input_to_primitive(&input, input.id().clone()) {
+        let staged = match input_to_primitive(&input, input.id().clone())
+            .expect("single input metadata cannot conflict")
+        {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
         };
@@ -1527,7 +1445,9 @@ mod tests {
             blocks: Some(blocks.clone()),
             handling_mode: None,
         });
-        let staged = match input_to_primitive(&input, input.id().clone()) {
+        let staged = match input_to_primitive(&input, input.id().clone())
+            .expect("single input metadata cannot conflict")
+        {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
         };
@@ -1579,7 +1499,8 @@ mod tests {
             turn_metadata: None,
         });
         let input_id = input.id().clone();
-        let primitive = input_to_primitive(&input, input_id);
+        let primitive =
+            input_to_primitive(&input, input_id).expect("single input metadata cannot conflict");
 
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1624,7 +1545,8 @@ mod tests {
             render_metadata: None,
         });
         let input_id = input.id().clone();
-        let primitive = input_to_primitive(&input, input_id);
+        let primitive =
+            input_to_primitive(&input, input_id).expect("single input metadata cannot conflict");
 
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1668,7 +1590,8 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         });
-        let primitive = input_to_primitive(&input, input.id().clone());
+        let primitive = input_to_primitive(&input, input.id().clone())
+            .expect("single input metadata cannot conflict");
 
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1789,7 +1712,9 @@ mod tests {
             render_metadata: Some(render_metadata.clone()),
         });
 
-        let staged = match input_to_primitive(&input, input.id().clone()) {
+        let staged = match input_to_primitive(&input, input.id().clone())
+            .expect("single input metadata cannot conflict")
+        {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
         };
@@ -1944,7 +1869,8 @@ mod tests {
     fn primitive_from_prompt_has_content_turn() {
         let input = make_prompt("hello");
         let id = input.id().clone();
-        let primitive = input_to_primitive(&input, id);
+        let primitive =
+            input_to_primitive(&input, id).expect("single input metadata cannot conflict");
         let meta = primitive
             .turn_metadata()
             .expect("should have turn_metadata");
@@ -1958,7 +1884,8 @@ mod tests {
     fn primitive_from_continuation_has_resume_pending() {
         let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
         let id = input.id().clone();
-        let primitive = input_to_primitive(&input, id);
+        let primitive =
+            input_to_primitive(&input, id).expect("single input metadata cannot conflict");
         let meta = primitive
             .turn_metadata()
             .expect("should have turn_metadata");
@@ -1994,7 +1921,8 @@ mod tests {
             handling_mode: None,
         });
         let id = input.id().clone();
-        let primitive = input_to_primitive(&input, id);
+        let primitive =
+            input_to_primitive(&input, id).expect("single input metadata cannot conflict");
         let meta = primitive
             .turn_metadata()
             .expect("should have turn_metadata");
@@ -2034,7 +1962,8 @@ mod tests {
             (peer.id().clone(), peer),
             (continuation.id().clone(), continuation),
         ];
-        let primitive = inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunCheckpoint);
+        let primitive = inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunCheckpoint)
+            .expect("mixed test batch metadata should not conflict");
         let meta = primitive
             .turn_metadata()
             .expect("should have turn_metadata");
@@ -2043,5 +1972,37 @@ mod tests {
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             "mixed batch must default to ContentTurn"
         );
+    }
+
+    #[test]
+    fn batch_metadata_conflict_surfaces_typed_error() {
+        let mut first = make_prompt("first");
+        if let Input::Prompt(prompt) = &mut first {
+            prompt.turn_metadata = Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        "model-a",
+                    )),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut second = make_prompt("second");
+        if let Input::Prompt(prompt) = &mut second {
+            prompt.turn_metadata = Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        "model-b",
+                    )),
+                    ..Default::default()
+                },
+            );
+        }
+        let inputs = vec![(first.id().clone(), first), (second.id().clone(), second)];
+
+        let err = try_inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunStart)
+            .expect_err("conflicting batch metadata should be rejected");
+
+        assert_eq!(err.field, "model");
     }
 }

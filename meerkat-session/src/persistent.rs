@@ -639,21 +639,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(err) => return Err(err),
         };
 
-        let Some(stored) = self
-            .store
-            .load(id)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?
-        else {
+        let Some(stored) = self.load_authoritative_session_base(id).await? else {
             return Ok(false);
         };
 
-        let stored_is_newer = stored.updated_at() > live.updated_at()
-            || (stored.updated_at() == live.updated_at()
-                && stored.messages().len() > live.messages().len());
+        let stored_has_more_transcript = stored.messages().len() > live.messages().len();
         let stored_is_archived = metadata_marks_archived(stored.metadata());
 
-        if !stored_is_newer && !stored_is_archived {
+        // A durable snapshot timestamp is a projection witness, not live-session
+        // authority. Runtime commits can normalize/persist an equivalent
+        // transcript a few microseconds after the live session updates itself;
+        // evicting the live handle on timestamp alone drops mechanical runtime
+        // resources such as comms. Only terminal archive state or a strictly
+        // longer durable transcript can evict the live session.
+        if !stored_has_more_transcript && !stored_is_archived {
             return Ok(false);
         }
 
@@ -1049,6 +1048,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     args,
                 )
             }
+            Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
+                receipt,
+                session_snapshot: Some(session_snapshot),
+                run_result: None,
+                terminal: Some(CoreApplyTerminal::NoPendingBoundary),
+            },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
         };
 
@@ -1095,11 +1100,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Ok((run_result, output))
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                // ResumePending with no boundary — no-op through canonical path.
-                // Callers (CLI, RPC) discard the RunResult — this is a legacy
-                // placeholder.
                 let output = self
-                    .build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+                    .build_runtime_output(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::NoPendingBoundary),
+                    )
                     .await?;
                 let noop_result = RunResult {
                     text: String::new(),
@@ -1138,9 +1146,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                // ResumePending with no boundary — no-op through canonical path.
-                self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
-                    .await
+                self.build_runtime_output(
+                    id,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    Some(CoreApplyTerminal::NoPendingBoundary),
+                )
+                .await
             }
             Err(error) => {
                 if let Some(terminal) = Self::callback_pending_terminal(&error) {
@@ -2484,11 +2497,10 @@ mod tests {
             event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             let session_id = self.inner.session_id();
-            let prompt_text = prompt.text_content();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
                     session_id: session_id.clone(),
-                    prompt: prompt_text,
+                    prompt: prompt.clone(),
                 })
                 .await;
             let result = self.inner.run_with_events(prompt, event_tx.clone()).await?;
@@ -3138,6 +3150,8 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            turn_metadata: None,
+            execution_kind: None,
         }
     }
 
@@ -3153,6 +3167,8 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            turn_metadata: None,
+            execution_kind: None,
         }
     }
 
@@ -4359,6 +4375,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_metadata_only_projection_does_not_discard_live_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::Defer))
+            .await
+            .expect("create deferred session");
+        let id = created.session_id;
+
+        let mut projected = service
+            .export_live_session(&id)
+            .await
+            .expect("live session should export");
+        projected.set_metadata("projection_only", serde_json::json!(true));
+        store
+            .save(&projected)
+            .await
+            .expect("projection snapshot should save");
+
+        let discarded = service
+            .discard_stale_live_session_if_needed(&id)
+            .await
+            .expect("discard check should succeed");
+
+        assert!(
+            !discarded,
+            "metadata/timestamp-only durable projection must not evict live runtime mechanics"
+        );
+        service
+            .export_live_session(&id)
+            .await
+            .expect("live session should remain available");
+    }
+
+    #[tokio::test]
     async fn test_apply_runtime_context_appends_emits_run_lifecycle_events() {
         use futures::StreamExt;
         use meerkat_core::event::AgentEvent;
@@ -4406,14 +4464,14 @@ mod tests {
             .expect("run_started event should exist");
         match started.payload {
             AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.to_lowercase();
+                let normalized = prompt.text_content().to_lowercase();
                 assert!(
                     normalized.contains("peer_response_terminal:analyst-rt:req-123"),
-                    "run_started prompt should expose runtime system-context source: {prompt}"
+                    "run_started prompt should expose runtime system-context source: {normalized}"
                 );
                 assert!(
                     normalized.contains("birch seventeen"),
-                    "run_started prompt should expose authoritative terminal peer payload: {prompt}"
+                    "run_started prompt should expose authoritative terminal peer payload: {normalized}"
                 );
             }
             other => panic!("expected run_started, got {other:?}"),

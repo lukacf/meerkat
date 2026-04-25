@@ -153,6 +153,8 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                 event_tx: Some(event_tx),
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
         )
         .await?;
@@ -189,6 +191,8 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                 event_tx: Some(event_tx),
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
         )
         .await?;

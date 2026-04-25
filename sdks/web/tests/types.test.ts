@@ -46,10 +46,9 @@ const fullConfig: RuntimeConfig = {
 
 const sessionConfig: SessionConfig = {
   model: 'claude-sonnet-4-5',
-  apiKey: 'sk-test',
+  connectionRef: 'default:anthropic',
   systemPrompt: 'You are helpful.',
   maxTokens: 1024,
-  anthropicBaseUrl: 'https://proxy.example.com/anthropic',
   labels: { env: 'test' },
   additionalInstructions: ['Be concise.'],
 };
@@ -116,7 +115,9 @@ const spawnSpec: SpawnSpec = {
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
     case 'run_started':
-      return event.prompt;
+      return typeof event.prompt === 'string'
+        ? event.prompt
+        : event.prompt.map((block) => (block.type === 'text' ? block.text : '')).join('');
     case 'hook_started':
       return `${event.hook_id}:${event.point}`;
     case 'hook_completed':

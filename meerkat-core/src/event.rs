@@ -2,9 +2,10 @@
 //!
 //! These events form the streaming API for consumers.
 
+use crate::error::AgentError;
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::time_compat::SystemTime;
-use crate::types::{SessionId, StopReason, Usage};
+use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -19,6 +20,73 @@ pub struct EventEnvelope<T> {
     pub mob_id: Option<String>,
     pub timestamp_ms: u64,
     pub payload: T,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentErrorClass {
+    Llm,
+    Store,
+    Tool,
+    Mcp,
+    SessionNotFound,
+    Budget,
+    MaxTokens,
+    ContentFiltered,
+    MaxTurns,
+    Cancelled,
+    InvalidState,
+    OperationNotFound,
+    DepthLimit,
+    ConcurrencyLimit,
+    Config,
+    Internal,
+    Build,
+    Auth,
+    CallbackPending,
+    StructuredOutput,
+    InvalidOutputSchema,
+    Hook,
+    Terminal,
+    NoPendingBoundary,
+}
+
+impl From<&AgentError> for AgentErrorClass {
+    fn from(error: &AgentError) -> Self {
+        match error {
+            AgentError::Llm { .. } => Self::Llm,
+            AgentError::StoreError(_) => Self::Store,
+            AgentError::ToolError(_) => Self::Tool,
+            AgentError::McpError(_) => Self::Mcp,
+            AgentError::SessionNotFound(_) => Self::SessionNotFound,
+            AgentError::TokenBudgetExceeded { .. }
+            | AgentError::TimeBudgetExceeded { .. }
+            | AgentError::ToolCallBudgetExceeded { .. } => Self::Budget,
+            AgentError::MaxTokensReached { .. } => Self::MaxTokens,
+            AgentError::ContentFiltered { .. } => Self::ContentFiltered,
+            AgentError::MaxTurnsReached { .. } => Self::MaxTurns,
+            AgentError::Cancelled => Self::Cancelled,
+            AgentError::InvalidStateTransition { .. } => Self::InvalidState,
+            AgentError::OperationNotFound(_) => Self::OperationNotFound,
+            AgentError::DepthLimitExceeded { .. } => Self::DepthLimit,
+            AgentError::ConcurrencyLimitExceeded => Self::ConcurrencyLimit,
+            AgentError::ConfigError(_) => Self::Config,
+            AgentError::InvalidToolAccess { .. } => Self::Tool,
+            AgentError::InternalError(_) => Self::Internal,
+            AgentError::BuildError(_) => Self::Build,
+            AgentError::AuthReauthRequired { .. } => Self::Auth,
+            AgentError::CallbackPending { .. } => Self::CallbackPending,
+            AgentError::StructuredOutputValidationFailed { .. } => Self::StructuredOutput,
+            AgentError::InvalidOutputSchema(_) => Self::InvalidOutputSchema,
+            AgentError::HookDenied { .. }
+            | AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. } => Self::Hook,
+            AgentError::TerminalFailure { .. } => Self::Terminal,
+            AgentError::NoPendingBoundary => Self::NoPendingBoundary,
+        }
+    }
 }
 
 impl<T> EventEnvelope<T> {
@@ -246,7 +314,7 @@ pub enum AgentEvent {
     /// Agent run started
     RunStarted {
         session_id: SessionId,
-        prompt: String,
+        prompt: ContentInput,
     },
 
     /// Agent run completed successfully
@@ -259,6 +327,7 @@ pub enum AgentEvent {
     /// Agent run failed
     RunFailed {
         session_id: SessionId,
+        error_class: AgentErrorClass,
         error: String,
     },
 
@@ -702,7 +771,7 @@ mod tests {
         let events = vec![
             AgentEvent::RunStarted {
                 session_id: SessionId::new(),
-                prompt: "Hello".to_string(),
+                prompt: ContentInput::Text("Hello".to_string()),
             },
             AgentEvent::TextDelta {
                 delta: "chunk".to_string(),
@@ -746,6 +815,7 @@ mod tests {
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
+                error_class: AgentErrorClass::Budget,
                 error: "Budget exceeded".to_string(),
             },
             AgentEvent::CompactionStarted {
@@ -817,7 +887,7 @@ mod tests {
         let events = vec![
             AgentEvent::RunStarted {
                 session_id: SessionId::new(),
-                prompt: "Hello".to_string(),
+                prompt: ContentInput::Text("Hello".to_string()),
             },
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
@@ -826,6 +896,7 @@ mod tests {
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
+                error_class: AgentErrorClass::Internal,
                 error: "failed".to_string(),
             },
             AgentEvent::HookStarted {

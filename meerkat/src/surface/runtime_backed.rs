@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive, RuntimeTurnMetadata};
+use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::SessionService;
 use meerkat_core::types::HandlingMode;
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
@@ -178,44 +178,10 @@ fn pending_system_context_appends(
     )
 }
 
-fn unsupported_runtime_metadata_fields(metadata: &RuntimeTurnMetadata) -> Vec<&'static str> {
-    let mut fields = Vec::new();
-    if metadata.model.is_some() {
-        fields.push("model");
-    }
-    if metadata.provider.is_some() {
-        fields.push("provider");
-    }
-    if metadata.provider_params.is_some() {
-        fields.push("provider_params");
-    }
-    if metadata.connection_ref.is_some() {
-        fields.push("connection_ref");
-    }
-    if metadata.keep_alive.is_some() {
-        fields.push("keep_alive");
-    }
-    if metadata.additional_instructions.is_some() {
-        fields.push("additional_instructions");
-    }
-    fields
-}
-
 fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError> {
     let metadata = primitive.turn_metadata();
-    if let Some(metadata) = metadata {
-        let unsupported = unsupported_runtime_metadata_fields(metadata);
-        if !unsupported.is_empty() {
-            return Err(CoreExecutorError::ApplyFailed {
-                reason: format!(
-                    "runtime-backed apply cannot yet project {} through StartTurnRequest; refusing to drop canonical RuntimeTurnMetadata fields",
-                    unsupported.join(", ")
-                ),
-            });
-        }
-    }
 
     Ok(meerkat_core::service::StartTurnRequest {
         prompt: primitive.extract_content_input(),
@@ -227,6 +193,8 @@ fn start_turn_request_from_primitive(
         event_tx: None,
         skill_references: metadata.and_then(|metadata| metadata.skill_references.clone()),
         flow_tool_overlay: metadata.and_then(|metadata| metadata.flow_tool_overlay.clone()),
+        turn_metadata: metadata.cloned(),
+        execution_kind: metadata.and_then(|metadata| metadata.execution_kind),
     })
 }
 
@@ -336,6 +304,7 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_client::TestClient;
     use meerkat_core::SessionBuildOptions;
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",
@@ -379,6 +348,39 @@ mod tests {
         not(target_arch = "wasm32")
     ))]
     use meerkat_runtime::{RealtimeAttachmentStatus, SessionServiceRuntimeExt};
+
+    #[test]
+    fn run_primitive_carries_runtime_metadata_into_start_turn_request() {
+        let metadata = RuntimeTurnMetadata {
+            execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending),
+            model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                "model-from-runtime",
+            )),
+            ..Default::default()
+        };
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                    content: CoreRenderable::Text {
+                        text: "hello".to_string(),
+                    },
+                }],
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(metadata.clone()),
+            });
+
+        let req = start_turn_request_from_primitive(&primitive)
+            .expect("metadata should be carried, not rejected");
+
+        assert_eq!(req.turn_metadata, Some(metadata));
+        assert_eq!(
+            req.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+        );
+    }
 
     fn make_request(build: SessionBuildOptions) -> CreateSessionRequest {
         CreateSessionRequest {

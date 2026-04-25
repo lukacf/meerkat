@@ -1937,7 +1937,7 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Idle || self.lifecycle_phase == Phase::Retired
             }
-            guard "runtime_is_bound" { self.active_runtime_id != None }
+            guard "session_registered" { self.session_id != None }
             update {
                 self.active_fence_token = None;
                 self.current_run_id = None;
@@ -1948,7 +1948,7 @@ machine! {
         transition RecycleFromAttached {
             on input Recycle
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "runtime_is_bound" { self.active_runtime_id != None }
+            guard "session_registered" { self.session_id != None }
             update {
                 self.active_fence_token = None;
                 self.current_run_id = None;

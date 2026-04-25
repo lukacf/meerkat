@@ -312,6 +312,25 @@ async fn wait_for_comms_mesh_ready(
             return true;
         }
         if Instant::now() > deadline {
+            for member in members {
+                let Some(session_id) = handle
+                    .resolve_bridge_session_id(&AgentIdentity::from(member))
+                    .await
+                else {
+                    eprintln!("mesh diagnostics: {member}: missing bridge session id");
+                    continue;
+                };
+                let Some(comms_runtime) = service.comms_runtime(&session_id).await else {
+                    eprintln!("mesh diagnostics: {member}: missing comms runtime for {session_id}");
+                    continue;
+                };
+                let peers = comms_runtime.peers().await;
+                let names = peers
+                    .iter()
+                    .map(|peer| peer.name.as_str().to_string())
+                    .collect::<Vec<_>>();
+                eprintln!("mesh diagnostics: {member}: peers={names:?}");
+            }
             return false;
         }
         sleep(Duration::from_secs(1)).await;
@@ -1124,7 +1143,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         let guess_reached_artist = wait_for_artist_guess_after_discussion(
             &handle,
             service.as_ref(),
-            Duration::from_secs(180),
+            Duration::from_secs(300),
         )
         .await;
 

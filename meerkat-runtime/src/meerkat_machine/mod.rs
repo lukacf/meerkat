@@ -732,6 +732,7 @@ impl MeerkatMachine {
             | MeerkatMachineCommand::SessionHasComms { .. }
             | MeerkatMachineCommand::OpsLifecycleRegistry { .. }
             | MeerkatMachineCommand::PrepareBindings { .. }
+            | MeerkatMachineCommand::PrepareLocalSessionBindings { .. }
             | MeerkatMachineCommand::InputState { .. }
             | MeerkatMachineCommand::ListActiveInputs { .. }
             | MeerkatMachineCommand::ReconfigureSessionLlmIdentity { .. }

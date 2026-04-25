@@ -1120,6 +1120,7 @@ impl SessionService for MockSessionService {
                             None,
                             AgentEvent::RunFailed {
                                 session_id,
+                                error_class: meerkat_core::event::AgentErrorClass::Internal,
                                 error: "mock flow turn failure".to_string(),
                             },
                         ))
@@ -6376,6 +6377,8 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
         )
         .await

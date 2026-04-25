@@ -598,6 +598,10 @@ async fn apply_runtime_turn(
         flow_tool_overlay: primitive
             .turn_metadata()
             .and_then(|meta| meta.flow_tool_overlay.clone()),
+        turn_metadata: primitive.turn_metadata().cloned(),
+        execution_kind: primitive
+            .turn_metadata()
+            .and_then(|meta| meta.execution_kind),
     };
 
     let session_identity = context
@@ -711,6 +715,10 @@ async fn apply_runtime_turn(
                         flow_tool_overlay: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
+                        turn_metadata: primitive.turn_metadata().cloned(),
+                        execution_kind: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.execution_kind),
                     },
                     boundary,
                     contributing_input_ids,
@@ -5569,6 +5577,8 @@ mod tests {
 
                     skill_references: None,
                     flow_tool_overlay: None,
+                    turn_metadata: None,
+                    execution_kind: None,
                 },
             )
             .await

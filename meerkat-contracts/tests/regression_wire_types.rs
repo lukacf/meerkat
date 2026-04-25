@@ -16,8 +16,8 @@ use meerkat_contracts::{
     WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
-    AgentEvent, BudgetType, HookPatch, HookPoint, HookReasonCode, RunResult, SessionId, StopReason,
-    ToolConfigChangeOperation, ToolConfigChangedPayload, Usage,
+    AgentErrorClass, AgentEvent, BudgetType, ContentInput, HookPatch, HookPoint, HookReasonCode,
+    RunResult, SessionId, StopReason, ToolConfigChangeOperation, ToolConfigChangedPayload, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -335,7 +335,7 @@ fn agent_event_all_variants_roundtrip() {
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
             session_id: session_id.clone(),
-            prompt: "hello".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
         },
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
@@ -349,6 +349,7 @@ fn agent_event_all_variants_roundtrip() {
         },
         AgentEvent::RunFailed {
             session_id,
+            error_class: AgentErrorClass::Internal,
             error: "boom".to_string(),
         },
         AgentEvent::HookStarted {
@@ -558,7 +559,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
             session_id: SessionId::new(),
-            prompt: "hello".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
         },
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
@@ -567,6 +568,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         },
         AgentEvent::RunFailed {
             session_id: SessionId::new(),
+            error_class: AgentErrorClass::Internal,
             error: "nope".to_string(),
         },
         AgentEvent::HookStarted {

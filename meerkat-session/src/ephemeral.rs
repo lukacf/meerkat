@@ -628,6 +628,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     args,
                 )
             }
+            Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
+                receipt,
+                session_snapshot: Some(session_snapshot),
+                run_result: None,
+                terminal: Some(CoreApplyTerminal::NoPendingBoundary),
+            },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
         })
     }
@@ -1142,11 +1148,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                // ResumePending with no boundary — succeed as no-op through
-                // the canonical boundary-apply path. contributing_input_ids
-                // are consumed normally.
-                self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
-                    .await
+                self.build_runtime_output(
+                    id,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    Some(CoreApplyTerminal::NoPendingBoundary),
+                )
+                .await
             }
             Err(error) => {
                 if let Some(terminal) = Self::callback_pending_terminal(&error) {
@@ -1700,17 +1709,43 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 })?;
             }
 
+            let metadata = req.turn_metadata;
+            let render_metadata = req.render_metadata.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.render_metadata.clone())
+            });
+            let handling_mode = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.handling_mode)
+                .unwrap_or(req.handling_mode);
+            let skill_references = req.skill_references.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.skill_references.clone())
+            });
+            let flow_tool_overlay = req.flow_tool_overlay.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.flow_tool_overlay.clone())
+            });
+            let execution_kind = req.execution_kind.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.execution_kind)
+            });
+
             handle
                 .command_tx
                 .send(SessionCommand::StartTurn {
                     prompt,
-                    render_metadata: req.render_metadata,
-                    handling_mode: req.handling_mode,
+                    render_metadata,
+                    handling_mode,
                     event_tx: req.event_tx,
                     result_tx,
-                    skill_references: req.skill_references,
-                    flow_tool_overlay: req.flow_tool_overlay,
-                    execution_kind: None,
+                    skill_references,
+                    flow_tool_overlay,
+                    execution_kind,
                 })
                 .await
                 .map_err(|_| {
@@ -2680,7 +2715,7 @@ async fn session_task<A: SessionAgent>(
                         &source_id,
                         AgentEvent::RunStarted {
                             session_id: session_id.clone(),
-                            prompt,
+                            prompt: ContentInput::Text(prompt),
                         },
                     );
                     let _ = control.session_event_tx.send(started);

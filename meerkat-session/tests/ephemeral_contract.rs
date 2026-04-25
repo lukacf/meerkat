@@ -67,7 +67,7 @@ impl SessionAgent for MockAgent {
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id: self.session_id.clone(),
-                prompt: "test".to_string(),
+                prompt: meerkat_core::ContentInput::Text("test".to_string()),
             })
             .await;
 
@@ -808,6 +808,8 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         event_tx: None,
         skill_references: None,
         flow_tool_overlay: None,
+        turn_metadata: None,
+        execution_kind: None,
     }
 }
 
@@ -1442,6 +1444,50 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
     };
     assert_eq!(tool_name, "external_mock");
     assert_eq!(args, json!({ "value": "browser" }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() -> Result<(), String>
+{
+    let service = make_service(MockAgentBuilder::new());
+    let _ = service
+        .create_session(create_req_deferred("Hello"))
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    let contributing_input_ids = vec![meerkat_core::lifecycle::InputId::new()];
+    let mut req = turn_req("");
+    req.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending);
+
+    let output = service
+        .apply_runtime_turn(
+            &session_id,
+            run_id.clone(),
+            req,
+            RunApplyBoundary::RunStart,
+            contributing_input_ids.clone(),
+        )
+        .await
+        .expect("runtime apply should surface no-pending as terminal");
+
+    assert_eq!(output.receipt.run_id, run_id);
+    assert_eq!(
+        output.receipt.contributing_input_ids,
+        contributing_input_ids
+    );
+    assert!(output.session_snapshot.is_some());
+    assert!(output.run_result.is_none());
+    assert!(matches!(
+        output.terminal,
+        Some(CoreApplyTerminal::NoPendingBoundary)
+    ));
     Ok(())
 }
 

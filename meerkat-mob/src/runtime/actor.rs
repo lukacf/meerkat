@@ -820,10 +820,17 @@ impl MobActor {
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<(), MobError> {
+        let signal_debug = format!("{signal:?}");
         let transition = self
             .dsl_authority
             .apply_signal(signal)
-            .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
+            .map_err(|e| {
+                MobError::Internal(format!(
+                    "DSL authority ({context}): {e}; signal={signal_debug}; live_runtime_ids={:?}; runtime_fence_tokens={:?}",
+                    self.dsl_authority.state.live_runtime_ids,
+                    self.dsl_authority.state.runtime_fence_tokens,
+                ))
+            })?;
         self.queue_routed_effects_from(&transition.effects);
         if transition.from_phase != transition.to_phase {
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
@@ -1377,6 +1384,8 @@ impl MobActor {
 
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                turn_metadata: None,
+                                execution_kind: None,
                             },
                         )
                         .await
@@ -4188,6 +4197,27 @@ impl MobActor {
                     },
                 )
                 .await?;
+            // Spawn emits RequestRuntimeBinding. Drain it before startup can
+            // publish RuntimeBound, otherwise the session may emit a fallback
+            // runtime id that MobMachine correctly rejects as not live.
+            if let Err(binding_error) = self.flush_routed_effects().await {
+                self.clear_kickoff_state(agent_identity).await;
+                if let Err(rollback_error) = self
+                    .rollback_failed_spawn(
+                        agent_identity,
+                        profile_name,
+                        &member_ref,
+                        &wired_spawn_targets,
+                        &planned_wiring_targets,
+                    )
+                    .await
+                {
+                    return Err(MobError::Internal(format!(
+                        "spawn runtime binding failed for '{agent_identity}': {binding_error}; rollback failed: {rollback_error}"
+                    )));
+                }
+                return Err(binding_error);
+            }
             if let Err(start_error) = self
                 .start_autonomous_member(agent_identity, &member_ref, prompt)
                 .await
@@ -7753,6 +7783,8 @@ impl MobActor {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    turn_metadata: None,
+                    execution_kind: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 Ok(())

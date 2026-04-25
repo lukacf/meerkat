@@ -1491,6 +1491,8 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
         )
         .await;

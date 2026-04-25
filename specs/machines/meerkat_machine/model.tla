@@ -1299,7 +1299,7 @@ ShutdownSurfaceRunning ==
 
 RecycleFromIdleOrRetired ==
     /\ phase = "Idle" \/ phase = "Retired"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None
@@ -1309,7 +1309,7 @@ RecycleFromIdleOrRetired ==
 
 RecycleFromAttached ==
     /\ phase = "Attached"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None

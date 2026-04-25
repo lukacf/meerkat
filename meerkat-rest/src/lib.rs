@@ -2370,7 +2370,9 @@ fn rest_runtime_host_surface_options(
     options.mcp_live = cfg!(feature = "mcp");
     options.comms = cfg!(feature = "comms");
     options.blobs = true;
-    options.artifacts = true;
+    // Artifact records currently have a JSON-RPC surface and may reference REST
+    // blob transport, but REST does not yet expose artifact/* routes.
+    options.artifacts = false;
     options.session_events = true;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
@@ -5495,6 +5497,8 @@ mod tests {
             true
         );
         assert_eq!(payload["capabilities"]["features"]["event_replay"], false);
+        assert_eq!(payload["capabilities"]["features"]["artifacts"], false);
+        assert_eq!(payload["capabilities"]["features"]["approvals"], false);
 
         let text = serde_json::to_string(&payload).unwrap();
         for forbidden in ["topology", "registry", "lease", "claim", "project"] {

@@ -15,6 +15,7 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod artifact;
 pub mod auth;
 pub mod blob;
 pub mod budget;
@@ -79,6 +80,10 @@ pub use agent::{
     AgentToolDispatcher, BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities,
     ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
     should_compose_tool_catalog_control_plane,
+};
+pub use artifact::{
+    ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,
+    ArtifactOwner, ArtifactPayload, ArtifactRecord, ArtifactStore, ArtifactType,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};

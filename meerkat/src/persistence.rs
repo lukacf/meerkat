@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use crate::SessionStore;
-use meerkat_core::BlobStore;
+use meerkat_core::{ArtifactStore, BlobStore};
 use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::event_store::{EventStore, FileEventStore};
@@ -25,8 +25,8 @@ use meerkat_store::SqliteSessionStore;
 use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
-    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore, StoreError,
-    ensure_realm_manifest_in, realm_paths_in,
+    FsArtifactStore, FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore,
+    StoreError, ensure_realm_manifest_in, realm_paths_in,
 };
 
 #[cfg(feature = "session-store")]
@@ -50,6 +50,7 @@ pub struct PersistenceBundle {
     #[cfg(feature = "session-store")]
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
+    artifact_store: Arc<dyn ArtifactStore>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     event_store: Option<Arc<dyn EventStore>>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -96,6 +97,7 @@ impl PersistenceBundle {
             schedule_store,
             runtime_store,
             blob_store,
+            artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             event_store: None,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -123,6 +125,7 @@ impl PersistenceBundle {
             session_store,
             schedule_store,
             blob_store,
+            artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             event_store: None,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -160,6 +163,10 @@ impl PersistenceBundle {
 
     pub fn blob_store(&self) -> Arc<dyn BlobStore> {
         self.blob_store.clone()
+    }
+
+    pub fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
+        self.artifact_store.clone()
     }
 
     pub fn schedule_store(&self) -> Arc<dyn ScheduleStore> {
@@ -227,8 +234,10 @@ pub async fn open_realm_persistence_in(
                 Arc::new(JsonlStore::new(paths.sessions_jsonl_dir));
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
+            let artifact_store: Arc<dyn ArtifactStore> =
+                Arc::new(FsArtifactStore::new(paths.root.join("artifacts")));
             let schedule_store: Arc<dyn ScheduleStore> = Arc::new(DisabledScheduleStore);
-            PersistenceBundle::with_realm_context(
+            let mut bundle = PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
                 paths.root,
@@ -236,7 +245,9 @@ pub async fn open_realm_persistence_in(
                 None,
                 blob_store,
                 schedule_store,
-            )
+            );
+            bundle.artifact_store = artifact_store;
+            bundle
         }
         RealmBackend::Sqlite => {
             let sqlite_store = Arc::new(SqliteSessionStore::open(
@@ -250,7 +261,9 @@ pub async fn open_realm_persistence_in(
             )?) as Arc<dyn RuntimeStore>;
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
-            PersistenceBundle::with_realm_context(
+            let artifact_store: Arc<dyn ArtifactStore> =
+                Arc::new(FsArtifactStore::new(paths.root.join("artifacts")));
+            let mut bundle = PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
                 paths.root,
@@ -258,7 +271,9 @@ pub async fn open_realm_persistence_in(
                 Some(runtime_store),
                 blob_store,
                 schedule_store,
-            )
+            );
+            bundle.artifact_store = artifact_store;
+            bundle
         }
     };
 
@@ -321,6 +336,7 @@ mod tests {
 
         assert!(bundle.runtime_store().is_some());
         assert!(!bundle.blob_store().is_persistent());
+        assert!(!bundle.artifact_store().is_persistent());
         let _ = bundle.runtime_adapter();
         Ok(())
     }
@@ -340,6 +356,7 @@ mod tests {
 
         assert!(bundle.runtime_store().is_some());
         assert!(bundle.blob_store().is_persistent());
+        assert!(bundle.artifact_store().is_persistent());
         let (event_store, projector) = bundle
             .event_projection()
             .expect("realm persistence must wire event projection");

@@ -9,6 +9,7 @@ pub mod tokio {
 }
 
 pub mod adapter;
+pub mod artifact;
 pub mod blob;
 mod error;
 
@@ -29,6 +30,7 @@ pub mod memory;
 pub mod sqlite_store;
 
 pub use adapter::StoreAdapter;
+pub use artifact::MemoryArtifactStore;
 pub use blob::MemoryBlobStore;
 pub use error::StoreError;
 
@@ -37,6 +39,8 @@ pub use error::StoreError;
 // of meerkat-store see no change.
 pub use meerkat_core::{SessionFilter, SessionStore, SessionStoreError};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use artifact::FsArtifactStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use blob::FsBlobStore;
 #[cfg(not(target_arch = "wasm32"))]

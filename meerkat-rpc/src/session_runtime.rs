@@ -589,6 +589,7 @@ pub struct SessionRuntime {
     factory: AgentFactory,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
+    artifact_store: Arc<dyn meerkat_core::ArtifactStore>,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Canonical staged-session authority (facade-owned). Holds sessions
     /// that have been created (ID returned to caller) but not yet materialized
@@ -752,6 +753,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
@@ -780,6 +782,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             max_sessions,
@@ -820,6 +823,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
@@ -849,6 +853,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             max_sessions,
@@ -1096,6 +1101,10 @@ impl SessionRuntime {
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
         self.service.blob_store()
+    }
+
+    pub fn artifact_store(&self) -> Arc<dyn meerkat_core::ArtifactStore> {
+        self.artifact_store.clone()
     }
 
     pub fn default_llm_client(&self) -> Option<Arc<dyn LlmClient>> {

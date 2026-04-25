@@ -713,6 +713,124 @@ impl MethodRouter {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
+    async fn handle_artifact_list(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ArtifactListParams = match params {
+            Some(raw) => match serde_json::from_str(raw.get()) {
+                Ok(params) => params,
+                Err(err) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Invalid params: {err}"),
+                    );
+                }
+            },
+            None => meerkat_contracts::ArtifactListParams::default(),
+        };
+        match self
+            .runtime
+            .artifact_store()
+            .list(params.into_filter())
+            .await
+        {
+            Ok(artifacts) => {
+                RpcResponse::success(id, meerkat_contracts::ArtifactListResult { artifacts })
+            }
+            Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        }
+    }
+
+    #[cfg(not(feature = "mini-surface"))]
+    async fn handle_artifact_get(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ArtifactIdParams = match handlers::parse_params(params) {
+            Ok(params) => params,
+            Err(response) => return response.with_id(id),
+        };
+        match self.runtime.artifact_store().get(&params.artifact_id).await {
+            Ok(record) => RpcResponse::success(id, record),
+            Err(meerkat_core::ArtifactError::NotFound(missing)) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("artifact not found: {missing}"),
+            ),
+            Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        }
+    }
+
+    #[cfg(not(feature = "mini-surface"))]
+    async fn handle_artifact_download(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ArtifactDownloadParams = match handlers::parse_params(params)
+        {
+            Ok(params) => params,
+            Err(response) => return response.with_id(id),
+        };
+        let record = match self.runtime.artifact_store().get(&params.artifact_id).await {
+            Ok(record) => record,
+            Err(meerkat_core::ArtifactError::NotFound(missing)) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("artifact not found: {missing}"),
+                );
+            }
+            Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        };
+        if let Some(expected) = params.expected_media_type.as_ref()
+            && expected != &record.media_type
+        {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "artifact media type mismatch: expected {expected}, found {}",
+                    record.media_type
+                ),
+            );
+        }
+        let blob_ref = match &record.content_handle {
+            meerkat_core::ArtifactContentHandle::Blob(blob_ref) => blob_ref,
+            other => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    meerkat_core::ArtifactError::UnsupportedContentHandle(other.opaque_id())
+                        .to_string(),
+                );
+            }
+        };
+        let blob_payload = match self.runtime.blob_store().get(&blob_ref.blob_id).await {
+            Ok(payload) => payload,
+            Err(meerkat_core::BlobStoreError::NotFound(_)) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("artifact payload not found: {}", record.artifact_id),
+                );
+            }
+            Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        };
+        match meerkat_core::ArtifactPayload::from_record_and_blob(&record, blob_payload) {
+            Ok(payload) => RpcResponse::success(
+                id,
+                meerkat_contracts::ArtifactDownloadResult { record, payload },
+            ),
+            Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
+        }
+    }
+
     /// Create a new method router with an explicit mob state.
     ///
     /// The mob state is registered on the runtime. Also spawns schedule host
@@ -888,6 +1006,12 @@ impl MethodRouter {
             "session/history" => self.handle_session_history(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
             "blob/get" => self.handle_blob_get(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "artifact/list" => self.handle_artifact_list(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "artifact/get" => self.handle_artifact_get(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "artifact/download" => self.handle_artifact_download(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
             "session/external_event" => {
@@ -2878,6 +3002,180 @@ mod tests {
         assert_eq!(result["blob_id"], blob_ref.blob_id.as_str());
         assert_eq!(result["media_type"], "image/png");
         assert_eq!(result["data"], "aGVsbG8=");
+    }
+
+    fn test_artifact_record(
+        artifact_id: &str,
+        blob_ref: meerkat_core::BlobRef,
+    ) -> meerkat_core::ArtifactRecord {
+        let mut record = meerkat_core::ArtifactRecord::new(
+            meerkat_core::ArtifactId::new(artifact_id).unwrap(),
+            meerkat_core::ArtifactType::Json,
+            "Report".to_string(),
+            "application/json".to_string(),
+            2,
+            Some("sha256:test-report".to_string()),
+            meerkat_core::ArtifactContentHandle::Blob(blob_ref),
+        )
+        .unwrap();
+        record.owner.session_id = Some("session-a".to_string());
+        record
+            .metadata
+            .labels
+            .insert("client.thread_id".to_string(), "thread-a".to_string());
+        record
+    }
+
+    async fn seed_test_artifact(router: &MethodRouter) -> meerkat_core::ArtifactRecord {
+        let blob_ref = router
+            .runtime
+            .blob_store()
+            .put_image("application/json", "e30=")
+            .await
+            .expect("blob stored");
+        let record = test_artifact_record("artifact-1", blob_ref);
+        router
+            .runtime
+            .artifact_store()
+            .put(record.clone())
+            .await
+            .expect("artifact stored");
+        record
+    }
+
+    #[tokio::test]
+    async fn artifact_list_and_get_return_stable_records() {
+        let (router, _rx) = test_router().await;
+        seed_test_artifact(&router).await;
+
+        let list_response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "artifact/list".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "session_id": "session-a",
+                        "label_equals": {"client.thread_id": "thread-a"}
+                    }))
+                    .expect("raw value"),
+                ),
+            })
+            .await
+            .expect("response");
+        assert!(
+            list_response.error.is_none(),
+            "artifact/list should succeed: {:?}",
+            list_response.error
+        );
+        let list_result: serde_json::Value =
+            serde_json::from_str(list_response.result.unwrap().get()).unwrap();
+        assert_eq!(list_result["artifacts"][0]["artifact_id"], "artifact-1");
+        assert!(!list_result.to_string().contains("/tmp"));
+        assert!(!list_result.to_string().contains("path"));
+
+        let get_response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(2)),
+                method: "artifact/get".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({ "artifact_id": "artifact-1" }),
+                    )
+                    .expect("raw value"),
+                ),
+            })
+            .await
+            .expect("response");
+        assert!(get_response.error.is_none(), "artifact/get should succeed");
+        let get_result: serde_json::Value =
+            serde_json::from_str(get_response.result.unwrap().get()).unwrap();
+        assert_eq!(get_result["artifact_id"], "artifact-1");
+    }
+
+    #[tokio::test]
+    async fn artifact_download_uses_artifact_id_and_blob_payload() {
+        let (router, _rx) = test_router().await;
+        seed_test_artifact(&router).await;
+
+        let response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "artifact/download".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "artifact_id": "artifact-1",
+                        "expected_media_type": "application/json"
+                    }))
+                    .expect("raw value"),
+                ),
+            })
+            .await
+            .expect("response");
+
+        assert!(
+            response.error.is_none(),
+            "artifact/download should succeed: {:?}",
+            response.error
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.unwrap().get()).unwrap();
+        assert_eq!(result["record"]["artifact_id"], "artifact-1");
+        assert_eq!(result["payload"]["artifact_id"], "artifact-1");
+        assert_eq!(result["payload"]["media_type"], "application/json");
+        assert_eq!(result["payload"]["data"], "e30=");
+    }
+
+    #[tokio::test]
+    async fn artifact_get_missing_is_typed_error() {
+        let (router, _rx) = test_router().await;
+
+        let response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "artifact/get".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({ "artifact_id": "missing" }),
+                    )
+                    .expect("raw value"),
+                ),
+            })
+            .await
+            .expect("response");
+
+        let err = response.error.expect("missing artifact should error");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(err.message.contains("artifact not found"));
+    }
+
+    #[tokio::test]
+    async fn artifact_download_rejects_media_type_mismatch() {
+        let (router, _rx) = test_router().await;
+        seed_test_artifact(&router).await;
+
+        let response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "artifact/download".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "artifact_id": "artifact-1",
+                        "expected_media_type": "text/plain"
+                    }))
+                    .expect("raw value"),
+                ),
+            })
+            .await
+            .expect("response");
+
+        let err = response.error.expect("mismatched media type should error");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(err.message.contains("media type mismatch"));
     }
 
     fn source_uuid(raw: &str) -> SourceUuid {

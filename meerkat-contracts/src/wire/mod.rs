@@ -1,5 +1,6 @@
 //! Canonical wire response types.
 
+mod artifact;
 mod comms;
 mod connection;
 mod event;
@@ -29,6 +30,10 @@ pub use connection::{
     WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 
+pub use artifact::{
+    ArtifactDownloadParams, ArtifactDownloadResult, ArtifactIdParams, ArtifactListParams,
+    ArtifactListResult,
+};
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,
     EventReplayScope, EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,

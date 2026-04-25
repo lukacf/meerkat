@@ -67,6 +67,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
 | `blob/get` | Session | Fetch a blob payload by id |
+| `artifact/list` | Artifact | List stable artifact records |
+| `artifact/get` | Artifact | Get one stable artifact record |
+| `artifact/download` | Artifact | Download blob-backed artifact payload bytes |
 | `session/archive` | Session | Remove session from runtime |
 | `session/external_event` | Session | Queue a runtime-backed external event |
 | `session/peer_response_terminal` | Session | Admit a correlated terminal peer response through the typed runtime ingress |

@@ -43,6 +43,11 @@ pub use wire::supervisor_bridge::{
     BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
 pub use wire::{
+    ArtifactDownloadParams,
+    ArtifactDownloadResult,
+    ArtifactIdParams,
+    ArtifactListParams,
+    ArtifactListResult,
     AudioFormatMismatchContext,
     CatalogModelEntry,
     CommsParams,

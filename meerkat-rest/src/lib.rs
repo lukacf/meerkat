@@ -2370,6 +2370,7 @@ fn rest_runtime_host_surface_options(
     options.mcp_live = cfg!(feature = "mcp");
     options.comms = cfg!(feature = "comms");
     options.blobs = true;
+    options.artifacts = true;
     options.session_events = true;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");

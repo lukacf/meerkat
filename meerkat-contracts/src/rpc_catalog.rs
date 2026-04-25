@@ -157,12 +157,32 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     ];
 
     if options.blob_enabled {
-        methods.push(RpcMethodDescriptor::typed(
-            "blob/get",
-            "Fetch raw blob payload metadata and bytes by blob id",
-            "BlobGetParams",
-            "BlobPayload",
-        ));
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "blob/get",
+                "Fetch raw blob payload metadata and bytes by blob id",
+                "BlobGetParams",
+                "BlobPayload",
+            ),
+            RpcMethodDescriptor::typed(
+                "artifact/list",
+                "List stable artifact records",
+                "ArtifactListParams",
+                "ArtifactListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "artifact/get",
+                "Get one stable artifact record",
+                "ArtifactIdParams",
+                "ArtifactRecord",
+            ),
+            RpcMethodDescriptor::typed(
+                "artifact/download",
+                "Download blob-backed artifact payload bytes",
+                "ArtifactDownloadParams",
+                "ArtifactDownloadResult",
+            ),
+        ]);
     }
 
     if options.session_events_enabled {

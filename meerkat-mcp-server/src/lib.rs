@@ -3064,6 +3064,8 @@ async fn handle_meerkat_resume(
 
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+            turn_metadata: None,
+            execution_kind: None,
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),

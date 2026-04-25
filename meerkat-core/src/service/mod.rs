@@ -7,6 +7,8 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
+use crate::lifecycle::RuntimeExecutionKind;
+use crate::lifecycle::run_primitive::RuntimeTurnMetadata;
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -729,6 +731,18 @@ pub struct StartTurnRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Canonical runtime-authored metadata for this turn.
+    ///
+    /// Runtime-backed callers populate this once at the machine boundary and
+    /// the session layer derives per-turn policy from this typed carrier
+    /// instead of re-inferring or dropping fields.
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
+    /// Runtime-authored execution intent for the session task.
+    ///
+    /// This is intentionally duplicated out of `turn_metadata` as the narrow
+    /// session dispatch key so non-runtime callers can remain explicit without
+    /// constructing a full metadata carrier.
+    pub execution_kind: Option<RuntimeExecutionKind>,
 }
 
 /// Request to append runtime system context to an existing session.

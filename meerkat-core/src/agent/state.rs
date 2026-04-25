@@ -46,6 +46,17 @@ enum CallTimeoutSource {
     TurnBudget,
 }
 
+struct LlmRetryRequest<'a> {
+    run_id: &'a RunId,
+    turn_count: u32,
+    event_tx: &'a Option<mpsc::Sender<AgentEvent>>,
+    messages: &'a [Message],
+    tools: &'a [Arc<ToolDef>],
+    max_tokens: u32,
+    temperature: Option<f32>,
+    provider_params: Option<&'a Value>,
+}
+
 fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
     match input {
         TurnExecutionInput::StartConversationRun { run_id }
@@ -184,7 +195,7 @@ where
         Ok(self.runtime_turn_authority_snapshot()?.active_run_id)
     }
 
-    fn turn_phase(&self) -> Result<TurnPhase, AgentError> {
+    pub(super) fn turn_phase(&self) -> Result<TurnPhase, AgentError> {
         Ok(self.runtime_turn_authority_snapshot()?.turn_phase)
     }
 
@@ -271,13 +282,20 @@ where
     /// - per-call timeout from override/profile, wrapped with remaining turn budget
     /// - typed timeout-origin selection before await
     async fn call_llm_with_retry(
-        &self,
-        messages: &[Message],
-        tools: &[Arc<ToolDef>],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&Value>,
+        &mut self,
+        request: LlmRetryRequest<'_>,
     ) -> Result<LlmStreamResult, AgentError> {
+        let LlmRetryRequest {
+            run_id,
+            turn_count,
+            event_tx,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+        } = request;
+
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
             let mut hydrated = messages.to_vec();
             hydrate_messages_for_execution(
@@ -403,9 +421,31 @@ where
                             capped.as_millis(),
                             e
                         );
+                        let recover =
+                            self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
+                                run_id: run_id.clone(),
+                            })?;
+                        self.execute_turn_effects(&recover, turn_count, event_tx)
+                            .await;
+                        let _ = crate::event_tap::tap_emit(
+                            &self.event_tap,
+                            event_tx.as_ref(),
+                            AgentEvent::Retrying {
+                                attempt: attempt + 1,
+                                max_attempts: self.retry_policy.max_retries,
+                                error: e.to_string(),
+                                delay_ms: capped.as_millis() as u64,
+                            },
+                        )
+                        .await;
                         attempt += 1;
                         tokio::time::sleep(capped).await;
                         self.budget.check()?;
+                        let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
+                            run_id: run_id.clone(),
+                        })?;
+                        self.execute_turn_effects(&retry, turn_count, event_tx)
+                            .await;
                         continue;
                     }
                     return Err(e);
@@ -862,7 +902,9 @@ where
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
-            match self.state {
+            let loop_state = self.turn_phase()?.to_loop_state();
+            self.state = loop_state.clone();
+            match loop_state {
                 LoopState::CallingLlm => {
                     // 0. Auth lease refresh loop (Phase 1.5-rev).
                     //    The canonical auth-state owner is the MeerkatMachine
@@ -904,14 +946,14 @@ where
                     self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::McpPending)
                     });
-                    // Prefer the DSL-authoritative handshake state (Phase 5G /
-                    // T5g); fall back to the shell's `ext.pending` projection
-                    // when no runtime handle is wired (standalone, tests).
-                    let pending_servers: Vec<String> =
-                        match self.mcp_server_lifecycle_handle.as_deref() {
-                            Some(handle) => handle.pending_server_ids().into_iter().collect(),
-                            None => ext.pending.clone(),
-                        };
+                    // The MCP lifecycle handle is the only authoritative read
+                    // side for pending server notices. Without it, core has no
+                    // typed owner to project from.
+                    let pending_servers: Vec<String> = self
+                        .mcp_server_lifecycle_handle
+                        .as_deref()
+                        .map(|handle| handle.pending_server_ids().into_iter().collect())
+                        .unwrap_or_default();
                     if !pending_servers.is_empty() {
                         self.session.push(synthetic_notice_message(
                             SystemNoticeKind::McpPending,
@@ -1355,13 +1397,16 @@ where
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
                     let result = match self
-                        .call_llm_with_retry(
-                            &request_messages,
-                            call_tool_defs,
-                            effective_max_tokens,
-                            effective_temperature,
-                            effective_provider_params.as_ref(),
-                        )
+                        .call_llm_with_retry(LlmRetryRequest {
+                            run_id: &run_id,
+                            turn_count,
+                            event_tx: &event_tx,
+                            messages: &request_messages,
+                            tools: call_tool_defs,
+                            max_tokens: effective_max_tokens,
+                            temperature: effective_temperature,
+                            provider_params: effective_provider_params.as_ref(),
+                        })
                         .await
                     {
                         Ok(r) => r,
@@ -2147,9 +2192,7 @@ where
 
         let outcome = self.turn_terminal_outcome()?;
         let classification = classify_terminal(&outcome);
-        if classification.is_some() {
-            self.state = LoopState::Completed;
-        }
+        self.state = self.turn_phase()?.to_loop_state();
 
         match classification {
             Some(SurfaceResultClass::HardFailure) => {

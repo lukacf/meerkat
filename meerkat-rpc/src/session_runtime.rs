@@ -2295,6 +2295,10 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
+                turn_metadata: primitive.turn_metadata().cloned(),
+                execution_kind: primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.execution_kind),
             };
 
             match self
@@ -2507,6 +2511,10 @@ impl SessionRuntime {
 
                         skill_references,
                         flow_tool_overlay,
+                        turn_metadata: primitive.turn_metadata().cloned(),
+                        execution_kind: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.execution_kind),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2565,6 +2573,10 @@ impl SessionRuntime {
 
                     skill_references,
                     flow_tool_overlay,
+                    turn_metadata: primitive.turn_metadata().cloned(),
+                    execution_kind: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.execution_kind),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2960,6 +2972,8 @@ impl SessionRuntime {
             event_tx: Some(event_tx.clone()),
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
+            turn_metadata: None,
+            execution_kind: None,
         };
 
         if self.live_session_is_stale(session_id).await? {
@@ -4870,14 +4884,14 @@ mod tests {
             .expect("run_started event should exist");
         match started.payload {
             AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.to_lowercase();
+                let normalized = prompt.text_content().to_lowercase();
                 assert!(
                     normalized.contains("peer_response_terminal:analyst-rt:req-123"),
-                    "run_started prompt should expose runtime system-context source: {prompt}"
+                    "run_started prompt should expose runtime system-context source: {normalized}"
                 );
                 assert!(
                     normalized.contains("birch seventeen"),
-                    "run_started prompt should expose authoritative terminal peer payload: {prompt}"
+                    "run_started prompt should expose authoritative terminal peer payload: {normalized}"
                 );
             }
             other => panic!("expected run_started, got {other:?}"),

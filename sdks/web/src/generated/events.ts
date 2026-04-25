@@ -1,6 +1,8 @@
 // Generated raw event types for @rkat/web
 // Source: artifacts/schemas/events.json
 
+import type { ContentInput } from "../types";
+
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export interface DeferredCatalogDelta {
@@ -82,7 +84,7 @@ export type Usage = {
 };
 
 export interface RunStartedEvent {
-  prompt: string;
+  prompt: ContentInput;
   session_id: SessionId;
   type: "run_started";
 }
@@ -96,6 +98,7 @@ export interface RunCompletedEvent {
 
 export interface RunFailedEvent {
   error: string;
+  error_class: string;
   session_id: SessionId;
   type: "run_failed";
 }

@@ -25,6 +25,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import type { ContentInput } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -126,7 +127,7 @@ export interface ScopedAgentEvent {
 export interface RunStartedEvent {
   readonly type: "run_started";
   readonly sessionId: string;
-  readonly prompt: string;
+  readonly prompt: ContentInput;
 }
 
 export interface RunCompletedEvent {
@@ -139,6 +140,7 @@ export interface RunCompletedEvent {
 export interface RunFailedEvent {
   readonly type: "run_failed";
   readonly sessionId: string;
+  readonly errorClass: string;
   readonly error: string;
 }
 
@@ -455,6 +457,11 @@ function parseUsage(raw: Record<string, unknown> | undefined): Usage {
   };
 }
 
+function parseContentInput(raw: unknown): ContentInput {
+  if (Array.isArray(raw)) return raw as ContentInput;
+  return String(raw ?? "");
+}
+
 /**
  * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
@@ -513,11 +520,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   switch (type) {
     // Session lifecycle
     case "run_started":
-      return { type, sessionId: String(raw.session_id ?? ""), prompt: String(raw.prompt ?? "") };
+      return { type, sessionId: String(raw.session_id ?? ""), prompt: parseContentInput(raw.prompt) };
     case "run_completed":
       return { type, sessionId: String(raw.session_id ?? ""), result: String(raw.result ?? ""), usage: parseUsage(raw.usage as Record<string, unknown>) };
     case "run_failed":
-      return { type, sessionId: String(raw.session_id ?? ""), error: String(raw.error ?? "") };
+      return { type, sessionId: String(raw.session_id ?? ""), errorClass: String(raw.error_class ?? ""), error: String(raw.error ?? "") };
 
     // Turn / LLM
     case "turn_started":

@@ -681,7 +681,7 @@ where
 
     async fn emit_run_started_event(
         &self,
-        prompt: &str,
+        prompt: ContentInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let _ = crate::event_tap::tap_emit(
@@ -689,7 +689,7 @@ where
             event_tx,
             AgentEvent::RunStarted {
                 session_id: self.session.id().clone(),
-                prompt: prompt.to_string(),
+                prompt,
             },
         )
         .await;
@@ -705,6 +705,7 @@ where
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
+                error_class: crate::event::AgentErrorClass::from(error),
                 error: error.to_string(),
             },
         )
@@ -843,10 +844,13 @@ where
         // attaches pair `runtime_execution_kind` with every live-run path,
         // and `runtime_turn_authority_snapshot` (state.rs) panics on an
         // unclassified handle. See #32 W2 / PR #299 follow-up.
-        self.state = LoopState::CallingLlm;
         if self.runtime_execution_kind.is_none() {
             self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
         }
+        self.state = self
+            .turn_phase()
+            .map(crate::turn_execution_authority::TurnPhase::to_loop_state)
+            .unwrap_or(LoopState::CallingLlm);
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -871,6 +875,7 @@ where
 
         // Hooks/events always see the text projection.
         let run_prompt = user_input.text_content();
+        let run_prompt_input = user_input.clone();
 
         // Add user message — preserve image blocks when present.
         let user_message = if user_input.has_non_text_content() {
@@ -880,7 +885,7 @@ where
         };
         self.session.push(Message::User(user_message));
 
-        self.emit_run_started_event(&run_prompt, event_tx.as_ref())
+        self.emit_run_started_event(run_prompt_input, event_tx.as_ref())
             .await;
 
         if let Err(err) = self.run_started_hooks(&run_prompt, event_tx.as_ref()).await {
@@ -940,16 +945,19 @@ where
         // that resumes pending work at a boundary. Default the classification
         // to `ResumePending` unless the caller staged an explicit kind via
         // `set_runtime_execution_kind`. See #32 W2 / PR #299 follow-up.
-        self.state = LoopState::CallingLlm;
         if self.runtime_execution_kind.is_none() {
             self.runtime_execution_kind =
                 Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
         }
+        self.state = self
+            .turn_phase()
+            .map(crate::turn_execution_authority::TurnPhase::to_loop_state)
+            .unwrap_or(LoopState::CallingLlm);
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
 
-        self.emit_run_started_event(&prompt, event_tx.as_ref())
+        self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
 
         if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {

@@ -1678,7 +1678,7 @@ impl SessionService for LocalSessionService {
                 None,
                 AgentEvent::RunStarted {
                     session_id: id.clone(),
-                    prompt: effective_prompt.text_content(),
+                    prompt: effective_prompt.clone(),
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new(
@@ -3355,6 +3355,8 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    turn_metadata: None,
+                    execution_kind: None,
                 },
             )
             .await
@@ -3363,6 +3365,7 @@ mod tests {
         let first = stream.next().await.expect("first event");
         match first.payload {
             AgentEvent::RunStarted { prompt, .. } => {
+                let prompt = prompt.text_content();
                 assert!(prompt.contains("Remember the customer preference."));
                 assert!(prompt.contains("hello"));
             }
@@ -3539,6 +3542,8 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    turn_metadata: None,
+                    execution_kind: None,
                 },
             )
             .await;
@@ -4981,6 +4986,8 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
             vec![],

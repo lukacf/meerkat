@@ -750,6 +750,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            turn_metadata: primitive.turn_metadata().cloned(),
+            execution_kind: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.execution_kind),
         };
 
         self.session_service

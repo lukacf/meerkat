@@ -79,6 +79,7 @@ impl SessionAgent for MockAgent {
             let _ = event_tx
                 .send(AgentEvent::RunFailed {
                     session_id: self.session_id.clone(),
+                    error_class: meerkat_core::event::AgentErrorClass::Internal,
                     error: "simulated failure".to_string(),
                 })
                 .await;
@@ -90,7 +91,7 @@ impl SessionAgent for MockAgent {
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id: self.session_id.clone(),
-                prompt: "test".to_string(),
+                prompt: meerkat_core::ContentInput::Text("test".to_string()),
             })
             .await;
 
@@ -597,6 +598,8 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         event_tx: None,
         skill_references: None,
         flow_tool_overlay: None,
+        turn_metadata: None,
+        execution_kind: None,
     }
 }
 
@@ -1174,6 +1177,8 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                turn_metadata: None,
+                execution_kind: None,
             },
         )
         .await

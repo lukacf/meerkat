@@ -473,13 +473,18 @@ impl MeerkatMachine {
                         )));
                     }
 
+                    let primitive =
+                        crate::runtime_loop::input_to_primitive(&dequeued_input, dequeued_id)
+                            .map_err(|err| {
+                                RuntimeDriverError::Internal(format!(
+                                    "failed to build accepted input primitive: {err}"
+                                ))
+                            })?;
+
                     MeerkatMachineRunPrepared {
                         input_id,
                         run_id,
-                        primitive: crate::runtime_loop::input_to_primitive(
-                            &dequeued_input,
-                            dequeued_id,
-                        ),
+                        primitive,
                     }
                 };
 

@@ -639,12 +639,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(err) => return Err(err),
         };
 
-        let Some(stored) = self
-            .store
-            .load(id)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?
-        else {
+        let Some(stored) = self.load_authoritative_session_base(id).await? else {
             return Ok(false);
         };
 
@@ -1049,6 +1044,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     args,
                 )
             }
+            Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
+                receipt,
+                session_snapshot: Some(session_snapshot),
+                run_result: None,
+                terminal: Some(CoreApplyTerminal::NoPendingBoundary),
+            },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
         };
 
@@ -1095,11 +1096,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Ok((run_result, output))
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                // ResumePending with no boundary — no-op through canonical path.
-                // Callers (CLI, RPC) discard the RunResult — this is a legacy
-                // placeholder.
                 let output = self
-                    .build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+                    .build_runtime_output(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::NoPendingBoundary),
+                    )
                     .await?;
                 let noop_result = RunResult {
                     text: String::new(),
@@ -1138,9 +1142,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                // ResumePending with no boundary — no-op through canonical path.
-                self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
-                    .await
+                self.build_runtime_output(
+                    id,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    Some(CoreApplyTerminal::NoPendingBoundary),
+                )
+                .await
             }
             Err(error) => {
                 if let Some(terminal) = Self::callback_pending_terminal(&error) {
@@ -2484,11 +2493,10 @@ mod tests {
             event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             let session_id = self.inner.session_id();
-            let prompt_text = prompt.text_content();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
                     session_id: session_id.clone(),
-                    prompt: prompt_text,
+                    prompt: prompt.clone(),
                 })
                 .await;
             let result = self.inner.run_with_events(prompt, event_tx.clone()).await?;
@@ -3138,6 +3146,8 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            turn_metadata: None,
+            execution_kind: None,
         }
     }
 
@@ -3153,6 +3163,8 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            turn_metadata: None,
+            execution_kind: None,
         }
     }
 
@@ -4406,14 +4418,14 @@ mod tests {
             .expect("run_started event should exist");
         match started.payload {
             AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.to_lowercase();
+                let normalized = prompt.text_content().to_lowercase();
                 assert!(
                     normalized.contains("peer_response_terminal:analyst-rt:req-123"),
-                    "run_started prompt should expose runtime system-context source: {prompt}"
+                    "run_started prompt should expose runtime system-context source: {normalized}"
                 );
                 assert!(
                     normalized.contains("birch seventeen"),
-                    "run_started prompt should expose authoritative terminal peer payload: {prompt}"
+                    "run_started prompt should expose authoritative terminal peer payload: {normalized}"
                 );
             }
             other => panic!("expected run_started, got {other:?}"),

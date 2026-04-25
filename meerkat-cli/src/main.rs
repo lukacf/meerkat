@@ -4535,12 +4535,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
-        // Post-wave-a: `StartTurnRequest.additional_instructions` /
-        // `execution_kind` were collapsed into the typed `RuntimeTurnMetadata`
-        // seam on `PromptInput.turn_metadata`; they no longer live on the
-        // session-service request literal. The primitive's metadata is still
-        // consulted for `skill_references` + `flow_tool_overlay`, which remain
-        // part of the request surface.
+        // Forward the primitive metadata carrier as the single runtime-authored
+        // source for per-turn policy.
         let turn_req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
@@ -4553,6 +4549,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            turn_metadata: primitive.turn_metadata().cloned(),
+            execution_kind: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.execution_kind),
         };
 
         // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.

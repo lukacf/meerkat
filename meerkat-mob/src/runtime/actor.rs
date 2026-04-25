@@ -1377,6 +1377,8 @@ impl MobActor {
 
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                turn_metadata: None,
+                                execution_kind: None,
                             },
                         )
                         .await
@@ -7753,6 +7755,8 @@ impl MobActor {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    turn_metadata: None,
+                    execution_kind: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 Ok(())

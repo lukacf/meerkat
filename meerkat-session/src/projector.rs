@@ -300,7 +300,7 @@ mod tests {
             &[
                 AgentEvent::RunStarted {
                     session_id: sid.clone(),
-                    prompt: "Hello".to_string(),
+                    prompt: meerkat_core::ContentInput::Text("Hello".to_string()),
                 },
                 AgentEvent::TextComplete {
                     content: "Hi there!".to_string(),

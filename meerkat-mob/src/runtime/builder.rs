@@ -1308,6 +1308,8 @@ impl MobBuilder {
                                 event_tx: None,
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                turn_metadata: None,
+                                execution_kind: None,
                             },
                         )
                         .await?;

@@ -265,21 +265,26 @@ impl MeerkatMachine {
                         Arc::clone(&entry.dsl_authority),
                     )
                 };
-                let mut driver = driver_handle.lock().await;
+                let runtime_id = {
+                    let driver = driver_handle.lock().await;
+                    driver.runtime_id().clone()
+                };
                 let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
                     agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
-                        driver.runtime_id(),
+                        &runtime_id,
                     ),
                     fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
                     generation: crate::meerkat_machine::dsl::Generation::from(0),
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                 };
-                machine_prepare_bindings_projection(&mut driver)?;
-                drop(driver);
                 let _ = self
                     .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                {
+                    let mut driver = driver_handle.lock().await;
+                    machine_prepare_bindings_projection(&mut driver)?;
+                }
                 // Share ONE HandleDslAuthority across all 5 handles so their
                 // transitions land on the session's real DSL state (same Arc
                 // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites

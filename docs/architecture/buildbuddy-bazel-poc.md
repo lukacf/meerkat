@@ -60,6 +60,12 @@ modes:
   distinct lanes.
 - `support-file`: exact selector behavior for a shared integration-test support
   file, measured with remote and local-spawn execution.
+- `edit-probes`: creates a temporary detached worktree, makes harmless real
+  edits to representative source/test/support files, runs the matching lanes,
+  and removes the worktree.
+- `edit-probes-warmed`: runs the same edit probes after prewarming the relevant
+  lanes in the temporary worktree, separating first-touch materialization from
+  steady-state edit feedback.
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
@@ -76,6 +82,12 @@ Representative measurements from the POC environment:
 | Same-worktree, same command, warmed lanes | `4.44s` / `4.34s` wall |
 | Shared test-support edit, exact remote selector | `19.10s` wall |
 | Shared test-support edit, exact local-spawn selector | `8.25s` wall |
+| Fresh temp worktree source edit probe | `23.98s` wall |
+| Fresh temp worktree exact-test edit probe | `48.31s` wall |
+| Fresh temp worktree support-local edit probe | `49.99s` wall |
+| Prewarmed temp worktree source edit probe | `3.85s` wall |
+| Prewarmed temp worktree exact-test edit probe | `5.62s` wall |
+| Prewarmed temp worktree support-local edit probe | `5.62s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |
@@ -83,6 +95,10 @@ Representative measurements from the POC environment:
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel
 client startup path rather than Rust compilation.
+
+For new agent worktrees, prewarming the small set of expected lanes is worth it:
+the edit-probe harness showed first edit feedback dropping from tens of seconds
+to roughly `4-6s` once those lanes were prepared.
 
 ## Current Guidance
 

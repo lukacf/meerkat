@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -12,6 +12,8 @@ Scenarios:
   same-worktree      Run two same-checkout agents in parallel with distinct lanes.
   same-command       Run two same-checkout agents using the same command in parallel.
   support-file       Run exact selectors for a shared integration-test support file.
+  edit-probes        Make real edits in a temporary worktree and time edit lanes.
+  edit-probes-warmed Prewarm lanes in a temporary worktree before timing edits.
   multi-worktree     Create two temporary git worktrees and run parallel agents.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
@@ -155,6 +157,69 @@ async function supportFile(root) {
   return results.some((result) => result.code !== 0) ? 1 : 0;
 }
 
+function editProbeCases() {
+  return [
+    {
+      command: "owned-build",
+      env: { RUST_LANE_ID: "edit-source" },
+      extra: ["--jobs=64", "--color=no", "--curses=no"],
+      marker: "\n// BuildBuddy edit probe: source-owned-build.\n",
+      path: "meerkat-machine-dsl-core/src/lib.rs",
+    },
+    {
+      command: "owned-fast-test",
+      env: { RUST_LANE_ID: "edit-test" },
+      extra: ["--jobs=64"],
+      marker: "\n// BuildBuddy edit probe: exact-test-remote.\n",
+      path: "meerkat-mob/tests/member_session_bindings.rs",
+    },
+    {
+      command: "owned-fast-test-local",
+      env: { RUST_LANE_ID: "edit-support-local" },
+      extra: ["--color=no", "--curses=no"],
+      marker: "\n// BuildBuddy edit probe: support-local.\n",
+      path: "meerkat/tests/support/test_session_store.rs",
+    },
+  ];
+}
+
+async function editProbes(root, { prewarm = false } = {}) {
+  console.log(`\n== ${prewarm ? "edit-probes-warmed" : "edit-probes"} ==`);
+  const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-edit-probes-"));
+  const worktree = join(temp, basename(root));
+  const head = (await run("git", ["rev-parse", "HEAD"], { cwd: root, label: "rev-parse" })).output.trim();
+  try {
+    const add = await run("git", ["worktree", "add", "--detach", worktree, head], {
+      cwd: root,
+      label: "edit-probe-worktree",
+    });
+    printResult(add);
+    if (add.code !== 0) return add.code;
+
+    const probes = editProbeCases();
+
+    if (prewarm) {
+      console.log("prewarming edit lanes...");
+      const warmResults = await Promise.all(
+        probes.map((probe) => repoCommand(worktree, probe.env, probe.command, [probe.path], probe.extra)),
+      );
+      for (const result of warmResults) printResult(result);
+      if (warmResults.some((result) => result.code !== 0)) return 1;
+    }
+
+    for (const probe of probes) {
+      appendFileSync(join(worktree, probe.path), probe.marker);
+      const result = await repoCommand(worktree, probe.env, probe.command, [probe.path], probe.extra);
+      printResult(result);
+      if (result.code !== 0) return result.code;
+    }
+    return 0;
+  } finally {
+    await run("git", ["worktree", "remove", "--force", worktree], { cwd: root, label: "remove-edit-probe-worktree" });
+    rmSync(temp, { force: true, recursive: true });
+  }
+}
+
 async function multiWorktree(root) {
   console.log("\n== multi-worktree ==");
   const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-worktrees-"));
@@ -263,7 +328,7 @@ if (requested.includes("--help") || requested.includes("-h")) {
   process.exit(0);
 }
 const scenarios = requested.length === 0 || requested.includes("all")
-  ? ["warm-noop", "same-worktree", "same-command", "support-file", "multi-worktree", "ci-cold", "ci-parallel"]
+  ? ["warm-noop", "same-worktree", "same-command", "support-file", "edit-probes", "edit-probes-warmed", "multi-worktree", "ci-cold", "ci-parallel"]
   : requested;
 
 const runners = new Map([
@@ -271,6 +336,8 @@ const runners = new Map([
   ["same-worktree", sameWorktree],
   ["same-command", sameCommand],
   ["support-file", supportFile],
+  ["edit-probes", editProbes],
+  ["edit-probes-warmed", (root) => editProbes(root, { prewarm: true })],
   ["multi-worktree", multiWorktree],
   ["ci-cold", ciCold],
   ["ci-parallel", ciParallel],

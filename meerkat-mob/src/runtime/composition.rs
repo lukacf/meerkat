@@ -41,6 +41,8 @@
 
 use crate::error::MobError;
 use crate::machines::mob_machine as mob_dsl;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_machine_schema::identity::{
     CompositionId, EffectVariantId, FieldId, MachineId, MachineInstanceId, SignalVariantId,
 };

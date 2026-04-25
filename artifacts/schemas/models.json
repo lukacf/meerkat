@@ -1,9 +1,37 @@
 {
   "CatalogModelEntry": {
     "$defs": {
+      "WireModelBetaHeader": {
+        "description": "Catalog-owned beta header metadata.",
+        "properties": {
+          "feature": {
+            "type": "string"
+          },
+          "header_name": {
+            "type": "string"
+          },
+          "header_value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "header_name",
+          "header_value"
+        ],
+        "type": "object"
+      },
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "beta_headers": {
+            "default": [],
+            "description": "Beta headers authorized by the model capability catalog.",
+            "items": {
+              "$ref": "#/$defs/WireModelBetaHeader"
+            },
+            "type": "array"
+          },
           "inline_video": {
             "description": "Whether the model accepts inline video content in user messages.",
             "type": "boolean"
@@ -232,9 +260,37 @@
         ],
         "type": "object"
       },
+      "WireModelBetaHeader": {
+        "description": "Catalog-owned beta header metadata.",
+        "properties": {
+          "feature": {
+            "type": "string"
+          },
+          "header_name": {
+            "type": "string"
+          },
+          "header_value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "header_name",
+          "header_value"
+        ],
+        "type": "object"
+      },
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "beta_headers": {
+            "default": [],
+            "description": "Beta headers authorized by the model capability catalog.",
+            "items": {
+              "$ref": "#/$defs/WireModelBetaHeader"
+            },
+            "type": "array"
+          },
           "inline_video": {
             "description": "Whether the model accepts inline video content in user messages.",
             "type": "boolean"
@@ -373,9 +429,37 @@
         ],
         "type": "object"
       },
+      "WireModelBetaHeader": {
+        "description": "Catalog-owned beta header metadata.",
+        "properties": {
+          "feature": {
+            "type": "string"
+          },
+          "header_name": {
+            "type": "string"
+          },
+          "header_value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "header_name",
+          "header_value"
+        ],
+        "type": "object"
+      },
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "beta_headers": {
+            "default": [],
+            "description": "Beta headers authorized by the model capability catalog.",
+            "items": {
+              "$ref": "#/$defs/WireModelBetaHeader"
+            },
+            "type": "array"
+          },
           "inline_video": {
             "description": "Whether the model accepts inline video content in user messages.",
             "type": "boolean"
@@ -459,9 +543,39 @@
     "type": "object"
   },
   "WireModelProfile": {
+    "$defs": {
+      "WireModelBetaHeader": {
+        "description": "Catalog-owned beta header metadata.",
+        "properties": {
+          "feature": {
+            "type": "string"
+          },
+          "header_name": {
+            "type": "string"
+          },
+          "header_value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "header_name",
+          "header_value"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Runtime profile for a model — capabilities and parameter schema.",
     "properties": {
+      "beta_headers": {
+        "default": [],
+        "description": "Beta headers authorized by the model capability catalog.",
+        "items": {
+          "$ref": "#/$defs/WireModelBetaHeader"
+        },
+        "type": "array"
+      },
       "inline_video": {
         "description": "Whether the model accepts inline video content in user messages.",
         "type": "boolean"

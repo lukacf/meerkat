@@ -1,9 +1,27 @@
 // Generated raw event types for @rkat/web
 // Source: artifacts/schemas/events.json
 
-import type { ContentInput } from "../types";
+export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
+
+export type BlobId = string;
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
+
+export type ContentBlock = {
+  text: string;
+  type: "text";
+} | {
+  data: string;
+  source: "inline";
+} | {
+  blob_id: BlobId;
+  source: "blob";
+} | {
+  data: string;
+  source: "inline";
+};
+
+export type ContentInput = string | ContentBlock[];
 
 export interface DeferredCatalogDelta {
   added_hidden_names?: string[];
@@ -98,7 +116,7 @@ export interface RunCompletedEvent {
 
 export interface RunFailedEvent {
   error: string;
-  error_class: string;
+  error_class: AgentErrorClass;
   session_id: SessionId;
   type: "run_failed";
 }

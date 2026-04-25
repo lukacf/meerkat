@@ -603,6 +603,7 @@ class WireModelProfile:
     supports_reasoning: bool
     supports_temperature: bool
     supports_thinking: bool
+    beta_headers: Optional[list[dict[str, Any]]] = None
     supports_web_search: Optional[bool] = None
 
 

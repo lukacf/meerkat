@@ -152,6 +152,21 @@
         "summary": "Get product-layer realtime channel status for a target"
       }
     },
+    "/runtime/capabilities": {
+      "get": {
+        "summary": "Get runtime host capability flags"
+      }
+    },
+    "/runtime/health": {
+      "get": {
+        "summary": "Get runtime host health"
+      }
+    },
+    "/runtime/host_info": {
+      "get": {
+        "summary": "Get read-only runtime host information"
+      }
+    },
     "/schedule/call": {
       "post": {
         "summary": "Invoke a schedule tool"

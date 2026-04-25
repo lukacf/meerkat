@@ -1,6 +1,39 @@
 {
   "AgentEvent": {
     "$defs": {
+      "AgentErrorClass": {
+        "enum": [
+          "llm",
+          "store",
+          "tool",
+          "mcp",
+          "session_not_found",
+          "budget",
+          "max_tokens",
+          "content_filtered",
+          "max_turns",
+          "cancelled",
+          "invalid_state",
+          "operation_not_found",
+          "depth_limit",
+          "concurrency_limit",
+          "config",
+          "internal",
+          "build",
+          "auth",
+          "callback_pending",
+          "structured_output",
+          "invalid_output_schema",
+          "hook",
+          "terminal",
+          "no_pending_boundary"
+        ],
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
       "BudgetType": {
         "description": "Type of budget being tracked",
         "enum": [
@@ -9,6 +42,141 @@
           "tool_calls"
         ],
         "type": "string"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -383,7 +551,7 @@
         "description": "Agent run started",
         "properties": {
           "prompt": {
-            "type": "string"
+            "$ref": "#/$defs/ContentInput"
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -431,6 +599,9 @@
           "error": {
             "type": "string"
           },
+          "error_class": {
+            "$ref": "#/$defs/AgentErrorClass"
+          },
           "session_id": {
             "$ref": "#/$defs/SessionId"
           },
@@ -442,6 +613,7 @@
         "required": [
           "type",
           "session_id",
+          "error_class",
           "error"
         ],
         "type": "object"
@@ -1177,6 +1349,35 @@
   },
   "ScopedAgentEvent": {
     "$defs": {
+      "AgentErrorClass": {
+        "enum": [
+          "llm",
+          "store",
+          "tool",
+          "mcp",
+          "session_not_found",
+          "budget",
+          "max_tokens",
+          "content_filtered",
+          "max_turns",
+          "cancelled",
+          "invalid_state",
+          "operation_not_found",
+          "depth_limit",
+          "concurrency_limit",
+          "config",
+          "internal",
+          "build",
+          "auth",
+          "callback_pending",
+          "structured_output",
+          "invalid_output_schema",
+          "hook",
+          "terminal",
+          "no_pending_boundary"
+        ],
+        "type": "string"
+      },
       "AgentEvent": {
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
@@ -1184,7 +1385,7 @@
             "description": "Agent run started",
             "properties": {
               "prompt": {
-                "type": "string"
+                "$ref": "#/$defs/ContentInput"
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -1232,6 +1433,9 @@
               "error": {
                 "type": "string"
               },
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass"
+              },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
               },
@@ -1243,6 +1447,7 @@
             "required": [
               "type",
               "session_id",
+              "error_class",
               "error"
             ],
             "type": "object"
@@ -1975,6 +2180,10 @@
           }
         ]
       },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
       "BudgetType": {
         "description": "Type of budget being tracked",
         "enum": [
@@ -1983,6 +2192,141 @@
           "tool_calls"
         ],
         "type": "string"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",

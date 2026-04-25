@@ -49,6 +49,45 @@
       "name": "capabilities/get"
     },
     {
+      "description": "Get read-only runtime host information",
+      "name": "runtime/host_info",
+      "result_type": "RuntimeHostInfo"
+    },
+    {
+      "description": "Get runtime host capability flags",
+      "name": "runtime/capabilities",
+      "result_type": "RuntimeHostCapabilities"
+    },
+    {
+      "description": "Get runtime host health",
+      "name": "runtime/health",
+      "result_type": "RuntimeHostHealth"
+    },
+    {
+      "description": "Create a durable approval request",
+      "name": "approval/request",
+      "params_type": "ApprovalRequestParams",
+      "result_type": "ApprovalRecord"
+    },
+    {
+      "description": "List durable approval requests",
+      "name": "approval/list",
+      "params_type": "ApprovalListParams",
+      "result_type": "ApprovalListResult"
+    },
+    {
+      "description": "Get one durable approval request",
+      "name": "approval/get",
+      "params_type": "ApprovalGetParams",
+      "result_type": "ApprovalRecord"
+    },
+    {
+      "description": "Record a durable approval decision",
+      "name": "approval/decide",
+      "params_type": "ApprovalDecideParams",
+      "result_type": "ApprovalRecord"
+    },
+    {
       "description": "Get the effective model catalog (built-in plus config-backed entries)",
       "name": "models/catalog",
       "result_type": "ModelsCatalogResponse"
@@ -112,6 +151,24 @@
       "result_type": "BlobPayload"
     },
     {
+      "description": "List stable artifact records",
+      "name": "artifact/list",
+      "params_type": "ArtifactListParams",
+      "result_type": "ArtifactListResult"
+    },
+    {
+      "description": "Get one stable artifact record",
+      "name": "artifact/get",
+      "params_type": "ArtifactIdParams",
+      "result_type": "ArtifactRecord"
+    },
+    {
+      "description": "Download blob-backed artifact payload bytes",
+      "name": "artifact/download",
+      "params_type": "ArtifactDownloadParams",
+      "result_type": "ArtifactDownloadResult"
+    },
+    {
       "description": "Queue a runtime-backed external event",
       "name": "session/external_event",
       "params_type": "SessionExternalEventEnvelope",
@@ -126,6 +183,24 @@
     {
       "description": "Stage runtime system context for application at the next LLM boundary",
       "name": "session/inject_context"
+    },
+    {
+      "description": "Read the latest replay cursor for an event source",
+      "name": "events/latest_cursor",
+      "params_type": "EventsLatestCursorParams",
+      "result_type": "EventsLatestCursorResult"
+    },
+    {
+      "description": "List replayable events after a cursor",
+      "name": "events/list_since",
+      "params_type": "EventsListSinceParams",
+      "result_type": "EventsListSinceResult"
+    },
+    {
+      "description": "Read a point-in-time snapshot anchor for an event source",
+      "name": "events/snapshot",
+      "params_type": "EventsSnapshotParams",
+      "result_type": "EventsSnapshotResult"
     },
     {
       "description": "Open a session event stream",
@@ -327,6 +402,12 @@
       "name": "mob/member_send",
       "params_type": "MobMemberSendParams",
       "result_type": "MobMemberSendResult"
+    },
+    {
+      "description": "Ensure an ingress member, then deliver user input with a replay cursor receipt",
+      "name": "mob/ingress_interaction",
+      "params_type": "MobIngressInteractionParams",
+      "result_type": "MobIngressInteractionResult"
     },
     {
       "description": "Append system context for a mob member",

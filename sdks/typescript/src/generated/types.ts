@@ -708,6 +708,7 @@ export interface ModelsCatalogResponse {
 }
 
 export interface WireModelProfile {
+  beta_headers?: Record<string, unknown>[];
   inline_video: boolean;
   model_family: string;
   params_schema: unknown;

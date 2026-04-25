@@ -10,12 +10,11 @@ impl MeerkatMachine {
             }
         }
 
-        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
         let dsl_authority = Arc::new(std::sync::Mutex::new(
             super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
                 &session_id,
                 RuntimeState::Idle,
-                Some(&runtime_id),
+                None,
                 None,
                 None,
                 std::collections::BTreeSet::new(),
@@ -195,13 +194,12 @@ impl MeerkatMachine {
                 }
                 (driver, completions, ops_lifecycle)
             } else {
-                let runtime_id = LogicalRuntimeId::new(session_id.to_string());
                 let dsl_authority = Arc::new(std::sync::Mutex::new(
                     super::dsl::MeerkatMachineAuthority::from_state(
                         super::dsl_authority::project_state(
                             &session_id,
                             RuntimeState::Idle,
-                            Some(&runtime_id),
+                            None,
                             None,
                             None,
                             std::collections::BTreeSet::new(),

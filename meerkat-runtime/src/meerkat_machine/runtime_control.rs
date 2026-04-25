@@ -341,4 +341,36 @@ impl MeerkatMachine {
             Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
         }
     }
+
+    /// Prepare factory-consumable session runtime resources without emitting
+    /// cross-machine binding signals.
+    ///
+    /// Mob provisioning uses this to pre-create the session-owned handle bundle
+    /// before `MobMachine::Spawn` has committed the member runtime id. The
+    /// authoritative mob binding is routed later through
+    /// `RequestRuntimeBinding -> PrepareBindings`, which emits the typed
+    /// `RuntimeBound` signal with the mob-owned `AgentRuntimeId` and fence.
+    pub async fn prepare_local_session_bindings(
+        &self,
+        session_id: SessionId,
+    ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::PrepareLocalSessionBindings {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
+            Ok(_) => {
+                tracing::error!(
+                    "prepare_local_session_bindings: unexpected command result variant"
+                );
+                Err(RuntimeBindingsError::SessionNotFound(session_id))
+            }
+            Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
+        }
+    }
 }

@@ -783,6 +783,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     reason: err.to_string(),
                 }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
+                tracing::debug!(
+                    bridge_session_id = %self.bridge_session_id,
+                    "mob runtime executor received StopRuntimeExecutor; discarding live session"
+                );
                 let discard_result = self
                     .session_service
                     .discard_live_session(&self.bridge_session_id)
@@ -853,9 +857,11 @@ impl MobProvisioner for SessionBackend {
                     id
                 });
             let bindings = adapter
-                .prepare_bindings(member_bridge_session_id.clone())
+                .prepare_local_session_bindings(member_bridge_session_id.clone())
                 .await
-                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+                .map_err(|e| {
+                    MobError::Internal(format!("prepare_local_session_bindings failed: {e}"))
+                })?;
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);

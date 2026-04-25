@@ -643,12 +643,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(false);
         };
 
-        let stored_is_newer = stored.updated_at() > live.updated_at()
-            || (stored.updated_at() == live.updated_at()
-                && stored.messages().len() > live.messages().len());
+        let stored_has_more_transcript = stored.messages().len() > live.messages().len();
         let stored_is_archived = metadata_marks_archived(stored.metadata());
 
-        if !stored_is_newer && !stored_is_archived {
+        // A durable snapshot timestamp is a projection witness, not live-session
+        // authority. Runtime commits can normalize/persist an equivalent
+        // transcript a few microseconds after the live session updates itself;
+        // evicting the live handle on timestamp alone drops mechanical runtime
+        // resources such as comms. Only terminal archive state or a strictly
+        // longer durable transcript can evict the live session.
+        if !stored_has_more_transcript && !stored_is_archived {
             return Ok(false);
         }
 
@@ -4368,6 +4372,48 @@ mod tests {
                 .contains("stored-session recovery via non-canonical runtime-binding providers has been deleted"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_metadata_only_projection_does_not_discard_live_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::Defer))
+            .await
+            .expect("create deferred session");
+        let id = created.session_id;
+
+        let mut projected = service
+            .export_live_session(&id)
+            .await
+            .expect("live session should export");
+        projected.set_metadata("projection_only", serde_json::json!(true));
+        store
+            .save(&projected)
+            .await
+            .expect("projection snapshot should save");
+
+        let discarded = service
+            .discard_stale_live_session_if_needed(&id)
+            .await
+            .expect("discard check should succeed");
+
+        assert!(
+            !discarded,
+            "metadata/timestamp-only durable projection must not evict live runtime mechanics"
+        );
+        service
+            .export_live_session(&id)
+            .await
+            .expect("live session should remain available");
     }
 
     #[tokio::test]

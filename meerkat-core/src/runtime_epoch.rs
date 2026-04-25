@@ -140,9 +140,8 @@ pub struct EpochCursorSnapshot {
 
 /// Bundle of epoch-local runtime facts.
 ///
-/// Created by the runtime epoch owner ([`MeerkatMachine::prepare_bindings`]),
-/// consumed by the factory. The factory never creates competing registries
-/// when it receives this bundle.
+/// Created by the runtime epoch owner, consumed by the factory. The factory
+/// never creates competing registries when it receives this bundle.
 ///
 /// The `session_id` field acts as an identity witness: the factory validates
 /// that `bindings.session_id == session.id()` to catch cross-wired bindings.

@@ -688,4 +688,80 @@ mod tests {
         assert_eq!(log[0].1[1].0.as_str(), "fence_token");
         assert!(matches!(log[0].1[1].1, OwnedFieldValue::U64(11)));
     }
+
+    #[tokio::test]
+    async fn local_session_bindings_do_not_dispatch_runtime_bound_signal() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        let signal_surface = Arc::new(RecordingSignalSurface::default());
+        let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+        let table = RouteTable::from_schema(&schema).expect("catalog routes");
+        let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
+            CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
+                .with_consumer(signal_surface.clone());
+        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+
+        let bindings = machine
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("local bindings prepare");
+
+        assert_eq!(bindings.session_id, session_id);
+        assert!(
+            signal_surface.log.lock().await.is_empty(),
+            "local resource preparation must not publish cross-machine runtime readiness"
+        );
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session_id).expect("session registered");
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                authority.state.active_runtime_id.is_none(),
+                "local resource preparation must leave binding identity unclaimed"
+            );
+            assert!(
+                authority.state.active_fence_token.is_none(),
+                "local resource preparation must leave binding fence unclaimed"
+            );
+        }
+
+        machine
+            .apply_routed_meerkat_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-authoritative".into()),
+                    fence_token: mm_dsl::FenceToken(13),
+                    generation: mm_dsl::Generation(0),
+                    session_id: mm_dsl::SessionId(session_id.to_string()),
+                },
+            )
+            .await
+            .expect("authoritative binding still applies after local resource prep");
+
+        let log = signal_surface.log.lock().await;
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0.as_str(), "ObserveRuntimeReady");
+        assert!(
+            matches!(&log[0].1[0].1, OwnedFieldValue::Str(value) if value == "rt-authoritative")
+        );
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session_id).expect("session registered");
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                matches!(&authority.state.active_runtime_id, Some(value) if value.0 == "rt-authoritative")
+            );
+            assert!(matches!(
+                authority.state.active_fence_token,
+                Some(mm_dsl::FenceToken(13))
+            ));
+        }
+    }
 }

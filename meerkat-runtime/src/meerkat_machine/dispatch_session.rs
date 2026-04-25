@@ -1,6 +1,135 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionBindingPreparation {
+    /// The runtime binding itself is the semantic event: apply
+    /// `PrepareBindings` to MeerkatMachine and publish any routed seam signals.
+    AuthoritativeRuntimeBinding,
+    /// Only create the session-local handle bundle. A separate owner will
+    /// route the authoritative binding later.
+    LocalSessionResources,
+}
+
 impl MeerkatMachine {
+    async fn prepare_session_runtime_bindings(
+        &self,
+        session_id: SessionId,
+        preparation: SessionBindingPreparation,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        if matches!(
+            self.existing_session_runtime_state(&session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return Err(RuntimeDriverError::Destroyed);
+        }
+        self.register_session_inner(session_id.clone()).await;
+        let (
+            driver_handle,
+            epoch_id,
+            ops_lifecycle,
+            cursor_state,
+            tool_visibility_owner,
+            dsl_authority_shared,
+        ) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(&session_id)
+                .ok_or(RuntimeDriverError::Internal(format!(
+                    "session {session_id} missing after register_session_inner"
+                )))?;
+            (
+                Arc::clone(&entry.driver),
+                entry.epoch_id.clone(),
+                Arc::clone(&entry.ops_lifecycle),
+                Arc::clone(&entry.cursor_state),
+                Arc::clone(&entry.tool_visibility_owner),
+                Arc::clone(&entry.dsl_authority),
+            )
+        };
+        if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
+            let runtime_id = {
+                let driver = driver_handle.lock().await;
+                driver.runtime_id().clone()
+            };
+            let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                    &runtime_id,
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
+                generation: crate::meerkat_machine::dsl::Generation::from(0),
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+            };
+            let _ = self
+                .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            {
+                let mut driver = driver_handle.lock().await;
+                machine_prepare_bindings_projection(&mut driver)?;
+            }
+        }
+        // Share ONE HandleDslAuthority across all 5 handles so their
+        // transitions land on the session's real DSL state (same Arc
+        // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
+        // rely on this — parallel private authorities would silently
+        // diverge from the session DSL.
+        let shared_handle_authority = Arc::new(crate::handles::HandleDslAuthority::from_shared(
+            dsl_authority_shared,
+        ));
+        Ok(MeerkatMachineCommandResult::Bindings(
+            meerkat_core::SessionRuntimeBindings {
+                session_id,
+                epoch_id,
+                ops_lifecycle: ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+                cursor_state,
+                tool_visibility_owner: tool_visibility_owner
+                    as Arc<dyn meerkat_core::ToolVisibilityOwner>,
+                turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                external_tool_surface: Arc::new(
+                    crate::handles::RuntimeExternalToolSurfaceHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                ),
+                peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                session_admission: Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                auth_lease: Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
+                mcp_server_lifecycle: Arc::new(
+                    crate::handles::RuntimeMcpServerLifecycleHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                ),
+                peer_interaction: Some(Arc::new(
+                    crate::handles::RuntimePeerInteractionHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                )),
+                session_context: Arc::new(crate::handles::RuntimeSessionContextHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                session_claim_handle: self.session_claim_handle(),
+                interaction_stream: Some(Arc::new(
+                    crate::handles::RuntimeInteractionStreamHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                )),
+                realtime_product_turn: Arc::new(
+                    crate::handles::RuntimeRealtimeProductTurnHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                ),
+            },
+        ))
+    }
+
     pub(super) async fn execute_meerkat_machine_session_command(
         &self,
         command: MeerkatMachineCommand,
@@ -235,120 +364,18 @@ impl MeerkatMachine {
                 ))
             }
             MeerkatMachineCommand::PrepareBindings { session_id } => {
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-                self.register_session_inner(session_id.clone()).await;
-                let (
-                    driver_handle,
-                    epoch_id,
-                    ops_lifecycle,
-                    cursor_state,
-                    tool_visibility_owner,
-                    dsl_authority_shared,
-                ) = {
-                    let sessions = self.sessions.read().await;
-                    let entry = sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::Internal(format!(
-                            "session {session_id} missing after register_session_inner"
-                        )))?;
-                    (
-                        Arc::clone(&entry.driver),
-                        entry.epoch_id.clone(),
-                        Arc::clone(&entry.ops_lifecycle),
-                        Arc::clone(&entry.cursor_state),
-                        Arc::clone(&entry.tool_visibility_owner),
-                        Arc::clone(&entry.dsl_authority),
-                    )
-                };
-                let runtime_id = {
-                    let driver = driver_handle.lock().await;
-                    driver.runtime_id().clone()
-                };
-                let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
-                    agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
-                        &runtime_id,
-                    ),
-                    fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
-                    generation: crate::meerkat_machine::dsl::Generation::from(0),
-                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-                };
-                let _ = self
-                    .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                {
-                    let mut driver = driver_handle.lock().await;
-                    machine_prepare_bindings_projection(&mut driver)?;
-                }
-                // Share ONE HandleDslAuthority across all 5 handles so their
-                // transitions land on the session's real DSL state (same Arc
-                // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
-                // rely on this — parallel private authorities would silently
-                // diverge from the session DSL.
-                let shared_handle_authority = Arc::new(
-                    crate::handles::HandleDslAuthority::from_shared(dsl_authority_shared),
-                );
-                Ok(MeerkatMachineCommandResult::Bindings(
-                    meerkat_core::SessionRuntimeBindings {
-                        session_id,
-                        epoch_id,
-                        ops_lifecycle: ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
-                        cursor_state,
-                        tool_visibility_owner: tool_visibility_owner
-                            as Arc<dyn meerkat_core::ToolVisibilityOwner>,
-                        turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new(
-                            Arc::clone(&shared_handle_authority),
-                        )),
-                        comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new(
-                            Arc::clone(&shared_handle_authority),
-                        )),
-                        external_tool_surface: Arc::new(
-                            crate::handles::RuntimeExternalToolSurfaceHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        ),
-                        peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new(
-                            Arc::clone(&shared_handle_authority),
-                        )),
-                        session_admission: Arc::new(
-                            crate::handles::RuntimeSessionAdmissionHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        ),
-                        auth_lease: Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
-                        mcp_server_lifecycle: Arc::new(
-                            crate::handles::RuntimeMcpServerLifecycleHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        ),
-                        peer_interaction: Some(Arc::new(
-                            crate::handles::RuntimePeerInteractionHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        )),
-                        session_context: Arc::new(
-                            crate::handles::RuntimeSessionContextHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        ),
-                        session_claim_handle: self.session_claim_handle(),
-                        interaction_stream: Some(Arc::new(
-                            crate::handles::RuntimeInteractionStreamHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        )),
-                        realtime_product_turn: Arc::new(
-                            crate::handles::RuntimeRealtimeProductTurnHandle::new(Arc::clone(
-                                &shared_handle_authority,
-                            )),
-                        ),
-                    },
-                ))
+                self.prepare_session_runtime_bindings(
+                    session_id,
+                    SessionBindingPreparation::AuthoritativeRuntimeBinding,
+                )
+                .await
+            }
+            MeerkatMachineCommand::PrepareLocalSessionBindings { session_id } => {
+                self.prepare_session_runtime_bindings(
+                    session_id,
+                    SessionBindingPreparation::LocalSessionResources,
+                )
+                .await
             }
             MeerkatMachineCommand::InputState {
                 session_id,

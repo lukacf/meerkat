@@ -62,6 +62,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | Method | Category | Description |
 |--------|----------|-------------|
 | `initialize` | Handshake | Returns server capabilities |
+| `runtime/host_info` | Runtime | Read host identity, endpoints, capabilities, health, and realm projection |
+| `runtime/capabilities` | Runtime | Read runtime host capability flags |
+| `runtime/health` | Runtime | Read runtime host health |
 | `session/create` | Session | Create session and run first turn |
 | `session/list` | Session | List active sessions |
 | `session/read` | Session | Get session state |
@@ -70,6 +73,13 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `artifact/list` | Artifact | List stable artifact records |
 | `artifact/get` | Artifact | Get one stable artifact record |
 | `artifact/download` | Artifact | Download blob-backed artifact payload bytes |
+| `approval/request` | Approval | Create a durable approval request |
+| `approval/list` | Approval | List approval records |
+| `approval/get` | Approval | Get one approval record |
+| `approval/decide` | Approval | Record an approval decision |
+| `events/latest_cursor` | Events | Read the latest replay cursor for a typed event scope |
+| `events/list_since` | Events | List replayable events after a typed cursor |
+| `events/snapshot` | Events | Read a point-in-time snapshot with its replay cursor |
 | `session/archive` | Session | Remove session from runtime |
 | `session/external_event` | Session | Queue a runtime-backed external event |
 | `session/peer_response_terminal` | Session | Admit a correlated terminal peer response through the typed runtime ingress |
@@ -100,6 +110,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/unwire` | Mob | Remove mob comms wiring (mob feature) |
 | `mob/lifecycle` | Mob | Stop, resume, complete, destroy, or reset a mob (mob feature) |
 | `mob/events` | Mob | Read mob events by cursor (mob feature) |
+| `mob/ingress_interaction` | Mob | Ensure an ingress member and deliver user input with replay anchors (mob feature) |
 | `mob/stream_open` | Mob | Open mob or member event stream (mob feature) |
 | `mob/stream_close` | Mob | Close mob or member event stream (mob feature) |
 | `mob/member_send` | Mob | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |

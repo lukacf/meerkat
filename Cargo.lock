@@ -2220,7 +2220,6 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
- "meerkat-mob",
  "trybuild",
 ]
 

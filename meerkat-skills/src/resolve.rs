@@ -42,13 +42,13 @@ pub async fn resolve_repositories_with_roots(
     {
         let _ = (context_root, user_root, cache_root);
         if let Some(repo) = config.repositories.first() {
-            let transport = match &repo.transport {
-                SkillRepoTransport::Filesystem { .. } => "filesystem",
-                SkillRepoTransport::Http { .. } => "HTTP",
-                SkillRepoTransport::Stdio { .. } => "stdio",
-                SkillRepoTransport::Git { .. } => "Git",
+            let error = match &repo.transport {
+                SkillRepoTransport::Filesystem { .. } => unavailable_on_wasm("filesystem"),
+                SkillRepoTransport::Http { .. } => unavailable_on_wasm("HTTP"),
+                SkillRepoTransport::Stdio { .. } => unavailable_on_wasm("stdio"),
+                SkillRepoTransport::Git { .. } => unavailable_on_wasm("Git"),
             };
-            return Err(unavailable_on_wasm(transport));
+            return Err(error);
         }
         Ok(Some(CompositeSkillSource::from_named(vec![NamedSource {
             name: "embedded".to_string(),

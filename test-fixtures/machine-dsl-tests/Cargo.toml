@@ -15,7 +15,6 @@ indexmap = "2" # used by DSL macro-generated schema code (invisible to cargo-mac
 
 [dev-dependencies]
 trybuild = "1"
-meerkat-mob = { path = "../../meerkat-mob" }
 
 [package.metadata.cargo-machete]
 ignored = ["indexmap"]  # used by DSL macro-generated schema code

@@ -846,6 +846,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.event_store.is_some() && self.projector.is_some()
     }
 
+    pub async fn event_log_latest_seq(&self, id: &SessionId) -> Result<Option<u64>, SessionError> {
+        let Some(event_store) = self.event_store.as_ref() else {
+            return Ok(None);
+        };
+        event_store
+            .last_seq(id)
+            .await
+            .map(Some)
+            .map_err(|err| SessionError::Store(Box::new(err)))
+    }
+
+    pub async fn event_log_read_from(
+        &self,
+        id: &SessionId,
+        from_seq: u64,
+    ) -> Result<Option<Vec<crate::event_store::StoredEvent>>, SessionError> {
+        let Some(event_store) = self.event_store.as_ref() else {
+            return Ok(None);
+        };
+        event_store
+            .read_from(id, from_seq)
+            .await
+            .map(Some)
+            .map_err(|err| SessionError::Store(Box::new(err)))
+    }
+
     pub fn blob_store(&self) -> Arc<dyn BlobStore> {
         self.blob_store.clone()
     }
@@ -4550,6 +4576,84 @@ mod tests {
         let projected = read_projected_events_after(&events_path, "run_completed").await;
         assert!(projected.contains("run_started"));
         assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_event_replay_projection_reads_ordered_session_events() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+        let session_id = SessionId::new();
+
+        event_store
+            .append(
+                &session_id,
+                &[
+                    AgentEvent::TurnStarted { turn_number: 0 },
+                    AgentEvent::TextComplete {
+                        content: "two".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("append event fixtures");
+
+        assert_eq!(
+            service
+                .event_log_latest_seq(&session_id)
+                .await
+                .expect("latest seq"),
+            Some(2)
+        );
+        let events = service
+            .event_log_read_from(&session_id, 2)
+            .await
+            .expect("read event log")
+            .expect("event projection enabled");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, 2);
+        assert!(matches!(events[0].event, AgentEvent::TextComplete { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_event_replay_projection_reports_unsupported_when_not_installed() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+
+        assert_eq!(
+            service
+                .event_log_latest_seq(&session_id)
+                .await
+                .expect("latest seq"),
+            None
+        );
+        assert!(
+            service
+                .event_log_read_from(&session_id, 1)
+                .await
+                .expect("read event log")
+                .is_none()
+        );
     }
 
     #[tokio::test]

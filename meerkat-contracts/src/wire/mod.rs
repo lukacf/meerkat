@@ -29,7 +29,12 @@ pub use connection::{
     WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 
-pub use event::WireEvent;
+pub use event::{
+    EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,
+    EventReplayScope, EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
+    EventsListSinceResult, EventsSnapshotBody, EventsSnapshotParams, EventsSnapshotResult,
+    WireEvent,
+};
 pub use host::{
     RuntimeHostCapabilities, RuntimeHostEndpointProjection, RuntimeHostFeatureFlags,
     RuntimeHostHealth, RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo,

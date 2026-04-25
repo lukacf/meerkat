@@ -7,7 +7,10 @@ use meerkat_core::ConfigStore;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-fn host_surface_options(runtime_available: bool) -> meerkat::surface::RuntimeHostSurfaceOptions {
+fn host_surface_options(
+    runtime_available: bool,
+    event_replay: bool,
+) -> meerkat::surface::RuntimeHostSurfaceOptions {
     let catalog_options = if cfg!(feature = "mini-surface") {
         meerkat_contracts::RpcMethodCatalogOptions::mini_surface()
     } else {
@@ -33,6 +36,7 @@ fn host_surface_options(runtime_available: bool) -> meerkat::surface::RuntimeHos
     options.comms = cfg!(feature = "comms");
     options.blobs = true;
     options.session_events = true;
+    options.event_replay = event_replay;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
     options.skills = true;
@@ -47,7 +51,7 @@ pub fn handle_info(
     config_store: &Arc<dyn ConfigStore>,
     runtime_available: bool,
 ) -> RpcResponse {
-    let options = host_surface_options(runtime_available);
+    let options = host_surface_options(runtime_available, runtime.supports_event_replay());
     let (context_root, _) = runtime.skill_identity_roots();
     let info = meerkat::surface::build_runtime_host_info(
         &options,
@@ -57,8 +61,12 @@ pub fn handle_info(
     RpcResponse::success(id, &info)
 }
 
-pub fn handle_capabilities(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
-    let options = host_surface_options(runtime_available);
+pub fn handle_capabilities(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    runtime_available: bool,
+) -> RpcResponse {
+    let options = host_surface_options(runtime_available, runtime.supports_event_replay());
     let capabilities = meerkat::surface::build_runtime_host_capabilities(&options);
     RpcResponse::success(id, &capabilities)
 }

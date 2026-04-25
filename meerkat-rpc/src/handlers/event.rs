@@ -7,9 +7,12 @@ use std::sync::Arc;
 use crate::handlers::runtime::to_wire_accept_result;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-use meerkat_contracts::{PeerResponseTerminalStatusWire, SessionExternalEventEnvelope};
+use meerkat_contracts::{
+    EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
+    EventsSnapshotParams, PeerResponseTerminalStatusWire, SessionExternalEventEnvelope,
+};
 
-use super::{parse_params, parse_session_id_for_runtime};
+use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 
 /// Parameters for `session/external_event`.
 #[derive(Debug, Deserialize)]
@@ -116,6 +119,78 @@ pub async fn handle_peer_response_terminal(
             Ok(result) => RpcResponse::success(id, result),
             Err(message) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, message),
         },
+        Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+/// Handle `events/latest_cursor` through the runtime's durable replay projection.
+pub async fn handle_events_latest_cursor(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let params: EventsLatestCursorParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    match runtime.event_latest_cursor(params.scope).await {
+        Ok(Some(cursor)) => RpcResponse::success(
+            id,
+            EventsLatestCursorResult {
+                contract_version: meerkat_contracts::ContractVersion::CURRENT,
+                cursor,
+            },
+        ),
+        Ok(None) => RpcResponse::error(
+            id,
+            crate::error::INVALID_REQUEST,
+            "event replay is not enabled for this runtime host",
+        ),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+/// Handle `events/list_since` through the runtime's durable replay projection.
+pub async fn handle_events_list_since(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let params: EventsListSinceParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    match runtime.event_list_since(params).await {
+        Ok(Some(result)) => RpcResponse::success(id, result),
+        Ok(None) => RpcResponse::error(
+            id,
+            crate::error::INVALID_REQUEST,
+            "event replay is not enabled for this runtime host",
+        ),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+/// Handle `events/snapshot` through the owning session service.
+pub async fn handle_events_snapshot(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let params: EventsSnapshotParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    match runtime.event_snapshot(params.scope).await {
+        Ok(Some(result)) => RpcResponse::success(id, result),
+        Ok(None) => RpcResponse::error(
+            id,
+            crate::error::INVALID_REQUEST,
+            "event replay is not enabled for this runtime host",
+        ),
         Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }

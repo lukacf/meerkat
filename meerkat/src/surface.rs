@@ -83,6 +83,7 @@ pub struct RuntimeHostSurfaceOptions {
     pub comms: bool,
     pub blobs: bool,
     pub session_events: bool,
+    pub event_replay: bool,
     pub session_streams: bool,
     pub schedules: bool,
     pub skills: bool,
@@ -105,6 +106,7 @@ impl RuntimeHostSurfaceOptions {
             comms: false,
             blobs: false,
             session_events: false,
+            event_replay: false,
             session_streams: false,
             schedules: false,
             skills: false,
@@ -177,9 +179,9 @@ pub fn build_runtime_host_capabilities(
             session_streams: options.session_streams,
             schedules: options.schedules,
             skills: options.skills,
+            event_replay: options.event_replay,
             // First slice: these future surfaces are deliberately reported as
             // unsupported until their owning lanes add durable contracts.
-            event_replay: false,
             artifacts: false,
             approvals: false,
             external_members: false,

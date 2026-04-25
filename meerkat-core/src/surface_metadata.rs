@@ -70,6 +70,12 @@ impl RuntimeMetadata {
     pub fn from_surface(surface: SurfaceMetadata) -> Self {
         Self { surface }
     }
+
+    /// Return whether this runtime projection carries no caller-owned metadata.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.surface.is_empty()
+    }
 }
 
 impl From<SurfaceMetadata> for RuntimeMetadata {

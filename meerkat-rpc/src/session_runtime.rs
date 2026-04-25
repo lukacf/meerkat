@@ -3479,6 +3479,125 @@ impl SessionRuntime {
         None
     }
 
+    /// Whether this runtime has a durable event replay projection installed.
+    pub fn supports_event_replay(&self) -> bool {
+        self.service.has_event_projection()
+    }
+
+    /// Read the latest durable event cursor for a session scope.
+    pub async fn event_latest_cursor(
+        &self,
+        scope: meerkat_contracts::EventReplayScope,
+    ) -> Result<Option<meerkat_contracts::EventReplayCursor>, RpcError> {
+        let session_id = scope.session_id().clone();
+        let latest = self
+            .service
+            .event_log_latest_seq(&session_id)
+            .await
+            .map_err(session_error_to_rpc)?;
+        let Some(sequence) = latest else {
+            return Ok(None);
+        };
+        if sequence == 0 && self.read_session_rich(&session_id).await.is_none() {
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            });
+        }
+        Ok(Some(meerkat_contracts::EventReplayCursor::new(
+            scope, sequence,
+        )))
+    }
+
+    /// Read durable events after a typed cursor.
+    pub async fn event_list_since(
+        &self,
+        params: meerkat_contracts::EventsListSinceParams,
+    ) -> Result<Option<meerkat_contracts::EventsListSinceResult>, RpcError> {
+        let latest = match self.event_latest_cursor(params.scope.clone()).await? {
+            Some(cursor) => cursor,
+            None => return Ok(None),
+        };
+        let from_cursor = params
+            .cursor
+            .unwrap_or_else(|| meerkat_contracts::EventReplayCursor::new(params.scope.clone(), 0));
+        let from_seq = from_cursor
+            .validate_for_list_since(&params.scope, latest.sequence)
+            .map_err(|err| RpcError {
+                code: error::INVALID_PARAMS,
+                message: match err {
+                    meerkat_contracts::EventReplayCursorError::ScopeMismatch => {
+                        "event replay cursor scope does not match requested scope".to_string()
+                    }
+                    meerkat_contracts::EventReplayCursorError::AheadOfLatest {
+                        requested_sequence,
+                        latest_sequence,
+                    } => format!(
+                        "event replay cursor sequence {requested_sequence} is ahead of latest sequence {latest_sequence}"
+                    ),
+                    meerkat_contracts::EventReplayCursorError::SequenceOverflow => {
+                        "event replay cursor sequence overflow".to_string()
+                    }
+                },
+                data: None,
+            })?;
+        let session_id = params.scope.session_id().clone();
+        let stored = self
+            .service
+            .event_log_read_from(&session_id, from_seq)
+            .await
+            .map_err(session_error_to_rpc)?
+            .unwrap_or_default();
+        let limit = params.limit.unwrap_or(stored.len()).max(1);
+        let has_more = stored.len() > limit;
+        let events = stored
+            .into_iter()
+            .take(limit)
+            .map(|stored| {
+                meerkat_contracts::EventReplayEnvelope::session(
+                    session_id.clone(),
+                    stored.seq,
+                    stored.timestamp,
+                    stored.event,
+                )
+            })
+            .collect();
+        Ok(Some(meerkat_contracts::EventsListSinceResult {
+            contract_version: meerkat_contracts::ContractVersion::CURRENT,
+            scope: params.scope,
+            from_cursor,
+            latest_cursor: latest,
+            events,
+            has_more,
+        }))
+    }
+
+    /// Read a point-in-time session snapshot and its paired replay cursor.
+    pub async fn event_snapshot(
+        &self,
+        scope: meerkat_contracts::EventReplayScope,
+    ) -> Result<Option<meerkat_contracts::EventsSnapshotResult>, RpcError> {
+        let latest = match self.event_latest_cursor(scope.clone()).await? {
+            Some(cursor) => cursor,
+            None => return Ok(None),
+        };
+        let session = self
+            .read_session_rich(scope.session_id())
+            .await
+            .ok_or_else(|| RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {}", scope.session_id()),
+                data: None,
+            })?;
+        Ok(Some(meerkat_contracts::EventsSnapshotResult {
+            contract_version: meerkat_contracts::ContractVersion::CURRENT,
+            scope,
+            cursor: latest,
+            snapshot: meerkat_contracts::EventsSnapshotBody::Session { session },
+        }))
+    }
+
     /// Read a session transcript as canonical wire history, including pending sessions.
     pub async fn read_session_history_rich(
         &self,

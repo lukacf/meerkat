@@ -183,6 +183,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "session/inject_context",
                 "Stage runtime system context for application at the next LLM boundary",
             ),
+            RpcMethodDescriptor::typed(
+                "events/latest_cursor",
+                "Read the latest replay cursor for an event source",
+                "EventsLatestCursorParams",
+                "EventsLatestCursorResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "events/list_since",
+                "List replayable events after a cursor",
+                "EventsListSinceParams",
+                "EventsListSinceResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "events/snapshot",
+                "Read a point-in-time snapshot anchor for an event source",
+                "EventsSnapshotParams",
+                "EventsSnapshotResult",
+            ),
         ]);
     }
 
@@ -530,6 +548,9 @@ mod tests {
         assert!(methods.iter().any(|m| m == "runtime/host_info"));
         assert!(methods.iter().any(|m| m == "runtime/capabilities"));
         assert!(methods.iter().any(|m| m == "runtime/health"));
+        assert!(methods.iter().any(|m| m == "events/latest_cursor"));
+        assert!(methods.iter().any(|m| m == "events/list_since"));
+        assert!(methods.iter().any(|m| m == "events/snapshot"));
         assert!(
             methods
                 .iter()

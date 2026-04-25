@@ -899,6 +899,18 @@ impl MethodRouter {
                     .await
             }
             #[cfg(not(feature = "mini-surface"))]
+            "events/latest_cursor" => {
+                handlers::event::handle_events_latest_cursor(id, params, self.runtime.clone()).await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "events/list_since" => {
+                handlers::event::handle_events_list_since(id, params, self.runtime.clone()).await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "events/snapshot" => {
+                handlers::event::handle_events_snapshot(id, params, self.runtime.clone()).await
+            }
+            #[cfg(not(feature = "mini-surface"))]
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
@@ -1134,6 +1146,7 @@ impl MethodRouter {
             ),
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
                 id,
+                &self.runtime,
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
@@ -5246,6 +5259,29 @@ mod tests {
         assert!(
             error_message(&resp).contains("mob-managed sessions"),
             "reserved mob label rejection should explain the trust boundary"
+        );
+    }
+
+    #[cfg(not(feature = "mini-surface"))]
+    #[tokio::test]
+    async fn events_latest_cursor_reports_unsupported_without_event_projection() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "events/latest_cursor",
+            serde_json::json!({
+                "scope": {
+                    "type": "session",
+                    "session_id": meerkat_core::SessionId::new().to_string()
+                }
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_REQUEST);
+        assert!(
+            error_message(&resp).contains("event replay is not enabled"),
+            "unsupported replay error should be explicit: {}",
+            error_message(&resp)
         );
     }
 

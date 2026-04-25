@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit audit-generated-headers
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -38,10 +38,16 @@ test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	$(CARGO) nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
 
-# Integration-fast tests only (no unit tests)
+# Integration-fast tests only (no unit tests). Must stay in sync with the
+# `int` cargo alias in `.cargo/config.toml`: both exclude the e2e lane
+# binaries (`e2e_{fast,system,live,smoke,models}_lane`) since those have
+# their own Makefile targets and scenario-test timeouts incompatible with
+# the integration-fast lane's default 300s nextest deadline.
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	$(CARGO) nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
+	$(CARGO) nextest run --workspace --tests \
+		-E 'not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)' \
+		--show-progress none --status-level none --final-status-level fail
 
 # Deterministic end-to-end lane (canonical integration harness)
 e2e-fast:
@@ -203,12 +209,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit-generated-headers audit
+ci: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity seam-inventory rmat-audit audit-generated-headers audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit-generated-headers audit
+ci-smoke: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal seam-inventory rmat-audit audit-generated-headers audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -274,6 +280,13 @@ rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
 	$(CARGO) run -p xtask -- rmat-audit --strict
+
+# Seam inventory (strict): every Local/External effect must have an
+# explicit classification and every routed effect must resolve via
+# the typed Route table in the composition schema.
+seam-inventory:
+	@echo "$(GREEN)Running seam inventory (strict)...$(NC)"
+	$(CARGO) run -p xtask -- seam-inventory --strict
 
 # Strict `@generated` header truthfulness audit: every `@generated` marker
 # must correspond to a codegen-emit path, and every codegen-emit path must

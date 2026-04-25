@@ -207,7 +207,7 @@ pub struct SessionBuildOptions {
     /// Scheduler remains surface-owned. This dispatcher only controls
     /// tool visibility/composition for the built agent.
     pub schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
-    pub preload_skills: Option<Vec<crate::skills::SkillId>>,
+    pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
@@ -366,6 +366,8 @@ impl MobToolCallerProvenance {
 pub struct MobToolAuthorityContext {
     principal_token: OpaquePrincipalToken,
     can_create_mobs: bool,
+    #[serde(default)]
+    can_mutate_profiles: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     managed_mob_scope: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +381,7 @@ impl MobToolAuthorityContext {
         Self {
             principal_token,
             can_create_mobs,
+            can_mutate_profiles: can_create_mobs,
             managed_mob_scope: BTreeSet::new(),
             caller_provenance: None,
             audit_invocation_id: None,
@@ -395,6 +398,15 @@ impl MobToolAuthorityContext {
 
     pub fn can_create_mobs(&self) -> bool {
         self.can_create_mobs
+    }
+
+    pub fn can_mutate_profiles(&self) -> bool {
+        self.can_mutate_profiles
+    }
+
+    pub fn with_profile_mutation(mut self, allowed: bool) -> Self {
+        self.can_mutate_profiles = allowed;
+        self
     }
 
     pub fn managed_mob_scope(&self) -> &BTreeSet<String> {
@@ -522,7 +534,7 @@ pub struct MobToolsBuildArgs {
     /// `apply_session_effects` after merging tool-produced `SessionEffect`s.
     /// If `None`, mob tools fall back to `authority_context` as a static snapshot.
     pub effective_authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
-    /// Comms name of the owning agent (for building TrustedPeerSpec).
+    /// Comms name of the owning agent (for building `TrustedPeerDescriptor`).
     pub comms_name: Option<String>,
     /// Optional comms runtime for auto-wiring spawned members.
     pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,
@@ -717,20 +729,6 @@ pub struct StartTurnRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
-    /// Optional additional instructions prepended as `[SYSTEM NOTICE: ...]` to the user prompt.
-    ///
-    /// Unlike `SessionBuildOptions.additional_instructions` (which are appended to the
-    /// system prompt as extra sections at session creation), turn-level instructions
-    /// are prepended to the user message as `[SYSTEM NOTICE: {instruction}]` blocks.
-    /// This distinction means create-time instructions persist across turns (system prompt)
-    /// while turn-level instructions are per-turn only (conversation history).
-    pub additional_instructions: Option<Vec<String>>,
-    /// Typed execution intent from the runtime layer.
-    ///
-    /// `Some(ContentTurn)` forces `run_turn`, `Some(ResumePending)` forces
-    /// `run_pending`. `None` preserves the existing `has_prompt` heuristic
-    /// for non-runtime substrate-direct paths.
-    pub execution_kind: Option<crate::lifecycle::run_primitive::RuntimeExecutionKind>,
 }
 
 /// Request to append runtime system context to an existing session.
@@ -772,6 +770,7 @@ pub enum AppendSystemContextStatus {
 
 /// Ephemeral per-turn tool overlay for flow-dispatched turns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TurnToolOverlay {
     /// Optional allow-list for this turn.
     #[serde(default)]

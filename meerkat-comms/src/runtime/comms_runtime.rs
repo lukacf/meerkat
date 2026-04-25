@@ -18,9 +18,9 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
-    PeerReachabilityReason, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
-    TrustedPeerSpec,
+    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerDirectoryEntry,
+    PeerDirectorySource, PeerName, PeerReachabilityReason, SendAndStreamError, SendError,
+    SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -98,8 +98,8 @@ struct InteractionStream {
 
 struct ResolvedPeer {
     name: PeerName,
-    peer_id: String,
-    address: String,
+    peer_id: meerkat_core::comms::PeerId,
+    address: meerkat_core::comms::PeerAddress,
     source: PeerDirectorySource,
     meta: crate::PeerMeta,
 }
@@ -108,6 +108,83 @@ impl ResolvedPeer {
     fn reachability_key(&self) -> ReachabilityKey {
         ReachabilityKey::new(self.name.as_str(), self.peer_id.as_str())
     }
+}
+
+/// Derive a stable [`meerkat_core::comms::PeerId`] from a signing pubkey.
+///
+/// Wave-B V5 dogma: `PeerId` is the runtime routing identity and distinct
+/// from the cryptographic pubkey. Until a runtime-managed UUID directory is
+/// wired (Wave-C), we derive the UUID deterministically from the pubkey
+/// bytes via UUID v5 so every surface that resolves the same peer sees the
+/// same `PeerId`, and callers can go round-trip pubkey → PeerId → pubkey by
+/// looking up in the trust store.
+///
+/// Delegates to the router's [`crate::router::peer_id_from_pubkey`] so both
+/// the router and the runtime agree on the UUIDv5 derivation — trust
+/// lookups by `PeerId` stay stable round-trip.
+fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> meerkat_core::comms::PeerId {
+    crate::router::peer_id_from_pubkey(pubkey)
+}
+
+fn parse_peer_address(raw: &str) -> meerkat_core::comms::PeerAddress {
+    use meerkat_core::comms::{PeerAddress, PeerTransport};
+    if let Some(rest) = raw.strip_prefix("inproc://") {
+        PeerAddress::new(PeerTransport::Inproc, rest)
+    } else if let Some(rest) = raw.strip_prefix("uds://") {
+        PeerAddress::new(PeerTransport::Uds, rest)
+    } else if let Some(rest) = raw.strip_prefix("tcp://") {
+        PeerAddress::new(PeerTransport::Tcp, rest)
+    } else {
+        // Unknown scheme: default to TCP so legacy callers remain addressable.
+        // Wave-C will tighten this into a typed parse error at the ingress
+        // boundary so no unknown-scheme peers enter the directory.
+        PeerAddress::new(PeerTransport::Tcp, raw)
+    }
+}
+
+/// Build a core-seam [`TrustedPeerDescriptor`] for an inproc peer with a
+/// known signing [`PubKey`].
+///
+/// The test-oriented pair helper uses this to seed mutual trust without
+/// going through the wire format — the derived `PeerId` comes from the
+/// same UUIDv5 derivation the router uses at lookup time.
+fn descriptor_for_inproc_peer(name: &str, pubkey: PubKey) -> Result<TrustedPeerDescriptor, String> {
+    let peer_name = PeerName::new(name.to_string())?;
+    Ok(TrustedPeerDescriptor {
+        peer_id: crate::router::peer_id_from_pubkey(&pubkey),
+        name: peer_name,
+        address: PeerAddress::new(meerkat_core::comms::PeerTransport::Inproc, name),
+        pubkey: *pubkey.as_bytes(),
+    })
+}
+
+/// Convert a core-seam [`TrustedPeerDescriptor`] into the comms-internal
+/// [`TrustedPeer`] (which carries a richer typed `PubKey`).
+///
+/// The descriptor carries the Ed25519 pubkey bytes; this helper consumes
+/// them and validates that the derived [`PeerId`] matches the descriptor's
+/// stated routing id (guards against hand-assembled descriptors where the
+/// two identities disagree).
+fn descriptor_to_trusted_peer(descriptor: TrustedPeerDescriptor) -> Result<TrustedPeer, SendError> {
+    let pubkey = PubKey::new(descriptor.pubkey);
+    // `test_only_unsigned` fixtures carry a zero pubkey (inproc transport
+    // bypasses signature verification); skip the consistency match in that
+    // case. Any non-zero pubkey must hash to the descriptor's `peer_id`.
+    if descriptor.pubkey != [0u8; 32] {
+        let derived = pubkey.to_peer_id();
+        if derived != descriptor.peer_id {
+            return Err(SendError::Validation(format!(
+                "TrustedPeerDescriptor.peer_id {} does not match pubkey-derived id {}",
+                descriptor.peer_id, derived
+            )));
+        }
+    }
+    Ok(TrustedPeer {
+        name: descriptor.name.as_string(),
+        pubkey,
+        addr: descriptor.address.to_string(),
+        meta: crate::PeerMeta::default(),
+    })
 }
 
 impl InteractionStream {
@@ -205,7 +282,7 @@ impl CoreCommsRuntime for CommsRuntime {
         self.inbox_notify.clone()
     }
     fn public_key(&self) -> Option<String> {
-        Some(self.public_key.to_peer_id())
+        Some(self.public_key.to_pubkey_string())
     }
 
     fn advertised_address(&self) -> Option<String> {
@@ -223,16 +300,8 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(self.bridge_bootstrap_token.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-        let public_key = PubKey::from_peer_id(&peer.peer_id)
-            .map_err(|err| SendError::Validation(err.to_string()))?;
-
-        let trusted_peer = TrustedPeer {
-            name: peer.name,
-            pubkey: public_key,
-            addr: peer.address,
-            meta: crate::PeerMeta::default(),
-        };
+    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        let trusted_peer = descriptor_to_trusted_peer(peer)?;
         self.register_trusted_peer(trusted_peer).await
     }
 
@@ -240,21 +309,14 @@ impl CoreCommsRuntime for CommsRuntime {
         self.unregister_trusted_peer(peer_id).await
     }
 
-    async fn add_private_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-        let public_key = PubKey::from_peer_id(&peer.peer_id)
-            .map_err(|err| SendError::Validation(err.to_string()))?;
-        let trusted_peer = TrustedPeer {
-            name: peer.name,
-            pubkey: public_key,
-            addr: peer.address,
-            meta: crate::PeerMeta::default(),
-        };
+    async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        let trusted_peer = descriptor_to_trusted_peer(peer)?;
         self.register_private_trusted_peer(trusted_peer).await
     }
 
     async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        let public_key =
-            PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
+        let public_key = PubKey::from_pubkey_string(peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         self.unregister_private_trusted_peer(&public_key).await
     }
 
@@ -427,7 +489,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
             } => self
                 .send_peer_command(
-                    to.as_str(),
+                    &to,
                     crate::types::MessageKind::Message {
                         body,
                         blocks,
@@ -440,10 +502,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     acked: false,
                 }),
             CommsCommand::PeerLifecycle { to, kind, params } => self
-                .send_peer_command(
-                    to.as_str(),
-                    crate::types::MessageKind::Lifecycle { kind, params },
-                )
+                .send_peer_command(&to, crate::types::MessageKind::Lifecycle { kind, params })
                 .await
                 .map(|envelope_id| SendReceipt::PeerLifecycleSent { envelope_id }),
             CommsCommand::PeerRequest {
@@ -486,7 +545,7 @@ impl CoreCommsRuntime for CommsRuntime {
 
                 let envelope_id = match self
                     .send_peer_command_with_id(
-                        to.as_str(),
+                        &to,
                         interaction_id,
                         crate::types::MessageKind::Request {
                             intent,
@@ -556,7 +615,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
 
                 self.send_peer_command(
-                    to.as_str(),
+                    &to,
                     crate::types::MessageKind::Response {
                         in_reply_to: in_reply_to.0,
                         status,
@@ -647,7 +706,7 @@ impl CoreCommsRuntime for CommsRuntime {
 
                 let envelope_id = match self
                     .send_peer_command_with_id(
-                        to.as_str(),
+                        &to,
                         interaction_id,
                         crate::types::MessageKind::Request {
                             intent,
@@ -913,26 +972,41 @@ impl CoreCommsRuntime for CommsRuntime {
                 )
             })?
         };
-        let mut trusted_peers: Vec<_> = self
+        let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
             .trusted_peers
             .read()
             .peers
             .iter()
-            .map(|peer| TrustedPeerSpec {
-                name: peer.name.clone(),
-                peer_id: peer.pubkey.to_peer_id(),
-                address: peer.addr.clone(),
+            .filter_map(|peer| {
+                let name = match PeerName::new(peer.name.clone()) {
+                    Ok(name) => name,
+                    Err(err) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            error = %err,
+                            "skipping trusted peer with invalid name in snapshot"
+                        );
+                        return None;
+                    }
+                };
+                Some(TrustedPeerDescriptor {
+                    peer_id: peer_id_from_pubkey(&peer.pubkey),
+                    name,
+                    address: parse_peer_address(&peer.addr),
+                    pubkey: *peer.pubkey.as_bytes(),
+                })
             })
             .collect();
         trusted_peers.sort_by(|left, right| {
             left.name
-                .cmp(&right.name)
+                .as_str()
+                .cmp(right.name.as_str())
                 .then_with(|| left.peer_id.cmp(&right.peer_id))
-                .then_with(|| left.address.cmp(&right.address))
+                .then_with(|| left.address.to_string().cmp(&right.address.to_string()))
         });
 
         Ok(meerkat_core::PeerIngressRuntimeSnapshot {
-            self_peer_id: self.public_key.to_peer_id(),
+            self_peer_id: peer_id_from_pubkey(&self.public_key),
             auth_required: self.require_peer_auth,
             authority_phase: map_peer_ingress_phase(authority_phase),
             trusted_peers,
@@ -1297,22 +1371,14 @@ impl CommsRuntime {
     ) -> Result<(Arc<Self>, Arc<Self>), CommsRuntimeError> {
         let a = Arc::new(Self::inproc_only(name_a)?);
         let b = Arc::new(Self::inproc_only(name_b)?);
-        let spec_for_a = meerkat_core::comms::TrustedPeerSpec::new(
-            name_b,
-            b.public_key().to_peer_id(),
-            format!("inproc://{name_b}"),
-        )
-        .map_err(CommsRuntimeError::TrustLoadError)?;
-        let spec_for_b = meerkat_core::comms::TrustedPeerSpec::new(
-            name_a,
-            a.public_key().to_peer_id(),
-            format!("inproc://{name_a}"),
-        )
-        .map_err(CommsRuntimeError::TrustLoadError)?;
-        meerkat_core::agent::CommsRuntime::add_trusted_peer(a.as_ref(), spec_for_a)
+        let descriptor_for_a = descriptor_for_inproc_peer(name_b, b.public_key())
+            .map_err(CommsRuntimeError::TrustLoadError)?;
+        let descriptor_for_b = descriptor_for_inproc_peer(name_a, a.public_key())
+            .map_err(CommsRuntimeError::TrustLoadError)?;
+        meerkat_core::agent::CommsRuntime::add_trusted_peer(a.as_ref(), descriptor_for_a)
             .await
             .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
-        meerkat_core::agent::CommsRuntime::add_trusted_peer(b.as_ref(), spec_for_b)
+        meerkat_core::agent::CommsRuntime::add_trusted_peer(b.as_ref(), descriptor_for_b)
             .await
             .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
         Ok((a, b))
@@ -1640,10 +1706,12 @@ impl CommsRuntime {
         Ok(())
     }
 
-    /// Canonical runtime trust-removal seam using a peer id string.
+    /// Canonical runtime trust-removal seam using a pubkey string
+    /// (`"ed25519:<base64>"`, the round-trippable encoding emitted by
+    /// [`PubKey::to_pubkey_string`]).
     pub async fn unregister_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        let public_key =
-            PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
+        let public_key = PubKey::from_pubkey_string(peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         Ok(self.router.remove_trusted_peer(&public_key))
     }
 
@@ -1678,7 +1746,8 @@ impl CommsRuntime {
 
     /// Canonical runtime trust-removal seam using a public key.
     pub async fn unregister_trusted_pubkey(&self, public_key: &PubKey) -> Result<bool, SendError> {
-        self.unregister_trusted_peer(&public_key.to_peer_id()).await
+        self.unregister_trusted_peer(&public_key.to_pubkey_string())
+            .await
     }
 
     /// Update the inproc registry entry with friendly metadata.
@@ -1761,6 +1830,7 @@ impl CommsRuntime {
                 .map(|p| (p.name.clone(), p.pubkey))
                 .collect();
         let participant_name = self.participant_name().to_string();
+        let private_pubkeys = self.router.private_pubkeys();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
         let mut emitted = 0usize;
@@ -1771,20 +1841,11 @@ impl CommsRuntime {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
                 }
-                // Private peers are admission-visible and send-resolvable
-                // but never appear in the directory — that's the point of
-                // the private-trust seam (e.g. supervisor bridge for
-                // session-backed mob members). Still mark the name and
-                // pubkey as "known" so an unrelated inproc entry with the
-                // same identity doesn't fall through to the `Inproc`
-                // source below.
-                if self.router.is_private(&peer.pubkey) {
-                    trusted_names.insert(peer.name.clone());
-                    trusted_pubkeys.insert(peer.pubkey);
-                    continue;
-                }
                 trusted_names.insert(peer.name.clone());
                 trusted_pubkeys.insert(peer.pubkey);
+                if private_pubkeys.contains(&peer.pubkey) {
+                    continue;
+                }
                 let source = if inproc_by_name
                     .get(&peer.name)
                     .is_some_and(|key| *key == peer.pubkey)
@@ -1806,8 +1867,8 @@ impl CommsRuntime {
                 };
                 on_peer(ResolvedPeer {
                     name,
-                    peer_id: peer.pubkey.to_peer_id(),
-                    address: peer.addr.clone(),
+                    peer_id: peer_id_from_pubkey(&peer.pubkey),
+                    address: parse_peer_address(&peer.addr),
                     source,
                     meta: peer.meta.clone(),
                 });
@@ -1820,6 +1881,9 @@ impl CommsRuntime {
         }
 
         for inproc in &inproc_peers {
+            if private_pubkeys.contains(&inproc.pubkey) {
+                continue;
+            }
             let name = match PeerName::new(inproc.name.clone()) {
                 Ok(name) => name,
                 Err(_) => {
@@ -1840,8 +1904,11 @@ impl CommsRuntime {
             }
             on_peer(ResolvedPeer {
                 name,
-                peer_id: inproc.pubkey.to_peer_id(),
-                address: format!("inproc://{peer_name_str}"),
+                peer_id: peer_id_from_pubkey(&inproc.pubkey),
+                address: meerkat_core::comms::PeerAddress::new(
+                    meerkat_core::comms::PeerTransport::Inproc,
+                    peer_name_str.clone(),
+                ),
                 source: PeerDirectorySource::Inproc,
                 meta: inproc.meta.clone(),
             });
@@ -1851,10 +1918,17 @@ impl CommsRuntime {
         emitted
     }
 
-    /// Canonical send path uses trusted peers only.
+    /// Canonical send path: destination is a typed [`PeerName`] that the
+    /// runtime resolves to a [`PeerId`] via the trusted-peer snapshot.
+    ///
+    /// Duplicate names are a discovery concern, not a routing concern —
+    /// the first resolvable entry wins here because the router itself
+    /// keys by `PeerId`. Surfaces that must reject ambiguity should
+    /// resolve names through [`crate::trust::TrustStore::resolve_name`]
+    /// at their own boundary.
     async fn send_peer_command(
         &self,
-        peer_name: &str,
+        peer_name: &PeerName,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
         self.send_peer_command_with_id(peer_name, Uuid::new_v4(), kind)
@@ -1863,7 +1937,7 @@ impl CommsRuntime {
 
     async fn send_peer_command_with_id(
         &self,
-        peer_name: &str,
+        peer_name: &PeerName,
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
@@ -1871,9 +1945,16 @@ impl CommsRuntime {
         self.reconcile_peer_directory(&resolved);
         let resolved_peer = resolved
             .into_iter()
-            .find(|peer| peer.name.as_str() == peer_name);
+            .find(|peer| peer.name.as_str() == peer_name.as_str());
+        let dest_peer_id = match resolved_peer.as_ref() {
+            Some(peer) => peer.peer_id,
+            None => return Err(SendError::PeerNotFound(peer_name.as_string())),
+        };
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
-        let result = self.router.send_with_id(peer_name, envelope_id, kind).await;
+        let result = self
+            .router
+            .send_with_id(dest_peer_id, envelope_id, kind)
+            .await;
         match result {
             Ok(envelope_id) => {
                 if let Some(peer) = resolved_peer.as_ref() {
@@ -1883,16 +1964,14 @@ impl CommsRuntime {
                 }
                 Ok(envelope_id)
             }
-            Err(crate::router::SendError::PeerNotFound(peer)) => {
+            Err(crate::router::SendError::PeerNotFound(peer_id)) => {
                 if let Some(resolved_peer) = resolved_peer.as_ref() {
                     self.peer_directory_reachability.lock().record_send_failed(
                         &resolved_peer.reachability_key(),
                         PeerReachabilityReason::OfflineOrNoAck,
                     );
-                    Err(SendError::PeerNotFound(peer))
-                } else {
-                    Err(SendError::PeerNotFound(peer))
                 }
+                Err(SendError::PeerNotFound(peer_id.to_string()))
             }
             Err(crate::router::SendError::PeerOffline) => {
                 if let Some(peer) = resolved_peer.as_ref() {
@@ -2422,11 +2501,23 @@ mod tests {
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
             InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
-            PeerReachabilityReason, StreamError, StreamScope, TrustedPeerSpec,
+            PeerReachabilityReason, StreamError, StreamScope, TrustedPeerDescriptor,
         },
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
     };
+
+    /// Test helper: build a [`TrustedPeerDescriptor`] from raw pubkey +
+    /// display name + address string. Panics on invalid input — tests are
+    /// expected to supply valid values.
+    fn trusted_descriptor(name: &str, pubkey: PubKey, address: &str) -> TrustedPeerDescriptor {
+        TrustedPeerDescriptor {
+            peer_id: crate::router::peer_id_from_pubkey(&pubkey),
+            name: PeerName::new(name.to_string()).expect("valid peer name"),
+            address: parse_peer_address(address),
+            pubkey: *pubkey.as_bytes(),
+        }
+    }
     use parking_lot::Mutex;
     use std::{collections::HashMap, sync::Arc};
     use tokio::time::{Duration, timeout};
@@ -2616,12 +2707,7 @@ mod tests {
         let sender = Keypair::generate();
         CoreCommsRuntime::add_trusted_peer(
             &runtime,
-            TrustedPeerSpec::new(
-                "sender",
-                sender.public_key().to_peer_id(),
-                "tcp://127.0.0.1:4200",
-            )
-            .unwrap(),
+            trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
         )
         .await
         .unwrap();
@@ -2716,12 +2802,7 @@ mod tests {
         let sender = Keypair::generate();
         CoreCommsRuntime::add_trusted_peer(
             &runtime,
-            TrustedPeerSpec::new(
-                "sender",
-                sender.public_key().to_peer_id(),
-                "tcp://127.0.0.1:4200",
-            )
-            .unwrap(),
+            trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
         )
         .await
         .unwrap();
@@ -2825,12 +2906,11 @@ mod tests {
         // `trusted_peers` BTreeSet is synced too, not just the RwLock.
         CoreCommsRuntime::add_trusted_peer(
             &peer,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &runtime_name,
-                runtime.public_key().to_peer_id(),
-                format!("inproc://{runtime_name}"),
-            )
-            .expect("valid trusted peer spec"),
+                runtime.public_key(),
+                &format!("inproc://{runtime_name}"),
+            ),
         )
         .await
         .expect("peer should accept trust entry for runtime");
@@ -2872,23 +2952,21 @@ mod tests {
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &receiver_name,
-                receiver.public_key().to_peer_id(),
-                format!("inproc://{receiver_name}"),
-            )
-            .expect("valid trusted peer spec"),
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
         )
         .await
         .expect("sender should trust receiver");
         CoreCommsRuntime::add_trusted_peer(
             &receiver,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &sender_name,
-                sender.public_key().to_peer_id(),
-                format!("inproc://{sender_name}"),
-            )
-            .expect("valid trusted peer spec"),
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
         )
         .await
         .expect("receiver should trust sender");
@@ -2976,7 +3054,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
     async fn runtime_bridge_red_ok_send_and_stream_reserves_one_interaction_channel() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("phase1-bridge-{suffix}")).unwrap();
@@ -3018,7 +3095,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
     async fn runtime_bridge_red_ok_completed_interaction_terminates_reserved_stream() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("phase1-complete-{suffix}")).unwrap();
@@ -3229,9 +3305,7 @@ mod tests {
         let runtime = CommsRuntime::new(config).await.unwrap();
 
         let peer_key = Keypair::generate();
-        let trusted_peer =
-            TrustedPeerSpec::new("ally", peer_key.public_key().to_peer_id(), "inproc://ally")
-                .expect("trusted peer spec should be valid");
+        let trusted_peer = trusted_descriptor("ally", peer_key.public_key(), "inproc://ally");
 
         CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer.clone())
             .await
@@ -3327,7 +3401,7 @@ mod tests {
         let runtime = CommsRuntime::new(config).await.unwrap();
 
         let sender = Keypair::generate();
-        let peer_id = sender.public_key().to_peer_id();
+        let pubkey_for_authority_check = sender.public_key();
         let envelope = signed_envelope(
             &sender,
             runtime.public_key(),
@@ -3367,15 +3441,14 @@ mod tests {
                 Some((PeerIngressState::Dropped, 0))
             );
             assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&peer_id),
+                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
                 Some(false)
             );
             // Drop counter ticked exactly once — the bug repair is visible.
             assert_eq!(inbox.dropped_count(), Some(1));
         }
 
-        let trusted_peer = TrustedPeerSpec::new("sender", peer_id.clone(), "inproc://sender")
-            .expect("trusted peer spec should be valid");
+        let trusted_peer = trusted_descriptor("sender", sender.public_key(), "inproc://sender");
         CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer)
             .await
             .expect("add_trusted_peer should succeed");
@@ -3387,7 +3460,7 @@ mod tests {
                 Some((PeerIngressState::Dropped, 0))
             );
             assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&peer_id),
+                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
                 Some(true)
             );
         }
@@ -3439,9 +3512,12 @@ mod tests {
             );
         }
 
-        let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id)
-            .await
-            .expect("remove_trusted_peer should succeed");
+        let removed = CoreCommsRuntime::remove_trusted_peer(
+            &runtime,
+            &pubkey_for_authority_check.to_pubkey_string(),
+        )
+        .await
+        .expect("remove_trusted_peer should succeed");
         assert!(removed);
 
         {
@@ -3451,7 +3527,7 @@ mod tests {
                 Some((PeerIngressState::Delivered, 0))
             );
             assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&peer_id),
+                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
                 Some(false)
             );
         }
@@ -3732,24 +3808,22 @@ mod tests {
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
-                receiver_name.clone(),
-                receiver.public_key().to_peer_id(),
-                format!("inproc://{receiver_name}"),
-            )
-            .unwrap(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
         )
         .await
         .unwrap();
 
         CoreCommsRuntime::add_trusted_peer(
             &receiver,
-            TrustedPeerSpec::new(
-                sender_name.clone(),
-                sender.public_key().to_peer_id(),
-                format!("inproc://{sender_name}"),
-            )
-            .unwrap(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
         )
         .await
         .unwrap();
@@ -3794,24 +3868,22 @@ mod tests {
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
-                receiver_name.clone(),
-                receiver.public_key().to_peer_id(),
-                format!("inproc://{receiver_name}"),
-            )
-            .unwrap(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
         )
         .await
         .unwrap();
 
         CoreCommsRuntime::add_trusted_peer(
             &receiver,
-            TrustedPeerSpec::new(
-                sender_name.clone(),
-                sender.public_key().to_peer_id(),
-                format!("inproc://{sender_name}"),
-            )
-            .unwrap(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
         )
         .await
         .unwrap();
@@ -3956,23 +4028,21 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
-        let peer_spec = meerkat_core::comms::TrustedPeerSpec::new(
+        let peer_spec = trusted_descriptor(
             &receiver_name,
-            receiver.public_key().to_peer_id(),
-            format!("inproc://{receiver_name}"),
-        )
-        .expect("valid peer spec");
+            receiver.public_key(),
+            &format!("inproc://{receiver_name}"),
+        );
 
         CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
             .await
             .expect("trusted peer add should succeed");
 
-        let reverse_spec = meerkat_core::comms::TrustedPeerSpec::new(
+        let reverse_spec = trusted_descriptor(
             &sender_name,
-            sender.public_key().to_peer_id(),
-            format!("inproc://{sender_name}"),
-        )
-        .expect("valid reverse peer spec");
+            sender.public_key(),
+            &format!("inproc://{sender_name}"),
+        );
 
         CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
             .await
@@ -4007,7 +4077,7 @@ mod tests {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("trust-register-{suffix}")).unwrap();
         let peer_key = Keypair::generate().public_key();
-        let peer_id = peer_key.to_peer_id();
+        let pubkey_for_authority_check = peer_key;
         let meta = crate::PeerMeta::default()
             .with_description("Coordinates delegated work")
             .with_label("team", "platform");
@@ -4025,7 +4095,7 @@ mod tests {
         {
             let inbox = runtime.inbox.lock().await;
             assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&peer_id),
+                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
                 Some(true)
             );
         }
@@ -4047,7 +4117,7 @@ mod tests {
         {
             let inbox = runtime.inbox.lock().await;
             assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&peer_id),
+                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
                 Some(false)
             );
         }
@@ -4062,10 +4132,19 @@ mod tests {
     #[tokio::test]
     async fn test_add_trusted_peer_invalid_peer_id_is_rejected() {
         let sender = CommsRuntime::inproc_only("trust-invalid-sender").unwrap();
-        let invalid_peer_spec = meerkat_core::comms::TrustedPeerSpec {
-            name: "invalid".to_string(),
-            peer_id: "bad-peer-id".to_string(),
-            address: "inproc://invalid".to_string(),
+        // Construct a descriptor whose `peer_id` does not match the supplied
+        // `pubkey` — `descriptor_to_trusted_peer` derives the id from pubkey
+        // and rejects the mismatch with `SendError::Validation`.
+        let bogus_peer_key = Keypair::generate();
+        let real_peer_key = Keypair::generate();
+        let invalid_peer_spec = meerkat_core::comms::TrustedPeerDescriptor {
+            name: meerkat_core::comms::PeerName::new("invalid").expect("valid peer name"),
+            peer_id: bogus_peer_key.public_key().to_peer_id(),
+            address: meerkat_core::comms::PeerAddress::new(
+                meerkat_core::comms::PeerTransport::Inproc,
+                "invalid",
+            ),
+            pubkey: *real_peer_key.public_key().as_bytes(),
         };
 
         let result = CoreCommsRuntime::add_trusted_peer(&sender, invalid_peer_spec).await;
@@ -4181,12 +4260,11 @@ mod tests {
         let peer = CommsRuntime::inproc_only("session-scoped-trust-peer").unwrap();
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 "session-scoped-trust-peer",
-                peer.public_key().to_peer_id(),
-                format!("inproc://{}", peer.participant_name()),
-            )
-            .expect("trusted peer spec"),
+                peer.public_key(),
+                &format!("inproc://{}", peer.participant_name()),
+            ),
         )
         .await
         .expect("add trusted peer");
@@ -4253,7 +4331,7 @@ mod tests {
             "expected Trusted or TrustedAndInproc, got {:?}",
             peer.source
         );
-        assert_eq!(peer.address, format!("inproc://{peer_name}"));
+        assert_eq!(peer.address.to_string(), format!("inproc://{peer_name}"));
         assert_eq!(peer.sendable_kinds.len(), 3);
         assert!(peer.sendable_kinds.contains(&"peer_message".to_string()));
         assert!(peer.sendable_kinds.contains(&"peer_request".to_string()));
@@ -4272,12 +4350,11 @@ mod tests {
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &receiver_name,
-                receiver.public_key().to_peer_id(),
-                format!("inproc://{receiver_name}"),
-            )
-            .expect("valid trusted peer"),
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
         )
         .await
         .expect("add trusted peer");
@@ -4288,12 +4365,11 @@ mod tests {
         // as `PeerOffline`. Mutual trust mirrors real deployments.
         CoreCommsRuntime::add_trusted_peer(
             &receiver,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &sender_name,
-                sender.public_key().to_peer_id(),
-                format!("inproc://{sender_name}"),
-            )
-            .expect("valid trusted peer"),
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
         )
         .await
         .expect("add trusted peer");
@@ -4331,12 +4407,11 @@ mod tests {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender = CommsRuntime::inproc_only(&format!("transport-sender-{suffix}")).unwrap();
         let peer_name = format!("transport-peer-{suffix}");
-        let peer_key = Keypair::generate().public_key().to_peer_id();
+        let peer_pubkey = Keypair::generate().public_key();
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(&peer_name, peer_key, "tcp://127.0.0.1:9")
-                .expect("valid trusted peer"),
+            trusted_descriptor(&peer_name, peer_pubkey, "tcp://127.0.0.1:9"),
         )
         .await
         .expect("add trusted peer");
@@ -4387,12 +4462,11 @@ mod tests {
         // at its ingress gate and gets rejected with `UntrustedSender`.
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &receiver_name,
-                receiver.public_key().to_peer_id(),
-                format!("inproc://{receiver_name}"),
-            )
-            .expect("valid trusted peer"),
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
         )
         .await
         .expect("sender must trust receiver");
@@ -4466,16 +4540,16 @@ mod tests {
         let sender =
             CommsRuntime::inproc_only(&format!("resolved-missing-sender-{suffix}")).unwrap();
         let missing_name = format!("resolved-missing-peer-{suffix}");
-        let missing_key = Keypair::generate().public_key().to_peer_id();
+        let missing_pubkey = Keypair::generate().public_key();
+        let missing_peer_id = missing_pubkey.to_peer_id().as_str();
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &missing_name,
-                missing_key,
-                format!("inproc://{missing_name}"),
-            )
-            .expect("valid trusted peer"),
+                missing_pubkey,
+                &format!("inproc://{missing_name}"),
+            ),
         )
         .await
         .expect("add trusted peer");
@@ -4491,7 +4565,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_name),
+            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_peer_id),
             "resolved missing peer should preserve PeerNotFound, got: {result:?}"
         );
 
@@ -4692,12 +4766,11 @@ mod tests {
         // Use `add_trusted_peer` so the classified queue's trust set syncs.
         CoreCommsRuntime::add_trusted_peer(
             &_peer,
-            TrustedPeerSpec::new(
+            trusted_descriptor(
                 &runtime_name,
-                runtime.public_key().to_peer_id(),
-                format!("inproc://{runtime_name}"),
-            )
-            .expect("valid trusted peer spec"),
+                runtime.public_key(),
+                &format!("inproc://{runtime_name}"),
+            ),
         )
         .await
         .expect("peer should accept trust entry for runtime");
@@ -4824,12 +4897,11 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         // Add receiver as trusted peer of sender
-        let peer_spec = meerkat_core::comms::TrustedPeerSpec::new(
+        let peer_spec = trusted_descriptor(
             &receiver_name,
-            receiver.public_key().to_peer_id(),
-            format!("inproc://{receiver_name}"),
-        )
-        .expect("valid peer spec");
+            receiver.public_key(),
+            &format!("inproc://{receiver_name}"),
+        );
 
         CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
             .await
@@ -4847,9 +4919,10 @@ mod tests {
             "receiver should appear in sender's peers after add"
         );
 
-        // Remove the trusted peer
-        let peer_id = receiver.public_key().to_peer_id();
-        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+        // Remove the trusted peer — `remove_trusted_peer` keys on the
+        // pubkey-string form so the pubkey bytes survive the lookup.
+        let peer_pubkey_string = receiver.public_key().to_pubkey_string();
+        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_pubkey_string)
             .await
             .expect("remove_trusted_peer should succeed");
         assert!(removed, "remove should return true for existing peer");
@@ -4885,8 +4958,8 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&format!("rm-absent-{suffix}")).unwrap();
         let other = CommsRuntime::inproc_only(&format!("rm-absent-other-{suffix}")).unwrap();
 
-        let peer_id = other.public_key().to_peer_id();
-        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+        let peer_pubkey_string = other.public_key().to_pubkey_string();
+        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_pubkey_string)
             .await
             .expect("remove_trusted_peer should succeed even for absent peer");
         assert!(

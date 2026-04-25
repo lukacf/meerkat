@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MobMachine.
 
-CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, MobMemberStateValues, MobTaskValues, NatValues, SessionIdValues, SetOfAgentRuntimeIdValues, SetOfTaskIdValues, SetOfWiringEdgeValues, TaskIdValues, TaskStatusValues, WiringEdgeValues, WorkIdValues, WorkOriginValues
+CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, MobIdValues, MobMemberStateValues, MobTaskValues, NatValues, SessionIdValues, SetOfAgentRuntimeIdValues, SetOfTaskIdValues, SetOfWiringEdgeValues, StringValues, TaskIdValues, TaskStatusValues, WiringEdgeValues, WorkIdValues, WorkOriginValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -25,9 +25,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch
+VARIABLES phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch
 
-vars == << phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+vars == << phase, model_step_count, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 Init ==
     /\ phase = "Running"
@@ -45,11 +45,66 @@ Init ==
     /\ in_progress_task_ids = {}
     /\ completed_task_ids = {}
     /\ member_session_bindings = [x \in {} |-> None]
+    /\ pending_session_ingress_detach_runtime_ids = {}
     /\ topology_epoch = 0
 
 TerminalStutter ==
     /\ phase = "Destroyed"
     /\ UNCHANGED vars
+
+WireMembersRunning(edge) ==
+    /\ phase = "Running"
+    /\ ((edge \in wiring_edges) = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ wiring_edges' = (wiring_edges \cup {edge})
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids >>
+
+
+UnwireMembersRunning(edge) ==
+    /\ phase = "Running"
+    /\ ((edge \in wiring_edges) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ wiring_edges' = (wiring_edges \ {edge})
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids >>
+
+
+BindMemberSessionRunning(agent_identity, session_id) ==
+    /\ phase = "Running"
+    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, session_id)
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, pending_session_ingress_detach_runtime_ids >>
+
+
+RotateMemberSessionRunning(agent_identity, old_session_id, new_session_id) ==
+    /\ phase = "Running"
+    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = Some(old_session_id))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, new_session_id)
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, pending_session_ingress_detach_runtime_ids >>
+
+
+ReleaseMemberSessionRunning(agent_identity, session_id) ==
+    /\ phase = "Running"
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = Some(session_id))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, pending_session_ingress_detach_runtime_ids >>
+
 
 SpawnRunningFresh(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing) ==
     /\ phase = "Running"
@@ -63,7 +118,8 @@ SpawnRunningFresh(agent_identity, agent_runtime_id, fence_token, generation, ext
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, fence_token)
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
     /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, bridge_session_id)
-    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, topology_epoch >>
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, pending_session_ingress_detach_runtime_ids >>
 
 
 SpawnRunningReplacing(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing) ==
@@ -78,14 +134,15 @@ SpawnRunningReplacing(agent_identity, agent_runtime_id, fence_token, generation,
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, fence_token)
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
     /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, bridge_session_id)
-    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, topology_epoch >>
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, pending_session_ingress_detach_runtime_ids >>
 
 
 ObserveRuntimeReady(agent_runtime_id, fence_token) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin) ==
@@ -96,7 +153,7 @@ SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ (agent_runtime_id \in externally_addressable_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin) ==
@@ -106,32 +163,32 @@ SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ (origin = "Internal")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-RetireMember(agent_runtime_id, fence_token) ==
+RetireMember(agent_runtime_id, fence_token, session_id) ==
     /\ phase = "Running"
     /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
     /\ phase = "Running"
     /\ (agent_runtime_id \in live_runtime_ids)
-    /\ phase' = "Stopped"
+    /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
     /\ externally_addressable_runtime_ids' = (externally_addressable_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapRemove(runtime_fence_tokens, agent_runtime_id)
     /\ active_run_count' = 0
     /\ member_state_markers' = MapRemove(member_state_markers, agent_runtime_id)
-    /\ UNCHANGED << pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable) ==
+ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id) ==
     /\ phase = "Running" \/ phase = "Stopped"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -141,10 +198,10 @@ ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
-    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable) ==
+RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -154,7 +211,7 @@ RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, externa
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ identity_to_runtime' = MapSet(identity_to_runtime, agent_identity, agent_runtime_id)
-    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << coordinator_bound, member_state_markers, wiring_edges, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 MarkCompleted ==
@@ -162,11 +219,12 @@ MarkCompleted ==
     /\ (active_run_count = 0)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-DestroyMob ==
+DestroyMob(session_id) ==
     /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ (pending_session_ingress_detach_runtime_ids = {})
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
@@ -175,6 +233,7 @@ DestroyMob ==
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
     /\ member_state_markers' = [x \in {} |-> None]
+    /\ pending_session_ingress_detach_runtime_ids' = {}
     /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
 
 
@@ -189,63 +248,63 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
     /\ member_state_markers' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RecordOperatorActionProvenanceRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RecordOperatorActionProvenanceStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RecordOperatorActionProvenanceCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RecordOperatorActionProvenanceDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SetSpawnPolicyRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SetSpawnPolicyStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SetSpawnPolicyCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SetSpawnPolicyDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StopRunning ==
@@ -255,7 +314,7 @@ StopRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ResumeStopped ==
@@ -263,7 +322,7 @@ ResumeStopped ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CompleteRunning ==
@@ -271,7 +330,7 @@ CompleteRunning ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ResetToRunning ==
@@ -281,68 +340,7 @@ ResetToRunning ==
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
-
-
-WireRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
-
-
-WireMembersRunning(edge) ==
-    /\ phase = "Running"
-    /\ ((edge \in wiring_edges) = FALSE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ wiring_edges' = (wiring_edges \cup {edge})
-    /\ topology_epoch' = (topology_epoch) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings >>
-
-
-UnwireMembersRunning(edge) ==
-    /\ phase = "Running"
-    /\ ((edge \in wiring_edges) = TRUE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ wiring_edges' = (wiring_edges \ {edge})
-    /\ topology_epoch' = (topology_epoch) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings >>
-
-
-BindMemberSessionRunning(agent_identity, session_id) ==
-    /\ phase = "Running"
-    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, session_id)
-    /\ topology_epoch' = (topology_epoch) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
-
-
-RotateMemberSessionRunning(agent_identity, old_session_id, new_session_id) ==
-    /\ phase = "Running"
-    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
-    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = Some(old_session_id))
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_session_bindings' = MapSet(member_session_bindings, agent_identity, new_session_id)
-    /\ topology_epoch' = (topology_epoch) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
-
-
-ReleaseMemberSessionRunning(agent_identity, session_id) ==
-    /\ phase = "Running"
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
-    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = Some(session_id))
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
-    /\ topology_epoch' = (topology_epoch) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 TaskCreateRunning(task_id, task_payload) ==
@@ -351,7 +349,7 @@ TaskCreateRunning(task_id, task_payload) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ tasks' = MapSet(tasks, task_id, task_payload)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 TaskUpdateRunningPending(task_id, new_status) ==
@@ -362,7 +360,7 @@ TaskUpdateRunningPending(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 TaskUpdateRunningInProgress(task_id, new_status) ==
@@ -373,7 +371,7 @@ TaskUpdateRunningInProgress(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \cup {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 TaskUpdateRunningCompleted(task_id, new_status) ==
@@ -384,7 +382,7 @@ TaskUpdateRunningCompleted(task_id, new_status) ==
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
     /\ completed_task_ids' = (completed_task_ids \cup {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 TaskUpdateRunningCancelled(task_id, new_status) ==
@@ -395,7 +393,7 @@ TaskUpdateRunningCancelled(task_id, new_status) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ in_progress_task_ids' = (in_progress_task_ids \ {task_id})
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ForceCancelRunning ==
@@ -403,7 +401,7 @@ ForceCancelRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAgentEventsRunning ==
@@ -411,7 +409,7 @@ SubscribeAgentEventsRunning ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAgentEventsStopped ==
@@ -419,7 +417,7 @@ SubscribeAgentEventsStopped ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAgentEventsCompleted ==
@@ -427,7 +425,7 @@ SubscribeAgentEventsCompleted ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAgentEventsDestroyed ==
@@ -435,63 +433,63 @@ SubscribeAgentEventsDestroyed ==
     /\ (live_runtime_ids # {})
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAllAgentEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAllAgentEventsStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAllAgentEventsCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeAllAgentEventsDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeMobEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeMobEventsStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeMobEventsCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 SubscribeMobEventsDestroyed ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ShutdownRunning ==
@@ -500,7 +498,7 @@ ShutdownRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ShutdownStopped ==
@@ -509,7 +507,7 @@ ShutdownStopped ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ShutdownCompleted ==
@@ -518,7 +516,7 @@ ShutdownCompleted ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CancelFlowRunning ==
@@ -526,7 +524,7 @@ CancelFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 InitializeOrchestratorRunning ==
@@ -534,7 +532,7 @@ InitializeOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 BindCoordinatorRunning ==
@@ -542,7 +540,7 @@ BindCoordinatorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 UnbindCoordinatorRunning ==
@@ -550,7 +548,7 @@ UnbindCoordinatorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StageSpawnRunning ==
@@ -558,7 +556,7 @@ StageSpawnRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StopOrchestratorRunning ==
@@ -566,7 +564,7 @@ StopOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StopOrchestratorStopped ==
@@ -574,7 +572,7 @@ StopOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StopOrchestratorCompleted ==
@@ -582,7 +580,7 @@ StopOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ResumeOrchestratorRunning ==
@@ -590,7 +588,7 @@ ResumeOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ResumeOrchestratorStopped ==
@@ -598,7 +596,7 @@ ResumeOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ResumeOrchestratorCompleted ==
@@ -606,7 +604,7 @@ ResumeOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = TRUE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 DestroyOrchestratorRunning ==
@@ -614,7 +612,7 @@ DestroyOrchestratorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 DestroyOrchestratorStopped ==
@@ -622,7 +620,7 @@ DestroyOrchestratorStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 DestroyOrchestratorCompleted ==
@@ -630,70 +628,70 @@ DestroyOrchestratorCompleted ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ForceCancelMemberRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 MemberPeerExposedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 MemberTerminalizedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 OperationPeerTrustedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 PeerInputAdmittedRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 BeginCleanupStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 BeginCleanupCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 FinishCleanupStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 FinishCleanupCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RunFlowRunning ==
@@ -702,7 +700,7 @@ RunFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StartFlowRunning ==
@@ -711,7 +709,7 @@ StartFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CreateRunRunning ==
@@ -719,7 +717,7 @@ CreateRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 StartRunRunning ==
@@ -727,14 +725,7 @@ StartRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
-
-
-UnwireRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CompleteFlowRunning ==
@@ -743,7 +734,7 @@ CompleteFlowRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CompleteFlowRunningZero ==
@@ -751,7 +742,7 @@ CompleteFlowRunningZero ==
     /\ (active_run_count = 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 FinishRunRunning ==
@@ -760,7 +751,7 @@ FinishRunRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 FinishRunRunningZero ==
@@ -768,60 +759,104 @@ FinishRunRunningZero ==
     /\ (active_run_count = 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
+
+
+RetireRunningReleasing(agent_runtime_id, agent_identity, releasing, session_id) ==
+    /\ phase = "Running"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
+    /\ (releasing # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
+    /\ pending_session_ingress_detach_runtime_ids' = (pending_session_ingress_detach_runtime_ids \cup {agent_runtime_id})
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing, session_id) ==
+    /\ phase = "Running"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
+    /\ (releasing = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
+
+
+RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing, session_id) ==
+    /\ phase = "Running"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
+    /\ (releasing = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
+
+
+RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing, session_id) ==
+    /\ phase = "Stopped"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
+    /\ (releasing # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
+    /\ pending_session_ingress_detach_runtime_ids' = (pending_session_ingress_detach_runtime_ids \cup {agent_runtime_id})
+    /\ topology_epoch' = (topology_epoch) + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+SessionIngressDetachedForMobDestroyRunning(mob_id, agent_runtime_id) ==
+    /\ phase = "Running"
+    /\ (mob_id = mob_id)
+    /\ ((agent_runtime_id \in pending_session_ingress_detach_runtime_ids) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_session_ingress_detach_runtime_ids' = (pending_session_ingress_detach_runtime_ids \ {agent_runtime_id})
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
 
 
-RetireRunningReleasing(agent_runtime_id, agent_identity, releasing) ==
-    /\ phase = "Running"
-    /\ (live_runtime_ids # {})
-    /\ (agent_runtime_id \in live_runtime_ids)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
-    /\ (releasing # None)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, topology_epoch >>
-
-
-RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
-    /\ phase = "Running"
-    /\ (live_runtime_ids # {})
-    /\ (agent_runtime_id \in live_runtime_ids)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
-    /\ (releasing = None)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
-
-
-RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing) ==
-    /\ phase = "Running"
-    /\ (live_runtime_ids # {})
-    /\ (agent_runtime_id \in live_runtime_ids)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
-    /\ (releasing = None)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
-
-
-RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing) ==
+SessionIngressDetachedForMobDestroyStopped(mob_id, agent_runtime_id) ==
     /\ phase = "Stopped"
-    /\ (live_runtime_ids # {})
-    /\ (agent_runtime_id \in live_runtime_ids)
-    /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
-    /\ (releasing # None)
+    /\ (mob_id = mob_id)
+    /\ ((agent_runtime_id \in pending_session_ingress_detach_runtime_ids) = TRUE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ member_session_bindings' = MapRemove(member_session_bindings, agent_identity)
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, topology_epoch >>
+    /\ pending_session_ingress_detach_runtime_ids' = (pending_session_ingress_detach_runtime_ids \ {agent_runtime_id})
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
 
 
-RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
+SessionIngressDetachFailedForMobDestroyRunning(mob_id, agent_runtime_id, reason) ==
+    /\ phase = "Running"
+    /\ (mob_id = mob_id)
+    /\ (reason = reason)
+    /\ ((agent_runtime_id \in pending_session_ingress_detach_runtime_ids) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
+
+
+SessionIngressDetachFailedForMobDestroyStopped(mob_id, agent_runtime_id, reason) ==
+    /\ phase = "Stopped"
+    /\ (mob_id = mob_id)
+    /\ (reason = reason)
+    /\ ((agent_runtime_id \in pending_session_ingress_detach_runtime_ids) = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
+
+
+RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing, session_id) ==
     /\ phase = "Stopped"
     /\ (live_runtime_ids # {})
     /\ (agent_runtime_id \in live_runtime_ids)
@@ -830,10 +865,10 @@ RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
+RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing, session_id) ==
     /\ phase = "Stopped"
     /\ (live_runtime_ids # {})
     /\ (agent_runtime_id \in live_runtime_ids)
@@ -842,7 +877,7 @@ RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RetireAllRunning ==
@@ -851,7 +886,7 @@ RetireAllRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 RetireAllStopped ==
@@ -860,7 +895,7 @@ RetireAllStopped ==
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
     /\ runtime_fence_tokens' = [x \in {} |-> None]
-    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CompleteSpawnRunning ==
@@ -869,11 +904,12 @@ CompleteSpawnRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_spawn_count' = (pending_spawn_count) - 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 DestroyFromAny ==
     /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ (pending_session_ingress_detach_runtime_ids = {})
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = {}
@@ -881,6 +917,7 @@ DestroyFromAny ==
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
     /\ coordinator_bound' = FALSE
+    /\ pending_session_ingress_detach_runtime_ids' = {}
     /\ UNCHANGED << externally_addressable_runtime_ids, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
 
 
@@ -890,7 +927,7 @@ RespawnRunning(agent_runtime_id) ==
     /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 CancelAllWorkRunning(agent_runtime_id, fence_token) ==
@@ -900,21 +937,26 @@ CancelAllWorkRunning(agent_runtime_id, fence_token) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, topology_epoch >>
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 Next ==
+    \/ \E edge \in WiringEdgeValues : WireMembersRunning(edge)
+    \/ \E edge \in WiringEdgeValues : UnwireMembersRunning(edge)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : BindMemberSessionRunning(agent_identity, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E old_session_id \in SessionIdValues : \E new_session_id \in SessionIdValues : RotateMemberSessionRunning(agent_identity, old_session_id, new_session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseMemberSessionRunning(agent_identity, session_id)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E bridge_session_id \in SessionIdValues : \E replacing \in OptionSessionIdValues : SpawnRunningFresh(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E bridge_session_id \in SessionIdValues : \E replacing \in OptionSessionIdValues : SpawnRunningReplacing(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeReady(agent_runtime_id, fence_token)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : \E origin \in WorkOriginValues : SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : \E origin \in WorkOriginValues : SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : RetireMember(agent_runtime_id, fence_token)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E session_id \in SessionIdValues : RetireMember(agent_runtime_id, fence_token, session_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeRetired(agent_runtime_id, fence_token)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
     \/ MarkCompleted
-    \/ DestroyMob
+    \/ \E session_id \in SessionIdValues : DestroyMob(session_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeDestroyed(agent_runtime_id, fence_token)
     \/ RecordOperatorActionProvenanceRunning
     \/ RecordOperatorActionProvenanceStopped
@@ -928,12 +970,6 @@ Next ==
     \/ ResumeStopped
     \/ CompleteRunning
     \/ ResetToRunning
-    \/ WireRunning
-    \/ \E edge \in WiringEdgeValues : WireMembersRunning(edge)
-    \/ \E edge \in WiringEdgeValues : UnwireMembersRunning(edge)
-    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : BindMemberSessionRunning(agent_identity, session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E old_session_id \in SessionIdValues : \E new_session_id \in SessionIdValues : RotateMemberSessionRunning(agent_identity, old_session_id, new_session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E session_id \in SessionIdValues : ReleaseMemberSessionRunning(agent_identity, session_id)
     \/ \E task_id \in TaskIdValues : \E task_payload \in MobTaskValues : TaskCreateRunning(task_id, task_payload)
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningPending(task_id, new_status)
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningInProgress(task_id, new_status)
@@ -982,17 +1018,20 @@ Next ==
     \/ StartFlowRunning
     \/ CreateRunRunning
     \/ StartRunRunning
-    \/ UnwireRunning
     \/ CompleteFlowRunning
     \/ CompleteFlowRunningZero
     \/ FinishRunRunning
     \/ FinishRunRunningZero
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningReleasing(agent_runtime_id, agent_identity, releasing)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireRunningReleasing(agent_runtime_id, agent_identity, releasing, session_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing, session_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing, session_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing, session_id)
+    \/ \E mob_id \in MobIdValues : \E agent_runtime_id \in AgentRuntimeIdValues : SessionIngressDetachedForMobDestroyRunning(mob_id, agent_runtime_id)
+    \/ \E mob_id \in MobIdValues : \E agent_runtime_id \in AgentRuntimeIdValues : SessionIngressDetachedForMobDestroyStopped(mob_id, agent_runtime_id)
+    \/ \E mob_id \in MobIdValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E reason \in StringValues : SessionIngressDetachFailedForMobDestroyRunning(mob_id, agent_runtime_id, reason)
+    \/ \E mob_id \in MobIdValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E reason \in StringValues : SessionIngressDetachFailedForMobDestroyStopped(mob_id, agent_runtime_id, reason)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing, session_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : \E session_id \in SessionIdValues : RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing, session_id)
     \/ RetireAllRunning
     \/ RetireAllStopped
     \/ CompleteSpawnRunning
@@ -1003,8 +1042,8 @@ Next ==
 
 bindings_require_known_identity == (\A id \in DOMAIN member_session_bindings : (id \in DOMAIN identity_to_runtime))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(live_runtime_ids) <= 1 /\ Cardinality(externally_addressable_runtime_ids) <= 1 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 1 /\ Cardinality(DOMAIN member_state_markers) <= 1 /\ Cardinality(wiring_edges) <= 1 /\ Cardinality(DOMAIN identity_to_runtime) <= 1 /\ Cardinality(DOMAIN tasks) <= 1 /\ Cardinality(in_progress_task_ids) <= 1 /\ Cardinality(completed_task_ids) <= 1 /\ Cardinality(DOMAIN member_session_bindings) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(live_runtime_ids) <= 2 /\ Cardinality(externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 2 /\ Cardinality(DOMAIN member_state_markers) <= 2 /\ Cardinality(wiring_edges) <= 2 /\ Cardinality(DOMAIN identity_to_runtime) <= 2 /\ Cardinality(DOMAIN tasks) <= 2 /\ Cardinality(in_progress_task_ids) <= 2 /\ Cardinality(completed_task_ids) <= 2 /\ Cardinality(DOMAIN member_session_bindings) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(live_runtime_ids) <= 1 /\ Cardinality(externally_addressable_runtime_ids) <= 1 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 1 /\ Cardinality(DOMAIN member_state_markers) <= 1 /\ Cardinality(wiring_edges) <= 1 /\ Cardinality(DOMAIN identity_to_runtime) <= 1 /\ Cardinality(DOMAIN tasks) <= 1 /\ Cardinality(in_progress_task_ids) <= 1 /\ Cardinality(completed_task_ids) <= 1 /\ Cardinality(DOMAIN member_session_bindings) <= 1 /\ Cardinality(pending_session_ingress_detach_runtime_ids) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(live_runtime_ids) <= 2 /\ Cardinality(externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN runtime_fence_tokens) <= 2 /\ Cardinality(DOMAIN member_state_markers) <= 2 /\ Cardinality(wiring_edges) <= 2 /\ Cardinality(DOMAIN identity_to_runtime) <= 2 /\ Cardinality(DOMAIN tasks) <= 2 /\ Cardinality(in_progress_task_ids) <= 2 /\ Cardinality(completed_task_ids) <= 2 /\ Cardinality(DOMAIN member_session_bindings) <= 2 /\ Cardinality(pending_session_ingress_detach_runtime_ids) <= 2
 
 Spec == Init /\ [][Next]_vars
 

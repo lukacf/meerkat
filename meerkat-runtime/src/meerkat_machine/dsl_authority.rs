@@ -38,6 +38,55 @@ pub(crate) fn write_back_phase(dsl_phase: mm_dsl::MeerkatPhase) -> RuntimeState 
     }
 }
 
+pub(crate) fn current_run_id_from_dsl(run_id: &mm_dsl::RunId) -> Option<RunId> {
+    uuid::Uuid::parse_str(&run_id.0).ok().map(RunId::from_uuid)
+}
+
+pub(crate) fn pre_run_phase_to_runtime_state(phase: mm_dsl::PreRunPhase) -> RuntimeState {
+    match phase {
+        mm_dsl::PreRunPhase::Idle => RuntimeState::Idle,
+        mm_dsl::PreRunPhase::Attached => RuntimeState::Attached,
+        mm_dsl::PreRunPhase::Retired => RuntimeState::Retired,
+    }
+}
+
+pub(crate) fn runtime_phase_from_authority(
+    authority: &mm_dsl::MeerkatMachineAuthority,
+) -> RuntimeState {
+    write_back_phase(authority.state.lifecycle_phase)
+}
+
+pub(crate) fn visible_runtime_phase_from_authority(
+    authority: &mm_dsl::MeerkatMachineAuthority,
+) -> RuntimeState {
+    if authority.state.lifecycle_phase == mm_dsl::MeerkatPhase::Running
+        && authority.state.pre_run_phase == Some(mm_dsl::PreRunPhase::Retired)
+    {
+        RuntimeState::Retired
+    } else {
+        runtime_phase_from_authority(authority)
+    }
+}
+
+pub(crate) fn current_run_id_from_authority(
+    authority: &mm_dsl::MeerkatMachineAuthority,
+) -> Option<RunId> {
+    authority
+        .state
+        .current_run_id
+        .as_ref()
+        .and_then(current_run_id_from_dsl)
+}
+
+pub(crate) fn pre_run_phase_from_authority(
+    authority: &mm_dsl::MeerkatMachineAuthority,
+) -> Option<RuntimeState> {
+    authority
+        .state
+        .pre_run_phase
+        .map(pre_run_phase_to_runtime_state)
+}
+
 pub(crate) fn project_phase(state: RuntimeState) -> mm_dsl::MeerkatPhase {
     match state {
         RuntimeState::Initializing => mm_dsl::MeerkatPhase::Initializing,
@@ -156,6 +205,9 @@ pub(crate) fn project_state(
         realtime_binding_authority_epoch: None,
         realtime_reattach_required: false,
         realtime_next_authority_epoch: 1,
+        realtime_reconnect_attempt_count: 0,
+        realtime_reconnect_next_retry_at_ms: None,
+        realtime_reconnect_deadline_at_ms: None,
         live_topology_phase: super::dsl::LiveTopologyPhase::Idle,
         mcp_server_states: std::collections::BTreeMap::new(),
         pending_peer_requests: std::collections::BTreeMap::new(),

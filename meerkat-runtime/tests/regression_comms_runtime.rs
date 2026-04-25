@@ -347,9 +347,9 @@ async fn silent_intent_maps_to_request_with_wake() {
     let input = interaction_to_peer_input(&interaction, &rid());
 
     // Under v9, silent intents are PeerInput(Request). The runtime's policy
-    // says WakeIfIdle for requests. The SILENT behavior is handled by the
-    // SilentIntentOverride layer (not yet implemented in DefaultPolicyTable).
-    // For now, verify the mapping is correct.
+    // resolves request inputs through the same staged-run wake path; caller
+    // intent metadata remains on the typed input rather than a stringly side
+    // channel.
     let policy = DefaultPolicyTable::resolve(&input, true);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
 

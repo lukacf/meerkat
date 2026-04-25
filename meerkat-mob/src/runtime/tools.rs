@@ -455,9 +455,35 @@ impl MobOperatorToolDispatcher {
     fn member_list_entry_result_payload(
         entry: &MobMemberListEntry,
     ) -> Result<serde_json::Value, ToolError> {
-        serde_json::to_value(entry).map_err(|error| {
+        // The app-facing `serde_json::to_value(entry)` derive skips the
+        // binding-era atoms (`agent_runtime_id`, `fence_token`) per the
+        // struct contract, so operator-tool output would lose the
+        // identity-native runtime fields that `spawn_member` already
+        // surfaces via its manual JSON shape (see
+        // `spawn_result_payload`). Operator tools run with injected
+        // authority and legitimately need these atoms for member
+        // bookkeeping — they're not leaking into app-facing wire output,
+        // they're the operator-visibility wire shape. Mirror the
+        // `spawn_result_payload` pattern: start from the struct-derived
+        // shape and splice the atoms back in at the tool boundary.
+        let mut value = serde_json::to_value(entry).map_err(|error| {
             ToolError::execution_failed(format!("encode member list entry: {error}"))
-        })
+        })?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "agent_runtime_id".to_string(),
+                serde_json::to_value(&entry.agent_runtime_id).map_err(|error| {
+                    ToolError::execution_failed(format!("encode agent_runtime_id: {error}"))
+                })?,
+            );
+            obj.insert(
+                "fence_token".to_string(),
+                serde_json::to_value(entry.fence_token).map_err(|error| {
+                    ToolError::execution_failed(format!("encode fence_token: {error}"))
+                })?,
+            );
+        }
+        Ok(value)
     }
 
     async fn spawn_result_payload_for_identity(

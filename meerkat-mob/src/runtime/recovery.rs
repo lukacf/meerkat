@@ -4,9 +4,9 @@
 //! scheduler's `ready_frames` and `pending_body_frame_loops` fields are
 //! consistent with the per-frame and per-loop kernel snapshots.
 
-use crate::generated::{flow_frame, loop_iteration};
 use crate::ids::{FlowNodeId, FrameId, LoopInstanceId};
 use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
+use crate::run::{flow_frame, loop_iteration};
 
 /// Errors that prevent a run from being resumed.
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +68,7 @@ fn check_frame_invariant(
         .kernel_state
         .node_status
         .iter()
-        .filter(|(_, status)| *status == &crate::generated::flow_frame::NodeRunStatus::Ready)
+        .filter(|(_, status)| *status == &crate::run::flow_frame::NodeRunStatus::Ready)
         .map(|(node_id, _)| node_id.clone())
         .collect();
 
@@ -124,7 +124,7 @@ fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
 /// Rebuild the run-level active counters from persisted snapshots.
 ///
 /// `active_node_count` counts running step nodes across all frames. Loop nodes
-/// are excluded because once a loop hands off to `LoopIterationMachine`, the
+/// are excluded because once a loop hands off to MobMachine-owned loop state, the
 /// run scheduler tracks the active body frame/step work instead of charging the
 /// parent loop node indefinitely.
 ///
@@ -176,7 +176,7 @@ fn count_running_step_nodes(snap: &FrameSnapshot) -> u32 {
         .node_status
         .iter()
         .filter(|(node_id, status)| {
-            *status == &crate::generated::flow_frame::NodeRunStatus::Running
+            *status == &crate::run::flow_frame::NodeRunStatus::Running
                 && matches!(
                     snap.kernel_state
                         .node_kind
@@ -201,7 +201,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use crate::generated::flow_run;
+        use crate::run::flow_run;
         let flow_state = flow_run::initial_state();
         MobRun {
             run_id: RunId::new(),
@@ -228,8 +228,8 @@ mod tests {
         ready_nodes: Vec<&str>,
         all_nodes_ready: bool,
     ) -> FrameSnapshot {
-        let mut state = crate::generated::flow_frame::initial_state();
-        state.phase = crate::generated::flow_frame::Phase::Running;
+        let mut state = crate::run::flow_frame::initial_state();
+        state.phase = crate::run::flow_frame::Phase::Running;
         state.ready_queue = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
         state.tracked_nodes = ready_nodes.iter().map(|s| FlowNodeId::from(*s)).collect();
         if all_nodes_ready {
@@ -238,7 +238,7 @@ mod tests {
                 .map(|s| {
                     (
                         FlowNodeId::from(*s),
-                        crate::generated::flow_frame::NodeRunStatus::Ready,
+                        crate::run::flow_frame::NodeRunStatus::Ready,
                     )
                 })
                 .collect();
@@ -277,36 +277,36 @@ mod tests {
     #[test]
     fn test_active_counts_reconcile_from_frames_and_loops() {
         let mut run = minimal_v2_run_running();
-        let mut root = crate::generated::flow_frame::initial_state();
-        root.phase = crate::generated::flow_frame::Phase::Running;
+        let mut root = crate::run::flow_frame::initial_state();
+        root.phase = crate::run::flow_frame::Phase::Running;
         root.node_status = BTreeMap::from([(
             FlowNodeId::from("loop-node"),
-            crate::generated::flow_frame::NodeRunStatus::Running,
+            crate::run::flow_frame::NodeRunStatus::Running,
         )]);
         root.node_kind = BTreeMap::from([(
             FlowNodeId::from("loop-node"),
-            crate::generated::flow_frame::FlowNodeKind::Loop,
+            crate::run::flow_frame::FlowNodeKind::Loop,
         )]);
         run.frames
             .insert(FrameId::from("root"), FrameSnapshot { kernel_state: root });
 
-        let mut body = crate::generated::flow_frame::initial_state();
-        body.phase = crate::generated::flow_frame::Phase::Running;
+        let mut body = crate::run::flow_frame::initial_state();
+        body.phase = crate::run::flow_frame::Phase::Running;
         body.node_status = BTreeMap::from([(
             FlowNodeId::from("body-step"),
-            crate::generated::flow_frame::NodeRunStatus::Running,
+            crate::run::flow_frame::NodeRunStatus::Running,
         )]);
         body.node_kind = BTreeMap::from([(
             FlowNodeId::from("body-step"),
-            crate::generated::flow_frame::FlowNodeKind::Step,
+            crate::run::flow_frame::FlowNodeKind::Step,
         )]);
         run.frames.insert(
             FrameId::from("body-frame"),
             FrameSnapshot { kernel_state: body },
         );
 
-        let mut loop_state = crate::generated::loop_iteration::initial_state();
-        loop_state.phase = crate::generated::loop_iteration::Phase::Running;
+        let mut loop_state = crate::run::loop_iteration::initial_state();
+        loop_state.phase = crate::run::loop_iteration::Phase::Running;
         loop_state.active_body_frame_id = Some(FrameId::from("body-frame"));
         run.loops.insert(
             LoopInstanceId::from("loop-1"),
@@ -323,11 +323,11 @@ mod tests {
     #[test]
     fn test_frame_invariant_valid_empty_queue() {
         let frame_id = crate::FrameId::from("f1");
-        let mut state = crate::generated::flow_frame::initial_state();
-        state.phase = crate::generated::flow_frame::Phase::Running;
+        let mut state = crate::run::flow_frame::initial_state();
+        state.phase = crate::run::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
             FlowNodeId::from("node-a"),
-            crate::generated::flow_frame::NodeRunStatus::Running,
+            crate::run::flow_frame::NodeRunStatus::Running,
         )]);
         let snap = FrameSnapshot {
             kernel_state: state,
@@ -338,11 +338,11 @@ mod tests {
     #[test]
     fn test_frame_invariant_violation_ready_not_in_queue() {
         let frame_id = crate::FrameId::from("f-bad");
-        let mut state = crate::generated::flow_frame::initial_state();
-        state.phase = crate::generated::flow_frame::Phase::Running;
+        let mut state = crate::run::flow_frame::initial_state();
+        state.phase = crate::run::flow_frame::Phase::Running;
         state.node_status = BTreeMap::from([(
             FlowNodeId::from("node-a"),
-            crate::generated::flow_frame::NodeRunStatus::Ready,
+            crate::run::flow_frame::NodeRunStatus::Ready,
         )]);
         let snap = FrameSnapshot {
             kernel_state: state,

@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Live integration and smoke tests for the RPC server.
 //!
 //! Reuses the same duplex-stream pattern from `integration_server.rs`.
@@ -1167,7 +1169,7 @@ async fn e2e_scenario_21_mob_callback_tools() {
                 "mob_id": mob_id,
                 "profile": "worker",
                 "agent_identity": "w1",
-                "initial_turn": "deferred"
+                "runtime_mode": "turn_driven"
             }
         }),
     )
@@ -1406,10 +1408,8 @@ async fn e2e_scenario_22_transport_backpressure() {
 /// backed by the shared `registered_tools` list and picks up additions via
 /// `poll_external_updates` at the next turn boundary.
 ///
-/// The member is spawned with `initial_turn: "deferred"` to avoid the
-/// `autonomous_host` loop racing the first turn against `tools/register`.
-/// A separate explicit `turn/start` drives the LLM call after tools are
-/// registered. `runtime_mode: "turn_driven"` ensures no background loop starts.
+/// The member is spawned with `runtime_mode: "turn_driven"` so no background
+/// loop races the explicit `turn/start` after tools are registered.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_23_late_register_on_existing_member() {
@@ -1482,7 +1482,7 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                 "mob_id": mob_id,
                 "profile": "worker",
                 "agent_identity": "w1",
-                "initial_turn": "deferred"
+                "runtime_mode": "turn_driven"
             }
         }),
     )

@@ -116,7 +116,27 @@ async fn run_chat(
     let messages = vec![Message::User(UserMessage::text(prompt.to_string()))];
     let mut request = LlmRequest::new(model, messages).with_max_tokens(max_tokens);
     if let Some(params) = provider_params {
-        request = request.with_provider_params(params);
+        // Test helper: project untyped JSON into the per-provider tag at the
+        // adapter boundary so legacy e2e fixtures keep working against the
+        // typed-provider-params surface.
+        use meerkat_core::lifecycle::run_primitive::{
+            AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
+        };
+        let tag = match client.provider() {
+            "anthropic" => AnthropicProviderTag::from_legacy_value(&params)
+                .ok()
+                .map(ProviderTag::Anthropic),
+            "openai" => OpenAiProviderTag::from_legacy_value(&params)
+                .ok()
+                .map(ProviderTag::OpenAi),
+            "gemini" | "google" => GeminiProviderTag::from_legacy_value(&params)
+                .ok()
+                .map(ProviderTag::Gemini),
+            _ => None,
+        };
+        if let Some(tag) = tag {
+            request = request.with_provider_params(tag);
+        }
     }
 
     let mut stream = client.stream(&request);

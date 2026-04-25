@@ -82,7 +82,7 @@ pub struct AgentMobToolSurface {
     owner_bridge_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
     model: String,
-    /// Parent agent's comms name (for building TrustedPeerSpec when wiring helpers).
+    /// Parent agent's comms name (for building TrustedPeerDescriptor when wiring helpers).
     comms_name: Option<String>,
     /// Parent agent's comms peer ID (ed25519 public key).
     comms_peer_id: Option<String>,
@@ -259,6 +259,13 @@ impl AgentMobToolSurface {
 
     async fn ensure_create_authority(&self, tool_name: &str) -> Result<(), ToolError> {
         if self.authority_context_snapshot().can_create_mobs() {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
+    async fn ensure_profile_mutation_authority(&self, tool_name: &str) -> Result<(), ToolError> {
+        if self.authority_context_snapshot().can_mutate_profiles() {
             return Ok(());
         }
         Err(ToolError::access_denied(tool_name))
@@ -480,7 +487,12 @@ impl AgentMobToolSurface {
             return false;
         };
 
-        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+        // Inproc delegation wiring: the parent and helper live on the same
+        // node, so identity authorization is the router's identity map, not
+        // envelope signatures. `test_only_unsigned` stamps a zero pubkey —
+        // signature verification would fail closed, which is the correct
+        // property here because the inproc transport bypasses it.
+        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             name.as_str(),
             peer_id.as_str(),
             format!("inproc://{name}"),
@@ -515,7 +527,9 @@ impl AgentMobToolSurface {
         if helper_comms_name == *name {
             return false;
         }
-        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+        // Same reasoning as `parent_spec` above: inproc transport, zero
+        // pubkey by design.
+        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
             &helper_comms_name,
             helper_peer_id,
             format!("inproc://{helper_comms_name}"),
@@ -767,13 +781,7 @@ impl AgentMobToolSurface {
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
-        if let Some(arg) = args.connection_ref {
-            let cref = arg.into_connection_ref().ok_or_else(|| {
-                ToolError::invalid_arguments(
-                    call.name,
-                    "connection_ref must be either \"<realm>:<binding>\" or {realm_id, binding_id}",
-                )
-            })?;
+        if let Some(cref) = args.connection_ref {
             spec.connection_ref = Some(cref);
         }
 
@@ -887,7 +895,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer);
+        let target = peer_target_from_args(args.peer)?;
         self.state
             .mob_wire(&mob_id, local, target)
             .await
@@ -904,7 +912,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer);
+        let target = peer_target_from_args(args.peer)?;
         self.state
             .mob_unwire(&mob_id, local, target)
             .await
@@ -912,14 +920,11 @@ impl AgentMobToolSurface {
         Self::encode_result(call, json!({ "unwired": true }))
     }
 
-    // TODO: Profile mutation authority. Currently gated on mob capability + store
-    // availability. Per-profile authority checks are a follow-up concern for
-    // multi-tenant realm scenarios.
-
     async fn dispatch_mob_profile_create(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -965,6 +970,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileUpdateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -980,6 +986,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_profile_mutation_authority(call.name).await?;
         let args: ProfileDeleteArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -1698,30 +1705,13 @@ struct SpawnMemberArgs {
     auto_wire_parent: Option<bool>,
     #[serde(default)]
     tooling: Option<meerkat_mob::SpawnTooling>,
-    /// Per-member auth binding (deferral §1). Accepts either the
-    /// string form `"<realm>:<binding>"` or the struct
-    /// `{"realm_id": "...", "binding_id": "..."}` (wire-contract
-    /// shape). When set, this member resolves credentials via the
-    /// named realm + binding; otherwise the member uses env-default
-    /// / config-realm fallback.
+    /// Per-member auth binding (deferral §1). Accepts the struct
+    /// `{"realm": "...", "binding": "..."}` (wire-contract shape).
+    /// When set, this member resolves credentials via the named
+    /// realm + binding; otherwise the member uses env-default /
+    /// config-realm fallback.
     #[serde(default)]
-    connection_ref: Option<ConnectionRefArg>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ConnectionRefArg {
-    Str(String),
-    Struct(meerkat_core::ConnectionRef),
-}
-
-impl ConnectionRefArg {
-    fn into_connection_ref(self) -> Option<meerkat_core::ConnectionRef> {
-        match self {
-            Self::Str(raw) => meerkat_core::ConnectionRef::parse(&raw),
-            Self::Struct(r) => Some(r),
-        }
-    }
+    connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 #[derive(Deserialize)]
@@ -1749,19 +1739,57 @@ struct ExternalPeerArg {
     name: String,
     peer_id: String,
     address: String,
+    /// Ed25519 signing public key (32 bytes). Defaults to zero — the
+    /// resulting descriptor will fail envelope signature verification,
+    /// which is the correct fail-closed property for agents that do
+    /// not supply a real key.
+    #[serde(default)]
+    pubkey: [u8; 32],
 }
 
-fn peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
+fn peer_target_from_args(
+    peer: WirePeerArg,
+) -> Result<meerkat_mob::PeerTarget, meerkat_core::error::ToolError> {
     match peer {
-        WirePeerArg::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
+        WirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
         WirePeerArg::External { external } => {
-            meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
-                name: external.name,
-                peer_id: external.peer_id,
-                address: external.address,
-            })
+            let name = meerkat_core::comms::PeerName::new(external.name.clone()).map_err(|e| {
+                meerkat_core::error::ToolError::invalid_arguments(
+                    "mob_wire",
+                    format!("invalid peer name '{}': {e}", external.name),
+                )
+            })?;
+            let peer_id = meerkat_core::comms::PeerId::parse(&external.peer_id).map_err(|e| {
+                meerkat_core::error::ToolError::invalid_arguments(
+                    "mob_wire",
+                    format!("invalid peer_id '{}': {e}", external.peer_id),
+                )
+            })?;
+            let address = parse_agent_peer_address(&external.address)
+                .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_wire", e))?;
+            Ok(meerkat_mob::PeerTarget::External(
+                meerkat_core::comms::TrustedPeerDescriptor {
+                    name,
+                    peer_id,
+                    address,
+                    pubkey: external.pubkey,
+                },
+            ))
         }
     }
+}
+
+fn parse_agent_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
+        "uds" => meerkat_core::comms::PeerTransport::Uds,
+        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 
 #[derive(Deserialize)]
@@ -1818,7 +1846,7 @@ mod tests {
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
         CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerReachability, SendError,
-        SendReceipt, TrustedPeerSpec,
+        SendReceipt, TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{InteractionSubscription, SubscribableInjector};
@@ -1904,7 +1932,7 @@ mod tests {
     struct TestCommsRuntime {
         name: String,
         key: String,
-        trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerSpec>>,
+        trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
         registry: Arc<TestCommsRegistry>,
@@ -1914,7 +1942,7 @@ mod tests {
         async fn new(name: &str, registry: Arc<TestCommsRegistry>) -> Arc<Self> {
             let runtime = Arc::new(Self {
                 name: name.to_string(),
-                key: format!("ed25519:{name}"),
+                key: meerkat_core::comms::PeerId::new().to_string(),
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
@@ -1931,11 +1959,18 @@ mod tests {
             Some(self.key.clone())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             self.trusted
                 .write()
                 .await
-                .insert(peer.peer_id.clone(), peer);
+                .insert(peer.peer_id.as_str().to_string(), peer);
+            Ok(())
+        }
+
+        async fn add_private_trusted_peer(
+            &self,
+            _peer: TrustedPeerDescriptor,
+        ) -> Result<(), SendError> {
             Ok(())
         }
 
@@ -1953,7 +1988,10 @@ mod tests {
                     stream: _,
                 } => {
                     let trusted = self.trusted.read().await;
-                    if !trusted.values().any(|peer| peer.name == to.as_str()) {
+                    if !trusted
+                        .values()
+                        .any(|peer| peer.name.as_str() == to.as_str())
+                    {
                         return Err(SendError::PeerNotFound(to.as_string()));
                     }
                     drop(trusted);
@@ -1990,7 +2028,7 @@ mod tests {
                 .values()
                 .filter_map(|peer| {
                     Some(PeerDirectoryEntry {
-                        name: meerkat_core::comms::PeerName::new(&peer.name).ok()?,
+                        name: meerkat_core::comms::PeerName::new(peer.name.as_str()).ok()?,
                         peer_id: peer.peer_id.clone(),
                         address: peer.address.clone(),
                         source: PeerDirectorySource::Trusted,
@@ -3054,6 +3092,22 @@ mod tests {
         )
     }
 
+    fn surface_with_profiles_and_authority(
+        state: Arc<MobMcpState>,
+        authority: MobToolAuthorityContext,
+    ) -> AgentMobToolSurface {
+        AgentMobToolSurface::new(
+            state,
+            None,
+            authority,
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
     #[test]
     fn test_profile_tools_present_when_store_available() {
         let defs = build_tool_defs_with_profile_support(true, false);
@@ -3192,6 +3246,35 @@ mod tests {
         let got2: serde_json::Value =
             serde_json::from_str(&get_result2.result.text_content()).unwrap();
         assert_eq!(got2["not_found"], true);
+    }
+
+    #[tokio::test]
+    async fn test_profile_mutation_requires_profile_authority() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles_and_authority(
+            Arc::clone(&state),
+            create_only_authority().with_profile_mutation(false),
+        );
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "worker",
+                "profile": sample_profile_json("claude-opus-4-6")
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let create_result = surface
+            .dispatch(ToolCallView {
+                id: "c1",
+                name: "mob_profile_create",
+                args: &create_args,
+            })
+            .await;
+        assert!(
+            create_result.is_err(),
+            "profile create must require explicit profile mutation authority"
+        );
     }
 
     #[tokio::test]

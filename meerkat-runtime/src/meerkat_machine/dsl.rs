@@ -209,29 +209,49 @@ impl From<Provider> for meerkat_core::provider::Provider {
     }
 }
 
-/// Typed mirror of [`meerkat_core::ConnectionRef`] — structural two-string
-/// projection (`realm_id` + `binding_id`) with bidirectional `From`.
+/// Typed mirror of [`meerkat_core::ConnectionRef`] — structural string
+/// projection carrying the flat forms of `realm` / `binding` / `profile`
+/// with bidirectional `From`.
+///
+/// The DSL layer keeps string fields because this mirror is the
+/// DSL-layer identity carrier (used inside runtime-owned guards /
+/// transitions where slug validation has already happened at the
+/// boundary). Domain-side `ConnectionRef` carries the typed atoms
+/// (`RealmId` / `BindingId` / `ProfileId`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ConnectionRef {
     pub realm_id: String,
     pub binding_id: String,
+    pub profile_id: Option<String>,
 }
 
 impl From<&meerkat_core::ConnectionRef> for ConnectionRef {
     fn from(r: &meerkat_core::ConnectionRef) -> Self {
         Self {
-            realm_id: r.realm_id.clone(),
-            binding_id: r.binding_id.clone(),
+            realm_id: r.realm.as_str().to_owned(),
+            binding_id: r.binding.as_str().to_owned(),
+            profile_id: r.profile.as_ref().map(|p| p.as_str().to_owned()),
         }
     }
 }
 
-impl From<ConnectionRef> for meerkat_core::ConnectionRef {
-    fn from(r: ConnectionRef) -> Self {
-        Self {
-            realm_id: r.realm_id,
-            binding_id: r.binding_id,
-        }
+/// Fallible conversion — DSL-layer flat strings may be slug-invalid
+/// (the DSL mirror intentionally accepts opaque strings to survive
+/// deserialization drift across schema versions), so lifting back to
+/// the typed-atom domain form may reject.
+impl TryFrom<ConnectionRef> for meerkat_core::ConnectionRef {
+    type Error = meerkat_core::IdentityError;
+
+    fn try_from(r: ConnectionRef) -> Result<Self, Self::Error> {
+        Ok(Self {
+            realm: meerkat_core::RealmId::parse(&r.realm_id)?,
+            binding: meerkat_core::BindingId::parse(&r.binding_id)?,
+            profile: r
+                .profile_id
+                .as_deref()
+                .map(meerkat_core::ProfileId::parse)
+                .transpose()?,
+        })
     }
 }
 
@@ -1363,6 +1383,22 @@ pub enum TurnCancellationReason {
     Observed,
 }
 
+/// Typed admission-signal classifier for the `PostAdmissionSignal` effect.
+/// Closed set of post-admission wake/interrupt intents emitted by the
+/// ingress authority so the shell dispatcher matches exhaustively on a
+/// typed discriminant instead of comparing string literals. Mirrors the
+/// shell-side `driver::ephemeral::PostAdmissionSignal` strength ordering
+/// (WakeLoop < InterruptYielding < RequestImmediateProcessing); the
+/// shell enum additionally carries a `None` bottom that the DSL never
+/// emits, so only the three emitted variants appear here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PostAdmissionSignalKind {
+    #[default]
+    WakeLoop,
+    InterruptYielding,
+    RequestImmediateProcessing,
+}
+
 /// Typed base lifecycle state for an external tool surface. Closed mirror of
 /// [`meerkat_core::tool_scope::ExternalToolSurfaceBaseState`] — replaces the
 /// former literal-string values in `surface_base_state`.
@@ -1713,48 +1749,106 @@ impl From<crate::HandlingMode> for InputLane {
 }
 
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
-// DSL. Shape mirrors `meerkat_core::comms::TrustedPeerSpec`. The
-// catalog DSL holds an identical type; the two are structurally
+// DSL. Shape mirrors `meerkat_core::comms::TrustedPeerDescriptor`.
+// The catalog DSL holds an identical type; the two are structurally
 // equivalent so the schema validator sees consistent opaque struct
 // shapes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerEndpoint {
-    pub name: String,
-    pub peer_id: String,
-    pub address: String,
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
 }
 
 impl PeerEndpoint {
     pub fn new(
-        name: impl Into<String>,
-        peer_id: impl Into<String>,
-        address: impl Into<String>,
+        name: impl Into<PeerName>,
+        peer_id: impl Into<PeerId>,
+        address: impl Into<PeerAddress>,
+        signing_key: impl Into<PeerSigningKey>,
     ) -> Self {
         Self {
             name: name.into(),
             peer_id: peer_id.into(),
             address: address.into(),
+            signing_key: signing_key.into(),
         }
     }
 }
 
-impl From<meerkat_core::comms::TrustedPeerSpec> for PeerEndpoint {
-    fn from(spec: meerkat_core::comms::TrustedPeerSpec) -> Self {
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
         Self {
-            name: spec.name,
-            peer_id: spec.peer_id,
-            address: spec.address,
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+            signing_key: PeerSigningKey(spec.pubkey),
         }
     }
 }
 
-impl From<PeerEndpoint> for meerkat_core::comms::TrustedPeerSpec {
-    fn from(ep: PeerEndpoint) -> Self {
-        Self {
-            name: ep.name,
-            peer_id: ep.peer_id,
-            address: ep.address,
-        }
+/// DSL-local carrier for the Ed25519 public signing key associated with a
+/// peer endpoint. The MeerkatMachine owns this projection alongside the
+/// endpoint identity atoms so trust reconciliation can install the exact
+/// key into the comms trust store without shell-side defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerSigningKey(pub [u8; 32]);
+
+impl From<[u8; 32]> for PeerSigningKey {
+    fn from(key: [u8; 32]) -> Self {
+        Self(key)
+    }
+}
+
+/// DSL-local newtype for a peer display name. Wraps the slug string
+/// so the schema validator sees a stable opaque shape; mirrors
+/// `meerkat_core::comms::PeerName` but avoids dragging the core
+/// comms types into the DSL grammar.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerName(pub String);
+
+impl<T: Into<String>> From<T> for PeerName {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// DSL-local newtype for the canonical peer routing id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerId(pub String);
+
+impl<T: Into<String>> From<T> for PeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// DSL-local newtype for a peer transport endpoint URL.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerAddress(pub String);
+
+impl<T: Into<String>> From<T> for PeerAddress {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerAddress {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -1874,6 +1968,25 @@ machine! {
             realtime_binding_authority_epoch: Option<u64>,
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
+
+            // --- Realtime reconnect progress (wave-c C-9c R4) ---
+            //
+            // Overlay-tracked reconnect progress the realtime-WS shell projects
+            // into the DSL via `ProjectRealtimeReconnectProgress`. RPC/MCP
+            // `realtime/status` queries against a session whose socket is
+            // actively reconnecting read these fields through
+            // `project_realtime_attachment_status` so the public
+            // `RealtimeChannelStatus` surfaces real `attempt_count` and
+            // `next_retry_at` instead of the pre-R4 `1`/`0` hard-codes.
+            //
+            // Cleared on `PublishRealtimeSignal::BindingReady` and on any
+            // transition that returns the binding to `Unbound` without a
+            // reattach requirement — the overlay only owns the reconnect
+            // cycle's lifetime, so progress fields fall to zero the instant
+            // the cycle ends.
+            realtime_reconnect_attempt_count: u64,
+            realtime_reconnect_next_retry_at_ms: Option<u64>,
+            realtime_reconnect_deadline_at_ms: Option<u64>,
 
             // --- Live-topology reconfigure phase ---
             live_topology_phase: LiveTopologyPhase,
@@ -2133,6 +2246,9 @@ machine! {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
+            realtime_reconnect_attempt_count = 0,
+            realtime_reconnect_next_retry_at_ms = None,
+            realtime_reconnect_deadline_at_ms = None,
             live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
@@ -2188,7 +2304,7 @@ machine! {
                 next_active_visibility_revision: u64,
                 tool_visibility_delta: SessionToolVisibilityDelta,
             },
-            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
             NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
@@ -2204,11 +2320,11 @@ machine! {
                 staged_visibility_revision: u64,
             },
             Recover,
-            Retire,
+            Retire { session_id: SessionId },
             Reset,
             StopRuntimeExecutor,
             RuntimeExecutorExited,
-            Destroy,
+            Destroy { session_id: SessionId },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
             SetSilentIntents { session_id: SessionId, intents: Set<String> },
@@ -2226,7 +2342,7 @@ machine! {
             RuntimeState { runtime_id: String },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
-            AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool, run_id: RunId },
+            AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
@@ -2250,7 +2366,7 @@ machine! {
             OpsBarrierSatisfied { operation_ids: Set<String> },
             BoundaryContinue,
             BoundaryComplete,
-            EnterExtraction,
+            EnterExtraction { max_extraction_retries: u64 },
             ExtractionStart,
             ExtractionValidationPassed,
             ExtractionValidationFailed { error: String },
@@ -2353,6 +2469,17 @@ machine! {
             DetachRealtimeBinding,
             RequireRealtimeReattach,
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            // Wave-c C-9c R4: overlay-tracked reconnect progress projected
+            // into DSL state so RPC/MCP status queries read real retry state.
+            // The `*_ms` fields are millis-since-epoch so the DSL doesn't
+            // depend on `chrono::DateTime`; the shell converts at the
+            // projection boundary.
+            ProjectRealtimeReconnectProgress {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
+            ClearRealtimeReconnectProgress,
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -2470,6 +2597,40 @@ machine! {
                 epoch: u64,
             },
 
+            // Supervisor-trust-edge feedback inputs (C-F2 / wave-d D-d).
+            //
+            // Feedback acks for the `supervisor_trust_publish` /
+            // `supervisor_trust_revoke` handoff protocols hosted on the
+            // canonical `MeerkatMachine` producer effects. The realising shell
+            // (`comms_drain::try_handle_supervisor_bridge_command`) calls
+            // `Router::add_trusted_peer` / `remove_trusted_peer` after the
+            // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
+            // DSL commit, then stages one of these four inputs carrying
+            // the `epoch` observed on the producer effect. The
+            // transitions guard on `peer_id` and `epoch` matching the
+            // current `supervisor_bound_*` binding, so a stale ack for
+            // epoch `N - 1` arriving after the binding has rotated to
+            // epoch `N` is rejected by the DSL without clearing the
+            // outstanding obligation.
+            SupervisorTrustEdgePublished {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgePublishFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+            SupervisorTrustEdgeRevoked {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgeRevokeFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+
             // Track-B (R5) peer-projection inputs. See catalog DSL for
             // full rationale. Rejected in `Initializing`, `Retired`,
             // `Stopped`, `Destroyed`.
@@ -2543,7 +2704,7 @@ machine! {
             ApplyControlPlaneCommand,
             InitiateRecycle,
             IngressAccepted,
-            PostAdmissionSignal { signal: String },
+            PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
             CompletionResolved,
@@ -2588,6 +2749,15 @@ machine! {
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
+            // Wave-c C-9c R4: reconnect-progress projected effect. Shell
+            // consumers (e.g. observability pipelines) can subscribe;
+            // production RPC/MCP `realtime/status` responders read the
+            // state field directly via `project_realtime_attachment_status`.
+            RealtimeReconnectProgressProjected {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
             // MCP server lifecycle effects.
@@ -2690,6 +2860,7 @@ machine! {
         disposition RejectSurfaceCall => external,
         disposition RealtimeIntentProjected => external,
         disposition RealtimeBindingRotated => external,
+        disposition RealtimeReconnectProgressProjected => external,
         disposition LiveTopologyPhaseChanged => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
@@ -2917,7 +3088,7 @@ machine! {
         // 7. PrepareBindings: different source→target mappings per phase
         // Initializing → Initializing (no guard, emits RuntimeBound)
         transition PrepareBindingsInitializing {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -2928,7 +3099,7 @@ machine! {
         }
         // Idle → Attached
         transition PrepareBindingsIdle {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -2939,7 +3110,7 @@ machine! {
         }
         // Attached → Attached
         transition PrepareBindingsAttached {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -2950,7 +3121,7 @@ machine! {
         }
         // Running → Running
         transition PrepareBindingsRunning {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -2961,7 +3132,7 @@ machine! {
         }
         // Retired → Retired
         transition PrepareBindingsRetired {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -2972,7 +3143,7 @@ machine! {
         }
         // Stopped → Stopped (inline in hand-written catalog)
         transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -3179,7 +3350,7 @@ machine! {
 
         // 14. Retire: from [Idle, Attached, Running] → Retired
         transition RetireRequestedFromIdle {
-            on input Retire
+            on input Retire { session_id }
             guard {
                 self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
@@ -3303,7 +3474,7 @@ machine! {
 
         // 17. Destroy: from all non-Destroyed → Destroyed
         transition Destroy {
-            on input Destroy
+            on input Destroy { session_id }
             guard {
                 self.lifecycle_phase == Phase::Initializing
                 || self.lifecycle_phase == Phase::Idle
@@ -3518,7 +3689,7 @@ machine! {
         //
         // Idle + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionIdleQueued {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -3526,11 +3697,11 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Idle + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionIdleImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }
@@ -3538,27 +3709,32 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
-        // Attached + immediate → Running (phase change!)
+        // Attached + immediate — admission-only self-loop.
+        //
+        // Post-#32 W6-J (dogma #1 split): admission no longer transitions to
+        // Running. The `Prepare` DSL input is the sole authority for
+        // lifecycle_phase + current_run_id run-start; the runtime loop fires
+        // it from `machine_begin_run` with the loop's fresh run_id.
+        // AcceptWithCompletion*Immediate now only signals intent (post-
+        // admission signal + SubmitRunPrimitive emit) so the loop wakes;
+        // the DSL run-start happens when the loop calls Prepare.
         transition AcceptWithCompletionAttachedImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }
             guard "interrupt_yielding" { interrupt_yielding == false }
-            update {
-                self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some(PreRunPhase::Attached);
-            }
-            to Running
+            update {}
+            to Attached
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
             emit SubmitRunPrimitive
         }
         // Attached + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionAttachedQueued {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -3566,11 +3742,11 @@ machine! {
             update {}
             to Attached
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
         transition AcceptWithCompletionRunningQueuedPassive {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -3590,7 +3766,7 @@ machine! {
         // durable context alone — the admission signal becomes the
         // authority that schedules the next turn.
         transition AcceptWithCompletionRunningQueuedWakeIfIdle {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -3599,11 +3775,11 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
         transition AcceptWithCompletionRunningInterruptYielding {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -3611,11 +3787,11 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "InterruptYielding" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }
@@ -3623,7 +3799,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops
@@ -3718,6 +3894,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -3748,6 +3925,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -3809,6 +3987,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -3839,6 +4018,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -3900,6 +4080,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -3930,6 +4111,7 @@ machine! {
             }
             update {
                 self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -4127,12 +4309,12 @@ machine! {
         }
 
         transition EnterExtraction {
-            on input EnterExtraction
+            on input EnterExtraction { max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
                 self.turn_phase = TurnPhase::Extracting;
-                self.extraction_attempts = self.extraction_attempts + 1;
+                self.max_extraction_retries = max_extraction_retries;
             }
             to Running
         }
@@ -4141,7 +4323,9 @@ machine! {
             on input ExtractionStart
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
-            update {}
+            update {
+                self.turn_phase = TurnPhase::CallingLlm;
+            }
             to Running
         }
 
@@ -4164,6 +4348,7 @@ machine! {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_remaining" { self.extraction_attempts < self.max_extraction_retries }
             update {
+                self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
@@ -4176,6 +4361,7 @@ machine! {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
+                self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }
@@ -5463,6 +5649,47 @@ machine! {
             to Idle
         }
 
+        // Wave-c C-9c R4: overlay → DSL input that records the current
+        // reconnect-cycle attempt count and next-retry deadline so
+        // `project_realtime_attachment_status` can surface them to
+        // RPC/MCP `realtime/status` responders.
+        transition ProjectRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeReconnectProgress { attempt_count, next_retry_at_ms, deadline_at_ms }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = attempt_count;
+                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
+                self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: attempt_count,
+                next_retry_at_ms: next_retry_at_ms,
+                deadline_at_ms: deadline_at_ms,
+            }
+        }
+
+        // Wave-c C-9c R4: reset the reconnect-progress fields. Shell fires
+        // this when the overlay clears (successful reconnect, operator
+        // detach, or non-reconnecting lifecycle transition).
+        transition ClearRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ClearRealtimeReconnectProgress
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: 0,
+                next_retry_at_ms: None,
+                deadline_at_ms: None,
+            }
+        }
+
         // =====================================================================
         // Live-topology reconfigure transitions
         // =====================================================================
@@ -6295,6 +6522,77 @@ machine! {
                 self.supervisor_bound_address = None;
                 self.supervisor_bound_epoch = None;
             }
+            to Idle
+        }
+
+        // Supervisor-trust-edge feedback transitions (C-F2 / wave-d D-d).
+        //
+        // Each transition is phase-preserving and guards on both
+        // `peer_id` and `epoch` matching the current binding. An ack for
+        // epoch `N - 1` arriving after a rotation advanced the binding
+        // to epoch `N` is rejected by the DSL — the outstanding
+        // obligation stays open and the stale ack cannot satisfy it.
+        transition SupervisorTrustEdgePublished {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublished { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgePublishFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublishFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevoked {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevoked { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevokeFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
             to Idle
         }
 

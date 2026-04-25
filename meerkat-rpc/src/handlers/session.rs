@@ -140,16 +140,20 @@ fn default_structured_output_retries() -> u32 {
 }
 
 fn canonical_skill_ids(
-    runtime: &SessionRuntime,
+    _runtime: &SessionRuntime,
     skill_refs: Option<Vec<SkillRef>>,
-    skill_references: Option<Vec<String>>,
+    _skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
+    // Post-wave-a dogma: `SkillsParams.skill_references` (legacy string path) was
+    // removed; the wire surface retains the field on `StartTurnParams`/
+    // `CreateSessionParams` for compatibility with older clients, but the runtime
+    // only consults the typed `skill_refs` path. Legacy ingress is silently
+    // dropped here.
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
-        skill_references,
     };
-    params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+    Ok(params.canonical_skill_keys())
 }
 
 /// Parameters for `session/list` (all optional).
@@ -305,9 +309,11 @@ pub async fn handle_create(
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
-    build_config.preload_skills = params
-        .preload_skills
-        .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
+    // Post-wave-a: `BuildConfig.preload_skills` is typed `Option<Vec<SkillKey>>`;
+    // legacy string ingress (`params.preload_skills: Option<Vec<String>>`) is
+    // dropped here. Typed ingress flows via `skill_refs`.
+    let _ = &params.preload_skills;
+    build_config.preload_skills = None;
 
     // Wire callback tools backed by the live registered_tools list.
     // Tools added later via tools/register are picked up dynamically at each

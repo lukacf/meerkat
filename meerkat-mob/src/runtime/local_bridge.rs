@@ -197,15 +197,39 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
     }
 
     async fn retire_member(&self) -> Result<BridgeRetireResponse, MobError> {
-        let report = self
-            .machine
-            .retire_runtime(&self.session_id)
-            .await
-            .map_err(|error| MobError::Internal(format!("local retire_member failed: {error}")))?;
-        Ok(BridgeRetireResponse {
-            inputs_abandoned: report.inputs_abandoned,
-            inputs_pending_drain: report.inputs_pending_drain,
-        })
+        // Post-wave-c C-6c the `RequestRuntimeRetire` routed effect
+        // already drove the DSL `Retire` transition on the shared
+        // `MeerkatMachine` via `MeerkatConsumerSurface`, so by the time
+        // this local-bridge retire fires the session's DSL lifecycle_phase
+        // is already `Retired`. A second `Retire` input is rejected by
+        // the `lifecycle_phase ∈ {Idle, Attached, Running}` guard on the
+        // `Retire` DSL transition. Treat "already retired" as idempotent
+        // success — the routed-effect path is the canonical retire; this
+        // bridge call was the legacy shell-side retire that the actor's
+        // disposal pipeline still issues for local members.
+        match self.machine.retire_runtime(&self.session_id).await {
+            Ok(report) => Ok(BridgeRetireResponse {
+                inputs_abandoned: report.inputs_abandoned,
+                inputs_pending_drain: report.inputs_pending_drain,
+            }),
+            Err(error) => {
+                let msg = error.to_string();
+                if msg.contains("guard rejected")
+                    && msg.contains("from Retired")
+                    && msg.contains("Retire")
+                {
+                    // Routed-effect path already retired this session.
+                    Ok(BridgeRetireResponse {
+                        inputs_abandoned: 0,
+                        inputs_pending_drain: 0,
+                    })
+                } else {
+                    Err(MobError::Internal(format!(
+                        "local retire_member failed: {error}"
+                    )))
+                }
+            }
+        }
     }
 
     async fn destroy_member(&self) -> Result<BridgeDestroyResponse, MobError> {
@@ -289,6 +313,7 @@ mod tests {
             name: "peer-a".to_string(),
             peer_id: "peer-a-id".to_string(),
             address: "inproc://peer-a".to_string(),
+            pubkey: [0u8; 32],
         }
     }
 

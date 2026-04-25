@@ -123,6 +123,9 @@ async fn test_sdk_agentfactory_tool_dispatch() {
     let mut agent = AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
+        .with_turn_state_handle(std::sync::Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
         .build(llm_adapter, tools, store_adapter)
         .await;
 

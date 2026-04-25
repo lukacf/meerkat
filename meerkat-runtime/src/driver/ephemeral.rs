@@ -302,7 +302,6 @@ impl EphemeralRuntimeDriver {
         self.admission_order = snapshot.admission_order;
     }
 
-    #[cfg(test)]
     pub(crate) fn shared_dsl_authority(&self) -> SharedIngressDslAuthority {
         Arc::clone(&self.dsl.0)
     }
@@ -340,11 +339,14 @@ impl EphemeralRuntimeDriver {
     fn absorb_dsl_effects(&mut self, effects: &[mm_dsl::MeerkatMachineEffect]) {
         for effect in effects {
             if let mm_dsl::MeerkatMachineEffect::PostAdmissionSignal { signal } = effect {
-                let new_signal = match signal.as_str() {
-                    "WakeLoop" => PostAdmissionSignal::WakeLoop,
-                    "InterruptYielding" => PostAdmissionSignal::InterruptYielding,
-                    "RequestImmediateProcessing" => PostAdmissionSignal::RequestImmediateProcessing,
-                    _ => continue,
+                let new_signal = match signal {
+                    mm_dsl::PostAdmissionSignalKind::WakeLoop => PostAdmissionSignal::WakeLoop,
+                    mm_dsl::PostAdmissionSignalKind::InterruptYielding => {
+                        PostAdmissionSignal::InterruptYielding
+                    }
+                    mm_dsl::PostAdmissionSignalKind::RequestImmediateProcessing => {
+                        PostAdmissionSignal::RequestImmediateProcessing
+                    }
                 };
                 if new_signal > self.post_admission_signal {
                     self.post_admission_signal = new_signal;
@@ -1177,6 +1179,29 @@ impl EphemeralRuntimeDriver {
                 .any(|queued_key| !excluded_keys.contains(queued_key))
         })
     }
+
+    pub(crate) fn defer_queued_inputs_behind_backlog(&mut self, input_ids: &[InputId]) {
+        let keys: Vec<String> = input_ids.iter().map(Self::dsl_key).collect();
+        self.with_dsl_state_mut(|state| {
+            let mut next_seq = state
+                .input_admission_seq
+                .values()
+                .max()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            for key in &keys {
+                if state.input_lane.contains_key(key) {
+                    state.input_admission_seq.insert(key.clone(), next_seq);
+                    next_seq = next_seq.saturating_add(1);
+                }
+            }
+            state.next_admission_seq = state.next_admission_seq.max(next_seq);
+        });
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+    }
+
     fn existing_superseded_input(
         &self,
         input: &Input,
@@ -1263,14 +1288,6 @@ impl EphemeralRuntimeDriver {
         self.steer_queue
             .dequeue_by_id(input_id)
             .or_else(|| self.queue.dequeue_by_id(input_id))
-    }
-
-    /// Look up the persisted input for a given ID (from the ledger).
-    #[allow(dead_code)] // Used by runtime_loop boundary classification via authority
-    pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
-        self.ledger
-            .get(input_id)
-            .and_then(|state| state.persisted_input.as_ref())
     }
 
     pub fn stage_input(

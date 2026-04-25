@@ -335,12 +335,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server_result
 }
 
-fn tool_call_commits_state_on_success(tool_name: &str) -> bool {
-    matches!(tool_name, "meerkat_run" | "meerkat_resume")
-}
-
 fn request_key(id: &Value) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| id.to_string())
+}
+
+fn tool_call_commits_state_on_success(tool_name: &str) -> bool {
+    matches!(tool_name, "meerkat_run" | "meerkat_resume")
 }
 
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {

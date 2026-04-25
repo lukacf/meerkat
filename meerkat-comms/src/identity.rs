@@ -2,12 +2,26 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use meerkat_core::comms::PeerId;
 use rand_core::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroize;
+
+/// UUIDv5 namespace for deriving [`PeerId`] from a signing pubkey.
+///
+/// `PeerId` is the canonical runtime routing key: both the router and the
+/// trust store index peers by `PeerId`, never by display name. The
+/// derivation is a content hash (UUIDv5) of the 32-byte Ed25519 pubkey
+/// so a given pubkey always resolves to the same `PeerId` across runtimes.
+///
+/// Kept in `identity.rs` (next to [`PubKey`]) so the namespace travels
+/// with the type it hashes. Router and runtime helpers call back into
+/// [`PubKey::to_peer_id`] rather than duplicating this constant.
+const PEER_ID_UUID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
 
 /// Errors that can occur during identity operations.
 #[derive(Debug, Error)]
@@ -96,13 +110,40 @@ impl PubKey {
         &self.0
     }
 
-    /// Convert to canonical peer ID string format: "ed25519:<base64>"
-    pub fn to_peer_id(&self) -> String {
+    /// Derive the canonical [`PeerId`] for this signing pubkey (typed).
+    ///
+    /// The derivation is a UUIDv5 hash of the 32-byte pubkey under
+    /// [`PEER_ID_UUID_NAMESPACE`]. A given pubkey always maps to the
+    /// same `PeerId`, so the router and trust store can index by
+    /// `PeerId` without handing around the raw pubkey everywhere.
+    ///
+    /// Note: this is a one-way derivation — `PeerId` is a content hash,
+    /// not a reversible encoding. To round-trip the pubkey bytes through
+    /// a string (for CBOR/JSON carriers, bootstrap tokens, etc.) use
+    /// [`Self::to_pubkey_string`] / [`Self::from_pubkey_string`].
+    pub fn to_peer_id(&self) -> PeerId {
+        PeerId::from_uuid(uuid::Uuid::new_v5(&PEER_ID_UUID_NAMESPACE, &self.0))
+    }
+
+    /// Encode this pubkey as `"ed25519:<base64>"`.
+    ///
+    /// Round-trip companion to [`Self::from_pubkey_string`] — use this
+    /// whenever the 32-byte pubkey needs to cross a string-shaped carrier
+    /// (CBOR/JSON trust-store payloads, inproc bootstrap tokens, transport
+    /// advertisements) and be recoverable on the other side.
+    ///
+    /// Distinct from [`Self::to_peer_id`]: this preserves the pubkey
+    /// bytes, `to_peer_id` produces a one-way UUIDv5 routing key.
+    pub fn to_pubkey_string(&self) -> String {
         format!("ed25519:{}", BASE64.encode(self.0))
     }
 
-    /// Parse a peer ID string back to a PubKey.
-    pub fn from_peer_id(s: &str) -> Result<Self, IdentityError> {
+    /// Parse a `"ed25519:<base64>"` pubkey string back to a [`PubKey`].
+    ///
+    /// Inverse of [`Self::to_pubkey_string`]. Fails if the prefix is
+    /// missing, the base64 is malformed, or the decoded length is not
+    /// exactly 32 bytes.
+    pub fn from_pubkey_string(s: &str) -> Result<Self, IdentityError> {
         let prefix = "ed25519:";
         if !s.starts_with(prefix) {
             return Err(IdentityError::InvalidPeerId(format!(
@@ -272,45 +313,56 @@ mod tests {
         assert_eq!(sig, decoded);
     }
 
-    // Phase 1: PeerId Conversion tests
+    // Phase 1: PeerId derivation + pubkey-string round-trip tests
 
     #[test]
-    fn test_pubkey_to_peer_id() {
+    fn test_pubkey_to_peer_id_is_deterministic_uuidv5() {
         let pubkey = PubKey::new([42u8; 32]);
+        let a = pubkey.to_peer_id();
+        let b = pubkey.to_peer_id();
+        assert_eq!(a, b, "derivation must be deterministic over pubkey bytes");
+        // PeerId renders as a hyphenated UUID.
+        let rendered = a.as_str();
+        assert_eq!(rendered.len(), 36, "UUID string length");
+        assert_eq!(rendered.matches('-').count(), 4, "UUID has 4 hyphens");
+    }
+
+    #[test]
+    fn test_pubkey_to_peer_id_differs_across_pubkeys() {
+        let id_a = PubKey::new([1u8; 32]).to_peer_id();
+        let id_b = PubKey::new([2u8; 32]).to_peer_id();
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn test_peer_id_parses_back_as_uuid() {
+        // A PeerId emitted from to_peer_id must round-trip through PeerId::parse.
+        let pubkey = PubKey::new([7u8; 32]);
         let peer_id = pubkey.to_peer_id();
-        assert!(peer_id.starts_with("ed25519:"));
-        // Base64 of 32 bytes is 44 chars (with padding)
-        assert_eq!(peer_id.len(), "ed25519:".len() + 44);
+        let reparsed = PeerId::parse(&peer_id.as_str()).unwrap();
+        assert_eq!(peer_id, reparsed);
     }
 
     #[test]
-    fn test_pubkey_from_peer_id() {
-        let original = PubKey::new([42u8; 32]);
-        let peer_id = original.to_peer_id();
-        let parsed = PubKey::from_peer_id(&peer_id).unwrap();
-        assert_eq!(original, parsed);
-    }
-
-    #[test]
-    fn test_peer_id_format() {
+    fn test_pubkey_to_pubkey_string_format() {
         let pubkey = PubKey::new([1u8; 32]);
-        let peer_id = pubkey.to_peer_id();
-        // Validate format with regex-like check
-        assert!(peer_id.starts_with("ed25519:"));
-        let base64_part = &peer_id["ed25519:".len()..];
-        // Base64 alphabet check (alphanumeric + / + = for padding)
+        let encoded = pubkey.to_pubkey_string();
+        assert!(encoded.starts_with("ed25519:"));
+        let base64_part = &encoded["ed25519:".len()..];
         assert!(
             base64_part
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
         );
+        // Base64 of 32 bytes is 44 chars (with padding).
+        assert_eq!(encoded.len(), "ed25519:".len() + 44);
     }
 
     #[test]
-    fn test_peer_id_roundtrip() {
+    fn test_pubkey_string_roundtrip() {
         let original = PubKey::new([99u8; 32]);
-        let peer_id = original.to_peer_id();
-        let recovered = PubKey::from_peer_id(&peer_id).unwrap();
+        let encoded = original.to_pubkey_string();
+        let recovered = PubKey::from_pubkey_string(&encoded).unwrap();
         assert_eq!(original, recovered);
     }
 

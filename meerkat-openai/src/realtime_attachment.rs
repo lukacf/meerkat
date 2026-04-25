@@ -4,6 +4,8 @@
 //! module owns provider-specific orchestration that coordinates those
 //! mechanics with runtime-owned live attachment authority.
 
+#![allow(clippy::large_futures)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -139,6 +141,15 @@ impl OpenAiRealtimeAttachmentOrchestrator {
 
     /// Detach the currently orchestrated provider session, abort its event pump,
     /// and clear the runtime binding while preserving durable intent.
+    ///
+    /// Wave-c C-9b R9 invariant: this is the sole production `handle.abort()`
+    /// on a realtime attachment task across the workspace. `abort()` is
+    /// immediately paired with `runtime.detach_live(session_id)` so the DSL
+    /// authority never observes an orphaned binding when the event-pump task
+    /// is cancelled mid-`.await`. Any new realtime-task cancellation path must
+    /// follow the same ordering: abort-then-detach, never abort alone.
+    /// Verified by `rg "\.abort\(\)" meerkat-openai/ meerkat-rpc/` returning
+    /// only this site plus `#[cfg(test)]` harness aborts.
     pub async fn detach(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         let task = self.tasks.lock().await.remove(session_id);
         if let Some(OpenAiLiveTaskState::Attached(handle)) = task {

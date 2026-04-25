@@ -5,167 +5,13 @@
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
+use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{Message, OutputSchema, StopReason, ToolDef, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
-
-// ============================================================================
-// Provider-specific Parameters
-// ============================================================================
-
-/// Type-safe provider-specific parameters.
-///
-/// Use this enum to pass provider-specific options in a type-safe manner.
-/// Each provider variant contains only the parameters that provider supports.
-///
-/// For extensibility, the `Other` variant allows passing arbitrary JSON
-/// for providers not yet covered or experimental features.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum ProviderParams {
-    /// Anthropic-specific parameters
-    Anthropic(AnthropicParams),
-    /// OpenAI-specific parameters
-    OpenAi(OpenAiParams),
-    /// Google Gemini-specific parameters
-    Gemini(GeminiParams),
-    /// Raw JSON for extensibility
-    Other(Value),
-}
-
-impl ProviderParams {
-    /// Convert to raw JSON Value for backward compatibility
-    pub fn to_value(&self) -> Value {
-        match self {
-            ProviderParams::Anthropic(p) => serde_json::to_value(p).unwrap_or_default(),
-            ProviderParams::OpenAi(p) => serde_json::to_value(p).unwrap_or_default(),
-            ProviderParams::Gemini(p) => serde_json::to_value(p).unwrap_or_default(),
-            ProviderParams::Other(v) => v.clone(),
-        }
-    }
-}
-
-/// Anthropic-specific parameters
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AnthropicParams {
-    /// Extended thinking configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<AnthropicThinking>,
-}
-
-/// Anthropic extended thinking configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicThinking {
-    /// Budget type for extended thinking
-    #[serde(rename = "type")]
-    pub budget_type: String,
-    /// Token budget for thinking
-    pub budget_tokens: u32,
-}
-
-impl AnthropicParams {
-    /// Create params with extended thinking enabled
-    pub fn with_thinking(budget_tokens: u32) -> Self {
-        Self {
-            thinking: Some(AnthropicThinking {
-                budget_type: "enabled".to_string(),
-                budget_tokens,
-            }),
-        }
-    }
-}
-
-/// OpenAI-specific parameters
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OpenAiParams {
-    /// Reasoning effort level for o-series models
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    /// Random seed for reproducibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    /// Frequency penalty (-2.0 to 2.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
-    /// Presence penalty (-2.0 to 2.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
-}
-
-/// Reasoning effort levels for OpenAI o-series models
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    Low,
-    Medium,
-    High,
-}
-
-impl OpenAiParams {
-    /// Create params with reasoning effort
-    pub fn with_reasoning_effort(effort: ReasoningEffort) -> Self {
-        Self {
-            reasoning_effort: Some(effort),
-            ..Default::default()
-        }
-    }
-
-    /// Create params with seed for reproducibility
-    pub fn with_seed(seed: i64) -> Self {
-        Self {
-            seed: Some(seed),
-            ..Default::default()
-        }
-    }
-}
-
-/// Google Gemini-specific parameters
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GeminiParams {
-    /// Thinking configuration for Gemini 3+ models
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<GeminiThinking>,
-    /// Top-K sampling parameter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-    /// Top-P (nucleus) sampling parameter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-}
-
-/// Gemini thinking configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeminiThinking {
-    /// Whether thinking is enabled
-    pub include_thoughts: bool,
-    /// Budget in tokens for thinking
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u32>,
-}
-
-impl GeminiParams {
-    /// Create params with thinking enabled
-    pub fn with_thinking(budget: u32) -> Self {
-        Self {
-            thinking: Some(GeminiThinking {
-                include_thoughts: true,
-                thinking_budget: Some(budget),
-            }),
-            ..Default::default()
-        }
-    }
-
-    /// Create params with top-k
-    pub fn with_top_k(k: u32) -> Self {
-        Self {
-            top_k: Some(k),
-            ..Default::default()
-        }
-    }
-}
 
 /// Stream type alias — Send on native, not required on wasm32 (single-threaded).
 #[cfg(not(target_arch = "wasm32"))]
@@ -215,13 +61,14 @@ pub struct LlmRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
-    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
-    ///
-    /// This is a generic JSON bag that providers can extract provider-specific
-    /// options from. Each provider implementation is responsible for reading
-    /// and applying relevant parameters.
+    /// Typed provider-specific knobs. `ProviderTag` is a provider-tagged
+    /// enum with typed fields for every known knob; legacy untyped JSON
+    /// is projected through
+    /// [`meerkat_core::lifecycle::run_primitive::AnthropicProviderTag::from_legacy_value`]
+    /// (and the OpenAi/Gemini siblings) at the adapter boundary so the
+    /// request surface never carries `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<ProviderTag>,
 }
 
 impl LlmRequest {
@@ -256,66 +103,81 @@ impl LlmRequest {
         self
     }
 
-    /// Set provider-specific parameters (replaces any existing params)
-    ///
-    /// Use this to pass the entire provider_params object at once.
-    pub fn with_provider_params(mut self, params: Value) -> Self {
+    /// Set provider-specific parameters (replaces any existing params).
+    pub fn with_provider_params(mut self, params: ProviderTag) -> Self {
         self.provider_params = Some(params);
         self
     }
 
-    /// Set a single provider-specific parameter
-    ///
-    /// If provider_params is None, creates a new object.
-    /// If provider_params exists, merges the new key into it.
-    pub fn with_provider_param(mut self, key: &str, value: impl Into<Value>) -> Self {
-        let mut params = self
-            .provider_params
-            .take()
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(obj) = params.as_object_mut() {
-            obj.insert(key.to_string(), value.into());
-        }
-        self.provider_params = Some(params);
+    /// Merge a typed knob into the existing `ProviderTag::Anthropic`
+    /// slot, constructing a default `AnthropicProviderTag` if none is
+    /// present. Chainable test/builder convenience.
+    pub fn with_anthropic_tag_merge<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut meerkat_core::lifecycle::run_primitive::AnthropicProviderTag),
+    {
+        use meerkat_core::lifecycle::run_primitive::AnthropicProviderTag;
+        let mut tag = match self.provider_params.take() {
+            Some(ProviderTag::Anthropic(t)) => t,
+            _ => AnthropicProviderTag::default(),
+        };
+        f(&mut tag);
+        self.provider_params = Some(ProviderTag::Anthropic(tag));
         self
     }
 
-    /// Set structured output schema using the unified OutputSchema wrapper.
+    /// Merge a typed knob into the existing `ProviderTag::OpenAi` slot.
+    pub fn with_openai_tag_merge<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut meerkat_core::lifecycle::run_primitive::OpenAiProviderTag),
+    {
+        use meerkat_core::lifecycle::run_primitive::OpenAiProviderTag;
+        let mut tag = match self.provider_params.take() {
+            Some(ProviderTag::OpenAi(t)) => t,
+            _ => OpenAiProviderTag::default(),
+        };
+        f(&mut tag);
+        self.provider_params = Some(ProviderTag::OpenAi(tag));
+        self
+    }
+
+    /// Merge a typed knob into the existing `ProviderTag::Gemini` slot.
+    pub fn with_gemini_tag_merge<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut meerkat_core::lifecycle::run_primitive::GeminiProviderTag),
+    {
+        use meerkat_core::lifecycle::run_primitive::GeminiProviderTag;
+        let mut tag = match self.provider_params.take() {
+            Some(ProviderTag::Gemini(t)) => t,
+            _ => GeminiProviderTag::default(),
+        };
+        f(&mut tag);
+        self.provider_params = Some(ProviderTag::Gemini(tag));
+        self
+    }
+
+    /// Set the structured-output schema on an existing provider tag.
+    /// Requires the request already has a `ProviderTag` variant selected
+    /// (the schema lives in the per-provider slot; there is no
+    /// provider-agnostic home for it).
     pub fn with_output_schema(mut self, schema: OutputSchema) -> Self {
-        self = self.with_provider_param("structured_output", schema.to_value());
+        self.provider_params = match self.provider_params.take() {
+            Some(ProviderTag::Anthropic(mut a)) => {
+                a.structured_output = Some(schema);
+                Some(ProviderTag::Anthropic(a))
+            }
+            Some(ProviderTag::OpenAi(mut o)) => {
+                o.structured_output = Some(schema);
+                Some(ProviderTag::OpenAi(o))
+            }
+            Some(ProviderTag::Gemini(mut g)) => {
+                g.structured_output = Some(schema);
+                Some(ProviderTag::Gemini(g))
+            }
+            Some(other) => Some(other),
+            None => None,
+        };
         self
-    }
-
-    /// Set type-safe provider parameters
-    ///
-    /// This is the preferred way to set provider-specific options as it
-    /// prevents passing parameters meant for one provider to another.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let request = LlmRequest::new("o1-preview", messages)
-    ///     .with_typed_params(ProviderParams::OpenAi(
-    ///         OpenAiParams::with_reasoning_effort(ReasoningEffort::High)
-    ///     ));
-    /// ```
-    pub fn with_typed_params(mut self, params: ProviderParams) -> Self {
-        self.provider_params = Some(params.to_value());
-        self
-    }
-
-    /// Set OpenAI-specific parameters
-    pub fn with_openai_params(self, params: OpenAiParams) -> Self {
-        self.with_typed_params(ProviderParams::OpenAi(params))
-    }
-
-    /// Set Anthropic-specific parameters
-    pub fn with_anthropic_params(self, params: AnthropicParams) -> Self {
-        self.with_typed_params(ProviderParams::Anthropic(params))
-    }
-
-    /// Set Gemini-specific parameters
-    pub fn with_gemini_params(self, params: GeminiParams) -> Self {
-        self.with_typed_params(ProviderParams::Gemini(params))
     }
 }
 
@@ -520,26 +382,24 @@ mod tests {
     #[test]
     fn test_tool_call_buffer_incomplete() {
         let buffer = ToolCallBuffer::new("tc_1".to_string());
-        assert!(buffer.try_complete().is_none()); // No name
+        assert!(buffer.try_complete().is_none());
 
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("test".to_string());
         buffer.args_json = r#"{"incomplete"#.to_string();
-        assert!(buffer.try_complete().is_none()); // Invalid JSON
+        assert!(buffer.try_complete().is_none());
     }
 
-    /// Regression test: tools with no parameters should complete successfully
-    /// (args_json is empty string, should be treated as empty object)
     #[test]
     fn test_tool_call_buffer_empty_args() -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("get_todays_activities".to_string());
-        buffer.args_json = String::new(); // Empty args (no parameters)
+        buffer.args_json = String::new();
 
         let completed = buffer.try_complete().ok_or("incomplete")?;
         assert_eq!(completed.id, "tc_1");
         assert_eq!(completed.name, "get_todays_activities");
-        assert_eq!(completed.args, serde_json::json!({})); // Should be empty object
+        assert_eq!(completed.args, serde_json::json!({}));
         Ok(())
     }
 
@@ -555,121 +415,40 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_request_provider_params_serialization() -> Result<(), Box<dyn std::error::Error>> {
-        // Test serialization with provider_params set
-        let request = LlmRequest::new("claude-3", vec![]).with_provider_params(serde_json::json!({
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": 10000
-            },
-            "custom_flag": true
-        }));
-
-        let json = serde_json::to_value(&request)?;
-        assert!(json.get("provider_params").is_some());
-        assert_eq!(json["provider_params"]["thinking"]["budget_tokens"], 10000);
-
-        // Deserialize and verify
-        let parsed: LlmRequest = serde_json::from_value(json)?;
-        assert!(parsed.provider_params.is_some());
-        let params = parsed.provider_params.as_ref().ok_or("missing params")?;
-        assert_eq!(params["thinking"]["type"], "enabled");
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_provider_params_none_serialization()
-    -> Result<(), Box<dyn std::error::Error>> {
-        // Test serialization without provider_params (should serialize as null or be absent)
-        let request = LlmRequest::new("claude-3", vec![]);
-
-        let json = serde_json::to_value(&request)?;
-        // provider_params should either be null or absent
-        let params = json.get("provider_params");
-        assert!(params.is_none() || params.ok_or("not found")?.is_null());
-
-        // Deserialize should work
-        let parsed: LlmRequest = serde_json::from_value(json)?;
-        assert!(parsed.provider_params.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_provider_params() {
-        // Test with_provider_params sets the entire object
-        let params = serde_json::json!({
-            "reasoning_effort": "high",
-            "stream_options": { "include_usage": true }
-        });
-
-        let request = LlmRequest::new("gpt-4", vec![]).with_provider_params(params.clone());
-
-        assert_eq!(request.provider_params, Some(params));
-    }
-
-    #[test]
-    fn test_llm_request_with_provider_param_single() -> Result<(), Box<dyn std::error::Error>> {
-        // Test with_provider_param sets a single key
-        let request = LlmRequest::new("claude-3", vec![]).with_provider_param(
-            "thinking",
-            serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": 5000
+    fn test_llm_request_typed_provider_params_round_trip() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use meerkat_core::lifecycle::run_primitive::{
+            AnthropicProviderTag, AnthropicThinkingConfig,
+        };
+        let request = LlmRequest::new("claude-3", vec![]).with_provider_params(
+            ProviderTag::Anthropic(AnthropicProviderTag {
+                thinking: Some(AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 10000,
+                }),
+                ..Default::default()
             }),
         );
 
-        let params = request.provider_params.as_ref().ok_or("missing params")?;
-        assert_eq!(params["thinking"]["type"], "enabled");
-        assert_eq!(params["thinking"]["budget_tokens"], 5000);
+        let json = serde_json::to_value(&request)?;
+        assert!(json.get("provider_params").is_some());
+        let parsed: LlmRequest = serde_json::from_value(json)?;
+        match parsed.provider_params {
+            Some(ProviderTag::Anthropic(t)) => {
+                assert_eq!(
+                    t.thinking,
+                    Some(AnthropicThinkingConfig::Enabled {
+                        budget_tokens: 10000,
+                    }),
+                );
+            }
+            other => return Err(format!("wrong variant: {other:?}").into()),
+        }
         Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_provider_param_multiple() -> Result<(), Box<dyn std::error::Error>> {
-        // Test chaining multiple with_provider_param calls
-        let request = LlmRequest::new("claude-3", vec![])
-            .with_provider_param(
-                "thinking",
-                serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": 10000
-                }),
-            )
-            .with_provider_param("custom_option", "value")
-            .with_provider_param("numeric_setting", 42);
-
-        let params = request.provider_params.as_ref().ok_or("missing params")?;
-        assert_eq!(params["thinking"]["budget_tokens"], 10000);
-        assert_eq!(params["custom_option"], "value");
-        assert_eq!(params["numeric_setting"], 42);
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_provider_param_overwrites() -> Result<(), Box<dyn std::error::Error>> {
-        // Test that setting the same key twice overwrites
-        let request = LlmRequest::new("claude-3", vec![])
-            .with_provider_param("key", "first")
-            .with_provider_param("key", "second");
-
-        let params = request.provider_params.as_ref().ok_or("missing params")?;
-        assert_eq!(params["key"], "second");
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_provider_params_empty_object() {
-        // Test with empty object
-        let request =
-            LlmRequest::new("claude-3", vec![]).with_provider_params(serde_json::json!({}));
-
-        assert_eq!(request.provider_params, Some(serde_json::json!({})));
     }
 
     #[test]
     fn test_tool_call_buffer_preallocated_capacity() {
         let buffer = ToolCallBuffer::new("tc_1".to_string());
-        // Should have pre-allocated capacity to reduce allocations
         assert!(
             buffer.args_json.capacity() >= TOOL_CALL_ARGS_CAPACITY,
             "Buffer should have pre-allocated capacity of at least {} bytes, got {}",
@@ -681,10 +460,7 @@ mod tests {
     #[test]
     fn test_tool_call_buffer_with_capacity() {
         let buffer = ToolCallBuffer::with_capacity("tc_1".to_string(), 1024);
-        assert!(
-            buffer.args_json.capacity() >= 1024,
-            "Buffer should have at least 1024 bytes capacity"
-        );
+        assert!(buffer.args_json.capacity() >= 1024);
     }
 
     #[test]
@@ -703,27 +479,16 @@ mod tests {
     fn test_tool_call_buffer_no_reallocation_small_args() {
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         let initial_capacity = buffer.args_json.capacity();
-
-        // Small JSON args that fit within default capacity
         let small_json = r#"{"path": "/tmp/test.txt"}"#;
         buffer.push_args(small_json);
-
-        // Should not have reallocated
-        assert_eq!(
-            buffer.args_json.capacity(),
-            initial_capacity,
-            "Buffer should not reallocate for small args"
-        );
+        assert_eq!(buffer.args_json.capacity(), initial_capacity);
     }
 
-    /// Regression test: ToolCallBuffer must be usable for buffering ToolCallDelta events
-    /// from providers like Anthropic that emit deltas instead of complete tool calls.
     #[test]
     fn test_regression_tool_call_buffer_delta_streaming() -> Result<(), Box<dyn std::error::Error>>
     {
         use std::collections::HashMap;
 
-        // Simulate streaming deltas as Anthropic would emit them
         let deltas = vec![
             ("tc_1", Some("read_file"), r#"{"pa"#),
             ("tc_1", None, r#"th": ""#),
@@ -743,7 +508,6 @@ mod tests {
             buffer.push_args(args_delta);
         }
 
-        // Convert buffered deltas to tool calls
         let tool_calls: Vec<_> = buffers
             .into_values()
             .filter_map(|b| b.try_complete())
@@ -752,235 +516,6 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(tool_calls[0].args["path"], "/tmp/test.txt");
-
-        Ok(())
-    }
-
-    // =========================================================================
-    // ProviderParams type-safety tests
-    // =========================================================================
-
-    #[test]
-    fn test_provider_params_anthropic_serialization() -> Result<(), Box<dyn std::error::Error>> {
-        let params = ProviderParams::Anthropic(AnthropicParams::with_thinking(10000));
-        let json = serde_json::to_value(&params)?;
-
-        assert_eq!(json["provider"], "anthropic");
-        assert_eq!(json["thinking"]["type"], "enabled");
-        assert_eq!(json["thinking"]["budget_tokens"], 10000);
-
-        // Round-trip
-        let parsed: ProviderParams = serde_json::from_value(json)?;
-        match parsed {
-            ProviderParams::Anthropic(p) => {
-                let thinking = p.thinking.ok_or("missing thinking")?;
-                assert_eq!(thinking.budget_tokens, 10000);
-            }
-            _ => return Err("wrong variant".into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_provider_params_openai_serialization() -> Result<(), Box<dyn std::error::Error>> {
-        let params =
-            ProviderParams::OpenAi(OpenAiParams::with_reasoning_effort(ReasoningEffort::High));
-        let json = serde_json::to_value(&params)?;
-
-        assert_eq!(json["provider"], "open_ai");
-        assert_eq!(json["reasoning_effort"], "high");
-
-        // Round-trip
-        let parsed: ProviderParams = serde_json::from_value(json)?;
-        match parsed {
-            ProviderParams::OpenAi(p) => {
-                assert_eq!(p.reasoning_effort, Some(ReasoningEffort::High));
-            }
-            _ => return Err("wrong variant".into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_provider_params_gemini_serialization() -> Result<(), Box<dyn std::error::Error>> {
-        let params = ProviderParams::Gemini(GeminiParams::with_thinking(8000));
-        let json = serde_json::to_value(&params)?;
-
-        assert_eq!(json["provider"], "gemini");
-        let thinking = json.get("thinking").ok_or("missing thinking")?;
-        assert_eq!(thinking["include_thoughts"], true);
-        assert_eq!(thinking["thinking_budget"], 8000);
-
-        // Round-trip
-        let parsed: ProviderParams = serde_json::from_value(json)?;
-        match parsed {
-            ProviderParams::Gemini(p) => {
-                let thinking = p.thinking.ok_or("missing thinking")?;
-                assert!(thinking.include_thoughts);
-                assert_eq!(thinking.thinking_budget, Some(8000));
-            }
-            _ => return Err("wrong variant".into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_reasoning_effort_variants() -> Result<(), Box<dyn std::error::Error>> {
-        // Test all ReasoningEffort variants serialize correctly
-        for (effort, expected) in [
-            (ReasoningEffort::Low, "low"),
-            (ReasoningEffort::Medium, "medium"),
-            (ReasoningEffort::High, "high"),
-        ] {
-            let json = serde_json::to_value(effort)?;
-            assert_eq!(json.as_str(), Some(expected));
-
-            // Round-trip
-            let parsed: ReasoningEffort = serde_json::from_value(json)?;
-            assert_eq!(parsed, effort);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_provider_params_to_value() {
-        // Test the to_value() method extracts inner params without the tag
-        let anthropic_params = ProviderParams::Anthropic(AnthropicParams::with_thinking(5000));
-        let value = anthropic_params.to_value();
-
-        // Should have thinking but NOT the "provider" tag
-        assert!(value.get("provider").is_none());
-        assert!(value.get("thinking").is_some());
-        assert_eq!(value["thinking"]["budget_tokens"], 5000);
-    }
-
-    #[test]
-    fn test_llm_request_with_typed_params() -> Result<(), Box<dyn std::error::Error>> {
-        let request = LlmRequest::new("o1-preview", vec![]).with_typed_params(
-            ProviderParams::OpenAi(OpenAiParams::with_reasoning_effort(ReasoningEffort::High)),
-        );
-
-        let params = request.provider_params.ok_or("missing params")?;
-        assert_eq!(params["reasoning_effort"], "high");
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_anthropic_params() -> Result<(), Box<dyn std::error::Error>> {
-        let request = LlmRequest::new("claude-sonnet-4", vec![])
-            .with_anthropic_params(AnthropicParams::with_thinking(10000));
-
-        let params = request.provider_params.ok_or("missing params")?;
-        assert_eq!(params["thinking"]["type"], "enabled");
-        assert_eq!(params["thinking"]["budget_tokens"], 10000);
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_openai_params() -> Result<(), Box<dyn std::error::Error>> {
-        let request = LlmRequest::new("gpt-5.2", vec![])
-            .with_openai_params(OpenAiParams::with_reasoning_effort(ReasoningEffort::Medium));
-
-        let params = request.provider_params.ok_or("missing params")?;
-        assert_eq!(params["reasoning_effort"], "medium");
-        Ok(())
-    }
-
-    #[test]
-    fn test_llm_request_with_gemini_params() -> Result<(), Box<dyn std::error::Error>> {
-        let request = LlmRequest::new("gemini-3-pro", vec![])
-            .with_gemini_params(GeminiParams::with_thinking(16000));
-
-        let params = request.provider_params.ok_or("missing params")?;
-        assert_eq!(params["thinking"]["include_thoughts"], true);
-        assert_eq!(params["thinking"]["thinking_budget"], 16000);
-        Ok(())
-    }
-
-    #[test]
-    fn test_openai_params_with_seed() {
-        let params = OpenAiParams::with_seed(42);
-        assert_eq!(params.seed, Some(42));
-        assert!(params.reasoning_effort.is_none());
-    }
-
-    #[test]
-    fn test_gemini_params_with_top_k() {
-        let params = GeminiParams::with_top_k(40);
-        assert_eq!(params.top_k, Some(40));
-        assert!(params.thinking.is_none());
-    }
-
-    #[test]
-    fn test_anthropic_params_default() {
-        let params = AnthropicParams::default();
-        assert!(params.thinking.is_none());
-    }
-
-    #[test]
-    fn test_openai_params_default() {
-        let params = OpenAiParams::default();
-        assert!(params.reasoning_effort.is_none());
-        assert!(params.seed.is_none());
-        assert!(params.frequency_penalty.is_none());
-        assert!(params.presence_penalty.is_none());
-    }
-
-    #[test]
-    fn test_gemini_params_default() {
-        let params = GeminiParams::default();
-        assert!(params.thinking.is_none());
-        assert!(params.top_k.is_none());
-        assert!(params.top_p.is_none());
-    }
-
-    /// Regression: Typed AnthropicParams must be extractable by build_request_body.
-    /// The provider code extracts thinking.budget_tokens from the serialized JSON.
-    #[test]
-    fn test_regression_anthropic_params_extractable() -> Result<(), Box<dyn std::error::Error>> {
-        let params = ProviderParams::Anthropic(AnthropicParams::with_thinking(10000));
-        let json = serde_json::to_value(&params)?;
-
-        // Provider code checks: params["thinking"]["budget_tokens"]
-        let budget = json
-            .get("thinking")
-            .and_then(|t| t.get("budget_tokens"))
-            .and_then(serde_json::Value::as_u64);
-
-        assert_eq!(
-            budget,
-            Some(10000),
-            "thinking.budget_tokens must be extractable"
-        );
-        Ok(())
-    }
-
-    /// Regression: Typed GeminiParams must be extractable by build_request_body.
-    /// The provider code extracts thinking.thinking_budget and top_p from serialized JSON.
-    #[test]
-    fn test_regression_gemini_params_extractable() -> Result<(), Box<dyn std::error::Error>> {
-        let mut params = GeminiParams::with_thinking(8000);
-        params.top_p = Some(0.95);
-        let provider_params = ProviderParams::Gemini(params);
-        let json = serde_json::to_value(&provider_params)?;
-
-        // Provider code checks: params["thinking"]["thinking_budget"]
-        let budget = json
-            .get("thinking")
-            .and_then(|t| t.get("thinking_budget"))
-            .and_then(serde_json::Value::as_u64);
-        assert_eq!(
-            budget,
-            Some(8000),
-            "thinking.thinking_budget must be extractable"
-        );
-
-        // Provider code checks: params["top_p"]
-        let top_p = json.get("top_p").and_then(serde_json::Value::as_f64);
-        assert!(
-            (top_p.unwrap_or(0.0) - 0.95).abs() < 0.001,
-            "top_p must be extractable"
-        );
 
         Ok(())
     }

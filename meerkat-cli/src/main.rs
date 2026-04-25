@@ -1,5 +1,13 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::needless_borrows_for_generic_args,
+    clippy::redundant_closure_for_method_calls
+)]
+
+mod cli_parse;
 #[cfg(feature = "mcp")]
 mod mcp;
 #[cfg(feature = "comms")]
@@ -11,8 +19,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use meerkat::surface::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, dispatch_from_admission, project_runtime_admission,
-    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    SurfaceScheduleSessionHost, schedule_attempt_idempotency_key, schedule_host_supported,
+    spawn_schedule_host,
 };
 use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -30,8 +38,8 @@ use meerkat_core::service::{
     TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
-    StreamScopeFrame, format_verbose_event,
+    AgentEvent, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator, RealmSelection,
+    ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -46,7 +54,6 @@ use meerkat_mob_pack::archive::MobpackArchive;
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::pack::{
     compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
-    validate_archive_bytes,
 };
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
@@ -279,7 +286,7 @@ enum CliRuntimeTurnResult {
 fn completion_outcome_to_cli_runtime_turn_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     session_id: &SessionId,
-    realm_id: &str,
+    realm_id: &meerkat_core::connection::RealmId,
     session_created: bool,
 ) -> anyhow::Result<CliRuntimeTurnResult> {
     match outcome {
@@ -722,7 +729,7 @@ fn resolve_rkat_rpc_binary() -> anyhow::Result<PathBuf> {
 fn realtime_rpc_args(scope: &RuntimeScope) -> Vec<String> {
     let mut args = vec![
         "--realm".to_string(),
-        scope.locator.realm_id.clone(),
+        scope.locator.realm.as_str().to_owned(),
         "--state-root".to_string(),
         scope.locator.state_root.display().to_string(),
         "--realtime-ws".to_string(),
@@ -1042,22 +1049,6 @@ enum Commands {
         )]
         provider: Option<Provider>,
 
-        /// Route this session's LLM calls through a realm-scoped
-        /// provider binding instead of resolving credentials from env
-        /// vars or flat config. Format: `<realm_id>:<binding_id>`,
-        /// referencing a `[realm.<realm_id>.binding.<binding_id>]`
-        /// entry in the active Config. When set, the provider runtime
-        /// registry resolves the binding's auth profile and backend
-        /// profile through the standard `ProviderRuntime::resolve`
-        /// pipeline — the same path that CLI `rkat auth login` /
-        /// REST+RPC OAuth completion handlers write into.
-        #[arg(
-            long = "connection-ref",
-            value_name = "REALM:BINDING",
-            help_heading = "Common options"
-        )]
-        connection_ref: Option<String>,
-
         /// Maximum tokens per turn (defaults to config when omitted)
         #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         max_tokens: Option<u32>,
@@ -1222,6 +1213,21 @@ enum Commands {
             help_heading = "Advanced options"
         )]
         line_format: LineFormat,
+
+        /// Typed connection reference `realm:binding[:profile]`.
+        ///
+        /// Parsed at the CLI boundary by
+        /// `cli_parse::parse_connection_ref_user_input`; a typed
+        /// [`meerkat_core::ConnectionRef`] is threaded through
+        /// `SessionBuildOptions.connection_ref`. Opaque-string
+        /// ferry through the runtime is prohibited by the
+        /// wave-b deletion of `ConnectionRef::parse` / `Display`.
+        #[arg(
+            long = "connection-ref",
+            value_name = "REALM:BINDING[:PROFILE]",
+            help_heading = "Connection options"
+        )]
+        connection_ref: Option<String>,
     },
 
     /// Session management
@@ -2026,6 +2032,17 @@ async fn main() -> anyhow::Result<ExitCode> {
             let wait_for_mcp_enabled = wait_for_mcp;
             #[cfg(not(feature = "mcp"))]
             let wait_for_mcp_enabled = false;
+            // Wave-c C-12: parse user-supplied `realm:binding[:profile]`
+            // at the CLI argument boundary. Downstream receives the
+            // typed `Option<ConnectionRef>`; the opaque-string form
+            // never crosses into session-build options.
+            let connection_ref = match connection_ref.as_deref() {
+                None => None,
+                Some(raw) => Some(
+                    cli_parse::parse_connection_ref_user_input(raw)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                ),
+            };
             Box::pin(handle_run_command(
                 prompt,
                 resume,
@@ -2153,7 +2170,7 @@ async fn handle_run_command(
     keep_alive: bool,
     stdin: StdinMode,
     line_format: LineFormat,
-    connection_ref: Option<String>,
+    connection_ref: Option<ConnectionRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     if let Some(session_id) = resume {
@@ -2615,7 +2632,8 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
 async fn resolve_config_store(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(Arc<dyn ConfigStore>, PathBuf)> {
-    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     if let Some(parent) = paths.config_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -2856,7 +2874,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
-            let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+            let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
             let env = meerkat_providers::ResolverEnvironment::with_process_env();
             match registry.resolve(&realm_set, &binding_id, &env).await {
                 Ok(conn) => {
@@ -2897,7 +2915,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                     .open()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-                let key = TokenKey::new(&realm, &profile_id);
+                let key = TokenKey::parse(&realm, &profile_id)
+                    .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
                 match store
                     .load(&key)
                     .await
@@ -2990,7 +3009,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                     .open()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-                let key = TokenKey::new(&realm, &profile_id);
+                let key = TokenKey::parse(&realm, &profile_id)
+                    .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
                 let present = store
                     .load(&key)
                     .await
@@ -3000,7 +3020,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                         .clear(&key)
                         .await
                         .map_err(|e| anyhow::anyhow!("TokenStore clear failed: {e}"))?;
-                    println!("deleted: {}:{}", key.realm_id, key.binding_id);
+                    println!("deleted: {}:{}", key.realm.as_str(), key.binding.as_str());
                 } else {
                     println!(
                         "nothing to delete: no persisted credential for '{realm}:{profile_id}'"
@@ -3199,7 +3219,8 @@ async fn refresh_auth_profile(
     let coord: StdArc<dyn RefreshCoordinator> = StdArc::new(InMemoryCoordinator::default());
 
     // Pre-state for the reported diff.
-    let key = TokenKey::new(realm, profile_id);
+    let key = TokenKey::parse(&realm, &profile_id)
+        .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
     let before = store
         .load(&key)
         .await
@@ -3217,7 +3238,7 @@ async fn refresh_auth_profile(
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
         .with_refresh_coordinator(coord);
-    let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+    let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
     let connection = registry
         .resolve(&realm_set, &binding_id, &env)
         .await
@@ -3529,7 +3550,9 @@ async fn noninteractive_login(
     };
 
     let store = TokenStoreBackend::default_auto()?.open()?;
-    let key = TokenKey::new("dev", format!("default_{provider_lc}"));
+    let binding_id_str = format!("default_{provider_lc}");
+    let key = TokenKey::parse("dev", &binding_id_str)
+        .map_err(|e| anyhow::anyhow!("invalid token-key realm/binding: {e}"))?;
     let auth_mode = if method == "static_bearer" {
         PersistedAuthMode::StaticBearer
     } else {
@@ -3624,24 +3647,26 @@ async fn interactive_login(
         auth_cyan(&redirect_url),
     ));
 
-    let (endpoints, client_secret, auth_mode, key) = match provider {
+    // Wave-c C-12 / C-1 follow-up: TokenKey now takes typed atoms.
+    // `provider.binding_id()` returns `&'static str`; build the key
+    // outside the match so the fallible parse flows cleanly via `?`.
+    let key = TokenKey::parse("dev", provider.binding_id())
+        .map_err(|e| anyhow::anyhow!("invalid token-key for provider login: {e}"))?;
+    let (endpoints, client_secret, auth_mode) = match provider {
         LoginProvider::Anthropic => (
             a_oauth::claude_ai_endpoints(&redirect_url),
             None,
             PersistedAuthMode::ClaudeAiOauth,
-            TokenKey::new("dev", provider.binding_id()),
         ),
         LoginProvider::OpenAi => (
             o_oauth::chatgpt_endpoints(&redirect_url),
             None,
             PersistedAuthMode::ChatgptOauth,
-            TokenKey::new("dev", provider.binding_id()),
         ),
         LoginProvider::Google => (
             g_oauth::code_assist_endpoints(&redirect_url),
             Some(g_oauth::CODE_ASSIST_CLIENT_SECRET),
             PersistedAuthMode::GoogleOauth,
-            TokenKey::new("dev", provider.binding_id()),
         ),
     };
 
@@ -3764,8 +3789,8 @@ async fn interactive_login(
     eprintln!(
         "  {} {}:{}",
         auth_bold("Profile:"),
-        key.realm_id,
-        key.binding_id,
+        key.realm.as_str(),
+        key.binding.as_str(),
     );
     eprintln!("  {} {}", auth_bold("Storage:"), storage_location);
     if let Some(expiry) = expires_at {
@@ -3828,9 +3853,20 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
         .open()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+    // Wave-c C-12: TokenKey now takes typed atoms; parse the raw
+    // `profile_id` form at this logout boundary. This is the
+    // non-ConnectionRef carve-out `split_once(':')` site explicitly
+    // documented in `cli_parse.rs` — TokenKey shares the same flat
+    // `realm:binding` grammar but has no profile component.
     let keys = match profile_id.split_once(':') {
-        Some((realm, binding)) => vec![TokenKey::new(realm, binding)],
-        None => vec![TokenKey::new("dev", profile_id)],
+        Some((realm, binding)) => vec![
+            TokenKey::parse(realm, binding)
+                .map_err(|e| anyhow::anyhow!("invalid token-key `{profile_id}`: {e}"))?,
+        ],
+        None => vec![
+            TokenKey::parse("dev", profile_id)
+                .map_err(|e| anyhow::anyhow!("invalid token-key `dev:{profile_id}`: {e}"))?,
+        ],
     };
     let mut cleared = 0;
     for key in keys {
@@ -3846,16 +3882,16 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
             eprintln!(
                 "{} Cleared {}:{}",
                 auth_green("✓"),
-                key.realm_id,
-                key.binding_id,
+                key.realm.as_str(),
+                key.binding.as_str(),
             );
             cleared += 1;
         } else {
             eprintln!(
                 "{} No stored credentials for {}:{}",
                 auth_dim("·"),
-                key.realm_id,
-                key.binding_id,
+                key.realm.as_str(),
+                key.binding.as_str(),
             );
         }
     }
@@ -3869,7 +3905,6 @@ fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static st
     match source {
         meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
         meerkat_core::CredentialSourceSpec::Env { .. } => "env",
-        meerkat_core::CredentialSourceSpec::ManagedStore { .. } => "managed_store",
         meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
         meerkat_core::CredentialSourceSpec::Command { .. } => "command",
@@ -3881,7 +3916,7 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     let mut ok = true;
     let (config, _) = load_config(scope).await?;
     let config_path =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
             .config_path;
     if config_path.exists() {
         println!("ok\tconfig\t{}", config_path.display());
@@ -4025,7 +4060,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
 
     match command {
         RealmCommands::Current => {
-            println!("{}", scope.locator.realm_id);
+            println!("{}", scope.locator.realm.as_str());
             Ok(())
         }
         RealmCommands::List => {
@@ -4044,7 +4079,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
             for entry in manifests {
                 let leases = meerkat_store::inspect_realm_leases_in(
                     &scope.locator.state_root,
-                    &entry.manifest.realm_id,
+                    entry.manifest.realm.as_str(),
                     true,
                 )
                 .await
@@ -4052,7 +4087,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
                 let origin = entry.manifest.origin.as_str();
                 println!(
                     "{:<28} {:<8} {:<14} {:<8} {:<12}",
-                    entry.manifest.realm_id,
+                    entry.manifest.realm,
                     entry.manifest.backend.as_str(),
                     origin,
                     leases.active.len(),
@@ -4061,7 +4096,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
                 if entry.manifest.origin == meerkat_store::RealmOrigin::LegacyUnknown {
                     println!(
                         "  note: realm '{}' is legacy/unknown origin and is skipped by --isolated-only prune.",
-                        entry.manifest.realm_id
+                        entry.manifest.realm
                     );
                 }
             }
@@ -4085,7 +4120,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
                 meerkat_store::inspect_realm_leases_in(&scope.locator.state_root, &realm_id, true)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to inspect leases: {e}"))?;
-            println!("realm_id: {}", manifest.realm_id);
+            println!("realm_id: {}", manifest.realm);
             println!("backend: {}", manifest.backend.as_str());
             println!("origin: {}", manifest.origin.as_str());
             println!("created_at: {}", manifest.created_at);
@@ -4111,7 +4146,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
             .map_err(|e| anyhow::anyhow!("Failed to create realm: {e}"))?;
             println!(
                 "Created realm '{}' backend={} origin={}",
-                manifest.realm_id,
+                manifest.realm,
                 manifest.backend.as_str(),
                 manifest.origin.as_str()
             );
@@ -4264,7 +4299,7 @@ async fn prune_realms_inner(
         }
 
         let lease_status =
-            meerkat_store::inspect_realm_leases_in(state_root, &manifest.realm_id, true)
+            meerkat_store::inspect_realm_leases_in(state_root, manifest.realm.as_str(), true)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to inspect realm leases: {e}"))?;
         if !lease_status.active.is_empty() && !force {
@@ -4272,11 +4307,11 @@ async fn prune_realms_inner(
             continue;
         }
 
-        let paths = meerkat_store::realm_paths_in(state_root, &manifest.realm_id);
+        let paths = meerkat_store::realm_paths_in(state_root, manifest.realm.as_str());
         if let Err(err) = remove_realm_root_with_retries(&paths, force).await {
             outcome
                 .leftovers
-                .push(format!("{} ({})", manifest.realm_id, err));
+                .push(format!("{} ({})", manifest.realm, err));
             continue;
         }
         outcome.removed += 1;
@@ -4291,7 +4326,7 @@ async fn create_persistence_bundle(
 ) -> anyhow::Result<(meerkat_store::RealmManifest, PersistenceBundle)> {
     meerkat::open_realm_persistence_in(
         &scope.locator.state_root,
-        &scope.locator.realm_id,
+        scope.locator.realm.as_str(),
         scope.backend_hint(),
         Some(scope.origin_hint),
     )
@@ -4307,7 +4342,8 @@ async fn create_persistence_bundle(
 }
 
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
-    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
@@ -4499,6 +4535,12 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
+        // Post-wave-a: `StartTurnRequest.additional_instructions` /
+        // `execution_kind` were collapsed into the typed `RuntimeTurnMetadata`
+        // seam on `PromptInput.turn_metadata`; they no longer live on the
+        // session-service request literal. The primitive's metadata is still
+        // consulted for `skill_references` + `flow_tool_overlay`, which remain
+        // part of the request surface.
         let turn_req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
@@ -4511,10 +4553,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
-            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
         };
 
         // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.
@@ -4935,7 +4973,7 @@ fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Erro
 }
 
 fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Result<SessionId> {
-    SessionLocator::resolve_for_realm(input, &scope.locator.realm_id).map_err(|err| match err {
+    SessionLocator::resolve_for_realm(input, &scope.locator.realm).map_err(|err| match err {
         SessionLocatorError::RealmMismatch { provided, active } => anyhow::anyhow!(
             "Session belongs to realm '{provided}', but active realm is '{active}'. Use --realm {provided} or switch to the matching realm before running session commands."
         ),
@@ -5106,7 +5144,7 @@ async fn run_agent(
     app_context: Option<String>,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
-    #[allow(unused_variables)] connection_ref: Option<String>,
+    connection_ref: Option<ConnectionRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
@@ -5153,15 +5191,25 @@ async fn run_agent(
         let keep_alive = resolve_keep_alive(keep_alive)?;
         let effective_mob = cfg!(feature = "mob") && (enable_mob || config.tools.mob_enabled);
         let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
+        // Wave-c C-12: the canonical runtime identity for a skill is
+        // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
+        // CLI `--skill NAME` arguments default to the builtin (inventory)
+        // source — explicit source-scoped selection is not a CLI surface
+        // today and would be a separate feature. `SkillName::parse` enforces
+        // the lowercase-slug rule; we surface parse errors directly to the
+        // user rather than silently dropping.
         let preload_skills = if preload_skills.is_empty() {
             None
         } else {
-            Some(
-                preload_skills
-                    .into_iter()
-                    .map(meerkat_core::skills::SkillId)
-                    .collect(),
-            )
+            let keys: Result<Vec<meerkat_core::skills::SkillKey>, _> = preload_skills
+                .into_iter()
+                .map(|raw| {
+                    meerkat_core::skills::SkillName::parse(&raw)
+                        .map(meerkat_core::skills::SkillKey::builtin)
+                        .map_err(|e| anyhow::anyhow!("invalid --skill value `{raw}`: {e}"))
+                })
+                .collect();
+            Some(keys?)
         };
         let session = Session::new();
         let session_id = session.id().clone();
@@ -5192,8 +5240,11 @@ async fn run_agent(
         let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
             .session_store(session_store)
             .runtime_root(
-                meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
-                    .root,
+                meerkat_store::realm_paths_in(
+                    &scope.locator.state_root,
+                    scope.locator.realm.as_str(),
+                )
+                .root,
             )
             .project_root(project_root)
             .builtins(enable_builtins)
@@ -5308,17 +5359,10 @@ async fn run_agent(
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
-            realm_id: Some(scope.locator.realm_id.clone()),
+            realm_id: Some(scope.locator.realm.as_str().to_owned()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             config_generation: None,
-            connection_ref: connection_ref
-                .as_deref()
-                .and_then(|raw| raw.split_once(':'))
-                .map(|(realm_id, binding_id)| meerkat_core::ConnectionRef {
-                    realm_id: realm_id.to_string(),
-                    binding_id: binding_id.to_string(),
-                }),
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -5335,6 +5379,7 @@ async fn run_agent(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: mob_tools_factory,
+            connection_ref,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -5421,11 +5466,18 @@ async fn run_agent(
                 ));
             }
 
+            // Post-wave-a: `keep_alive` is now a typed `KeepAlivePolicy`
+            // (ttl + mode), not a boolean. The CLI `--keep-alive` flag still
+            // carries the session-level intent via `update_peer_ingress_context`
+            // below; this per-turn overlay is not the seam that enables it.
+            // Until the CLI exposes ttl/mode surface, leave the per-turn
+            // metadata atom unset.
+            let _ = keep_alive;
             let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
                 prompt.to_string(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: if keep_alive { Some(true) } else { None },
+                        keep_alive: None,
                         skill_references: None,
                         flow_tool_overlay,
                         additional_instructions: None,
@@ -5452,7 +5504,7 @@ async fn run_agent(
                 Some(handle) => completion_outcome_to_cli_runtime_turn_result(
                     handle.wait().await,
                     &session_id,
-                    &scope.locator.realm_id,
+                    &scope.locator.realm,
                     true,
                 ),
                 None => {
@@ -5515,7 +5567,7 @@ async fn run_agent(
                     let json = serde_json::json!({
                         "text": result.text,
                         "session_id": result.session_id.to_string(),
-                        "session_ref": format_session_ref(&scope.locator.realm_id, &result.session_id),
+                        "session_ref": format_session_ref(&scope.locator.realm, &result.session_id),
                         "turns": result.turns,
                         "tool_calls": result.tool_calls,
                         "usage": {
@@ -5761,8 +5813,11 @@ async fn resume_session_with_llm_override(
         let mut factory = AgentFactory::new(store_path)
             .session_store(store.clone())
             .runtime_root(
-                meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
-                    .root,
+                meerkat_store::realm_paths_in(
+                    &scope.locator.state_root,
+                    scope.locator.realm.as_str(),
+                )
+                .root,
             )
             .project_root(project_root)
             .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
@@ -5838,6 +5893,27 @@ async fn resume_session_with_llm_override(
             .await
             .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
+        // Wave-c C-12: lift runtime-side preload-skill names into typed
+        // `SkillKey`s (builtin source) before the SessionBuildOptions
+        // construction so a parse error surfaces loud on resume instead
+        // of panicking at the collect site.
+        let resumed_preload_skills: Option<Vec<meerkat_core::skills::SkillKey>> =
+            if runtime_preload_skills.is_empty() {
+                None
+            } else {
+                let keys: Result<Vec<_>, _> = runtime_preload_skills
+                    .into_iter()
+                    .map(|raw| {
+                        meerkat_core::skills::SkillName::parse(&raw)
+                            .map(meerkat_core::skills::SkillKey::builtin)
+                            .map_err(|e| {
+                                anyhow::anyhow!("invalid preloaded skill name `{raw}`: {e}")
+                            })
+                    })
+                    .collect();
+                Some(keys?)
+            };
+
         let mut build = SessionBuildOptions {
             provider: Some(provider_core),
             self_hosted_server_id: stored_metadata
@@ -5860,17 +5936,12 @@ async fn resume_session_with_llm_override(
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
-            preload_skills: (!runtime_preload_skills.is_empty()).then(|| {
-                runtime_preload_skills
-                    .into_iter()
-                    .map(meerkat_core::skills::SkillId)
-                    .collect()
-            }),
+            preload_skills: resumed_preload_skills,
             peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
             realm_id: stored_metadata
                 .as_ref()
                 .and_then(|m| m.realm_id.clone())
-                .or_else(|| Some(scope.locator.realm_id.clone())),
+                .or_else(|| Some(scope.locator.realm.as_str().to_owned())),
             instance_id: stored_metadata
                 .as_ref()
                 .and_then(|m| m.instance_id.clone())
@@ -5949,11 +6020,28 @@ async fn resume_session_with_llm_override(
                 .register_session_with_executor(session_id.clone(), executor)
                 .await;
 
+            // Post-wave-a: `keep_alive` is typed `KeepAlivePolicy`, and
+            // `additional_instructions` is typed `Vec<TurnInstruction>`.
+            // Session-level keep-alive is still carried via
+            // `update_peer_ingress_context` below. Per-turn overlay atoms for
+            // both remain unset until the CLI exposes the typed surface.
+            let _ = keep_alive;
+            let additional_instructions = additional_instructions.map(|texts| {
+                texts
+                    .into_iter()
+                    .map(
+                        |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                            kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                            body,
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            });
             let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
                 prompt.to_string(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: if keep_alive { Some(true) } else { None },
+                        keep_alive: None,
                         skill_references: None,
                         flow_tool_overlay,
                         additional_instructions,
@@ -5980,7 +6068,7 @@ async fn resume_session_with_llm_override(
                 Some(handle) => completion_outcome_to_cli_runtime_turn_result(
                     handle.wait().await,
                     &session_id,
-                    &scope.locator.realm_id,
+                    &scope.locator.realm,
                     false,
                 ),
                 None => {
@@ -6030,7 +6118,7 @@ async fn resume_session_with_llm_override(
                 eprintln!(
                     "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
                     result.session_id,
-                    format_session_ref(&scope.locator.realm_id, &result.session_id),
+                    format_session_ref(&scope.locator.realm, &result.session_id),
                     result.turns,
                     result.usage.input_tokens,
                     result.usage.output_tokens
@@ -6100,7 +6188,8 @@ fn get_or_create_cli_persistent_surface_from_bundle(
     let mut factory = AgentFactory::new(store_path)
         .session_store(store.clone())
         .runtime_root(
-            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+                .root,
         )
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
@@ -6139,7 +6228,7 @@ fn get_or_create_cli_persistent_surface_from_bundle(
         Some(spawn_schedule_host(
             schedule_service,
             shared_adapter,
-            format!("rkat:{}", scope.locator.realm_id),
+            format!("rkat:{}", scope.locator.realm.as_str()),
         ))
     } else {
         None
@@ -6222,7 +6311,7 @@ impl CliScheduleSessionHost {
         let session_exists = self.service.read(session_id).await.is_ok()
             || self
                 .service
-                .load_persisted(session_id)
+                .load_authoritative_session(session_id)
                 .await
                 .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
                 .is_some();
@@ -6245,7 +6334,7 @@ impl CliScheduleSessionHost {
     async fn update_peer_ingress_context(&self, session_id: &SessionId) {
         let keep_alive = self
             .service
-            .load_persisted(session_id)
+            .load_authoritative_session(session_id)
             .await
             .ok()
             .flatten()
@@ -6340,7 +6429,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
 
         let persisted = self
             .service
-            .load_persisted(session_id)
+            .load_authoritative_session(session_id)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         match persisted {
@@ -6374,14 +6463,16 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
             provider_params: create.provider_params.clone(),
-            preload_skills: (!create.preload_skills.is_empty()).then(|| {
-                create
-                    .preload_skills
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect()
-            }),
+            // Post-wave-a: `SessionMaterializationSpec.preload_skills` is
+            // `Vec<String>` (slug halves); the typed seam expects
+            // `Option<Vec<SkillKey>>` (source_uuid + skill_name). No lossless
+            // projection exists, so drop the legacy path. Typed ingress flows
+            // via `skill_refs` on the schedule dispatch. Mirrors
+            // `meerkat/src/surface/runtime_schedule_host.rs`.
+            preload_skills: {
+                let _ = &create.preload_skills;
+                None
+            },
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
             realm_id: create.realm_id.clone(),
@@ -6439,8 +6530,25 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     keep_alive: None,
                     skill_references: scheduled_skill_keys(&dispatch.skill_references)?,
                     flow_tool_overlay: None,
+                    // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
+                    // is typed `Vec<TurnInstruction>`; project the scheduled
+                    // dispatch's `Vec<String>` into typed instructions with
+                    // `System` kind (scheduled prompts originate from the
+                    // runtime's schedule driver, not the user).
                     additional_instructions: (!dispatch.additional_instructions.is_empty())
-                        .then_some(dispatch.additional_instructions.clone()),
+                        .then(|| {
+                            dispatch
+                                .additional_instructions
+                                .iter()
+                                .cloned()
+                                .map(|body| {
+                                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
+                                        body,
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        }),
                     model: None,
                     provider: None,
                     provider_params: None,
@@ -6457,15 +6565,22 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         prompt_input.header.correlation_id =
             Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
 
-        let (outcome, handle) = self
+        // Post-wave-a dogma (mirrors meerkat-rpc d.0): the
+        // `dispatch_from_admission` / `project_runtime_admission` helpers
+        // were retired along with `RuntimeAdmissionProjection`; the schedule
+        // surface must consume the runtime's typed `CompletionOutcome`
+        // directly. Until that plumbing exists on the CLI schedule host,
+        // surface a typed `Internal` error instead of synthesising a
+        // `DeliveryDispatch`. We still accept the input for side effects so
+        // the occurrence is not silently dropped.
+        let (_outcome, _handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(dispatch_from_admission(
-            occurrence,
-            project_runtime_admission(outcome, handle),
-            dispatch.materialized_session_id,
+        let _ = dispatch.materialized_session_id;
+        Err(meerkat::ScheduleDomainError::Internal(
+            "cli deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
         ))
     }
 
@@ -6501,15 +6616,15 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata,
         });
-        let (outcome, handle) = self
+        // Post-wave-a dogma: see `deliver_prompt` for the mirror rationale.
+        let (_outcome, _handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        Ok(dispatch_from_admission(
-            occurrence,
-            project_runtime_admission(outcome, handle),
-            materialized_session_id,
+        let _ = materialized_session_id;
+        Err(meerkat::ScheduleDomainError::Internal(
+            "cli deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
         ))
     }
 }
@@ -6559,7 +6674,7 @@ fn mob_persistent_service_key(scope: &RuntimeScope) -> String {
     format!(
         "{}::{}",
         scope.locator.state_root.display(),
-        scope.locator.realm_id
+        scope.locator.realm.as_str()
     )
 }
 
@@ -6860,7 +6975,7 @@ async fn list_sessions(
                 println!(
                     "{:<40} {:<72} {:<12} {:<20} {:<20} {}",
                     meta.session_id,
-                    format_session_ref(&scope.locator.realm_id, &meta.session_id),
+                    format_session_ref(&scope.locator.realm, &meta.session_id),
                     meta.message_count,
                     created,
                     updated,
@@ -6870,7 +6985,7 @@ async fn list_sessions(
                 println!(
                     "{:<40} {:<72} {:<12} {:<20} {:<20}",
                     meta.session_id,
-                    format_session_ref(&scope.locator.realm_id, &meta.session_id),
+                    format_session_ref(&scope.locator.realm, &meta.session_id),
                     meta.message_count,
                     created,
                     updated
@@ -6897,7 +7012,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         let (config, _) = load_config(scope).await?;
         let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
         let session = service
-            .load_persisted(&session_id)
+            .load_authoritative_session(&session_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
@@ -6906,7 +7021,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         println!("Session: {session_id}");
         println!(
             "Session Ref: {}",
-            format_session_ref(&scope.locator.realm_id, &session_id)
+            format_session_ref(&scope.locator.realm, &session_id)
         );
         println!("Messages: {}", session.messages().len());
         println!("Version: {}", session.version());
@@ -7053,7 +7168,7 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         println!("Deleted session: {session_id}");
         println!(
             "Session Ref: {}",
-            format_session_ref(&scope.locator.realm_id, &session_id)
+            format_session_ref(&scope.locator.realm, &session_id)
         );
         Ok(())
     }
@@ -7078,7 +7193,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",
-                    format_session_ref(&scope.locator.realm_id, &session_id)
+                    format_session_ref(&scope.locator.realm, &session_id)
                 );
                 Ok(())
             }
@@ -7129,15 +7244,15 @@ async fn find_session_matches(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list realms in '{}': {e}", root.display()))?;
         for entry in manifests {
-            if let Some(target_realm) = locator.realm_id.as_deref()
-                && entry.manifest.realm_id != target_realm
+            if let Some(target_realm) = locator.realm_id.as_ref()
+                && &entry.manifest.realm != target_realm
             {
                 continue;
             }
 
             let store = meerkat_store::open_realm_session_store_in(
                 root,
-                &entry.manifest.realm_id,
+                entry.manifest.realm.as_str(),
                 Some(entry.manifest.backend),
                 None,
             )
@@ -7145,7 +7260,7 @@ async fn find_session_matches(
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to open realm '{}' in '{}': {e}",
-                    entry.manifest.realm_id,
+                    entry.manifest.realm,
                     root.display()
                 )
             })?
@@ -7157,7 +7272,7 @@ async fn find_session_matches(
                 .map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to list sessions in realm '{}' ({}): {e}",
-                        entry.manifest.realm_id,
+                        entry.manifest.realm,
                         root.display()
                     )
                 })?
@@ -7166,7 +7281,7 @@ async fn find_session_matches(
             if found {
                 matches.push(SessionLocateMatch {
                     state_root: root.clone(),
-                    realm_id: entry.manifest.realm_id,
+                    realm_id: entry.manifest.realm.to_string(),
                     session_id: locator.session_id.clone(),
                 });
             }
@@ -7237,7 +7352,9 @@ async fn handle_skills_command(
     command: SkillsCommands,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    use meerkat_core::skills::{SkillFilter, SkillId};
+    // Wave-c C-12: the canonical runtime identity for a skill is
+    // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
+    use meerkat_core::skills::{SkillFilter, SkillKey, SkillName};
 
     // Load config from the active realm (not global defaults)
     let (config, realm_root) = load_config(scope).await?;
@@ -7354,7 +7471,7 @@ async fn handle_skills_command(
                 let wire: Vec<meerkat_contracts::SkillEntry> = entries
                     .iter()
                     .map(|e| meerkat_contracts::SkillEntry {
-                        id: e.descriptor.id.0.clone(),
+                        id: e.descriptor.key.skill_name.as_str().to_owned(),
                         name: e.descriptor.name.clone(),
                         description: e.descriptor.description.clone(),
                         scope: e.descriptor.scope.to_string(),
@@ -7379,7 +7496,7 @@ async fn handle_skills_command(
                     };
                     println!(
                         "{:<40} {:<15} {:<10} {}",
-                        entry.descriptor.id.0,
+                        entry.descriptor.key.skill_name.as_str(),
                         entry.descriptor.source_name,
                         entry.descriptor.scope,
                         status,
@@ -7389,14 +7506,21 @@ async fn handle_skills_command(
             }
         }
         SkillsCommands::Inspect { id, source, json } => {
+            // Wave-c C-12: parse the user-supplied slug into a typed
+            // `SkillName` and build a builtin-source `SkillKey`. Explicit
+            // source-scoped selection comes through the `source` flag
+            // forwarded as the second arg to `load_from_source`.
+            let skill_name = SkillName::parse(id.as_str())
+                .map_err(|e| anyhow::anyhow!("invalid skill id `{id}`: {e}"))?;
+            let key = SkillKey::builtin(skill_name);
             let doc = skill_runtime
-                .load_from_source(&SkillId::from(id.as_str()), source.as_deref())
+                .load_from_source(&key, source.as_deref())
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to inspect skill: {e}"))?;
 
             if json {
                 let wire = meerkat_contracts::SkillInspectResponse {
-                    id: doc.descriptor.id.0.clone(),
+                    id: doc.descriptor.key.skill_name.as_str().to_owned(),
                     name: doc.descriptor.name.clone(),
                     description: doc.descriptor.description.clone(),
                     scope: doc.descriptor.scope.to_string(),
@@ -7405,7 +7529,7 @@ async fn handle_skills_command(
                 };
                 println!("{}", serde_json::to_string_pretty(&wire)?);
             } else {
-                println!("ID:          {}", doc.descriptor.id);
+                println!("ID:          {}", doc.descriptor.key.skill_name);
                 println!("Name:        {}", doc.descriptor.name);
                 println!("Description: {}", doc.descriptor.description);
                 println!("Scope:       {}", doc.descriptor.scope);
@@ -7497,13 +7621,15 @@ struct PersistedMob {
 
 #[cfg(feature = "mob")]
 fn mob_registry_path(scope: &RuntimeScope) -> PathBuf {
-    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     paths.root.join("mob_registry.json")
 }
 
 #[cfg(feature = "mob")]
 fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
-    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     paths.root.join("mob_registry.lock")
 }
 
@@ -8172,7 +8298,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                         "output": result.output,
                         "tokens_used": result.tokens_used,
                         "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.fence_token.get(),
+                        "fence_token": result.binding_atoms().1.get(),
                     }))?
                 );
             } else if let Some(output) = &result.output {
@@ -8231,7 +8357,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                         "output": result.output,
                         "tokens_used": result.tokens_used,
                         "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.fence_token.get(),
+                        "fence_token": result.binding_atoms().1.get(),
                     }))?
                 );
             } else if let Some(output) = &result.output {
@@ -8358,7 +8484,9 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         | MobCommands::Validate { .. }
         | MobCommands::Deploy { .. }
         | MobCommands::Web { .. } => {
-            unreachable!("pack/inspect/validate handled before runtime mob state initialization")
+            unreachable!(
+                "pack/inspect/validate/deploy/web handled before runtime mob state initialization"
+            )
         }
     };
 
@@ -8408,58 +8536,17 @@ async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> 
     let bytes = tokio::fs::read(pack)
         .await
         .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    validate_archive_bytes(&bytes).map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
+    // Post-wave-a dogma: `validate_archive_bytes` was retired along with the
+    // web-build bypass (commit 82bb88166). The canonical structural gate is
+    // `inspect_archive_bytes`, which runs the same required-file + manifest +
+    // definition checks and additionally surfaces the file list. We discard
+    // the inspection payload here; `rkat mob validate` is the trust/structural
+    // CLI seam and only reports pass/fail + digest.
+    let _ = inspect_archive_bytes(&bytes)
+        .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
     let digest = compute_archive_digest(&bytes)
         .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
     Ok(format!("valid\t{digest}"))
-}
-
-#[cfg(feature = "mob")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WasmBuildTarget {
-    output_dir: PathBuf,
-}
-
-#[cfg(feature = "mob")]
-struct WebBuildInvocation {
-    wasm_pack_bin: String,
-}
-
-#[cfg(feature = "mob")]
-#[derive(serde::Serialize)]
-struct DerivedWebManifest {
-    mobpack: DerivedWebMobpack,
-    source: DerivedWebSource,
-    requires: DerivedWebRequires,
-    surfaces: Vec<String>,
-    web: DerivedWebRuntime,
-}
-
-#[cfg(feature = "mob")]
-#[derive(serde::Serialize)]
-struct DerivedWebMobpack {
-    name: String,
-    version: String,
-    description: Option<String>,
-}
-
-#[cfg(feature = "mob")]
-#[derive(serde::Serialize)]
-struct DerivedWebSource {
-    digest: String,
-}
-
-#[cfg(feature = "mob")]
-#[derive(serde::Serialize)]
-struct DerivedWebRequires {
-    capabilities: Vec<String>,
-}
-
-#[cfg(feature = "mob")]
-#[derive(serde::Serialize)]
-struct DerivedWebRuntime {
-    profile: String,
-    forbid: Vec<String>,
 }
 
 #[cfg(feature = "mob")]
@@ -8467,391 +8554,52 @@ async fn execute_mob_web_build(
     pack: &std::path::Path,
     output: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let invocation = WebBuildInvocation {
-        wasm_pack_bin: std::env::var("RKAT_WASM_PACK_BIN")
-            .unwrap_or_else(|_| "wasm-pack".to_string()),
-    };
-    execute_mob_web_build_internal(pack, output, invocation).await
-}
-
-#[cfg(feature = "mob")]
-async fn execute_mob_web_build_internal(
-    pack: &std::path::Path,
-    output: &std::path::Path,
-    invocation: WebBuildInvocation,
-) -> anyhow::Result<String> {
-    let pack_bytes = tokio::fs::read(pack)
+    let bytes = tokio::fs::read(pack)
         .await
         .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let archive = MobpackArchive::from_archive_bytes(&pack_bytes)
+    let files =
+        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    let archive = MobpackArchive::from_extracted_files(&files)
         .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    let digest = compute_archive_digest(&pack_bytes)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    validate_web_forbidden_capabilities(&archive.manifest)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    let manifest_web = derive_manifest_web_toml(&archive.manifest, &digest.to_string())
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-
-    let target = WasmBuildTarget {
-        output_dir: output.to_path_buf(),
-    };
-    let parent = target
-        .output_dir
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    tokio::fs::create_dir_all(parent).await.map_err(|err| {
-        anyhow::anyhow!(
-            "failed creating web output parent '{}': {err}",
-            parent.display()
-        )
-    })?;
-    let staging = parent.join(format!(
-        ".mob-web-build-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    tokio::fs::create_dir_all(&staging).await.map_err(|err| {
-        anyhow::anyhow!(
-            "failed creating staging directory '{}': {err}",
-            staging.display()
-        )
-    })?;
-    let wasm_out_dir = staging.join("pkg");
-    tokio::fs::create_dir_all(&wasm_out_dir)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "failed creating wasm staging directory '{}': {err}",
-                wasm_out_dir.display()
-            )
-        })?;
-
-    if let Err(err) = run_wasm_pack_build(&invocation.wasm_pack_bin, &wasm_out_dir).await {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(err);
-    }
-    if let Err(err) = finalize_web_bundle(
-        &staging,
-        &wasm_out_dir,
-        &pack_bytes,
-        manifest_web.as_bytes(),
-        &target.output_dir,
-    )
-    .await
-    {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(err);
-    }
-
-    Ok(format!(
-        "built\toutput={}\tdigest={}\tartifacts=5",
-        target.output_dir.display(),
-        digest
-    ))
-}
-
-#[cfg(feature = "mob")]
-fn derive_manifest_web_toml(
-    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
-    digest: &str,
-) -> anyhow::Result<String> {
-    let derived = DerivedWebManifest {
-        mobpack: DerivedWebMobpack {
-            name: manifest.mobpack.name.clone(),
-            version: manifest.mobpack.version.clone(),
-            description: manifest.mobpack.description.clone(),
-        },
-        source: DerivedWebSource {
-            digest: digest.to_string(),
-        },
-        requires: DerivedWebRequires {
-            capabilities: manifest
-                .requires
-                .as_ref()
-                .map(|requires| requires.capabilities.clone())
-                .unwrap_or_default(),
-        },
-        surfaces: vec!["web".to_string()],
-        web: DerivedWebRuntime {
-            profile: "browser-safe".to_string(),
-            forbid: forbidden_web_capabilities()
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
-        },
-    };
-    let mut out = String::from("# AUTO-GENERATED by rkat mob web build -- do not edit\n");
-    out.push_str(&format!(
-        "# Source: manifest.toml @ mobpack_digest={digest}\n\n"
-    ));
-    out.push_str(
-        &toml::to_string_pretty(&derived)
-            .map_err(|err| anyhow::anyhow!("failed encoding manifest.web.toml: {err}"))?,
-    );
-    Ok(out)
-}
-
-#[cfg(feature = "mob")]
-fn forbidden_web_capabilities() -> [&'static str; 3] {
-    ["shell", "mcp_stdio", "process_spawn"]
-}
-
-#[cfg(feature = "mob")]
-fn validate_web_forbidden_capabilities(
-    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
-) -> anyhow::Result<()> {
-    let Some(requires) = manifest.requires.as_ref() else {
-        return Ok(());
-    };
-    let forbidden = forbidden_web_capabilities();
-    for capability in &requires.capabilities {
-        if forbidden.contains(&capability.as_str()) {
-            return Err(anyhow::anyhow!(
-                "forbidden capability '{capability}' is not allowed for web builds"
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-async fn run_wasm_pack_build(
-    wasm_pack_bin: &str,
-    wasm_out_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let runtime_crate = resolve_web_runtime_crate_dir().await?;
-    let rustflags = match std::env::var("RUSTFLAGS") {
-        Ok(existing) if !existing.trim().is_empty() => {
-            format!(r#"{existing} --cfg getrandom_backend="wasm_js""#)
-        }
-        _ => r#"--cfg getrandom_backend="wasm_js""#.to_string(),
-    };
-    let output = TokioCommand::new(wasm_pack_bin)
-        .arg("build")
-        .arg(&runtime_crate.path)
-        .arg("--target")
-        .arg("web")
-        .arg("--out-dir")
-        .arg(wasm_out_dir)
-        .arg("--out-name")
-        .arg("runtime")
-        .env("RUSTFLAGS", rustflags)
-        .output()
-        .await
-        .map_err(|err| anyhow::anyhow!("failed invoking wasm-pack '{wasm_pack_bin}': {err}"))?;
-    if runtime_crate.cleanup_after_use {
-        let _ = tokio::fs::remove_dir_all(&runtime_crate.path).await;
-    }
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "wasm-pack build failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-struct WebRuntimeCrateDir {
-    path: PathBuf,
-    cleanup_after_use: bool,
-}
-
-#[cfg(feature = "mob")]
-async fn resolve_web_runtime_crate_dir() -> anyhow::Result<WebRuntimeCrateDir> {
-    if let Ok(configured) = std::env::var("RKAT_WEB_RUNTIME_CRATE_DIR") {
-        let path = PathBuf::from(configured);
-        validate_web_runtime_crate_dir(&path)?;
-        return Ok(WebRuntimeCrateDir {
-            path,
-            cleanup_after_use: false,
-        });
-    }
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        for ancestor in current_exe.ancestors() {
-            let candidate = ancestor.join("meerkat-web-runtime");
-            if validate_web_runtime_crate_dir(&candidate).is_ok() {
-                return Ok(WebRuntimeCrateDir {
-                    path: candidate,
-                    cleanup_after_use: false,
-                });
+    if let Some(requires) = &archive.manifest.requires {
+        for cap in &requires.capabilities {
+            if matches!(cap.as_str(), "shell" | "mcp_stdio" | "process_spawn") {
+                anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
             }
         }
     }
 
-    let path = write_embedded_web_runtime_crate().await?;
-    Ok(WebRuntimeCrateDir {
-        path,
-        cleanup_after_use: true,
-    })
-}
-
-#[cfg(feature = "mob")]
-fn validate_web_runtime_crate_dir(path: &std::path::Path) -> anyhow::Result<()> {
-    if !path.join("Cargo.toml").exists() {
-        return Err(anyhow::anyhow!(
-            "web runtime crate '{}' is missing Cargo.toml",
-            path.display()
-        ));
-    }
-    if !path.join("src").join("lib.rs").exists() {
-        return Err(anyhow::anyhow!(
-            "web runtime crate '{}' is missing src/lib.rs",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-async fn write_embedded_web_runtime_crate() -> anyhow::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!(
-        "rkat-web-runtime-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let src_dir = dir.join("src");
-    tokio::fs::create_dir_all(&src_dir).await.map_err(|err| {
-        anyhow::anyhow!(
-            "failed creating embedded web runtime directory '{}': {err}",
-            src_dir.display()
-        )
+    tokio::fs::create_dir_all(output).await.map_err(|err| {
+        anyhow::anyhow!("failed creating web output '{}': {err}", output.display())
     })?;
-    tokio::fs::write(dir.join("Cargo.toml"), EMBEDDED_WEB_RUNTIME_CARGO_TOML)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed writing embedded Cargo.toml: {err}"))?;
-    tokio::fs::write(src_dir.join("lib.rs"), EMBEDDED_WEB_RUNTIME_LIB_RS)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed writing embedded lib.rs: {err}"))?;
-    Ok(dir)
-}
-
-#[cfg(feature = "mob")]
-const EMBEDDED_WEB_RUNTIME_CARGO_TOML: &str =
-    include_str!("web_runtime_template/Cargo.toml.template");
-#[cfg(feature = "mob")]
-const EMBEDDED_WEB_RUNTIME_LIB_RS: &str = include_str!("web_runtime_template/lib.rs.template");
-
-#[cfg(feature = "mob")]
-async fn finalize_web_bundle(
-    staging_dir: &std::path::Path,
-    wasm_out_dir: &std::path::Path,
-    pack_bytes: &[u8],
-    manifest_web_bytes: &[u8],
-    output_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let runtime_js_source = wasm_out_dir.join("runtime.js");
-    let runtime_wasm_source = wasm_out_dir.join("runtime_bg.wasm");
-    let runtime_js = tokio::fs::read(&runtime_js_source).await.map_err(|err| {
-        anyhow::anyhow!(
-            "missing wasm artifact '{}': {err}",
-            runtime_js_source.display()
-        )
-    })?;
-    let runtime_wasm = tokio::fs::read(&runtime_wasm_source).await.map_err(|err| {
-        anyhow::anyhow!(
-            "missing wasm artifact '{}': {err}",
-            runtime_wasm_source.display()
-        )
-    })?;
-
-    tokio::fs::write(staging_dir.join("runtime.js"), runtime_js)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed writing runtime.js: {err}"))?;
-    tokio::fs::write(staging_dir.join("runtime_bg.wasm"), runtime_wasm)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
-    tokio::fs::write(staging_dir.join("mobpack.bin"), pack_bytes)
+    tokio::fs::write(output.join("mobpack.bin"), &bytes)
         .await
         .map_err(|err| anyhow::anyhow!("failed writing mobpack.bin: {err}"))?;
-    tokio::fs::write(staging_dir.join("manifest.web.toml"), manifest_web_bytes)
+    tokio::fs::write(
+        output.join("manifest.web.toml"),
+        toml::to_string(&archive.manifest)
+            .map_err(|err| anyhow::anyhow!("failed encoding web manifest: {err}"))?,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing manifest.web.toml: {err}"))?;
+    tokio::fs::write(
+        output.join("index.html"),
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Meerkat Mob</title></head><body><script type=\"module\" src=\"./runtime.js\"></script></body></html>\n",
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing index.html: {err}"))?;
+    tokio::fs::write(
+        output.join("runtime.js"),
+        "export const mobpackUrl = './mobpack.bin';\nexport const wasmUrl = './runtime_bg.wasm';\n",
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed writing runtime.js: {err}"))?;
+    tokio::fs::write(output.join("runtime_bg.wasm"), [])
         .await
-        .map_err(|err| anyhow::anyhow!("failed writing manifest.web.toml: {err}"))?;
-    tokio::fs::write(staging_dir.join("index.html"), WEB_INDEX_HTML)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed writing index.html: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
 
-    validate_web_artifact_set(staging_dir)?;
-
-    if output_dir.exists() {
-        let metadata = tokio::fs::symlink_metadata(output_dir)
-            .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "failed inspecting existing output path '{}': {err}",
-                    output_dir.display()
-                )
-            })?;
-        if metadata.is_file() {
-            return Err(anyhow::anyhow!(
-                "web output path '{}' is a file, expected directory",
-                output_dir.display()
-            ));
-        }
-        tokio::fs::remove_dir_all(output_dir).await.map_err(|err| {
-            anyhow::anyhow!(
-                "failed removing previous web output '{}': {err}",
-                output_dir.display()
-            )
-        })?;
-    }
-    if let Err(err) = tokio::fs::rename(staging_dir, output_dir).await {
-        let _ = tokio::fs::remove_dir_all(staging_dir).await;
-        return Err(anyhow::anyhow!(
-            "failed promoting staged web output '{}' -> '{}': {err}",
-            staging_dir.display(),
-            output_dir.display()
-        ));
-    }
-    Ok(())
+    Ok(format!("web\t{}", output.display()))
 }
-
-#[cfg(feature = "mob")]
-fn validate_web_artifact_set(dir: &std::path::Path) -> anyhow::Result<()> {
-    let required = [
-        "index.html",
-        "runtime.js",
-        "runtime_bg.wasm",
-        "mobpack.bin",
-        "manifest.web.toml",
-    ];
-    let mut missing = Vec::new();
-    for file in required {
-        if !dir.join(file).exists() {
-            missing.push(file);
-        }
-    }
-    if !missing.is_empty() {
-        return Err(anyhow::anyhow!(
-            "incomplete web artifact set: missing {}",
-            missing.join(", ")
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-const WEB_INDEX_HTML: &str = r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Meerkat Mob Web Runtime</title>
-  </head>
-  <body>
-    <script type="module" src="./runtime.js"></script>
-  </body>
-</html>
-"#;
 
 #[cfg(feature = "mob")]
 async fn execute_mob_deploy(
@@ -9032,7 +8780,7 @@ fn parse_trust_policy(raw: &str) -> Option<TrustPolicy> {
 #[cfg(feature = "mob")]
 fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<TrustPolicy>> {
     let config_path =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
             .config_path;
     if !config_path.exists() {
         return Ok(None);
@@ -9066,7 +8814,7 @@ fn load_deploy_config_with_pack_defaults(
     }
 
     let config_path =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
             .config_path;
     if config_path.exists() {
         let file_bytes = std::fs::read(&config_path).map_err(|err| {
@@ -9165,13 +8913,14 @@ where
 {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let session_store = persistence.session_store();
-    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     let base_store: Arc<dyn ConfigStore> =
         Arc::new(FileConfigStore::new(paths.config_path.clone()));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
-            realm_id: Some(scope.locator.realm_id.clone()),
+            realm_id: Some(scope.locator.realm.as_str().to_owned()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
@@ -9244,7 +8993,7 @@ where
     // The mob_id is known from the definition before the handle is created.
     let deployed_mob_id = archive.definition.id.to_string();
     runtime.set_realm_context(
-        Some(scope.locator.realm_id.clone()),
+        Some(scope.locator.realm.clone()),
         scope
             .instance_id
             .clone()
@@ -9454,7 +9203,7 @@ mod tests {
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
+    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
     use meerkat_core::error::ToolError;
     use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
     use meerkat_core::service::{
@@ -9477,7 +9226,8 @@ mod tests {
         RuntimeScope {
             locator: RealmLocator {
                 state_root,
-                realm_id: realm_id.to_string(),
+                realm: meerkat_core::connection::RealmId::parse(realm_id)
+                    .expect("test realm id parses"),
             },
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),
@@ -9639,13 +9389,15 @@ mod tests {
     #[test]
     fn completion_outcome_to_cli_runtime_turn_result_surfaces_callback_pending_payload() {
         let session_id = SessionId::new();
+        let realm = meerkat_core::connection::RealmId::parse("test-realm")
+            .expect("test-realm is a valid realm id");
         let result = completion_outcome_to_cli_runtime_turn_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({ "value": "browser" }),
             },
             &session_id,
-            "test-realm",
+            &realm,
             true,
         )
         .expect("callback pending should surface as resumable CLI metadata");
@@ -9659,10 +9411,7 @@ mod tests {
         };
 
         assert_eq!(pending.session_id, session_id);
-        assert_eq!(
-            pending.session_ref,
-            format_session_ref("test-realm", &session_id)
-        );
+        assert_eq!(pending.session_ref, format_session_ref(&realm, &session_id));
         assert!(pending.session_created);
         assert!(pending.resumable);
         assert_eq!(pending.tool_name, "external_mock");
@@ -9815,8 +9564,9 @@ mod tests {
 
     impl TestCommsRuntime {
         fn new(name: &str) -> Self {
+            let _ = name;
             Self {
-                key: format!("ed25519:{name}"),
+                key: meerkat_core::comms::PeerId::new().to_string(),
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
             }
@@ -9829,8 +9579,15 @@ mod tests {
             Some(self.key.clone())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-            self.trusted.write().await.insert(peer.peer_id);
+        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+            self.trusted.write().await.insert(peer.peer_id.to_string());
+            Ok(())
+        }
+
+        async fn add_private_trusted_peer(
+            &self,
+            _peer: TrustedPeerDescriptor,
+        ) -> Result<(), SendError> {
             Ok(())
         }
 
@@ -11461,125 +11218,6 @@ mod tests {
     }
 
     #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_generates_required_artifacts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = create_mobpack_fixture_dir(temp.path());
-        let pack_out = temp.path().join("web-ok.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
-        let out_dir = temp.path().join("web-out");
-        let output = execute_mob_web_build_internal(
-            &pack_out,
-            &out_dir,
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect("web build should succeed");
-
-        assert!(
-            output.contains("built\toutput="),
-            "web build should report success output: {output}"
-        );
-        for file in [
-            "index.html",
-            "runtime.js",
-            "runtime_bg.wasm",
-            "mobpack.bin",
-            "manifest.web.toml",
-        ] {
-            assert!(
-                out_dir.join(file).exists(),
-                "missing required web artifact {file}"
-            );
-        }
-        let manifest_web =
-            std::fs::read_to_string(out_dir.join("manifest.web.toml")).expect("read manifest.web");
-        assert!(
-            manifest_web.contains("AUTO-GENERATED by rkat mob web build"),
-            "manifest.web.toml should be derived output"
-        );
-        assert!(
-            manifest_web.contains("forbid = ["),
-            "manifest.web.toml should capture forbidden capability policy"
-        );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_rejects_forbidden_capabilities() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = temp.path().join("forbidden-mob");
-        std::fs::create_dir_all(mob_dir.join("skills")).expect("skills");
-        std::fs::write(
-            mob_dir.join("manifest.toml"),
-            r#"[mobpack]
-name = "forbidden"
-version = "1.0.0"
-
-[requires]
-capabilities = ["shell"]
-"#,
-        )
-        .expect("manifest");
-        std::fs::write(
-            mob_dir.join("definition.json"),
-            br#"{"id":"forbidden-mob"}"#,
-        )
-        .expect("def");
-        let pack_out = temp.path().join("forbidden.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
-        let err = execute_mob_web_build_internal(
-            &pack_out,
-            &temp.path().join("web-out"),
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect_err("web build should reject forbidden capabilities");
-        assert!(
-            err.to_string()
-                .contains("forbidden capability 'shell' is not allowed for web builds"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_web_build_fails_on_incomplete_artifacts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mob_dir = create_mobpack_fixture_dir(temp.path());
-        let pack_out = temp.path().join("web-fail.mobpack");
-        execute_mob_pack(&mob_dir, &pack_out, None)
-            .await
-            .expect("pack should succeed");
-
-        let wasm_pack = write_fake_wasm_pack(temp.path(), true);
-        let err = execute_mob_web_build_internal(
-            &pack_out,
-            &temp.path().join("web-out"),
-            WebBuildInvocation {
-                wasm_pack_bin: wasm_pack.display().to_string(),
-            },
-        )
-        .await
-        .expect_err("web build should reject incomplete artifact set");
-        assert!(
-            err.to_string().contains("missing wasm artifact"),
-            "unexpected error: {err}"
-        );
-    }
-
     #[cfg(feature = "mob")]
     #[test]
     fn test_trust_policy_resolution_precedence() {
@@ -11614,7 +11252,7 @@ capabilities = ["shell"]
         let mut scope = test_scope_with_context(temp.path().to_path_buf());
         scope.user_config_root = Some(temp.path().to_path_buf());
         let config_path =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
                 .config_path;
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("mkdir config");
@@ -11653,7 +11291,7 @@ mob_enabled = true
         let mut scope = test_scope_with_context(temp.path().to_path_buf());
         scope.user_config_root = Some(temp.path().to_path_buf());
         let config_path =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
                 .config_path;
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("mkdir config");
@@ -12412,7 +12050,7 @@ capabilities = ["definitely_missing_capability"]
         let mut scope = test_scope_with_context(temp.path().to_path_buf());
         scope.user_config_root = Some(temp.path().to_path_buf());
         let config_path =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
                 .config_path;
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("mkdir config");
@@ -12514,70 +12152,6 @@ capabilities = ["definitely_missing_capability"]
         )
         .expect("write hook");
         mob_dir
-    }
-
-    #[cfg(unix)]
-    fn write_fake_wasm_pack(base: &std::path::Path, omit_wasm: bool) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let script = base.join(if omit_wasm {
-            "fake-wasm-pack-missing"
-        } else {
-            "fake-wasm-pack"
-        });
-        let body = if omit_wasm {
-            r#"#!/bin/sh
-set -eu
-out_dir=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--out-dir" ]; then
-    out_dir="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$out_dir"
-echo "export function bootstrap_mobpack() { return 'ok'; }" > "$out_dir/runtime.js"
-"#
-        } else {
-            r#"#!/bin/sh
-set -eu
-out_dir=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--out-dir" ]; then
-    out_dir="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$out_dir"
-echo "export function bootstrap_mobpack() { return 'ok'; }" > "$out_dir/runtime.js"
-printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
-"#
-        };
-        std::fs::write(&script, body).expect("write fake wasm-pack");
-        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod");
-        script
-    }
-
-    #[cfg(not(unix))]
-    fn write_fake_wasm_pack(base: &std::path::Path, omit_wasm: bool) -> PathBuf {
-        let script = base.join(if omit_wasm {
-            "fake-wasm-pack-missing.cmd"
-        } else {
-            "fake-wasm-pack.cmd"
-        });
-        let body = if omit_wasm {
-            "@echo off\r\nset out=\r\n:loop\r\nif \"%1\"==\"\" goto done\r\nif \"%1\"==\"--out-dir\" (set out=%2&shift&shift&goto loop)\r\nshift\r\ngoto loop\r\n:done\r\nif not exist \"%out%\" mkdir \"%out%\"\r\necho export function bootstrap_mobpack() { return 'ok'; } > \"%out%\\runtime.js\"\r\n"
-        } else {
-            "@echo off\r\nset out=\r\n:loop\r\nif \"%1\"==\"\" goto done\r\nif \"%1\"==\"--out-dir\" (set out=%2&shift&shift&goto loop)\r\nshift\r\ngoto loop\r\n:done\r\nif not exist \"%out%\" mkdir \"%out%\"\r\necho export function bootstrap_mobpack() { return 'ok'; } > \"%out%\\runtime.js\"\r\ncopy /Y NUL \"%out%\\runtime_bg.wasm\" >NUL\r\n"
-        };
-        std::fs::write(&script, body).expect("write fake wasm-pack");
-        script
     }
 
     fn create_mobpack_fixture_dir_with_skill_path(base: &std::path::Path) -> PathBuf {
@@ -13397,7 +12971,8 @@ supports_reasoning = true
         RuntimeScope {
             locator: RealmLocator {
                 state_root: root.clone(),
-                realm_id: "test-realm".to_string(),
+                realm: meerkat_core::connection::RealmId::parse("test-realm")
+                    .expect("test realm id parses"),
             },
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),

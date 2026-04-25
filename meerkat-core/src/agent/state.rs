@@ -17,7 +17,7 @@ use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
-    TurnTerminalOutcome,
+    TurnPrimitiveKind, TurnTerminalOutcome,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
@@ -46,12 +46,76 @@ enum CallTimeoutSource {
     TurnBudget,
 }
 
+fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
+    match input {
+        TurnExecutionInput::StartConversationRun { run_id }
+        | TurnExecutionInput::StartImmediateAppend { run_id }
+        | TurnExecutionInput::StartImmediateContext { run_id }
+        | TurnExecutionInput::PrimitiveApplied { run_id, .. }
+        | TurnExecutionInput::LlmReturnedToolCalls { run_id, .. }
+        | TurnExecutionInput::LlmReturnedTerminal { run_id }
+        | TurnExecutionInput::RegisterPendingOps { run_id, .. }
+        | TurnExecutionInput::ToolCallsResolved { run_id }
+        | TurnExecutionInput::OpsBarrierSatisfied { run_id, .. }
+        | TurnExecutionInput::BoundaryContinue { run_id }
+        | TurnExecutionInput::BoundaryComplete { run_id }
+        | TurnExecutionInput::RecoverableFailure { run_id }
+        | TurnExecutionInput::FatalFailure { run_id }
+        | TurnExecutionInput::RetryRequested { run_id }
+        | TurnExecutionInput::CancelNow { run_id }
+        | TurnExecutionInput::CancelAfterBoundary { run_id }
+        | TurnExecutionInput::CancellationObserved { run_id }
+        | TurnExecutionInput::AcknowledgeTerminal { run_id }
+        | TurnExecutionInput::TurnLimitReached { run_id }
+        | TurnExecutionInput::BudgetExhausted { run_id }
+        | TurnExecutionInput::TimeBudgetExceeded { run_id }
+        | TurnExecutionInput::EnterExtraction { run_id, .. }
+        | TurnExecutionInput::ExtractionValidationPassed { run_id }
+        | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
+        | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
+        TurnExecutionInput::ForceCancelNoRun => None,
+    }
+}
+
 fn synthetic_notice_message(kind: SystemNoticeKind, body: impl Into<String>) -> Message {
     Message::SystemNotice(SystemNoticeMessage::new(kind, body))
 }
 
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
+}
+
+fn merge_provider_param_patch(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target_obj), Value::Object(patch_obj)) => {
+            for (key, value) in patch_obj {
+                if value.is_null() {
+                    target_obj.remove(key);
+                } else {
+                    merge_provider_param_patch(
+                        target_obj.entry(key.clone()).or_insert(Value::Null),
+                        value,
+                    );
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch.clone();
+        }
+    }
+}
+
+fn merged_provider_params(defaults: Option<&Value>, explicit: Option<&Value>) -> Option<Value> {
+    match (defaults, explicit) {
+        (None, None) => None,
+        (Some(defaults), None) => Some(defaults.clone()),
+        (None, Some(explicit)) => Some(explicit.clone()),
+        (Some(defaults), Some(explicit)) => {
+            let mut merged = defaults.clone();
+            merge_provider_param_patch(&mut merged, explicit);
+            Some(merged)
+        }
+    }
 }
 
 fn hidden_deferred_catalog_names(
@@ -82,76 +146,96 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
-    fn runtime_turn_authority_snapshot(&self) -> Option<crate::TurnStateSnapshot> {
-        let handle = self.turn_state_handle.as_deref()?;
-        self.runtime_execution_kind?;
-        Some(handle.snapshot())
+    /// Snapshot the runtime-backed turn-state authority.
+    ///
+    /// Pre-wave-a, a missing `turn_state_handle` fell through to a
+    /// standalone in-process `self.turn_state` authority. Wave-a deleted
+    /// the standalone authority entirely; the runtime-backed handle is now
+    /// the only turn-state source. For live runs the facade wires the
+    /// handle via `AgentBuilder::with_turn_state_handle` (see
+    /// `meerkat/src/factory.rs` where it plugs `SessionRuntimeBindings`).
+    ///
+    /// Returns a typed `AgentError::InternalError` when callers on the
+    /// live-run path query turn state without an attached handle —
+    /// preserves the pre-retype intent (a real secondary authority, never
+    /// a silent default) as a fail-loud error rather than an
+    /// `unwrap_or_default` silent-drop.
+    fn runtime_turn_authority_snapshot(&self) -> Result<crate::TurnStateSnapshot, AgentError> {
+        let handle = self.turn_state_handle.as_deref().ok_or_else(|| {
+            AgentError::InternalError(
+                "runtime turn-state handle missing: agent was built without \
+                 with_turn_state_handle but is being queried on a live-run code path \
+                 — the standalone fallback was deleted in wave-a; runtime-backed \
+                 wiring is required"
+                    .to_string(),
+            )
+        })?;
+        if self.runtime_execution_kind.is_none() {
+            return Err(AgentError::InternalError(
+                "runtime_execution_kind not set: turn-state handle is attached but \
+                 the runtime build mode did not classify the execution kind"
+                    .to_string(),
+            ));
+        }
+        Ok(handle.snapshot())
     }
 
-    fn turn_active_run_id(&self) -> Option<RunId> {
-        self.runtime_turn_authority_snapshot()
-            .and_then(|snapshot| snapshot.active_run_id)
-            .or_else(|| self.turn_state.active_run().cloned())
+    fn turn_active_run_id(&self) -> Result<Option<RunId>, AgentError> {
+        Ok(self.runtime_turn_authority_snapshot()?.active_run_id)
     }
 
-    fn turn_phase(&self) -> TurnPhase {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.turn_phase)
-            .unwrap_or_else(|| self.turn_state.phase())
+    fn turn_phase(&self) -> Result<TurnPhase, AgentError> {
+        Ok(self.runtime_turn_authority_snapshot()?.turn_phase)
     }
 
-    fn turn_cancel_after_boundary(&self) -> bool {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.cancel_after_boundary)
-            .unwrap_or_else(|| self.turn_state.cancel_after_boundary())
+    fn turn_cancel_after_boundary(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .runtime_turn_authority_snapshot()?
+            .cancel_after_boundary)
     }
 
-    fn turn_has_barrier_ops(&self) -> bool {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.has_barrier_ops)
-            .unwrap_or_else(|| self.turn_state.has_barrier_ops())
+    fn turn_has_barrier_ops(&self) -> Result<bool, AgentError> {
+        Ok(self.runtime_turn_authority_snapshot()?.has_barrier_ops)
     }
 
-    fn turn_barrier_operation_ids(&self) -> Vec<crate::ops::OperationId> {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| {
-                snapshot
-                    .barrier_operation_ids
-                    .iter()
-                    .filter_map(|id| parse_runtime_operation_id(id))
-                    .collect()
-            })
-            .unwrap_or_else(|| {
-                self.turn_state
-                    .barrier_op_ids()
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
+    fn turn_barrier_operation_ids(&self) -> Result<Vec<crate::ops::OperationId>, AgentError> {
+        let snapshot = self.runtime_turn_authority_snapshot()?;
+        Ok(snapshot
+            .barrier_operation_ids
+            .iter()
+            .filter_map(|id| parse_runtime_operation_id(id))
+            .collect())
     }
 
-    fn turn_pending_ops_registered(&self) -> bool {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| !snapshot.pending_op_refs.is_empty())
-            .unwrap_or_else(|| self.turn_state.pending_op_refs().is_some())
+    fn turn_pending_ops_registered(&self) -> Result<bool, AgentError> {
+        Ok(!self
+            .runtime_turn_authority_snapshot()?
+            .pending_op_refs
+            .is_empty())
     }
 
-    fn turn_in_extraction_flow(&self) -> bool {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| snapshot.max_extraction_retries > 0)
-            .unwrap_or_else(|| self.turn_state.in_extraction_flow())
+    fn turn_in_extraction_flow(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .runtime_turn_authority_snapshot()?
+            .max_extraction_retries
+            > 0)
     }
 
-    fn turn_terminal_outcome(&self) -> TurnTerminalOutcome {
-        self.runtime_turn_authority_snapshot()
-            .and_then(|snapshot| snapshot.terminal_outcome)
-            .unwrap_or_else(|| self.turn_state.terminal_outcome())
+    fn turn_terminal_outcome(&self) -> Result<TurnTerminalOutcome, AgentError> {
+        // `terminal_outcome` on the snapshot is `Option<TurnTerminalOutcome>`;
+        // `None` there is a meaningful phase ("not yet terminal"), distinct
+        // from "handle absent" which surfaces above as an error. Project
+        // the in-handle `None` to `TurnTerminalOutcome::None` per the
+        // DSL contract (see `TurnStateSnapshot::terminal_outcome` doc).
+        Ok(self
+            .runtime_turn_authority_snapshot()?
+            .terminal_outcome
+            .unwrap_or(TurnTerminalOutcome::None))
     }
 
-    fn turn_extraction_attempts(&self) -> u32 {
-        self.runtime_turn_authority_snapshot()
-            .map(|snapshot| u32::try_from(snapshot.extraction_attempts).unwrap_or(u32::MAX))
-            .unwrap_or_else(|| self.turn_state.extraction_attempts())
+    fn turn_extraction_attempts(&self) -> Result<u32, AgentError> {
+        let snapshot = self.runtime_turn_authority_snapshot()?;
+        Ok(u32::try_from(snapshot.extraction_attempts).unwrap_or(u32::MAX))
     }
 
     /// Resolve the effective call timeout for this LLM call.
@@ -381,44 +465,41 @@ where
         };
 
         let result = match input {
-            // Runtime Start* inputs absorb primitive details that the
-            // standalone fallback receives later via PrimitiveApplied, so defer the
-            // runtime mutation until PrimitiveApplied carries the full payload.
-            TurnExecutionInput::StartConversationRun { .. }
-            | TurnExecutionInput::StartImmediateAppend { .. }
-            | TurnExecutionInput::StartImmediateContext { .. } => {
-                return Ok(());
+            TurnExecutionInput::StartConversationRun { run_id }
+                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                "conversation".to_string(),
+                false,
+                false,
+                0,
+            ),
+            TurnExecutionInput::StartImmediateAppend { run_id }
+                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartImmediateAppend { run_id } => {
+                handle.start_immediate_append(run_id.clone(), "immediate_append".to_string())
+            }
+            TurnExecutionInput::StartImmediateContext { run_id }
+                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartImmediateContext { run_id } => {
+                handle.start_immediate_context(run_id.clone(), "immediate_context".to_string())
             }
             TurnExecutionInput::PrimitiveApplied {
-                run_id,
-                admitted_content_shape,
-                vision_enabled,
-                image_tool_results_enabled,
-            } => match self.turn_state.primitive_kind() {
-                crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn => handle
-                    .start_conversation_run(
-                        run_id.clone(),
-                        crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
-                        admitted_content_shape.0.clone(),
-                        *vision_enabled,
-                        *image_tool_results_enabled,
-                        if self.config.output_schema.is_some() {
-                            u64::from(self.config.structured_output_retries)
-                        } else {
-                            0
-                        },
-                    )
-                    .and_then(|()| handle.primitive_applied()),
-                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateAppend => handle
-                    .start_immediate_append(run_id.clone(), admitted_content_shape.0.clone())
-                    .and_then(|()| handle.primitive_applied()),
-                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateContextAppend => {
-                    handle
-                        .start_immediate_context(run_id.clone(), admitted_content_shape.0.clone())
-                        .and_then(|()| handle.primitive_applied())
-                }
-                crate::turn_execution_authority::TurnPrimitiveKind::None => return Ok(()),
-            },
+                run_id: _,
+                admitted_content_shape: _,
+                vision_enabled: _,
+                image_tool_results_enabled: _,
+            } => handle.primitive_applied(),
             TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
                 handle.llm_returned_tool_calls(u64::from(*tool_count))
             }
@@ -458,12 +539,14 @@ where
             }
             TurnExecutionInput::CancellationObserved { .. } => handle.cancellation_observed(),
             TurnExecutionInput::AcknowledgeTerminal { .. } => {
-                handle.acknowledge_terminal(self.turn_terminal_outcome())
+                handle.acknowledge_terminal(self.turn_terminal_outcome()?)
             }
             TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
             TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
             TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
-            TurnExecutionInput::EnterExtraction { .. } => handle.enter_extraction(),
+            TurnExecutionInput::EnterExtraction { max_retries, .. } => {
+                handle.enter_extraction(*max_retries)
+            }
             TurnExecutionInput::ExtractionValidationPassed { .. } => {
                 handle.extraction_validation_passed()
             }
@@ -485,23 +568,42 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
-        let runtime_backed = self.turn_state_handle.is_some()
-            && self.runtime_execution_kind.is_some()
-            && self.turn_state.can_accept(&input);
-        if runtime_backed {
-            self.apply_turn_input_via_runtime_handle(&input)?;
+        let prev_phase = self.turn_phase()?;
+        self.apply_turn_input_via_runtime_handle(&input)?;
+        let next_phase = self.turn_phase()?;
+
+        // Effects are derived from phase transitions only. The runtime
+        // authority owns all other side-effect decisions; core just
+        // surfaces the compaction tick on CallingLlm entry so the
+        // standalone compactor path still fires.
+        let mut effects = Vec::new();
+        if prev_phase != TurnPhase::CallingLlm && next_phase == TurnPhase::CallingLlm {
+            effects.push(TurnExecutionEffect::CheckCompaction);
         }
-        let transition = self.turn_state.apply(input.clone()).map_err(|err| {
-            if runtime_backed {
-                AgentError::InternalError(format!(
-                    "standalone turn-state shadow diverged after runtime accepted {input:?}: {err}"
-                ))
-            } else {
-                err
-            }
-        })?;
-        self.state = transition.next_phase.to_loop_state();
-        Ok(transition)
+        if prev_phase != TurnPhase::Completed
+            && next_phase == TurnPhase::Completed
+            && let Some(run_id) = turn_input_run_id(&input)
+        {
+            effects.push(TurnExecutionEffect::RunCompleted { run_id });
+        }
+        if prev_phase != TurnPhase::Failed
+            && next_phase == TurnPhase::Failed
+            && let Some(run_id) = turn_input_run_id(&input)
+        {
+            effects.push(TurnExecutionEffect::RunFailed { run_id });
+        }
+        if prev_phase != TurnPhase::Cancelled
+            && next_phase == TurnPhase::Cancelled
+            && let Some(run_id) = turn_input_run_id(&input)
+        {
+            effects.push(TurnExecutionEffect::RunCancelled { run_id });
+        }
+
+        Ok(TurnExecutionTransition {
+            prev_phase,
+            next_phase,
+            effects,
+        })
     }
 
     /// Execute side effects from a transition. Handles CheckCompaction
@@ -513,6 +615,42 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) {
         for effect in &transition.effects {
+            match effect {
+                TurnExecutionEffect::RunCompleted { run_id } => {
+                    if let Some(handle) = self.turn_state_handle.as_deref()
+                        && let Err(error) = handle.run_completed(run_id.clone())
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "runtime turn-state handle rejected RunCompleted effect"
+                        );
+                    }
+                }
+                TurnExecutionEffect::RunFailed { run_id } => {
+                    if let Some(handle) = self.turn_state_handle.as_deref()
+                        && let Err(error) =
+                            handle.run_failed(run_id.clone(), "run failed".to_string())
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "runtime turn-state handle rejected RunFailed effect"
+                        );
+                    }
+                }
+                TurnExecutionEffect::RunCancelled { run_id } => {
+                    if let Some(handle) = self.turn_state_handle.as_deref()
+                        && let Err(error) = handle.run_cancelled(run_id.clone())
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "runtime turn-state handle rejected RunCancelled effect"
+                        );
+                    }
+                }
+                TurnExecutionEffect::RunStarted { .. }
+                | TurnExecutionEffect::BoundaryApplied { .. }
+                | TurnExecutionEffect::CheckCompaction => {}
+            }
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;
                 if let Some(ref compactor) = self.compactor {
@@ -535,7 +673,7 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            *self.session.messages_mut() = outcome.new_messages;
+                            *self.session.messages_mut_internal() = outcome.new_messages;
                             self.session.record_usage(outcome.summary_usage.clone());
                             self.budget.record_usage(&outcome.summary_usage);
                             self.last_input_tokens = 0;
@@ -592,11 +730,13 @@ where
             return Ok(());
         }
 
-        if self.turn_active_run_id().as_ref() != Some(run_id) || self.turn_cancel_after_boundary() {
+        if self.turn_active_run_id()?.as_ref() != Some(run_id)
+            || self.turn_cancel_after_boundary()?
+        {
             return Ok(());
         }
 
-        match self.turn_phase() {
+        match self.turn_phase()? {
             TurnPhase::ApplyingPrimitive
             | TurnPhase::CallingLlm
             | TurnPhase::WaitingForOps
@@ -625,7 +765,11 @@ where
         let mut event_stream_open = true;
 
         // --- Authority lifecycle: start a conversation run ---
-        let run_id = RunId(uuid::Uuid::new_v4());
+        let run_id = self
+            .turn_state_handle
+            .as_deref()
+            .and_then(|handle| handle.snapshot().active_run_id)
+            .unwrap_or_else(|| RunId(uuid::Uuid::new_v4()));
         self.apply_turn_input(TurnExecutionInput::StartConversationRun {
             run_id: run_id.clone(),
         })?;
@@ -737,100 +881,9 @@ where
                     //
                     //    Strip prior synthetic AuthReauthRequired notices
                     //    so the notice always reflects current DSL state.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
                     });
-                    if let (Some(handle), Some(binding_key)) = (
-                        self.auth_lease_handle.as_deref(),
-                        self.connection_ref_binding_key.as_deref(),
-                    ) {
-                        let snapshot = handle.snapshot(binding_key);
-
-                        // TTL sampler — Phase 1.5-rev refresh-loop leg
-                        // (b): when the lease is still `valid` but the
-                        // resolver's recorded expires_at is within 60s
-                        // of now, drive MarkAuthExpiring so the runner
-                        // (next iteration) sees `expiring` and fires
-                        // begin_refresh. Comparing DSL-recorded TTL
-                        // against SystemTime is shell-mechanics; the
-                        // DSL's transition guard enforces legality.
-                        if snapshot.phase == Some(crate::handles::AuthLeasePhase::Valid)
-                            && let Some(expires_at) = snapshot.expires_at
-                        {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            // Policy constant is owned by the
-                            // handle-trait module (dogma §9/§20).
-                            // Leases within AUTH_LEASE_TTL_REFRESH_WINDOW_SECS
-                            // of expiry (or already past) trigger
-                            // expiring. Max sentinel (u64::MAX) means
-                            // "no expiry" — api_key/env-var leases
-                            // land here and never expire.
-                            let window = crate::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS;
-                            if expires_at != u64::MAX && expires_at <= now.saturating_add(window) {
-                                let _ = handle.mark_expiring(binding_key);
-                            }
-                        }
-
-                        // Re-read state — may have moved to `expiring`
-                        // via the TTL check above.
-                        let snapshot = handle.snapshot(binding_key);
-                        match snapshot.phase {
-                            // expiring → observable state only. Plan
-                            // §1.5r.9's "call provider resolver refresh
-                            // → complete_refresh or refresh_failed" leg
-                            // is architecturally blocked on mid-session
-                            // client hot-swap (plan §Explicit deferrals),
-                            // so driving into `refreshing` from here
-                            // would create a state the production flow
-                            // has no path out of. Dogma §19 forbids that
-                            // theater. The TTL-expiry signal is still
-                            // useful to external observers (CLI status,
-                            // REST AuthStatus), which is why
-                            // `mark_expiring` fires above; the machine's
-                            // `refreshing` state remains reachable from
-                            // tests and — when the refresh driver lands
-                            // — from a session-scoped driver task.
-                            Some(crate::handles::AuthLeasePhase::Expiring) => {}
-                            // reauth_required → project the DSL state into a
-                            // synthetic session-level system notice, then
-                            // terminate the run. The DSL has already
-                            // decided that this binding cannot proceed;
-                            // the runner only surfaces that decision.
-                            Some(crate::handles::AuthLeasePhase::ReauthRequired) => {
-                                let notice = format!(
-                                    "Connection `{binding_key}` requires re-authentication. \
-                                     Run `rkat auth login` for the provider, then retry."
-                                );
-                                self.session.push(synthetic_notice_message(
-                                    SystemNoticeKind::AuthReauthRequired,
-                                    notice.clone(),
-                                ));
-                                // Typed terminal — the machine decided
-                                // this binding cannot proceed. Surfaces
-                                // can pattern-match on
-                                // AgentError::AuthReauthRequired rather
-                                // than parsing a string prefix out of
-                                // InternalError (dogma §5).
-                                self.pending_fatal_diagnostic =
-                                    Some(AgentError::AuthReauthRequired {
-                                        binding_key: binding_key.to_string(),
-                                        message: notice,
-                                    });
-                                self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                                    run_id: run_id.clone(),
-                                })?;
-                                return self.build_result(turn_count, tool_call_count).await;
-                            }
-                            // valid / refreshing / None: no runner action.
-                            // `refreshing` means another caller is mid-flight;
-                            // we can proceed with the call because the lease
-                            // hasn't been invalidated yet.
-                            _ => {}
-                        }
-                    }
 
                     // 1. Poll external updates BEFORE tool capture so newly
                     //    connected tools are visible in the same LLM call.
@@ -848,7 +901,7 @@ where
                     // 3. Manage [MCP_PENDING] notice lifecycle.
                     //    Always strip prior synthetic notices to avoid stale state.
                     //    Uses starts_with on a strict prefix to avoid matching user text.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::McpPending)
                     });
                     // Prefer the DSL-authoritative handshake state (Phase 5G /
@@ -870,7 +923,7 @@ where
                     }
 
                     // 3b. Background shell job completion notices via CompletionFeed.
-                    self.session.messages_mut().retain(|message| {
+                    self.session.messages_mut_internal().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob)
                     });
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
@@ -1192,21 +1245,10 @@ where
 
                     let mut effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    // Merge provider tool defaults with explicit provider_params (RFC 7396).
-                    // tool_defaults are non-persisted, re-derived each build from config + profile.
-                    // explicit provider_params are persisted and override/remove defaults via null.
-                    let mut effective_provider_params = match (
-                        &self.config.provider_tool_defaults,
-                        &self.config.provider_params,
-                    ) {
-                        (Some(defaults), Some(explicit)) => {
-                            let mut merged = defaults.clone();
-                            json_merge_patch(&mut merged, explicit.clone());
-                            Some(merged)
-                        }
-                        (Some(defaults), None) => Some(defaults.clone()),
-                        (None, some_or_none) => some_or_none.clone(),
-                    };
+                    let mut effective_provider_params = merged_provider_params(
+                        self.config.provider_tool_defaults.as_ref(),
+                        self.config.provider_params.as_ref(),
+                    );
 
                     // Pre-LLM hooks may rewrite request params or deny the turn.
                     let pre_llm_report = self
@@ -1238,6 +1280,9 @@ where
                         ..
                     }) = pre_llm_report.decision
                     {
+                        self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                            run_id: run_id.clone(),
+                        })?;
                         return Err(AgentError::HookDenied {
                             point: HookPoint::PreLlmRequest,
                             reason_code,
@@ -1277,7 +1322,7 @@ where
                     }
 
                     // In extraction mode, override tools/temperature/params
-                    let in_extraction = self.turn_in_extraction_flow();
+                    let in_extraction = self.turn_in_extraction_flow()?;
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
@@ -1383,6 +1428,20 @@ where
                     self.budget.record_usage(&result.usage);
                     self.last_input_tokens = result.usage.input_tokens;
                     self.session.record_usage(result.usage.clone());
+                    if let Err(AgentError::TokenBudgetExceeded { used, limit }) =
+                        self.budget.check()
+                    {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::Tokens,
+                            used,
+                            limit,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                            run_id: run_id.clone(),
+                        })?;
+                        return self.build_result(turn_count, tool_call_count).await;
+                    }
 
                     let (blocks, stop_reason, usage) = result.into_parts();
                     let mut assistant_msg = BlockAssistantMessage {
@@ -1781,7 +1840,7 @@ where
                             has_barrier_ops,
                         })?;
 
-                        if self.turn_has_barrier_ops() {
+                        if self.turn_has_barrier_ops()? {
                             // Stay in WaitingForOps — the outer match arm will
                             // await completion of barrier ops via wait-set.
                             continue;
@@ -1798,7 +1857,7 @@ where
                         })?;
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         turn_count += 1;
-                    } else if self.turn_in_extraction_flow() {
+                    } else if self.turn_in_extraction_flow()? {
                         // Extraction turn response — validate against schema
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
@@ -1883,7 +1942,7 @@ where
                                 },
                             )?;
 
-                            if !self.turn_phase().is_terminal() {
+                            if !self.turn_phase()?.is_terminal() {
                                 // Authority decided to retry — push retry prompt
                                 let retry_prompt = format!(
                                     "The previous output was invalid: {error}. \
@@ -1902,16 +1961,19 @@ where
                                 tracing::warn!("Failed to save session: {}", e);
                             }
                             return Err(AgentError::StructuredOutputValidationFailed {
-                                attempts: self.turn_extraction_attempts(),
+                                attempts: self.turn_extraction_attempts()?,
                                 reason: error,
                                 last_output: self.session.last_assistant_text().unwrap_or_default(),
                             });
                         }
 
                         // Validation passed — complete via authority
-                        self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
-                            run_id: run_id.clone(),
-                        })?;
+                        let t = self.apply_turn_input(
+                            TurnExecutionInput::ExtractionValidationPassed {
+                                run_id: run_id.clone(),
+                            },
+                        )?;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         if let Err(e) = self.store.save(&self.session).await {
                             tracing::warn!("Failed to save session: {}", e);
                         }
@@ -1943,7 +2005,7 @@ where
 
                         // Check if we need to perform extraction turn for structured output
                         if let Some(output_schema) = self.config.output_schema.as_ref()
-                            && !self.turn_in_extraction_flow()
+                            && !self.turn_in_extraction_flow()?
                         {
                             // Enter extraction mode via authority
                             self.extraction_result = None;
@@ -1981,9 +2043,10 @@ where
                         }
 
                         // No extraction needed - complete normally
-                        self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                        let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                             run_id: run_id.clone(),
                         })?;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
 
                         // Save session
                         if let Err(e) = self.store.save(&self.session).await {
@@ -2006,12 +2069,12 @@ where
                     // Await completion of all pending barrier operations via
                     // the machine-owned turn-local wait-set. Only barrier ops
                     // block the turn; detached ops run independently.
-                    if !self.turn_pending_ops_registered() {
+                    if !self.turn_pending_ops_registered()? {
                         return Err(AgentError::InternalError(
                             "WaitingForOps entered without registered pending_op_refs".to_string(),
                         ));
                     }
-                    let barrier_ids = self.turn_barrier_operation_ids();
+                    let barrier_ids = self.turn_barrier_operation_ids()?;
                     if !barrier_ids.is_empty() {
                         let wait_result = if let Some(ref registry) = self.ops_lifecycle {
                             registry
@@ -2051,9 +2114,10 @@ where
                 }
                 LoopState::DrainingEvents => {
                     // Wait for any pending events to be processed
-                    self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                    let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                         run_id: run_id.clone(),
                     })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
                 LoopState::Cancelling => {
                     // Handle cancellation
@@ -2081,8 +2145,11 @@ where
     async fn build_result(&mut self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
         use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
 
-        let outcome = self.turn_terminal_outcome();
+        let outcome = self.turn_terminal_outcome()?;
         let classification = classify_terminal(&outcome);
+        if classification.is_some() {
+            self.state = LoopState::Completed;
+        }
 
         match classification {
             Some(SurfaceResultClass::HardFailure) => {
@@ -2218,27 +2285,6 @@ fn completion_outcome_status_str(
     }
 }
 
-/// RFC 7396 JSON Merge Patch: null removes, objects recurse, scalars replace.
-///
-/// Local copy because `config_store::merge_patch` is `#[cfg(not(target_arch = "wasm32"))]`.
-fn json_merge_patch(base: &mut serde_json::Value, patch: serde_json::Value) {
-    use serde_json::Value;
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    json_merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2254,8 +2300,8 @@ mod tests {
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::skills::{
-        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillId,
-        SkillKey, SkillName, SourceUuid,
+        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillKey,
+        SkillName, SourceUuid,
     };
     use crate::state::LoopState;
     use crate::tool_scope::{
@@ -2269,6 +2315,30 @@ mod tests {
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
+
+    /// Attach an in-core phase-tracking `TurnStateHandle` to a raw
+    /// `AgentBuilder`.
+    ///
+    /// Wave-A deleted the standalone in-core turn-state fallback
+    /// (`LocalTurnExecutionState`); `Agent::runtime_turn_authority_snapshot`
+    /// now requires a live handle on every run path. Tests that construct
+    /// a bare `AgentBuilder::new()` (wrapped here by this helper) must
+    /// thread a `TurnStateHandle` through the build or the agent loop
+    /// panics the first time it queries turn state.
+    ///
+    /// `meerkat-core` cannot borrow `RuntimeTurnStateHandle` from
+    /// `meerkat-runtime` (circular dev-dep instantiates two copies of
+    /// `meerkat-core` and the trait impls do not unify). Instead we use
+    /// the in-core test helper
+    /// [`super::test_turn_state_handle::TestTurnStateHandle`], which
+    /// ports the deleted pre-wave-a `LocalTurnExecutionState` transition
+    /// logic verbatim so the agent loop sees faithful phase advancement.
+    ///
+    /// See #32 Class W1 — runtime_turn_authority missing handle.
+    fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        builder.with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+    }
 
     #[test]
     fn rewrite_assistant_text_rewrites_all_text_blocks() {
@@ -2351,19 +2421,27 @@ mod tests {
     }
 
     struct RecordingSkillEngine {
-        seen_ids: Mutex<Vec<SkillId>>,
+        seen_keys: Mutex<Vec<SkillKey>>,
     }
 
     impl RecordingSkillEngine {
         fn new() -> Self {
             Self {
-                seen_ids: Mutex::new(Vec::new()),
+                seen_keys: Mutex::new(Vec::new()),
             }
         }
 
-        fn seen(&self) -> Vec<SkillId> {
-            self.seen_ids.lock().unwrap().clone()
+        fn seen(&self) -> Vec<SkillKey> {
+            self.seen_keys.lock().unwrap().clone()
         }
+    }
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        SkillKey::new(
+            SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid fixture source uuid"),
+            SkillName::parse(name).expect("valid fixture skill name"),
+        )
     }
 
     impl SkillEngine for RecordingSkillEngine {
@@ -2375,19 +2453,20 @@ mod tests {
 
         fn resolve_and_render(
             &self,
-            ids: &[SkillId],
+            keys: &[SkillKey],
         ) -> impl Future<Output = Result<Vec<ResolvedSkill>, crate::skills::SkillError>> + Send
         {
-            let ids = ids.to_vec();
+            let keys = keys.to_vec();
             async move {
-                let mut seen = self.seen_ids.lock().unwrap();
-                seen.extend_from_slice(&ids);
+                let mut seen = self.seen_keys.lock().unwrap();
+                seen.extend_from_slice(&keys);
                 drop(seen);
 
                 Ok(vec![ResolvedSkill {
-                    id: ids.first().cloned().unwrap_or_else(|| {
-                        SkillId("dc256086-0d2f-4f61-a307-320d4148107f/email-extractor".to_string())
-                    }),
+                    key: keys
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| fixture_skill_key("email-extractor")),
                     name: "email-extractor".to_string(),
                     rendered_body: "<skill>injected canonical skill</skill>".to_string(),
                     byte_size: 34,
@@ -2431,33 +2510,33 @@ mod tests {
 
         fn list_artifacts(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
         ) -> impl Future<
             Output = Result<Vec<crate::skills::SkillArtifact>, crate::skills::SkillError>,
         > + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
 
         fn read_artifact(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
             _artifact_path: &str,
         ) -> impl Future<
             Output = Result<crate::skills::SkillArtifactContent, crate::skills::SkillError>,
         > + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
 
         fn invoke_function(
             &self,
-            id: &SkillId,
+            key: &SkillKey,
             _function_name: &str,
             _arguments: Value,
         ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
-            let missing = id.clone();
-            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
     }
 
@@ -3404,7 +3483,7 @@ mod tests {
     where
         C: AgentLlmClient + ?Sized + 'static,
     {
-        AgentBuilder::new()
+        with_test_turn_state_handle(AgentBuilder::new())
             .build(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await
     }
@@ -3413,7 +3492,7 @@ mod tests {
     async fn reused_session_follow_up_run_can_compact_before_first_llm_call() {
         let client = Arc::new(CompactionAwareLlmClient::new());
         let compactor = Arc::new(TrackingCompactor::new(Some(1)));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .compactor(compactor.clone())
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -3429,83 +3508,6 @@ mod tests {
                 "COMPACT NOW".to_string(),
                 "second".to_string()
             ]
-        );
-    }
-
-    #[tokio::test]
-    async fn calling_llm_with_max_turns_zero_completes_with_zero_turns() {
-        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
-        agent.config.max_turns = Some(0);
-        agent.state = LoopState::CallingLlm;
-
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 0);
-        assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn calling_llm_with_budget_exhausted_completes_with_zero_turns() {
-        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
-        agent.config.max_turns = Some(10);
-        agent.state = LoopState::CallingLlm;
-        agent.budget = Budget::new(BudgetLimits {
-            max_tokens: Some(0),
-            max_duration: None,
-            max_tool_calls: None,
-        });
-
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 0);
-        assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn completed_with_max_turns_zero_returns_immediately() {
-        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
-        agent.config.max_turns = Some(0);
-        agent.state = LoopState::Completed;
-
-        // With the turn execution authority, Completed + max_turns=0
-        // correctly returns immediately with 0 turns rather than
-        // erroring with InvalidStateTransition.
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 0);
-        assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn error_recovery_with_max_turns_zero_completes() {
-        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
-        agent.config.max_turns = Some(0);
-        agent.state = LoopState::ErrorRecovery;
-
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 0);
-        assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn run_with_events_emits_run_completed_for_max_turns_zero() {
-        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
-        agent.config.max_turns = Some(0);
-
-        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
-        let result = agent
-            .run_with_events("prompt".to_string().into(), tx)
-            .await
-            .unwrap();
-        assert_eq!(result.turns, 0);
-
-        let mut saw_run_completed = false;
-        while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::RunCompleted { result, .. } = event {
-                saw_run_completed = true;
-                assert_eq!(result, "");
-            }
-        }
-        assert!(
-            saw_run_completed,
-            "successful early exits should still emit RunCompleted"
         );
     }
 
@@ -3550,7 +3552,7 @@ mod tests {
             }
         }
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_hook_engine(Arc::new(RewriteRunCompletedHook))
             .build(
                 Arc::new(StaticLlmClient),
@@ -3611,7 +3613,7 @@ mod tests {
             }
         }
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_hook_engine(Arc::new(DenyRunCompletedHook))
             .build(
                 Arc::new(StaticLlmClient),
@@ -3688,7 +3690,7 @@ mod tests {
             Vec::new(),
             vec!["late boundary message".to_string()],
         ]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_hook_engine(Arc::new(DenyTurnBoundaryHook))
             .with_comms_runtime(comms)
             .build(
@@ -3750,7 +3752,7 @@ mod tests {
             });
         }
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_event_tap(tap)
             .build(
                 Arc::new(StaticLlmClient),
@@ -3783,7 +3785,7 @@ mod tests {
         let client = Arc::new(RecordingLlmClient::new());
         let skill_engine = Arc::new(RecordingSkillEngine::new());
         let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(skill_engine.clone()));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_skill_engine(skill_runtime)
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -3805,7 +3807,7 @@ mod tests {
         assert!(
             seen_ids
                 .iter()
-                .any(|id| id.0 == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
+                .any(|id| id.to_string() == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
             "expected canonical skill id to be forwarded to skill engine, saw: {seen_ids:?}"
         );
 
@@ -3840,7 +3842,7 @@ mod tests {
             },
         ])));
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .with_blob_store(blob_store.clone())
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
@@ -3867,7 +3869,7 @@ mod tests {
     async fn provider_receives_filtered_tools_and_dispatch_blocks_hidden_tools() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
@@ -3899,7 +3901,7 @@ mod tests {
     async fn external_tool_dispatch_uses_visible_dispatcher() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client, tools.clone(), Arc::new(NoopStore))
             .await;
 
@@ -3921,7 +3923,7 @@ mod tests {
     async fn external_tool_dispatch_blocks_hidden_tools() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client, tools.clone(), Arc::new(NoopStore))
             .await;
         agent
@@ -3966,7 +3968,7 @@ mod tests {
     async fn external_tool_dispatch_applies_session_effects() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(DeferredLoadDispatcher::new());
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client, tools, Arc::new(NoopStore))
             .await;
 
@@ -3996,7 +3998,7 @@ mod tests {
     async fn provider_and_dispatch_share_the_same_combined_visible_set_for_control_tools() {
         let client = Arc::new(ControlPlaneVisibilityClient::new());
         let tools = Arc::new(PlaneAwareToolDispatcher::new());
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
@@ -4033,7 +4035,7 @@ mod tests {
     async fn deferred_tools_become_visible_only_after_load_effect_reaches_the_next_boundary() {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
@@ -4058,7 +4060,7 @@ mod tests {
     async fn deferred_catalog_delta_events_track_hidden_catalog_changes_across_boundaries() {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client, tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
@@ -4100,7 +4102,7 @@ mod tests {
     async fn direct_builder_exact_catalog_without_control_plane_keeps_deferred_tools_inline() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(DeferredWithoutControlDispatcher::new());
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
@@ -4125,7 +4127,7 @@ mod tests {
     async fn run_loop_boundary_applies_filter_and_emits_tool_config_changed_and_notice() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent
@@ -4172,7 +4174,7 @@ mod tests {
     async fn run_loop_fails_safe_to_full_tools_with_warning_event_and_notice() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent
@@ -4235,7 +4237,7 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
@@ -4264,7 +4266,7 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
@@ -4305,7 +4307,7 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;
@@ -4537,7 +4539,7 @@ mod tests {
 
         let hint = Duration::from_millis(200); // short for CI speed
         let client = Arc::new(RateLimitThenSucceedClient::new(hint));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .retry_policy(RetryPolicy {
                 max_retries: 3,
                 initial_delay: Duration::from_millis(10),
@@ -4584,7 +4586,7 @@ mod tests {
         use crate::retry::RetryPolicy;
 
         let client = Arc::new(RateLimitThenSucceedClient::new(Duration::ZERO));
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .retry_policy(RetryPolicy {
                 max_retries: 3,
                 initial_delay: Duration::from_millis(10),
@@ -4701,7 +4703,7 @@ mod tests {
             text_response(r#"{"answer": "42"}"#),
         ]));
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -4744,7 +4746,7 @@ mod tests {
             text_response(r#"{"name": "meerkat"}"#),
         ]));
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
             .structured_output_retries(2)
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
@@ -4789,7 +4791,7 @@ mod tests {
             text_response("bad json 2"),
         ]));
 
-        let mut agent = AgentBuilder::new()
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
             .structured_output_retries(2)
             .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))

@@ -33,6 +33,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
+fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
+    AgentBuilder::new().with_turn_state_handle(Arc::new(
+        meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Mock agent
 // ---------------------------------------------------------------------------
@@ -711,7 +717,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<CompactionSessionAgent, SessionError> {
-        let mut builder = AgentBuilder::new()
+        let mut builder = agent_builder_with_ephemeral_turn_state()
             .model(req.model.clone())
             .compactor(self.compactor.clone());
         if let Some(max_tokens) = req.max_tokens {
@@ -740,7 +746,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RealSessionAgent, SessionError> {
-        let mut builder = AgentBuilder::new().model(req.model.clone());
+        let mut builder = agent_builder_with_ephemeral_turn_state().model(req.model.clone());
         if let Some(max_tokens) = req.max_tokens {
             builder = builder.max_tokens_per_turn(max_tokens);
         }
@@ -802,8 +808,6 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         event_tx: None,
         skill_references: None,
         flow_tool_overlay: None,
-        additional_instructions: None,
-        execution_kind: None,
     }
 }
 

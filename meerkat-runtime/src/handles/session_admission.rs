@@ -39,6 +39,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         work_id: &str,
         origin: InputSource,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Ingest {
                 runtime_id: mm_dsl::AgentRuntimeId::from(runtime_id.to_string()),
@@ -55,21 +56,21 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         request_immediate_processing: bool,
         interrupt_yielding: bool,
         wake_if_idle: bool,
-        run_id: &RunId,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
                 input_id: mm_dsl::InputId::from_domain(input_id),
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
-                run_id: mm_dsl::RunId::from_domain(run_id),
             },
             "SessionAdmissionHandle::accept_with_completion",
         )
     }
 
     fn accept_without_wake(&self, input_id: &InputId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::AcceptWithoutWake {
                 input_id: mm_dsl::InputId::from_domain(input_id),
@@ -79,6 +80,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
     }
 
     fn prepare(&self, run_id: &RunId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Prepare {
                 session_id: mm_dsl::SessionId::default(),
@@ -89,6 +91,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
     }
 
     fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Commit {
                 input_id: mm_dsl::InputId::from_domain(input_id),
@@ -99,6 +102,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
     }
 
     fn fail(&self, run_id: &RunId) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Fail {
                 run_id: mm_dsl::RunId::from_domain(run_id),
@@ -108,6 +112,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
     }
 
     fn recycle(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Recycle,
             "SessionAdmissionHandle::recycle",

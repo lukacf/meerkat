@@ -1,4 +1,4 @@
-//! Cross-crate DSL handle traits for the MeerkatMachine DSL.
+//! Cross-crate DSL handle traits.
 //!
 //! Downstream crates (`meerkat-mcp`, `meerkat-comms`, `meerkat-session`) drive
 //! DSL transitions through these trait objects without importing
@@ -368,7 +368,7 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn boundary_complete(&self) -> Result<(), DslTransitionError>;
 
-    fn enter_extraction(&self) -> Result<(), DslTransitionError>;
+    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError>;
 
     fn extraction_start(&self) -> Result<(), DslTransitionError>;
 
@@ -592,7 +592,6 @@ pub trait SessionAdmissionHandle: Send + Sync {
         request_immediate_processing: bool,
         interrupt_yielding: bool,
         wake_if_idle: bool,
-        run_id: &RunId,
     ) -> Result<(), DslTransitionError>;
 
     /// Fire the `AcceptWithoutWake { input_id }` input.
@@ -632,17 +631,13 @@ pub struct AuthLeaseSnapshot {
 /// seam, not in random helpers") and §20 ("every important behavior
 /// reduces to one clear owner").
 ///
-/// The actual state transition is gated by the MeerkatMachine DSL's
+/// The actual state transition is gated by the AuthMachine DSL's
 /// `MarkAuthExpiring` input (which enforces the `valid → expiring`
 /// legality); this constant only controls *when* the runner fires
 /// that input, not whether the transition is legal.
 pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
-///
-/// Covers the auth-lifecycle inputs on the MeerkatMachine DSL. Each method
-/// drives the corresponding DSL transition and returns
-/// `Err(DslTransitionError)` if the guard rejects.
 pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `AcquireAuthLease { binding_key, expires_at }` — unconditional.
     ///
@@ -1342,6 +1337,25 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
         &self,
         observer: Arc<dyn RealtimeProjectionFreshnessObserver>,
     );
+
+    /// Atomically install a typed observer and return the current
+    /// freshness snapshot as a single authority read. Implementations
+    /// MUST hold the same authority lock that projection transitions use
+    /// for both observer installation and the `(freshness, frontier)`
+    /// sample, so no `RealtimeProjectionFreshnessChanged` effect can
+    /// slip between "observer visible" and "socket seeded from the DSL".
+    ///
+    /// Callers that only need best-effort notification may use
+    /// [`Self::install_projection_freshness_observer`]. Realtime socket
+    /// bindings should prefer this method so wake registration and the
+    /// typed DSL snapshot share one ordering point.
+    fn install_projection_freshness_observer_with_snapshot(
+        &self,
+        observer: Arc<dyn RealtimeProjectionFreshnessObserver>,
+    ) -> (RealtimeProjectionFreshness, u64) {
+        self.install_projection_freshness_observer(observer);
+        (self.projection_freshness(), self.projection_frontier_ms())
+    }
 
     // ---- Reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20) ----
 

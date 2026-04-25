@@ -315,10 +315,10 @@ if include_scenario(39):
             accepted = await client_b.submit(
                 session_id,
                 make_prompt_input(
-                    f"Reply with PY-RUNTIME-39 and the marker {marker}.",
+                    f"Reply with PY-RUNTIME-39, PY-RUNTIME-OK, and the marker {marker}.",
                     turn_metadata={
                         "additional_instructions": [
-                            "Always include the marker [PY-RUNTIME-OK].",
+                            "Keep the response brief and include only the requested markers.",
                         ],
                     },
                 ),

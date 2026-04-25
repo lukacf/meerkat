@@ -3,10 +3,12 @@
 //! Exposes agent-facing comms tools: `send_message`, `send_request`,
 //! `send_response`, and `peers`.
 //!
-//! All comms-send tools serialize into the typed
-//! [`meerkat_core::comms::CommsCommandRequest`] enum at the deserialization
-//! boundary. Invalid discriminators (`source`, `stream`, `handling_mode`,
-//! `status`) become serde errors rather than runtime string-match failures.
+//! The tool inputs deserialize into typed per-tool input structs; from
+//! there they are assembled directly into [`CommsCommand`] domain
+//! envelopes and dispatched through the runtime. There is no wire-layer
+//! [`CommsCommandRequest`] variant for peer traffic after Wave-B: the
+//! agent-facing MCP surface is internal, so typed enums (`HandlingMode`,
+//! `ResponseStatus`) remain the only serde-gated boundary.
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;
@@ -19,7 +21,7 @@ use std::sync::Arc;
 use crate::{CommsConfig, Keypair};
 use crate::{Router, Status, TrustedPeers};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, CommsCommandRequest, PeerName};
+use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName};
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::types::HandlingMode;
 
@@ -140,27 +142,26 @@ pub async fn handle_tools_call(
             let input: SendMessageInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_name(&input.to)?;
-            let request = CommsCommandRequest::PeerMessage {
+            let command = CommsCommand::PeerMessage {
                 to,
-                body: Some(input.body),
+                body: input.body,
                 blocks: None,
-                handling_mode: Some(input.handling_mode),
+                handling_mode: input.handling_mode,
             };
-            dispatch(ctx, request).await
+            dispatch(ctx, command).await
         }
         "send_request" => {
             let input: SendRequestInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_name(&input.to)?;
-            let request = CommsCommandRequest::PeerRequest {
+            let command = CommsCommand::PeerRequest {
                 to,
                 intent: input.intent,
-                params: input.params,
-                body: None,
-                handling_mode: Some(input.handling_mode),
-                stream: None,
+                params: input.params.unwrap_or_else(|| json!({})),
+                handling_mode: input.handling_mode,
+                stream: InputStreamMode::None,
             };
-            dispatch(ctx, request).await
+            dispatch(ctx, command).await
         }
         "send_response" => {
             let input: SendResponseInput = serde_json::from_value(args.clone())
@@ -168,14 +169,20 @@ pub async fn handle_tools_call(
             let to = peer_name(&input.to)?;
             let in_reply_to_uuid = uuid::Uuid::parse_str(&input.in_reply_to)
                 .map_err(|_| format!("invalid UUID for in_reply_to: {}", input.in_reply_to))?;
-            let request = CommsCommandRequest::PeerResponse {
+            // Accepted progress responses reject a handling_mode override
+            // at the tool boundary — the receiver's admission gate would
+            // drop them, so refuse to build a command that can't succeed.
+            if matches!(input.status, ResponseStatus::Accepted) && input.handling_mode.is_some() {
+                return Err("handling_mode is forbidden on accepted peer responses".to_string());
+            }
+            let command = CommsCommand::PeerResponse {
                 to,
                 in_reply_to: InteractionId(in_reply_to_uuid),
                 status: input.status,
-                result: input.result,
+                result: input.result.unwrap_or_else(|| json!({})),
                 handling_mode: input.handling_mode,
             };
-            dispatch(ctx, request).await
+            dispatch(ctx, command).await
         }
         "peers" => {
             let _input: PeersInput = serde_json::from_value(args.clone())
@@ -190,20 +197,15 @@ fn peer_name(value: &str) -> Result<PeerName, String> {
     PeerName::new(value).map_err(|err| format!("invalid to: {err}"))
 }
 
-async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Value, String> {
-    // Capture peer name for error normalization before consuming the request.
-    let peer_for_errors = match &request {
-        CommsCommandRequest::PeerMessage { to, .. }
-        | CommsCommandRequest::PeerRequest { to, .. }
-        | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_string()),
-        CommsCommandRequest::Input { .. } => None,
+async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, String> {
+    // Capture peer name for error normalization before consuming the command.
+    let peer_for_errors = match &command {
+        CommsCommand::PeerMessage { to, .. }
+        | CommsCommand::PeerLifecycle { to, .. }
+        | CommsCommand::PeerRequest { to, .. }
+        | CommsCommand::PeerResponse { to, .. } => Some(to.clone()),
+        CommsCommand::Input { .. } => None,
     };
-
-    let command = request
-        // Per-session id is irrelevant here — the agent-facing tools only
-        // reach peer_* commands, never the local `Input` variant.
-        .into_command(&meerkat_core::SessionId::new())
-        .map_err(|e| e.to_string())?;
     let cmd_kind = command.command_kind().to_string();
 
     if let Some(runtime) = &ctx.runtime {
@@ -213,12 +215,18 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
             }
             meerkat_core::comms::SendError::PeerOffline => format!(
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
-                peer_for_errors.as_deref().unwrap_or("<unknown>")
+                peer_for_errors
+                    .as_ref()
+                    .map(PeerName::as_str)
+                    .unwrap_or("<unknown>")
             ),
             meerkat_core::comms::SendError::Internal(inner) if is_transport_internal(&inner) => {
                 format!(
                     "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
-                    peer_for_errors.as_deref().unwrap_or("<unknown>")
+                    peer_for_errors
+                        .as_ref()
+                        .map(PeerName::as_str)
+                        .unwrap_or("<unknown>")
                 )
             }
             other => other.to_string(),
@@ -226,17 +234,36 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
         return Ok(json!({ "status": "sent", "kind": cmd_kind }));
     }
 
+    // Fallback path (no runtime): dispatch directly through the router.
+    // This is used by unit tests and minimal host configurations. Resolve
+    // the destination `PeerName` against the trusted-peer set exactly once
+    // — duplicate names refuse the send rather than guessing.
+    let dest_display = peer_for_errors
+        .as_ref()
+        .map(PeerName::as_str)
+        .unwrap_or("<unknown>")
+        .to_string();
+    let dest_peer_id = match &command {
+        CommsCommand::PeerMessage { to, .. }
+        | CommsCommand::PeerLifecycle { to, .. }
+        | CommsCommand::PeerRequest { to, .. }
+        | CommsCommand::PeerResponse { to, .. } => resolve_name_to_peer_id(ctx, to)?,
+        CommsCommand::Input { .. } => {
+            return Err("input command is not supported by MCP send".to_string());
+        }
+    };
+
     match command {
         CommsCommand::Input { .. } => Err("input command is not supported by MCP send".to_string()),
         CommsCommand::PeerMessage {
-            to,
             body,
             blocks,
             handling_mode,
+            ..
         } => {
             ctx.router
                 .send(
-                    to.as_str(),
+                    dest_peer_id,
                     crate::types::MessageKind::Message {
                         body,
                         blocks,
@@ -244,21 +271,20 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
                     },
                 )
                 .await
-                .map_err(|e| format_router_send_error(to.as_str(), e))?;
+                .map_err(|e| format_router_send_error(&dest_display, e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
-        CommsCommand::PeerLifecycle { to, kind, params } => {
+        CommsCommand::PeerLifecycle { kind, params, .. } => {
             ctx.router
                 .send(
-                    to.as_str(),
+                    dest_peer_id,
                     crate::types::MessageKind::Lifecycle { kind, params },
                 )
                 .await
-                .map_err(|e| format_router_send_error(to.as_str(), e))?;
+                .map_err(|e| format_router_send_error(&dest_display, e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
         CommsCommand::PeerRequest {
-            to,
             intent,
             params,
             handling_mode,
@@ -266,7 +292,7 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
         } => {
             ctx.router
                 .send(
-                    to.as_str(),
+                    dest_peer_id,
                     crate::types::MessageKind::Request {
                         intent,
                         params,
@@ -274,15 +300,15 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
                     },
                 )
                 .await
-                .map_err(|e| format_router_send_error(to.as_str(), e))?;
+                .map_err(|e| format_router_send_error(&dest_display, e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
         CommsCommand::PeerResponse {
-            to,
             in_reply_to,
             status,
             result,
             handling_mode,
+            ..
         } => {
             let status = match status {
                 ResponseStatus::Accepted => Status::Accepted,
@@ -291,7 +317,7 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
             };
             ctx.router
                 .send(
-                    to.as_str(),
+                    dest_peer_id,
                     crate::types::MessageKind::Response {
                         in_reply_to: in_reply_to.0,
                         status,
@@ -300,9 +326,33 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
                     },
                 )
                 .await
-                .map_err(|e| format_router_send_error(to.as_str(), e))?;
+                .map_err(|e| format_router_send_error(&dest_display, e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
+    }
+}
+
+/// Resolve a typed [`PeerName`] against the runtime-facing trust set.
+///
+/// Delegates to [`crate::trust::TrustedPeers`] via the read lock —
+/// duplicate names are not routing-legal, so this returns the first
+/// matching entry's derived [`meerkat_core::comms::PeerId`] and lets the
+/// router refuse if no entry matches. Runtime-backed surfaces that care
+/// about the name ambiguity should use
+/// [`crate::trust::TrustStore::resolve_name`] and surface the typed
+/// [`crate::trust::TrustResolveError::Ambiguous`] before reaching the
+/// router.
+fn resolve_name_to_peer_id(
+    ctx: &ToolContext,
+    name: &PeerName,
+) -> Result<meerkat_core::comms::PeerId, String> {
+    let peers = ctx.trusted_peers.read();
+    match peers.get_by_name(name.as_str()) {
+        Some(peer) => Ok(crate::router::peer_id_from_pubkey(&peer.pubkey)),
+        None => Err(format!(
+            "peer_not_found_or_not_trusted: peer '{}' is not found or not trusted",
+            name.as_str()
+        )),
     }
 }
 

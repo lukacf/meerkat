@@ -323,10 +323,6 @@ struct ShellState {
     wait_request_id: Option<WaitRequestId>,
     /// Monotonic sequence counter for completion feed entries.
     next_completion_seq: CompletionSeq,
-    /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
-    /// sets pending and fires the Notify so the waker task can inject a
-    /// continuation into the quiescent session.
-    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
     /// Shared feed buffer for completion events.
     feed_buffer: Arc<FeedBuffer>,
     /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
@@ -375,7 +371,6 @@ impl ShellState {
             max_concurrent,
             wait_request_id: None,
             next_completion_seq: 0,
-            detached_wake: None,
             // Feed buffer is larger than max_completed to absorb bursts.
             // Entries are only evicted by buffer capacity, not by consumer cursor,
             // so the buffer must be large enough that consumers drain before
@@ -624,9 +619,8 @@ impl ShellState {
     }
 
     /// Emit shell-side mechanics for a terminal transition: notify watchers,
-    /// push CompletionEntry, arm detached wake, retain in FIFO, evict as
-    /// needed. Called AFTER the DSL transition has already persisted the
-    /// terminal status + outcome.
+    /// push CompletionEntry, retain in FIFO, evict as needed. Called AFTER the
+    /// DSL transition has already persisted the terminal status + outcome.
     fn finalize_terminal(&mut self, id: &OperationId) {
         let outcome = match self.terminal_outcome(id) {
             Some(o) => o,
@@ -638,14 +632,6 @@ impl ShellState {
         if let Some(shell) = self.records.get_mut(id) {
             shell.notify_watchers(&outcome);
             shell.mark_completed();
-        }
-
-        // Arm detached wake for BackgroundToolOp terminals.
-        if let (Some(k), Some(wake)) = (kind, self.detached_wake.as_ref())
-            && k == OperationKind::BackgroundToolOp
-        {
-            wake.pending.store(true, Ordering::Release);
-            wake.notify.notify_one();
         }
 
         // Push completion feed entry.
@@ -967,7 +953,6 @@ pub struct RuntimeOpsLifecycleRegistry {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct RuntimeOpsDiagnosticSnapshot {
     pub operation_count: usize,
     pub active_count: usize,
@@ -1012,14 +997,6 @@ impl RuntimeOpsLifecycleRegistry {
             state.persist_tx = Some(tx);
             state.persist_epoch_id = Some(epoch_id);
             state.persist_cursor_state = Some(cursor_state);
-        }
-    }
-
-    /// Wire the detached-wake state so that finalize_terminal arms pending
-    /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
-    pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
-        if let Ok(mut state) = self.state.write() {
-            state.detached_wake = Some(wake);
         }
     }
 
@@ -1153,10 +1130,6 @@ impl RuntimeOpsLifecycleRegistry {
     }
 
     /// Capture a stable diagnostic snapshot of the canonical ops lifecycle state.
-    ///
-    /// This is an internal refactor aid for the MeerkatMachine build-out. It is
-    /// intentionally additive and does not change lifecycle semantics.
-    #[allow(dead_code)]
     pub(crate) fn diagnostic_snapshot(&self) -> RuntimeOpsDiagnosticSnapshot {
         let state = self
             .state
@@ -1823,7 +1796,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::TrustedPeerSpec;
+    use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
     use meerkat_core::types::SessionId;
@@ -1884,8 +1857,13 @@ mod tests {
         let result = registry.peer_ready(
             &op_id,
             OperationPeerHandle {
-                peer_name: "peer".into(),
-                trusted_peer: TrustedPeerSpec::new("peer", "peer-id", "inproc://peer").unwrap(),
+                peer_name: meerkat_core::comms::PeerName::new("peer").unwrap(),
+                trusted_peer: TrustedPeerDescriptor::test_only_unsigned_typed(
+                    "peer",
+                    PeerId::new(),
+                    "inproc://peer",
+                )
+                .unwrap(),
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
@@ -1924,39 +1902,6 @@ mod tests {
                 other => panic!("expected completed, got {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn background_terminal_sets_detached_wake_pending_without_signaled_latch() {
-        let registry = RuntimeOpsLifecycleRegistry::new();
-        let wake = std::sync::Arc::new(crate::detached_wake::DetachedWakeState::new());
-        registry.set_detached_wake(std::sync::Arc::clone(&wake));
-
-        let spec = background_spec("wake");
-        let op_id = spec.id.clone();
-        registry.register_operation(spec).unwrap();
-        registry.provisioning_succeeded(&op_id).unwrap();
-        registry
-            .complete_operation(
-                &op_id,
-                OperationResult {
-                    id: op_id.clone(),
-                    content: "done".into(),
-                    is_error: false,
-                    duration_ms: 1,
-                    tokens_used: 0,
-                },
-            )
-            .unwrap();
-
-        assert!(
-            wake.pending.load(Ordering::Acquire),
-            "background terminal should arm detached wake pending state"
-        );
-        assert!(
-            !wake.signaled.load(Ordering::Acquire),
-            "ops lifecycle should not set the legacy signaled latch directly"
-        );
     }
 
     #[tokio::test]
@@ -2328,12 +2273,20 @@ mod tests {
         assert!(snap1.peer_handle.is_none());
 
         let handle = OperationPeerHandle {
-            peer_name: "member-x".into(),
-            trusted_peer: TrustedPeerSpec::new("member-x", "peer-id", "inproc://x").unwrap(),
+            peer_name: meerkat_core::comms::PeerName::new("member-x").unwrap(),
+            trusted_peer: TrustedPeerDescriptor::test_only_unsigned_typed(
+                "member-x",
+                PeerId::new(),
+                "inproc://x",
+            )
+            .unwrap(),
         };
         registry.peer_ready(&op_id, handle).unwrap();
 
         let snap2 = registry.snapshot(&op_id).unwrap();
-        assert_eq!(snap2.peer_handle.as_ref().unwrap().peer_name, "member-x");
+        assert_eq!(
+            snap2.peer_handle.as_ref().unwrap().peer_name.as_str(),
+            "member-x"
+        );
     }
 }

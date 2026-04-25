@@ -120,8 +120,6 @@ fn event_label(kind: &MobEventKind) -> &'static str {
         MobEventKind::MobReset => "MobReset",
         MobEventKind::MemberSpawned(..) => "MemberSpawned",
         MobEventKind::MemberRetired { .. } => "MemberRetired",
-        MobEventKind::MembersWired { .. } => "MembersWired",
-        MobEventKind::MembersUnwired { .. } => "MembersUnwired",
         MobEventKind::TaskCreated { .. } => "TaskCreated",
         MobEventKind::TaskUpdated { .. } => "TaskUpdated",
         MobEventKind::FlowStarted { .. } => "FlowStarted",

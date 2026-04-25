@@ -10,12 +10,12 @@ mod hook_impl;
 mod runner;
 pub mod skills;
 mod state;
-mod turn_state;
-
+#[doc(hidden)]
+pub mod test_turn_state_handle;
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope, TrustedPeerSpec,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
@@ -552,8 +552,8 @@ pub trait CommsRuntime: Send + Sync {
     /// Runtime-local advertised comms address, if available.
     ///
     /// This is the canonical address the runtime expects peers to use when
-    /// constructing a [`TrustedPeerSpec`]. Implementations that do not expose a
-    /// stable advertised address can return `None`.
+    /// constructing a [`TrustedPeerDescriptor`]. Implementations that do not
+    /// expose a stable advertised address can return `None`.
     fn advertised_address(&self) -> Option<String> {
         None
     }
@@ -569,7 +569,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Runtimes that manage trust dynamically should accept this as a mutable
     /// control-plane operation and return `SendError::Unsupported` if not
     /// available.
-    async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_trusted_peer not supported for this CommsRuntime".to_string(),
         ))
@@ -596,7 +596,10 @@ pub trait CommsRuntime: Send + Sync {
     /// peer in `comms.peers` / REST / RPC / MCP. The admission gate consults
     /// both the public and private trust sets; `resolve_peer_directory()`
     /// consults only the public set.
-    async fn add_private_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+    async fn add_private_trusted_peer(
+        &self,
+        _peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
             "add_private_trusted_peer not supported for this CommsRuntime".to_string(),
         ))
@@ -840,8 +843,11 @@ where
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
-    /// Optional session checkpointer for host-mode persistence.
-    #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
+    /// Optional session checkpointer for keep-alive persistence.
+    ///
+    /// Wired by `AgentBuilder::with_checkpointer`, installed by
+    /// `PersistentSessionService`, and consumed by
+    /// `Agent::checkpoint_current_session`.
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
@@ -858,9 +864,6 @@ where
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
     /// Optional shared lifecycle registry for async operations.
-    ///
-    /// When set, the agent loop waits on the exact turn-local operation IDs
-    /// registered in `turn_state.pending_op_refs()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Optional completion feed for cursor-based completion delivery.
     pub(crate) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
@@ -877,33 +880,22 @@ where
     /// of the canonical `session.build_state().mob_tool_authority_context`.
     pub(crate) mob_authority_handle:
         Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
-    /// Runtime-backed turn-state handle, when provided by the session runtime
-    /// bindings. Writes route here first when the mapping is available, with
-    /// `turn_state` retained as the standalone fallback owner.
+    /// Runtime-backed turn-state handle, provided by the session runtime bindings.
     pub(crate) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
-    /// Standalone local owner for turn-execution state when no runtime handle exists.
-    pub(crate) turn_state: turn_state::LocalTurnExecutionState,
     /// Typed execution intent for the current run, when this turn is owned by
     /// the runtime control plane rather than a direct surface call.
     pub(crate) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
-    /// Runtime-backed auth lease handle (Phase 1.5-rev). When set, the runner
-    /// drives lease lifecycle transitions at each CallingLlm boundary and
-    /// emits `AUTH_REAUTH_REQUIRED` notices when a permanent refresh failure
-    /// occurs. `connection_ref_binding_key` identifies which binding the
-    /// session's LLM calls route through.
+    /// Runtime-backed auth lease handle (Phase 1.5-rev).
+    #[expect(dead_code, reason = "wired by D-c AuthMachine composition")]
     pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
     /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary
     /// to decide whether to emit the `[MCP_PENDING]` system notice.
     pub(crate) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
-    /// Binding key for the connection_ref this session resolves through,
-    /// in `"realm_id:binding_id"` form. Populated when the agent was built
-    /// via a connection_ref path; `None` for env-var / legacy flat path.
-    pub(crate) connection_ref_binding_key: Option<String>,
     /// Shared live flag for cancellation at the next turn boundary.
     pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).
@@ -926,11 +918,14 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::{
         CommsRuntime, DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS, InlinePeerNotificationPolicy,
     };
-    use crate::comms::{SendError, TrustedPeerSpec};
+    use crate::comms::{
+        PeerAddress, PeerId, PeerName, PeerTransport, SendError, TrustedPeerDescriptor,
+    };
     use async_trait::async_trait;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -957,10 +952,11 @@ mod tests {
             notify: Arc::new(Notify::new()),
         };
         assert!(<NoopCommsRuntime as CommsRuntime>::public_key(&runtime).is_none());
-        let peer = TrustedPeerSpec {
-            name: "peer-a".to_string(),
-            peer_id: "ed25519:test".to_string(),
-            address: "inproc://peer-a".to_string(),
+        let peer = TrustedPeerDescriptor {
+            peer_id: PeerId::new(),
+            name: PeerName::new("peer-a").expect("valid peer name"),
+            address: PeerAddress::new(PeerTransport::Inproc, "peer-a"),
+            pubkey: [0u8; 32],
         };
         let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));

@@ -15,18 +15,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Wire projection of [`meerkat_core::ConnectionRef`].
+///
+/// Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
+/// `parse` and `Display` on both the core type and the wire projection so
+/// the colon-joined form cannot travel across wire boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireConnectionRef {
-    pub realm_id: String,
-    pub binding_id: String,
+    pub realm: meerkat_core::connection::RealmId,
+    pub binding: meerkat_core::connection::BindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<meerkat_core::connection::ProfileId>,
 }
 
 impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
     fn from(value: meerkat_core::ConnectionRef) -> Self {
         Self {
-            realm_id: value.realm_id,
-            binding_id: value.binding_id,
+            realm: value.realm,
+            binding: value.binding,
+            profile: value.profile,
         }
     }
 }
@@ -34,28 +41,10 @@ impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
 impl From<WireConnectionRef> for meerkat_core::ConnectionRef {
     fn from(value: WireConnectionRef) -> Self {
         Self {
-            realm_id: value.realm_id,
-            binding_id: value.binding_id,
+            realm: value.realm,
+            binding: value.binding,
+            profile: value.profile,
         }
-    }
-}
-
-impl WireConnectionRef {
-    pub fn parse(raw: &str) -> Option<Self> {
-        let (realm, binding) = raw.split_once(':')?;
-        if realm.is_empty() || binding.is_empty() {
-            return None;
-        }
-        Some(Self {
-            realm_id: realm.to_string(),
-            binding_id: binding.to_string(),
-        })
-    }
-}
-
-impl std::fmt::Display for WireConnectionRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.realm_id, self.binding_id)
     }
 }
 
@@ -100,13 +89,10 @@ pub struct WireAuthProfile {
     pub id: String,
     pub provider: String,
     pub auth_method: String,
-    /// Discriminator: "inline_secret" / "env" / "managed_store" /
+    /// Discriminator: "inline_secret" / "env" /
     /// "external_resolver" / "platform_default" / "command" /
     /// "file_descriptor".
     pub source_kind: String,
-    /// Discriminator for the storage variant:
-    /// "keyring" / "file" / "auto" / "ephemeral" / "host_managed".
-    pub storage_kind: String,
 }
 
 impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
@@ -114,25 +100,16 @@ impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
         let source_kind = match &value.source {
             meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
             meerkat_core::CredentialSourceSpec::Env { .. } => "env",
-            meerkat_core::CredentialSourceSpec::ManagedStore { .. } => "managed_store",
             meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
             meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
             meerkat_core::CredentialSourceSpec::Command { .. } => "command",
             meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
-        };
-        let storage_kind = match &value.storage {
-            meerkat_core::CredentialStorageSpec::Keyring => "keyring",
-            meerkat_core::CredentialStorageSpec::File { .. } => "file",
-            meerkat_core::CredentialStorageSpec::Auto => "auto",
-            meerkat_core::CredentialStorageSpec::Ephemeral => "ephemeral",
-            meerkat_core::CredentialStorageSpec::HostManaged => "host_managed",
         };
         Self {
             id: value.id.clone(),
             provider: value.provider.as_str().to_string(),
             auth_method: value.auth_method.clone(),
             source_kind: source_kind.to_string(),
-            storage_kind: storage_kind.to_string(),
         }
     }
 }
@@ -270,6 +247,162 @@ pub struct WireAuthStatus {
     pub last_error: Option<WireAuthError>,
 }
 
+// --- Auth REST response envelopes ------------------------------------
+
+/// Identifies a binding inside a realm on the wire. Shared by every
+/// auth REST response that returns a `{realm_id, binding_id, connection_ref}`
+/// trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
+/// fields always agree; the `realm_id`/`binding_id` strings carry the
+/// slug form for wire consumers that key by string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireBindingIdentity {
+    pub realm_id: String,
+    pub binding_id: String,
+    pub connection_ref: WireConnectionRef,
+}
+
+impl From<&meerkat_core::ConnectionRef> for WireBindingIdentity {
+    fn from(cref: &meerkat_core::ConnectionRef) -> Self {
+        Self {
+            realm_id: cref.realm.to_string(),
+            binding_id: cref.binding.to_string(),
+            connection_ref: WireConnectionRef::from(cref.clone()),
+        }
+    }
+}
+
+/// `POST /auth/profiles` (create) success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileCreated {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    pub auth_method: String,
+    pub stored: bool,
+}
+
+/// `GET /auth/profiles/:binding_id` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileDetail {
+    pub connection_ref: WireConnectionRef,
+    pub binding_id: String,
+    pub profile_id: String,
+    pub auth_profile: WireAuthProfile,
+}
+
+/// `DELETE /auth/profiles/:binding_id` / `POST /auth/logout` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfileCleared {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub cleared: bool,
+}
+
+/// `POST /auth/login/start` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLoginStart {
+    pub authorize_url: String,
+    pub state: String,
+    pub pkce_verifier: String,
+    pub pkce_challenge: String,
+    pub redirect_uri: String,
+    pub provider: String,
+}
+
+/// `POST /auth/login/complete` / ready leg of device-code success body.
+///
+/// The optional `state` field distinguishes the flat `POST
+/// /auth/login/complete` response (no `state` set) from the device-code
+/// ready leg (`state = "ready"`) which is part of the pending/slow_down/
+/// access_denied/expired/ready tagged protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLoginReady {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub has_refresh_token: bool,
+    pub scopes: Vec<String>,
+}
+
+/// `POST /auth/login/device/start` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDeviceStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    pub interval: u64,
+    pub provider: String,
+}
+
+/// Realm summary entry returned by `GET /realms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRealmSummary {
+    pub realm_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_binding: Option<String>,
+    pub backend_count: usize,
+    pub auth_profile_count: usize,
+    pub binding_count: usize,
+}
+
+/// `GET /realms` success body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRealmList {
+    pub realms: Vec<WireRealmSummary>,
+}
+
+/// `GET /auth/profiles` success body — realm-scoped lists of backend,
+/// auth, and binding profiles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthProfilesList {
+    pub realm_id: String,
+    pub auth_profiles: Vec<WireAuthProfile>,
+    pub backend_profiles: Vec<WireBackendProfile>,
+    pub bindings: Vec<WireProviderBinding>,
+}
+
+/// `GET /auth/status/:binding_id` success body. Richer than
+/// [`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
+/// `connection_ref` / `has_refresh_token` so the caller can key by
+/// binding directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAuthStatusDetail {
+    #[serde(flatten)]
+    pub identity: WireBindingIdentity,
+    pub profile_id: String,
+    pub provider: String,
+    pub auth_method: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub has_refresh_token: bool,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -278,25 +411,31 @@ mod tests {
     #[test]
     fn connection_ref_roundtrip() {
         let r = meerkat_core::ConnectionRef {
-            realm_id: "dev".into(),
-            binding_id: "default_openai".into(),
+            realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
+            profile: None,
         };
         let w: WireConnectionRef = r.clone().into();
-        assert_eq!(w.realm_id, "dev");
-        assert_eq!(w.binding_id, "default_openai");
+        assert_eq!(w.realm.as_str(), "dev");
+        assert_eq!(w.binding.as_str(), "default_openai");
+        assert!(w.profile.is_none());
         let back: meerkat_core::ConnectionRef = w.into();
         assert_eq!(back, r);
     }
 
     #[test]
-    fn connection_ref_parse_and_display() {
-        let w = WireConnectionRef::parse("dev:default_openai").unwrap();
-        assert_eq!(w.realm_id, "dev");
-        assert_eq!(w.binding_id, "default_openai");
-        assert_eq!(w.to_string(), "dev:default_openai");
-        assert!(WireConnectionRef::parse("no-colon").is_none());
-        assert!(WireConnectionRef::parse(":empty-realm").is_none());
-        assert!(WireConnectionRef::parse("empty-binding:").is_none());
+    fn connection_ref_wire_json_has_no_string_form() {
+        let w = WireConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("openai_main").unwrap(),
+            profile: Some(meerkat_core::connection::ProfileId::parse("ci").unwrap()),
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("\"realm\":\"prod\""));
+        assert!(json.contains("\"binding\":\"openai_main\""));
+        assert!(json.contains("\"profile\":\"ci\""));
+        // No colon-joined form anywhere.
+        assert!(!json.contains("prod:openai_main"));
     }
 
     #[test]
@@ -310,69 +449,6 @@ mod tests {
         };
         let w: WireBackendProfile = (&bp).into();
         assert_eq!(w.provider, "openai");
-    }
-
-    #[test]
-    fn auth_profile_discriminators_are_snake_case() {
-        use meerkat_core::{AuthProfile, CredentialSourceSpec, CredentialStorageSpec, Provider};
-        let cases = [
-            (
-                CredentialSourceSpec::InlineSecret { secret: "x".into() },
-                CredentialStorageSpec::Keyring,
-                "inline_secret",
-                "keyring",
-            ),
-            (
-                CredentialSourceSpec::ExternalResolver { handle: "x".into() },
-                CredentialStorageSpec::Ephemeral,
-                "external_resolver",
-                "ephemeral",
-            ),
-            (
-                CredentialSourceSpec::PlatformDefault,
-                CredentialStorageSpec::Auto,
-                "platform_default",
-                "auto",
-            ),
-            (
-                CredentialSourceSpec::Command {
-                    program: "/bin/sh".into(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: Default::default(),
-                    timeout_ms: 30_000,
-                    refresh_interval_ms: None,
-                },
-                CredentialStorageSpec::HostManaged,
-                "command",
-                "host_managed",
-            ),
-            (
-                CredentialSourceSpec::FileDescriptor {
-                    fd: 3,
-                    scope_override: None,
-                },
-                CredentialStorageSpec::File {
-                    path: "/tmp/x".into(),
-                },
-                "file_descriptor",
-                "file",
-            ),
-        ];
-        for (source, storage, expected_source, expected_storage) in cases {
-            let ap = AuthProfile {
-                id: "a".into(),
-                provider: Provider::OpenAI,
-                auth_method: "api_key".into(),
-                source,
-                storage,
-                constraints: Default::default(),
-                metadata_defaults: Default::default(),
-            };
-            let w: WireAuthProfile = (&ap).into();
-            assert_eq!(w.source_kind, expected_source);
-            assert_eq!(w.storage_kind, expected_storage);
-        }
     }
 
     #[test]

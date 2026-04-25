@@ -137,7 +137,7 @@ machine OrderLifecycle {
     disposition OrderSubmitted => local,
     disposition OrderAssigned => local,
     disposition OrderPaid => local,
-    disposition OrderCompleted => external,
+    disposition OrderCompleted => external handoff order_completion,
     disposition OrderCancelled => external,
     disposition RetryAttempted => local,
 
@@ -447,9 +447,34 @@ mod tests {
         assert_eq!(def.invariants.len(), 4);
         assert_eq!(def.transitions.len(), 12);
         assert_eq!(def.dispositions.len(), 6);
+        assert_eq!(
+            def.dispositions
+                .iter()
+                .find(|d| d.effect == "OrderCompleted")
+                .and_then(|d| d.handoff_protocol.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("order_completion")
+        );
         assert!(def.is_stored_phase());
         assert_eq!(def.phase_field_name().unwrap(), "lifecycle_phase");
         assert_eq!(def.terminal_phases.len(), 2);
+    }
+
+    #[test]
+    fn schema_lowering_preserves_handoff_annotation() {
+        let tokens: proc_macro2::TokenStream = ORDER_LIFECYCLE.parse().expect("tokenize");
+        let expanded = crate::expand_machine(tokens).expect("expand machine");
+        let rendered = expanded.to_string();
+
+        assert!(
+            rendered.contains("handoff_protocol : Some"),
+            "generated schema must carry handoff_protocol = Some(...)"
+        );
+        assert!(
+            rendered.contains("order_completion"),
+            "generated schema must include the declared protocol id"
+        );
     }
 
     #[test]

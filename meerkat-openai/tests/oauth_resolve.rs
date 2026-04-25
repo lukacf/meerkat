@@ -42,7 +42,6 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
             provider: "openai".into(),
             auth_method: auth_method.into(),
             source: CredentialSourceSpec::PlatformDefault,
-            storage: None,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()
@@ -92,7 +91,10 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
         .await
         .unwrap();
 
@@ -125,7 +127,10 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
         metadata: serde_json::Value::Null,
     };
     store
-        .save(&TokenKey::new("dev", "default_chatgpt"), &persisted)
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
         .await
         .unwrap();
 

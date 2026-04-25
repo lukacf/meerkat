@@ -19,13 +19,17 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Driver
-- `RecomputeMobPeerOverlay` (`RecomputeMobPeerOverlayDriver` in `meerkat-runtime/src/generated/recompute_mob_peer_overlay_driver.rs`)
+- `meerkat_mob_seam_driver` (`MeerkatMobSeamDriver` in `meerkat-runtime/src/generated/meerkat_mob_seam.rs`)
   - watches:
-    - `mob::WiringGraphChanged`
-    - `mob::MemberSessionBindingChanged`
-    - `meerkat::LocalEndpointChanged`
+    - `mob::RequestRuntimeBinding`
+    - `mob::RequestRuntimeIngress`
+    - `mob::RequestRuntimeRetire`
+    - `mob::RequestRuntimeDestroy`
   - dispatches:
-    - `apply_mob_peer_overlay` → `meerkat::ApplyMobPeerOverlay` (Input)
+    - `binding_request_reaches_meerkat` → `meerkat::PrepareBindings` (Input)
+    - `work_request_reaches_meerkat` → `meerkat::Ingest` (Input)
+    - `retire_request_reaches_meerkat` → `meerkat::Retire` (Input)
+    - `destroy_request_reaches_meerkat` → `meerkat::Destroy` (Input)
 
 ## Transaction Plans
 - `(none)`

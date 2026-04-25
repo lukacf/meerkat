@@ -1,7 +1,7 @@
 //! In-memory skill source for testing.
 
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillSource, apply_filter,
+    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey, SkillSource, apply_filter,
 };
 
 /// In-memory skill source for testing and SDK embedding.
@@ -21,12 +21,12 @@ impl SkillSource for InMemorySkillSource {
         Ok(apply_filter(&all, filter))
     }
 
-    async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
+    async fn load(&self, key: &SkillKey) -> Result<SkillDocument, SkillError> {
         self.skills
             .iter()
-            .find(|s| &s.descriptor.id == id)
+            .find(|s| &s.descriptor.key == key)
             .cloned()
-            .ok_or_else(|| SkillError::NotFound { id: id.clone() })
+            .ok_or_else(|| SkillError::NotFound { key: key.clone() })
     }
 }
 
@@ -35,28 +35,37 @@ impl SkillSource for InMemorySkillSource {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
-    use meerkat_core::skills::SkillScope;
+    use meerkat_core::skills::{SkillName, SkillScope, SourceUuid};
 
-    fn make_skill(id: &str, name: &str) -> SkillDocument {
+    fn test_key(skill: &str) -> SkillKey {
+        SkillKey {
+            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap(),
+            skill_name: SkillName::parse(skill).unwrap(),
+        }
+    }
+
+    fn make_skill(skill: &str, name: &str) -> SkillDocument {
         SkillDocument {
             descriptor: SkillDescriptor {
-                id: SkillId(id.into()),
+                key: test_key(skill),
                 name: name.into(),
                 description: format!("Desc for {name}"),
                 scope: SkillScope::Builtin,
-                ..Default::default()
+                metadata: IndexMap::new(),
+                capability_requirements: Vec::new(),
+                source_name: String::new(),
             },
-            body: format!("Body for {id}"),
+            body: format!("Body for {skill}"),
             extensions: IndexMap::new(),
         }
     }
 
     fn test_source() -> InMemorySkillSource {
         InMemorySkillSource::new(vec![
-            make_skill("extraction/email", "email"),
-            make_skill("extraction/fiction", "fiction"),
-            make_skill("formatting/markdown", "markdown"),
-            make_skill("pdf-processing", "pdf-processing"),
+            make_skill("email", "email"),
+            make_skill("pdf", "pdf"),
+            make_skill("markdown", "markdown"),
+            make_skill("workflow", "workflow"),
         ])
     }
 
@@ -68,33 +77,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_with_collection_filter() {
-        let source = test_source();
-        let result = source
-            .list(&SkillFilter {
-                collection: Some("extraction".into()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|s| s.id.0.starts_with("extraction/")));
+    async fn test_load_returns_not_found_for_missing() {
+        let source = InMemorySkillSource::new(vec![make_skill("email", "email")]);
+        let result = source.load(&test_key("missing")).await;
+        assert!(matches!(result, Err(SkillError::NotFound { .. })));
     }
 
     #[tokio::test]
-    async fn test_list_collection_filter_no_sibling() {
-        let source = InMemorySkillSource::new(vec![
-            make_skill("extraction/email", "email"),
-            make_skill("extract/something", "something"),
-        ]);
-        let result = source
-            .list(&SkillFilter {
-                collection: Some("extraction".into()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id.0, "extraction/email");
+    async fn test_load_returns_document_for_known() {
+        let source = InMemorySkillSource::new(vec![make_skill("email", "email")]);
+        let result = source.load(&test_key("email")).await.unwrap();
+        assert_eq!(result.descriptor.name, "email");
     }
 }

@@ -1,9 +1,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Phase 0 external-boundary contract tests for runtime control-plane seams.
 //!
-//! These stay out of the fast suite on purpose. They exercise the live
-//! `MeerkatMachine` surface and its out-of-band control channel rather
-//! than only in-crate helpers.
+//! These exercise the live `MeerkatMachine` surface and its out-of-band
+//! control channel rather than only in-crate helpers.
 
 use std::sync::{
     Arc,
@@ -104,7 +103,6 @@ impl CoreExecutor for RecordingExecutor {
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_reset_terminates_waited_progress_work_without_running_it() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
@@ -172,7 +170,6 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_work() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
@@ -248,7 +245,6 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_drains_waited_progress_work_to_completion() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
@@ -315,7 +311,6 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;

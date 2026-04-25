@@ -35,7 +35,10 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        MeerkatMachine::accept_input_with_completion(self, session_id, input).await
+        Box::pin(MeerkatMachine::accept_input_with_completion(
+            self, session_id, input,
+        ))
+        .await
     }
 
     async fn runtime_state(
@@ -176,6 +179,32 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             ))),
         }
     }
+
+    /// Wave-c C-9c R4: fully-projected public channel status. Reads DSL
+    /// state (attachment + reconnect-progress) and returns a
+    /// ready-to-serialize `RealtimeChannelStatus` with real
+    /// `attempt_count` / `next_retry_at` / `deadline_at` sourced from the
+    /// overlay-projected fields, not hard-coded defaults.
+    async fn realtime_channel_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::RuntimeRealtimeChannelStatus {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::RealtimeChannelStatus(status) => Ok(status),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::realtime_channel_status: {other:?}"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,15 +224,16 @@ impl MeerkatMachine {
             .find_map(|effect| match effect {
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::PostAdmissionSignal {
                     signal,
-                } => Some(match signal.as_str() {
-                    "WakeLoop" => crate::driver::ephemeral::PostAdmissionSignal::WakeLoop,
-                    "InterruptYielding" => {
+                } => Some(match signal {
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::WakeLoop => {
+                        crate::driver::ephemeral::PostAdmissionSignal::WakeLoop
+                    }
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::InterruptYielding => {
                         crate::driver::ephemeral::PostAdmissionSignal::InterruptYielding
                     }
-                    "RequestImmediateProcessing" => {
+                    crate::meerkat_machine::dsl::PostAdmissionSignalKind::RequestImmediateProcessing => {
                         crate::driver::ephemeral::PostAdmissionSignal::RequestImmediateProcessing
                     }
-                    _ => crate::driver::ephemeral::PostAdmissionSignal::None,
                 }),
                 _ => None,
             })
@@ -275,9 +305,7 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(dsl_authority::write_back_phase(
-            authority.state.lifecycle_phase,
-        ))
+        Some(dsl_authority::runtime_phase_from_authority(&authority))
     }
 
     /// Look up the session entry for a runtime ID, returning a control-plane error

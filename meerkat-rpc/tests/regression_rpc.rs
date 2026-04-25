@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Regression tests for RPC surface response shapes and method contracts.
 //!
 //! Deterministic (mock LLM, no API keys, no `#[ignore]`). Runs in `cargo rct`.

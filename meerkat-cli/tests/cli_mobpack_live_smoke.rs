@@ -1024,7 +1024,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
     let after_respawn = poll_members_until(&mut surface, mob_id, |payload| {
         payload["members"].as_array().is_some_and(|members| {
             members.iter().any(|entry| {
-                entry["agent_identity"].as_str() == Some("worker-1") && entry["state"] == "Active"
+                entry["agent_identity"].as_str() == Some("worker-1") && entry["state"] == "active"
             })
         })
     })
@@ -1452,7 +1452,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
     let respawned_members = poll_members_until(&mut surface, mob_id, |payload| {
         payload["members"].as_array().is_some_and(|members| {
             members.iter().any(|entry| {
-                entry["agent_identity"].as_str() == Some("worker-1") && entry["state"] == "Active"
+                entry["agent_identity"].as_str() == Some("worker-1") && entry["state"] == "active"
             })
         })
     })

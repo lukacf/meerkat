@@ -90,6 +90,7 @@ async fn integration_real_router_send() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
 
     let trusted_peers = make_trusted_peers_with_addr(
@@ -131,7 +132,7 @@ async fn integration_real_router_send() {
 
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -162,9 +163,11 @@ async fn integration_real_router_resolves_peer_name() {
         true,
     );
 
+    let unknown_pubkey = make_keypair().public_key();
+    let unknown_peer_id = meerkat_comms::router::peer_id_from_pubkey(&unknown_pubkey);
     let result = router
         .send(
-            "unknown-peer",
+            unknown_peer_id,
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -174,7 +177,7 @@ async fn integration_real_router_resolves_peer_name() {
         .await;
 
     match result {
-        Err(SendError::PeerNotFound(name)) => assert_eq!(name, "unknown-peer"),
+        Err(SendError::PeerNotFound(id)) => assert_eq!(id, unknown_peer_id),
         _ => panic!("expected PeerNotFound error"),
     }
 }
@@ -186,6 +189,7 @@ async fn integration_real_router_connects_to_peer() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
 
     let trusted_peers = make_trusted_peers_with_addr(
@@ -206,7 +210,7 @@ async fn integration_real_router_connects_to_peer() {
     // No server listening - should fail with IO error
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -224,6 +228,7 @@ async fn integration_real_router_signs_envelope() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
     let our_pubkey = our_keypair.public_key();
 
@@ -267,7 +272,7 @@ async fn integration_real_router_signs_envelope() {
 
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -286,6 +291,7 @@ async fn integration_real_router_waits_for_ack() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
     let our_pubkey = our_keypair.public_key();
 
@@ -325,7 +331,7 @@ async fn integration_real_router_waits_for_ack() {
 
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -344,6 +350,7 @@ async fn integration_real_router_timeout_returns_offline() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
 
     let trusted_peers = make_trusted_peers_with_addr(
@@ -372,7 +379,7 @@ async fn integration_real_router_timeout_returns_offline() {
 
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -392,6 +399,7 @@ async fn integration_real_send() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
     let our_pubkey = our_keypair.public_key();
 
@@ -440,7 +448,7 @@ async fn integration_real_send() {
 
     let result = router
         .send(
-            "test-peer",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
             MessageKind::Message {
                 body: "test body".to_string(),
                 blocks: None,
@@ -459,6 +467,7 @@ async fn integration_real_send_request() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
     let our_pubkey = our_keypair.public_key();
 
@@ -507,11 +516,13 @@ async fn integration_real_send_request() {
     });
 
     let result = router
-        .send_request(
-            "test-peer",
-            "review-pr".to_string(),
-            serde_json::json!({"pr": 42}),
-            meerkat_core::types::HandlingMode::Queue,
+        .send(
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
+            MessageKind::Request {
+                intent: "review-pr".to_string(),
+                params: serde_json::json!({"pr": 42}),
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+            },
         )
         .await;
     assert!(result.is_ok());
@@ -525,6 +536,7 @@ async fn integration_real_send_response() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
 
     let trusted_peers = make_trusted_peers_with_addr(
@@ -567,11 +579,14 @@ async fn integration_real_send_response() {
     });
 
     let result = router
-        .send_response(
-            "test-peer",
-            request_id,
-            Status::Completed,
-            serde_json::json!({"approved": true}),
+        .send(
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
+            MessageKind::Response {
+                in_reply_to: request_id,
+                status: Status::Completed,
+                result: serde_json::json!({"approved": true}),
+                handling_mode: None,
+            },
         )
         .await;
     assert!(result.is_ok());
@@ -585,6 +600,7 @@ async fn integration_real_send_response_no_ack_wait() {
     let sock_path = tmp.path().join("peer.sock");
 
     let peer_keypair = make_keypair();
+    let peer_pubkey = peer_keypair.public_key();
     let our_keypair = make_keypair();
 
     let trusted_peers = make_trusted_peers_with_addr(
@@ -612,11 +628,14 @@ async fn integration_real_send_response_no_ack_wait() {
 
     let start = std::time::Instant::now();
     let result = router
-        .send_response(
-            "test-peer",
-            Uuid::new_v4(),
-            Status::Completed,
-            serde_json::json!({}),
+        .send(
+            meerkat_comms::router::peer_id_from_pubkey(&peer_pubkey),
+            MessageKind::Response {
+                in_reply_to: Uuid::new_v4(),
+                status: Status::Completed,
+                result: serde_json::json!({}),
+                handling_mode: None,
+            },
         )
         .await;
     let elapsed = start.elapsed();
@@ -670,7 +689,7 @@ async fn integration_real_router_inproc_send() {
     // Send via router
     let result = router
         .send(
-            "receiver-agent",
+            meerkat_comms::router::peer_id_from_pubkey(&receiver_pubkey),
             MessageKind::Message {
                 body: "hello via inproc".to_string(),
                 blocks: None,
@@ -730,7 +749,7 @@ async fn integration_real_router_inproc_peer_not_found() {
     // Send should fail - peer not in registry
     let result = router
         .send(
-            "missing-agent",
+            meerkat_comms::router::peer_id_from_pubkey(&fake_pubkey),
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
@@ -781,11 +800,13 @@ async fn integration_real_router_inproc_request_response() {
 
     // Send request
     let result = router
-        .send_request(
-            "service-agent",
-            "analyze".to_string(),
-            serde_json::json!({"file": "main.rs"}),
-            meerkat_core::types::HandlingMode::Queue,
+        .send(
+            meerkat_comms::router::peer_id_from_pubkey(&receiver_pubkey),
+            MessageKind::Request {
+                intent: "analyze".to_string(),
+                params: serde_json::json!({"file": "main.rs"}),
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+            },
         )
         .await;
     assert!(result.is_ok());

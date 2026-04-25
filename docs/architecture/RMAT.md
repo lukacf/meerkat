@@ -349,15 +349,16 @@ Read-seam violations — shell code that reads canonical authority state or
 declares shadow-state counters — are caught by the `ForbiddenShellAuthorityReads`
 AST rule inside `rmat-audit`. Policy entries in `xtask/src/rmat_policy.rs` bind
 each rule to a file path and an AST pattern (method call, field declaration, or
-field access). Exceptions must be annotated inline:
+field access). Production findings are not suppressible; inline annotations are
+honored only in explicit test-fixture paths so canaries can exercise suppression
+parsing without masking live violations:
 
 ```rust
 // RMAT-ALLOW(ForbiddenShellAuthorityReads): rationale — see issue #NNN
 ```
 
-Annotations must sit on or immediately above the offending span. There is no
-global suppression; each violation is opted out individually with a stated
-reason. Unlike a regex-based lint, the AST rule distinguishes struct
+Test-fixture annotations must sit on or immediately above the offending span.
+There is no global suppression. Unlike a regex-based lint, the AST rule distinguishes struct
 declarations from struct-literal initializers, so snapshot-style projections
 that happen to use protected field names are not false-positives.
 

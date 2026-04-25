@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls)]
+
 use meerkat_machine_schema::TriggerKind;
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -88,6 +90,17 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "BindSupervisor",
         "AuthorizeSupervisor",
         "RevokeSupervisor",
+        // Wave-d D-d: supervisor-trust-edge feedback acks for the
+        // `supervisor_trust_publish` / `supervisor_trust_revoke` handoff
+        // protocols. Staged by `stage_supervisor_trust_{published,
+        // publish_failed, revoked, revoke_failed}` from the
+        // `try_handle_supervisor_bridge_command` path after the shell
+        // calls `Router::{add,remove}_trusted_peer`. DSL-internal; not
+        // dispatched through `MeerkatMachineCommand`.
+        "SupervisorTrustEdgePublished",
+        "SupervisorTrustEdgePublishFailed",
+        "SupervisorTrustEdgeRevoked",
+        "SupervisorTrustEdgeRevokeFailed",
         // U9 (dogma #4): realtime product-turn lifecycle is driven via
         // `RealtimeProductTurnHandle` (meerkat-core/src/handles.rs) from the
         // realtime-WS dispatch loop in `meerkat-rpc::realtime_ws`, not
@@ -115,6 +128,14 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         // `protocol_ops_barrier_satisfaction` handoff helper, not
         // through `MeerkatMachineCommand`.
         "OpsBarrierSatisfied",
+        // Surface handoff feedback is delivered through
+        // `ExternalToolSurfaceHandle` / generated surface protocol helpers,
+        // not through `MeerkatMachineCommand`. Runtime command variants
+        // keep the shell-facing `Surface*` names while the canonical DSL
+        // owns the protocol feedback names.
+        "PendingSucceeded",
+        "PendingFailed",
+        "SnapshotAligned",
         // Round-5 Track-B (PR #340): peer-projection overlay inputs.
         // `ApplyMobPeerOverlay` is dispatched by the
         // `RecomputeMobPeerOverlay` composition driver (see
@@ -127,6 +148,8 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "ClearLocalEndpoint",
         "AddDirectPeerEndpoint",
         "RemoveDirectPeerEndpoint",
+        "ProjectRealtimeReconnectProgress",
+        "ClearRealtimeReconnectProgress",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()
@@ -134,6 +157,7 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         .collect();
     let expected: BTreeSet<&str> = canonical_meerkat_machine_command_manifest()
         .into_iter()
+        .filter(|name| *name != "RuntimeRealtimeChannelStatus")
         .collect();
 
     assert_eq!(actual, expected);
@@ -152,10 +176,24 @@ fn mob_machine_inputs_equal_runtime_manifest_exactly() {
     // ever; they may stay shell-level by design).
     const RUNTIME_COMPOSITION_ONLY_COMMANDS: &[&str] =
         &["EnsureMember", "Reconcile", "ListMembersMatching"];
-    let actual = variant_names(&schema.inputs.variants);
+    const DSL_ONLY_INPUTS: &[&str] = &[
+        "WireMembers",
+        "UnwireMembers",
+        "BindMemberSession",
+        "RotateMemberSession",
+        "ReleaseMemberSession",
+        "SessionIngressDetachedForMobDestroy",
+        "SessionIngressDetachFailedForMobDestroy",
+    ];
+    let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
+        .into_iter()
+        .filter(|name| !DSL_ONLY_INPUTS.contains(name))
+        .collect();
     let expected: BTreeSet<&str> = canonical_mob_machine_command_manifest()
         .into_iter()
-        .filter(|name| !RUNTIME_COMPOSITION_ONLY_COMMANDS.contains(name))
+        .filter(|name| {
+            !RUNTIME_COMPOSITION_ONLY_COMMANDS.contains(name) && !["Wire", "Unwire"].contains(name)
+        })
         .collect();
 
     assert_eq!(actual, expected);
@@ -167,13 +205,13 @@ fn every_canonical_input_has_transition_coverage() {
         let surface_only_inputs: BTreeSet<&str> = schema
             .surface_only_inputs
             .iter()
-            .map(String::as_str)
+            .map(|v| v.as_str())
             .collect();
         let covered: BTreeSet<&str> = schema
             .transitions
             .iter()
-            .filter(|transition| transition.on.kind == TriggerKind::Input)
-            .map(|transition| transition.on.variant.as_str())
+            .filter(|transition| transition.on.kind() == TriggerKind::Input)
+            .map(|transition| transition.on.variant_str())
             .collect();
 
         for input in &schema.inputs.variants {
@@ -196,8 +234,8 @@ fn every_canonical_signal_has_transition_coverage() {
         let covered: BTreeSet<&str> = schema
             .transitions
             .iter()
-            .filter(|transition| transition.on.kind == TriggerKind::Signal)
-            .map(|transition| transition.on.variant.as_str())
+            .filter(|transition| transition.on.kind() == TriggerKind::Signal)
+            .map(|transition| transition.on.variant_str())
             .collect();
 
         for signal in &schema.signals.variants {

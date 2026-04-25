@@ -8,9 +8,19 @@ mod tests {
         AgentFactory, Config, CreateSessionRequest, PersistenceBundle, SessionQuery,
         SessionService, build_persistent_service, build_persistent_service_with_runtime_adapter,
     };
-    use meerkat_core::DeferredPromptPolicy;
     use meerkat_core::service::InitialTurnPolicy;
+    use meerkat_core::{
+        BindingId, ConnectionRef, DeferredPromptPolicy, RealmId, service::SessionBuildOptions,
+    };
     use meerkat_store::MemoryBlobStore;
+
+    fn test_connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("default").expect("default realm id"),
+            binding: BindingId::parse("default_openai").expect("default openai binding"),
+            profile: None,
+        }
+    }
 
     fn create_request(prompt: &str) -> CreateSessionRequest {
         CreateSessionRequest {
@@ -23,7 +33,10 @@ mod tests {
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            build: None,
+            build: Some(SessionBuildOptions {
+                connection_ref: Some(test_connection_ref()),
+                ..Default::default()
+            }),
             labels: None,
         }
     }
@@ -110,15 +123,11 @@ mod tests {
             .await
             .expect("create_session should succeed through the shared runtime-backed bundle");
 
-        let summaries = service_b
-            .list(SessionQuery::default())
+        let loaded = service_b
+            .load_authoritative_session(&created.session_id)
             .await
-            .expect("list should succeed through the second service built from the same bundle");
-        assert!(
-            summaries
-                .iter()
-                .any(|summary| summary.session_id == created.session_id),
-            "services built from the same PersistenceBundle should share persisted state"
-        );
+            .expect("authoritative load should succeed through the second service")
+            .expect("services built from the same PersistenceBundle should share persisted state");
+        assert_eq!(loaded.id(), &created.session_id);
     }
 }

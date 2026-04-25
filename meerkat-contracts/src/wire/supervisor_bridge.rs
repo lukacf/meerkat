@@ -199,14 +199,22 @@ impl std::fmt::Display for BridgeMemberRuntimeState {
 
 /// Minimal trusted peer identity for supervisor bridge wire messages.
 ///
-/// Mirrors `meerkat_core::comms::TrustedPeerSpec` but is self-contained in
-/// the contracts crate so neither sender nor receiver needs a cross-crate
-/// dependency for deserialization.
+/// Mirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is
+/// self-contained in the contracts crate so neither sender nor receiver
+/// needs a cross-crate dependency for deserialization. Fields stay
+/// stringly at the wire boundary — the typed `PeerId`/`PeerName`/
+/// `PeerAddress` atoms are only re-hydrated on the receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgePeerSpec {
     pub name: String,
     pub peer_id: String,
     pub address: String,
+    /// Ed25519 signing public key bytes — required so the receiver can
+    /// verify envelope signatures after trust registration. Serialized
+    /// as a 32-element array; the JSON form is an array of numbers, not
+    /// a base64/hex string, to keep the wire deliberately boring.
+    #[serde(default)]
+    pub pubkey: [u8; 32],
 }
 
 /// Connectivity class observed for the bridged member runtime.
@@ -219,34 +227,55 @@ pub enum BridgePeerConnectivity {
     Unknown,
 }
 
-impl From<meerkat_core::comms::TrustedPeerSpec> for BridgePeerSpec {
-    fn from(spec: meerkat_core::comms::TrustedPeerSpec) -> Self {
+impl From<meerkat_core::comms::TrustedPeerDescriptor> for BridgePeerSpec {
+    fn from(spec: meerkat_core::comms::TrustedPeerDescriptor) -> Self {
         Self {
-            name: spec.name,
-            peer_id: spec.peer_id,
-            address: spec.address,
+            name: spec.name.as_str().to_string(),
+            peer_id: spec.peer_id.as_str(),
+            address: spec.address.to_string(),
+            pubkey: spec.pubkey,
         }
     }
 }
 
-impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
     type Error = String;
 
     fn try_from(spec: BridgePeerSpec) -> Result<Self, Self::Error> {
-        meerkat_core::comms::TrustedPeerSpec::new(spec.name, spec.peer_id, spec.address)
+        Self::try_from(&spec)
     }
 }
 
-impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
     type Error = String;
 
     fn try_from(spec: &BridgePeerSpec) -> Result<Self, Self::Error> {
-        meerkat_core::comms::TrustedPeerSpec::new(
-            spec.name.clone(),
-            spec.peer_id.clone(),
-            spec.address.clone(),
-        )
+        let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
+            .map_err(|e| format!("invalid peer_id: {e}"))?;
+        let name = meerkat_core::comms::PeerName::new(spec.name.clone())
+            .map_err(|e| format!("invalid peer name: {e}"))?;
+        let address = parse_peer_address(&spec.address)?;
+        Ok(meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id,
+            name,
+            address,
+            pubkey: spec.pubkey,
+        })
     }
+}
+
+fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    use meerkat_core::comms::{PeerAddress, PeerTransport};
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => PeerTransport::Inproc,
+        "uds" => PeerTransport::Uds,
+        "tcp" => PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(PeerAddress::new(transport, endpoint))
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +516,7 @@ mod tests {
             name: "member-a".to_string(),
             peer_id: "peer-abc".to_string(),
             address: "tcp://127.0.0.1:7000".to_string(),
+            pubkey: [0u8; 32],
         }
     }
 
@@ -507,6 +537,7 @@ mod tests {
                 name: "member-b".to_string(),
                 peer_id: "peer-xyz".to_string(),
                 address: "tcp://127.0.0.1:7001".to_string(),
+                pubkey: [0u8; 32],
             },
         }
     }
@@ -986,10 +1017,13 @@ mod tests {
         let payload: BridgeBindPayload =
             serde_json::from_value(raw.clone()).expect("decode pre-newtype payload");
         assert_eq!(payload.bootstrap_token.as_str(), "tok-raw-string");
+        assert_eq!(payload.supervisor.pubkey, [0u8; 32]);
         let reencoded = serde_json::to_value(&payload).expect("reserialize payload");
+        let mut expected = raw;
+        expected["supervisor"]["pubkey"] = json!(vec![0u8; 32]);
         assert_eq!(
-            reencoded, raw,
-            "newtype round-trip must preserve the pre-newtype wire shape"
+            reencoded, expected,
+            "pre-pubkey payloads must decode and reserialize with the defaulted pubkey"
         );
     }
 }

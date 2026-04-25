@@ -1,34 +1,6 @@
 use super::*;
 
 impl MeerkatMachine {
-    fn sync_session_dsl_authority_from_driver(
-        dsl_authority: &Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>,
-        session_id: &SessionId,
-        control_projection: &Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
-        driver_runtime_id: &LogicalRuntimeId,
-        driver_silent_intents: std::collections::BTreeSet<String>,
-    ) {
-        let control = control_projection
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        let mut authority = dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        authority.state.lifecycle_phase = super::dsl_authority::project_phase(control.phase);
-        authority.state.session_id = Some(super::dsl::SessionId::from_domain(session_id));
-        authority.state.active_runtime_id =
-            Some(super::dsl::AgentRuntimeId::from_domain(driver_runtime_id));
-        authority.state.current_run_id = control
-            .current_run_id
-            .as_ref()
-            .map(super::dsl::RunId::from_domain);
-        authority.state.pre_run_phase = control
-            .pre_run_phase
-            .and_then(super::dsl_authority::pre_run_phase_from_runtime_state);
-        authority.state.silent_intent_overrides = driver_silent_intents;
-    }
-
     pub(super) async fn register_session_inner(&self, session_id: SessionId) {
         {
             let mut sessions = self.sessions.write().await;
@@ -55,19 +27,29 @@ impl MeerkatMachine {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return;
         }
+        // Cold-restart: when `recover()` realizes a stored terminal
+        // runtime state (Retired / Stopped / Destroyed) on the driver's
+        // shell `control_projection`, the DSL authority still holds the
+        // construction-time `Idle`. Re-project the DSL state from the
+        // recovered phase so `existing_session_runtime_state` (which reads
+        // `dsl_authority.state.lifecycle_phase` as the canonical source
+        // post-e5c5ecaf3) surfaces the true stored phase.
+        let recovered_phase = entry.as_driver().runtime_state();
+        if recovered_phase != RuntimeState::Idle {
+            let mut authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.state = super::dsl_authority::project_state(
+                &session_id,
+                recovered_phase,
+                Some(&runtime_id),
+                None,
+                None,
+                std::collections::BTreeSet::new(),
+                None,
+            );
+        }
         let control_projection = entry.control_projection_handle();
-        let driver_runtime_id = entry.runtime_id().clone();
-        let driver_silent_intents = entry
-            .silent_comms_intents()
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        Self::sync_session_dsl_authority_from_driver(
-            &dsl_authority,
-            &session_id,
-            &control_projection,
-            &driver_runtime_id,
-            driver_silent_intents,
-        );
 
         let (ops_lifecycle, epoch_id, cursor_state) =
             self.recover_or_create_ops_state(&session_id).await;
@@ -90,8 +72,9 @@ impl MeerkatMachine {
             current_capability_surface: None,
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
             phase: RegistrationPhase::Queuing,
-            detached_wake: None,
             dsl_authority,
+            drain_slot: CommsDrainSlot::new(),
+            trust_reconciler: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -226,19 +209,6 @@ impl MeerkatMachine {
                     );
                     return;
                 }
-                let control_projection = recovered_entry.control_projection_handle();
-                let driver_runtime_id = recovered_entry.runtime_id().clone();
-                let driver_silent_intents = recovered_entry
-                    .silent_comms_intents()
-                    .into_iter()
-                    .collect::<std::collections::BTreeSet<_>>();
-                Self::sync_session_dsl_authority_from_driver(
-                    &dsl_authority,
-                    &session_id,
-                    &control_projection,
-                    &driver_runtime_id,
-                    driver_silent_intents,
-                );
 
                 // Recover ops state OUTSIDE the sessions lock to avoid blocking
                 // other adapter operations behind potentially slow disk I/O.
@@ -284,8 +254,9 @@ impl MeerkatMachine {
                             capability_surface_status:
                                 SessionLlmCapabilitySurfaceStatus::Unresolved,
                             phase: RegistrationPhase::Queuing,
-                            detached_wake: None,
                             dsl_authority,
+                            drain_slot: CommsDrainSlot::new(),
+                            trust_reconciler: None,
                         },
                     );
                     (driver, completions, recovered_ops)
@@ -336,13 +307,6 @@ impl MeerkatMachine {
             }
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
-
-        // Wire detached-op wake state: the ops lifecycle registry will set
-        // `pending = true` and fire `notify` when a BackgroundToolOp reaches
-        // terminal. The waker task (spawned after attachment below) then injects
-        // a continuation through the canonical ingress seam.
-        let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
-        ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
         // Wire persistence channel if a durable store is available.
         if let Some(ref store) = self.store {
@@ -400,7 +364,6 @@ impl MeerkatMachine {
                 wake_rx,
                 control_rx,
                 Some(completions.clone()),
-                Some(Arc::clone(&detached_wake_state)),
                 Some(completion_feed),
                 entry_cursor_state,
                 Arc::downgrade(self),
@@ -427,7 +390,6 @@ impl MeerkatMachine {
                         match pending_loop_handle.take() {
                             Some(loop_handle) => {
                                 entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
-                                entry.detached_wake = Some(Arc::clone(&detached_wake_state));
                                 (true, false)
                             }
                             None => {
@@ -514,11 +476,12 @@ impl MeerkatMachine {
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
         let entry = {
             let mut sessions = self.sessions.write().await;
-            let mut slots = self.comms_drain_slots.write().await;
-            // Remove + abort drain slot before dropping session binding so
-            // slot keys remain a subset of registered-session keys.
-            if let Some(mut slot) = slots.remove(session_id) {
-                abort_slot(&mut slot);
+            // Abort the drain slot inline before removing the entry — the
+            // slot is now owned by the entry itself (wave-c C-H2), so the
+            // "slot keys are a subset of registered-session keys" invariant
+            // is structural rather than enforced by ordering.
+            if let Some(entry) = sessions.get_mut(session_id) {
+                abort_slot(&mut entry.drain_slot);
             }
             sessions.remove(session_id)
         };
@@ -743,6 +706,52 @@ impl MeerkatMachine {
                 present: intent_present,
             },
             "ProjectRealtimeIntent",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Wave-c C-9c R4: project the realtime-WS reconnect-overlay progress
+    /// (attempt count, next retry deadline) into DSL state so RPC/MCP
+    /// `realtime/status` queries surface real retry-budget data instead of
+    /// hard-coded `0`/`1` defaults.
+    ///
+    /// `next_retry_at_ms` / `deadline_at_ms` are milliseconds since the
+    /// Unix epoch (shell converts from `chrono::DateTime<Utc>` at the
+    /// emission site; the DSL stays chrono-free).
+    pub async fn project_realtime_reconnect_progress(
+        &self,
+        session_id: &SessionId,
+        attempt_count: u64,
+        next_retry_at_ms: Option<u64>,
+        deadline_at_ms: Option<u64>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ProjectRealtimeReconnectProgress {
+                attempt_count,
+                next_retry_at_ms,
+                deadline_at_ms,
+            },
+            "ProjectRealtimeReconnectProgress",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Wave-c C-9c R4: clear the reconnect-progress fields. Shell fires
+    /// this when the overlay cycle ends — successful reconnect (DSL
+    /// moves back to `BindingReady`) or operator detach.
+    pub async fn clear_realtime_reconnect_progress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ClearRealtimeReconnectProgress,
+            "ClearRealtimeReconnectProgress",
         )
         .await
         .map(|_| ())

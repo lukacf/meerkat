@@ -1,10 +1,14 @@
 //! Handlers for `skills/list` and `skills/inspect`.
+//!
+//! Post-V4 the runtime keys skills by `SkillKey` (source_uuid + skill_name).
+//! This handler projects the typed key onto the existing wire `SkillEntry`
+//! shape by rendering `"{source_uuid}/{skill_name}"` — the wire contract
+//! itself is owned by `meerkat-contracts` and a separate task retypes it
+//! to carry `source_uuid` and `skill_name` as distinct fields.
 
 use std::sync::Arc;
 
-use meerkat_core::skills::{SkillFilter, SkillId, SkillRuntime};
-use serde::Deserialize;
-use serde_json::value::RawValue;
+use meerkat_core::skills::{SkillFilter, SkillRuntime};
 
 use crate::protocol::{RpcId, RpcResponse};
 
@@ -28,7 +32,10 @@ pub async fn handle_list(
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
                 .map(|e| meerkat_contracts::SkillEntry {
-                    id: e.descriptor.id.0.clone(),
+                    id: format!(
+                        "{}/{}",
+                        e.descriptor.key.source_uuid, e.descriptor.key.skill_name
+                    ),
                     name: e.descriptor.name.clone(),
                     description: e.descriptor.description.clone(),
                     scope: e.descriptor.scope.to_string(),
@@ -41,56 +48,5 @@ pub async fn handle_list(
             RpcResponse::success(id, &response)
         }
         Err(e) => RpcResponse::error(id, -32603, format!("skill list failed: {e}")),
-    }
-}
-
-#[derive(Deserialize)]
-struct InspectParams {
-    id: String,
-    #[serde(default)]
-    source: Option<String>,
-}
-
-/// Handle `skills/inspect` — inspect a skill's full content.
-pub async fn handle_inspect(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    skill_runtime: &Option<Arc<SkillRuntime>>,
-) -> RpcResponse {
-    let runtime = match skill_runtime {
-        Some(rt) => rt,
-        None => {
-            return RpcResponse::error(id, -32603, "skills not enabled");
-        }
-    };
-
-    let input: InspectParams = match params {
-        Some(raw) => match serde_json::from_str(raw.get()) {
-            Ok(p) => p,
-            Err(e) => {
-                return RpcResponse::error(id, -32602, format!("invalid params: {e}"));
-            }
-        },
-        None => {
-            return RpcResponse::error(id, -32602, "missing params");
-        }
-    };
-
-    match runtime
-        .load_from_source(&SkillId::from(input.id.as_str()), input.source.as_deref())
-        .await
-    {
-        Ok(doc) => {
-            let response = meerkat_contracts::SkillInspectResponse {
-                id: doc.descriptor.id.0.clone(),
-                name: doc.descriptor.name.clone(),
-                description: doc.descriptor.description.clone(),
-                scope: doc.descriptor.scope.to_string(),
-                source: doc.descriptor.source_name.clone(),
-                body: doc.body,
-            };
-            RpcResponse::success(id, &response)
-        }
-        Err(e) => RpcResponse::error(id, -32603, format!("skill inspect failed: {e}")),
     }
 }

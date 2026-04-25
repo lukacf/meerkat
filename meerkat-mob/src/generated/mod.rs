@@ -5,7 +5,4 @@
 // `pub mod` index, and `xtask audit-generated-headers` forbids the
 // codegen marker here to keep that honest.
 
-pub mod flow_frame;
-pub mod flow_run;
-pub mod loop_iteration;
-pub mod protocol_flow_loop_until_evaluation;
+pub mod protocol_mob_destroying_session_ingress;

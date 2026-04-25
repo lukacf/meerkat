@@ -25,6 +25,8 @@ macro_rules! smoke_suite {
 }
 
 smoke_scenario!(e2e_smoke_s16_rpc_kitchen_sink, 16);
+smoke_scenario!(e2e_smoke_s21_rpc_mob_callback_tools, 21);
+smoke_scenario!(e2e_smoke_s22_rpc_transport_backpressure, 22);
 smoke_scenario!(e2e_smoke_s27_cli_shell_and_structured_output, 27);
 smoke_scenario!(e2e_smoke_s28_cli_signed_mobpack_deploy, 28);
 smoke_scenario!(e2e_smoke_s30_cli_mob_flow_probe, 30);
@@ -72,11 +74,6 @@ smoke_scenario!(
 smoke_scenario!(
     e2e_smoke_s72_rust_sdk_realtime_audio_member_model_switch_continuity,
     72
-);
-smoke_suite!(e2e_smoke_rpc_mob_callback_tools, "rpc-mob-callback-tools");
-smoke_suite!(
-    e2e_smoke_rpc_transport_backpressure,
-    "rpc-transport-backpressure"
 );
 smoke_suite!(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
 smoke_suite!(

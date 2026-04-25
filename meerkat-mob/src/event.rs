@@ -12,7 +12,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::{PeerName, TrustedPeerDescriptor};
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
@@ -294,33 +294,61 @@ pub enum MobEventKind {
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
     },
-    /// Bidirectional trust was established between two members.
+    /// Bidirectional wiring edge established between two local members.
+    ///
+    /// DSL-emit-driven observability: the shell records this variant on
+    /// successful `MobMachineInput::WireMembers` acceptance, mirroring the
+    /// DSL's `EmitWiringLifecycleNotice { kind: Wired, edge }` effect. The
+    /// DSL authority (`wiring_edges` in `MobMachine`) is the single source
+    /// of truth; this event is observability only, never authority.
+    ///
+    /// Fields use the normalized `(a, b)` edge ordering (`a <= b`) produced
+    /// by `WiringEdge::new`, so equal edges yield equal events regardless
+    /// of caller argument order.
     MembersWired {
-        /// First member.
+        /// First member of the edge (lexicographically smaller identity).
         a: AgentIdentity,
-        /// Second member.
+        /// Second member of the edge.
         b: AgentIdentity,
     },
-    /// Trust was established from a local member to an external peer.
-    ExternalPeerWired {
-        /// Local member that trusts the external peer.
-        local: AgentIdentity,
-        /// Full trusted-peer specification for replay/respawn restore.
-        spec: TrustedPeerSpec,
-    },
-    /// Trust was removed from a local member to an external peer.
-    ExternalPeerUnwired {
-        /// Local member removing trust.
-        local: AgentIdentity,
-        /// External peer name that was removed from the local projection.
-        peer_name: String,
-    },
-    /// Bidirectional trust was removed between two members.
+    /// Bidirectional wiring edge removed between two local members.
+    ///
+    /// DSL-emit-driven observability counterpart of [`Self::MembersWired`].
+    /// Emitted by the shell on successful `MobMachineInput::UnwireMembers`
+    /// acceptance, mirroring `EmitWiringLifecycleNotice { kind: Unwired }`.
+    /// Uses the same normalized `(a, b)` edge ordering.
     MembersUnwired {
-        /// First member.
+        /// First member of the edge (lexicographically smaller identity).
         a: AgentIdentity,
-        /// Second member.
+        /// Second member of the edge.
         b: AgentIdentity,
+    },
+    /// A local member was wired to an external trusted peer.
+    ///
+    /// Restored post-#31 D-external-peer: external peer wiring carries the
+    /// full [`TrustedPeerDescriptor`] through the event log so roster
+    /// projection and resume can reinstate trust without consulting any
+    /// live comms runtime. `local` is the local session-backed member that
+    /// initiated the wire; `spec` is the full descriptor used to install
+    /// trust on the local's session comms runtime.
+    ExternalPeerWired {
+        /// Local member that initiated the wire.
+        local: AgentIdentity,
+        /// Full trusted peer descriptor installed as trust on the local
+        /// member's comms runtime.
+        spec: TrustedPeerDescriptor,
+    },
+    /// A local member was unwired from a previously-wired external peer.
+    ///
+    /// Restored post-#31 D-external-peer: companion of
+    /// [`Self::ExternalPeerWired`]. `peer_name` is the canonical
+    /// [`PeerName`] of the external peer, matching the
+    /// [`TrustedPeerDescriptor::name`] of the previously-wired descriptor.
+    ExternalPeerUnwired {
+        /// Local member that initiated the unwire.
+        local: AgentIdentity,
+        /// Canonical name of the external peer removed from local trust.
+        peer_name: PeerName,
     },
     /// A task was created on the shared task board.
     TaskCreated {
@@ -733,6 +761,44 @@ mod tests {
             run_id,
             step_id,
             escalated_to: escalated_identity,
+        });
+    }
+
+    #[test]
+    fn test_members_wired_roundtrip() {
+        roundtrip(&MobEventKind::MembersWired {
+            a: AgentIdentity::from("l-1"),
+            b: AgentIdentity::from("w-2"),
+        });
+    }
+
+    #[test]
+    fn test_members_unwired_roundtrip() {
+        roundtrip(&MobEventKind::MembersUnwired {
+            a: AgentIdentity::from("l-1"),
+            b: AgentIdentity::from("w-2"),
+        });
+    }
+
+    #[test]
+    fn test_external_peer_wired_roundtrip() {
+        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            "remote-mob/worker/agent-b",
+            meerkat_core::comms::PeerId::new(),
+            "inproc://remote-mob/worker/agent-b",
+        )
+        .expect("valid external peer");
+        roundtrip(&MobEventKind::ExternalPeerWired {
+            local: AgentIdentity::from("l-1"),
+            spec,
+        });
+    }
+
+    #[test]
+    fn test_external_peer_unwired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerUnwired {
+            local: AgentIdentity::from("l-1"),
+            peer_name: PeerName::new("remote-mob/worker/agent-b").unwrap(),
         });
     }
 

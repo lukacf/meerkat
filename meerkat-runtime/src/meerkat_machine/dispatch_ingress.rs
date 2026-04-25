@@ -45,7 +45,6 @@ impl MeerkatMachine {
                     });
                 }
 
-                let run_id_for_dsl = RunId::new();
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     let runtime_idle = state.is_idle_or_attached();
@@ -61,9 +60,6 @@ impl MeerkatMachine {
                                 .request_immediate_processing,
                             interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
                             wake_if_idle: resolved.coarse_flags.wake_if_idle,
-                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                &run_id_for_dsl,
-                            ),
                         },
                         "AcceptWithCompletion",
                     )
@@ -159,9 +155,6 @@ impl MeerkatMachine {
                                     .request_immediate_processing,
                                 interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
                                 wake_if_idle: resolved.coarse_flags.wake_if_idle,
-                                run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                    &run_id_for_dsl,
-                                ),
                             },
                             "AcceptWithCompletion",
                         )
@@ -248,6 +241,8 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                    let mut resolved = resolved;
+                    resolved.policy.wake_mode = crate::policy::WakeMode::None;
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await
@@ -327,6 +322,42 @@ impl MeerkatMachine {
                     None => None,
                 };
 
+                {
+                    let driver = driver.lock().await;
+                    if !driver.is_idle_or_attached() {
+                        return Err(Self::normalize_destroyed_error(
+                            RuntimeDriverError::NotReady {
+                                state: self
+                                    .existing_session_runtime_state(&session_id)
+                                    .await
+                                    .unwrap_or(RuntimeState::Destroyed),
+                            },
+                        ));
+                    }
+
+                    let active_input_ids = driver.as_driver().active_input_ids();
+                    if !active_input_ids.is_empty() {
+                        let duplicate_active_input = input
+                            .header()
+                            .idempotency_key
+                            .as_ref()
+                            .and_then(|key| driver.input_id_for_idempotency_key(key));
+                        if let Some(existing_id) = duplicate_active_input {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: format!(
+                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                                ),
+                            });
+                        }
+                        return Err(RuntimeDriverError::NotReady {
+                            state: self
+                                .existing_session_runtime_state(&session_id)
+                                .await
+                                .unwrap_or(RuntimeState::Destroyed),
+                        });
+                    }
+                }
+
                 // DSL-first: validate Prepare transition before driver realizes the effect.
                 let run_id = RunId::new();
                 let previous_dsl_state = match self
@@ -361,50 +392,6 @@ impl MeerkatMachine {
 
                 let prepared = {
                     let mut driver = driver.lock().await;
-                    if !driver.is_idle_or_attached() {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady {
-                                state: self
-                                    .existing_session_runtime_state(&session_id)
-                                    .await
-                                    .unwrap_or(RuntimeState::Destroyed),
-                            },
-                        ));
-                    }
-
-                    let active_input_ids = driver.as_driver().active_input_ids();
-                    if !active_input_ids.is_empty() {
-                        let duplicate_active_input =
-                            input.header().idempotency_key.as_ref().and_then(|key| {
-                                active_input_ids.iter().find(|active_id| {
-                                    driver
-                                        .as_driver()
-                                        .input_state(active_id)
-                                        .and_then(|state| state.idempotency_key.as_ref())
-                                        == Some(key)
-                                })
-                            });
-                        if let Some(existing_id) = duplicate_active_input {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeDriverError::ValidationFailed {
-                                reason: format!(
-                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                                ),
-                            });
-                        }
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeDriverError::NotReady {
-                            state: self
-                                .existing_session_runtime_state(&session_id)
-                                .await
-                                .unwrap_or(RuntimeState::Destroyed),
-                        });
-                    }
-
                     let outcome = match driver
                         .as_driver_mut()
                         .accept_input(input)
@@ -437,19 +424,6 @@ impl MeerkatMachine {
                             });
                         }
                     };
-
-                    if !driver.is_idle_or_attached() {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady {
-                                state: self
-                                    .existing_session_runtime_state(&session_id)
-                                    .await
-                                    .unwrap_or(RuntimeState::Destroyed),
-                            },
-                        ));
-                    }
 
                     let (dequeued_id, dequeued_input) = match driver.dequeue_next() {
                         Some(pair) => pair,
@@ -486,8 +460,12 @@ impl MeerkatMachine {
                         let next_phase = crate::runtime_state::run_return_phase_from_pre_run_phase(
                             driver.pre_run_phase(),
                         );
-                        let _ =
-                            machine_apply_run_return_projection(&mut driver, &run_id, next_phase);
+                        let _ = machine_apply_run_return_projection(
+                            &mut driver,
+                            &run_id,
+                            crate::meerkat_machine::driver::RunReturnDisposition::Fail,
+                            next_phase,
+                        );
                         self.restore_session_dsl_state(&session_id, previous_dsl_state)
                             .await;
                         return Err(RuntimeDriverError::Internal(format!(
@@ -495,7 +473,7 @@ impl MeerkatMachine {
                         )));
                     }
 
-                    MeerkatMachineLegacyRunPrepared {
+                    MeerkatMachineRunPrepared {
                         input_id,
                         run_id,
                         primitive: crate::runtime_loop::input_to_primitive(

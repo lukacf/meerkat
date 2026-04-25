@@ -128,7 +128,10 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             .output_schema
             .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
             .transpose()?,
-        provider_params: input.provider_params,
+        provider_params: input
+            .provider_params
+            .map(|wire| serde_json::to_value(wire).map_err(|error| error.to_string()))
+            .transpose()?,
     })
 }
 
@@ -390,7 +393,12 @@ mod tests {
                     meerkat_core::OutputSchema::new(serde_json::json!({"type":"object"}))
                         .expect("valid output schema"),
                 ),
-                provider_params: Some(serde_json::json!({"reasoning_effort":"medium"})),
+                provider_params: Some(
+                    meerkat_contracts::wire::runtime::WireProviderParamsOverride {
+                        reasoning: Some(meerkat_contracts::wire::runtime::WireReasoningMode::Emit),
+                        ..Default::default()
+                    },
+                ),
             }),
         );
 

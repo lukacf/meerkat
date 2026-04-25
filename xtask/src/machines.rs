@@ -22,7 +22,6 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    flow_frame_machine, flow_run_machine, loop_iteration_machine,
 };
 use serde::Serialize;
 
@@ -170,7 +169,7 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
             &root,
             HopcroftTarget {
                 kind: "machine",
-                display_name: &machine.schema.machine,
+                display_name: machine.schema.machine.as_str(),
                 slug: &machine.slug,
                 dir: &dir,
                 machine_schema: Some(&machine.schema),
@@ -193,7 +192,7 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
             &root,
             HopcroftTarget {
                 kind: "composition",
-                display_name: &composition.schema.name,
+                display_name: composition.schema.name.as_str(),
                 slug: &composition.slug,
                 dir: &dir,
                 machine_schema: None,
@@ -293,7 +292,7 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         let existing = fs::read_to_string(&mapping_path).ok();
         let merged = merge_mapping_document(
             existing.as_deref(),
-            &machine.schema.machine,
+            machine.schema.machine.as_str(),
             &render_machine_mapping_coverage(&machine.schema, &machine.coverage),
         );
         write_generated(&mapping_path, &merged)?;
@@ -355,7 +354,7 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         let existing = fs::read_to_string(&mapping_path).ok();
         let merged = merge_mapping_document(
             existing.as_deref(),
-            &composition.schema.name,
+            composition.schema.name.as_str(),
             &render_composition_mapping_coverage(&composition.schema, &composition.coverage),
         );
         write_generated(&mapping_path, &merged)?;
@@ -419,7 +418,12 @@ fn machine_verify_at_root(
                         workers,
                     )?;
                     merge_tlc_coverage(&mut aggregated_coverage, witness_coverage.as_ref());
-                    witness_covered_routes.extend(witness.expected_routes.iter().cloned());
+                    witness_covered_routes.extend(
+                        witness
+                            .expected_routes
+                            .iter()
+                            .map(|r| r.as_str().to_owned()),
+                    );
                     witness_covered_scheduler_rules.extend(
                         witness
                             .expected_scheduler_rules
@@ -501,7 +505,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         let mapping_path = machine_mapping_path(root, &machine.slug);
         let mapping_expected = expected_mapping_document(
             &mapping_path,
-            &machine.schema.machine,
+            machine.schema.machine.as_str(),
             &render_machine_mapping_coverage(&machine.schema, &machine.coverage),
         )?;
         compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
@@ -563,7 +567,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         let mapping_path = composition_mapping_path(root, &composition.slug);
         let mapping_expected = expected_mapping_document(
             &mapping_path,
-            &composition.schema.name,
+            composition.schema.name.as_str(),
             &render_composition_mapping_coverage(&composition.schema, &composition.coverage),
         )?;
         compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
@@ -741,7 +745,7 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
     let registry_names: BTreeSet<String> = registry
         .machines
         .iter()
-        .map(|machine| machine.machine.clone())
+        .map(|machine| machine.machine.as_str().to_owned())
         .collect();
 
     // Only cross-reference against doc inventories when the docs exist.
@@ -813,10 +817,10 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
     }
 
     for machine in &registry.machines {
-        let Some(owner_row) = owner_inventory.get(&machine.machine) else {
+        let Some(owner_row) = owner_inventory.get(machine.machine.as_str()) else {
             continue;
         };
-        let Some(required_final_mode) = final_mode_inventory.get(&machine.machine) else {
+        let Some(required_final_mode) = final_mode_inventory.get(machine.machine.as_str()) else {
             continue;
         };
         if owner_row.owner_crate != machine.rust.crate_name {
@@ -1262,7 +1266,7 @@ fn validate_machine_semantic_coverage(
         &schema
             .transitions
             .iter()
-            .map(|transition| transition.name.clone())
+            .map(|transition| transition.name.as_str().to_owned())
             .collect::<Vec<_>>(),
         &manifest.transition_coverage,
         &anchor_ids,
@@ -1275,7 +1279,7 @@ fn validate_machine_semantic_coverage(
             .effects
             .variants
             .iter()
-            .map(|variant| variant.name.clone())
+            .map(|variant| variant.name.as_str().to_owned())
             .collect::<Vec<_>>(),
         &manifest.effect_coverage,
         &anchor_ids,
@@ -1287,7 +1291,7 @@ fn validate_machine_semantic_coverage(
         &schema
             .invariants
             .iter()
-            .map(|invariant| invariant.name.clone())
+            .map(|invariant| invariant.name.as_str().to_owned())
             .collect::<Vec<_>>(),
         &manifest.invariant_coverage,
         &anchor_ids,
@@ -1318,7 +1322,7 @@ fn validate_composition_semantic_coverage(
         &schema
             .routes
             .iter()
-            .map(|route| route.name.clone())
+            .map(|route| route.name.as_str().to_owned())
             .collect::<Vec<_>>(),
         &manifest.route_coverage,
         &anchor_ids,
@@ -1455,10 +1459,11 @@ fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec
             entries
                 .iter()
                 .find(|entry| {
-                    entry.schema.machine == *wanted
+                    entry.schema.machine.as_str() == wanted.as_str()
                         || entry.slug == *wanted
                         || legacy_machine_slug(&entry.schema.machine) == Some(wanted.as_str())
-                        || entry.schema.machine.strip_suffix("Machine") == Some(wanted.as_str())
+                        || entry.schema.machine.as_str().strip_suffix("Machine")
+                            == Some(wanted.as_str())
                 })
                 .cloned()
                 .ok_or_else(|| anyhow!("unknown machine selection `{wanted}`"))
@@ -1479,7 +1484,9 @@ fn select_compositions(
         .map(|wanted| {
             entries
                 .iter()
-                .find(|entry| entry.schema.name == *wanted || entry.slug == *wanted)
+                .find(|entry| {
+                    entry.schema.name.as_str() == wanted.as_str() || entry.slug == *wanted
+                })
                 .cloned()
                 .ok_or_else(|| anyhow!("unknown composition selection `{wanted}`"))
         })
@@ -1620,10 +1627,10 @@ pub fn ensure_machine_transition_coverage(
         .filter_map(|transition| {
             let evaluations = coverage
                 .counts_by_operator
-                .get(&transition.name)
+                .get(transition.name.as_str())
                 .map(|counts| counts.evaluations)
                 .unwrap_or(0);
-            (evaluations == 0).then(|| transition.name.clone())
+            (evaluations == 0).then(|| transition.name.as_str().to_owned())
         })
         .collect::<Vec<_>>();
 
@@ -1658,8 +1665,8 @@ pub fn ensure_composition_coverage(
                 .get(&operator)
                 .map(|counts| counts.evaluations)
                 .unwrap_or(0);
-            (evaluations == 0 && !witness_covered_routes.contains(&route.name))
-                .then(|| route.name.clone())
+            (evaluations == 0 && !witness_covered_routes.contains(route.name.as_str()))
+                .then(|| route.name.as_str().to_owned())
         })
         .collect::<Vec<_>>();
 
@@ -2137,11 +2144,7 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
 }
 
 fn compat_generated_kernel_schemas() -> Vec<MachineSchema> {
-    vec![
-        flow_frame_machine(),
-        flow_run_machine(),
-        loop_iteration_machine(),
-    ]
+    Vec::new()
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
@@ -3484,8 +3487,13 @@ fn transition_input_variant_map(schema: &MachineSchema) -> BTreeMap<String, Stri
     schema
         .transitions
         .iter()
-        .filter(|transition| transition.on.kind == TriggerKind::Input)
-        .map(|transition| (transition.name.clone(), transition.on.variant.clone()))
+        .filter(|transition| transition.on.kind() == TriggerKind::Input)
+        .map(|transition| {
+            (
+                transition.name.as_str().to_owned(),
+                transition.on.variant_str().to_owned(),
+            )
+        })
         .collect()
 }
 
@@ -3497,16 +3505,22 @@ fn schema_input_rows_for_pair(
     let mut rows = Vec::new();
 
     for input_variant in &schema.inputs.variants {
-        let left =
-            schema_transition_summaries_for_phase_input(schema, left_phase, &input_variant.name);
-        let right =
-            schema_transition_summaries_for_phase_input(schema, right_phase, &input_variant.name);
+        let left = schema_transition_summaries_for_phase_input(
+            schema,
+            left_phase,
+            input_variant.name.as_str(),
+        );
+        let right = schema_transition_summaries_for_phase_input(
+            schema,
+            right_phase,
+            input_variant.name.as_str(),
+        );
         if left.is_empty() && right.is_empty() {
             continue;
         }
 
         rows.push(HopcroftSchemaInputRow {
-            input_variant: input_variant.name.clone(),
+            input_variant: input_variant.name.as_str().to_owned(),
             classification: classify_schema_input_row(&left, &right),
             left,
             right,
@@ -3525,24 +3539,29 @@ fn schema_transition_summaries_for_phase_input(
         .transitions
         .iter()
         .filter(|transition| {
-            transition.on.kind == TriggerKind::Input
-                && transition.on.variant == input_variant
-                && transition.from.iter().any(|from| from == phase)
+            transition.on.kind() == TriggerKind::Input
+                && transition.on.variant_str() == input_variant
+                && transition.from.iter().any(|from| from.as_str() == phase)
         })
         .map(|transition| HopcroftSchemaTransitionSummary {
-            transition: transition.name.clone(),
-            to_phase: transition.to.clone(),
-            binding_names: transition.on.bindings.clone(),
+            transition: transition.name.as_str().to_owned(),
+            to_phase: transition.to.as_str().to_owned(),
+            binding_names: transition
+                .on
+                .bindings()
+                .iter()
+                .map(|b| b.as_str().to_owned())
+                .collect(),
             guard_names: transition
                 .guards
                 .iter()
-                .map(|guard| guard.name.clone())
+                .map(|guard| guard.name.as_str().to_owned())
                 .collect(),
             update_count: transition.updates.len(),
             effect_variants: transition
                 .emit
                 .iter()
-                .map(|effect| effect.variant.clone())
+                .map(|effect| effect.variant.as_str().to_owned())
                 .collect(),
         })
         .collect::<Vec<_>>();
@@ -3796,7 +3815,8 @@ fn summarize_snapshot_value_for_cli(value: &str) -> String {
     }
 }
 
-fn generated_kernel_module_slug(machine_name: &str) -> String {
+fn generated_kernel_module_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
     match machine_name {
         "MeerkatMachine" => "meerkat".into(),
         "MobMachine" => "mob".into(),
@@ -3804,7 +3824,8 @@ fn generated_kernel_module_slug(machine_name: &str) -> String {
     }
 }
 
-pub fn machine_slug(machine_name: &str) -> String {
+pub fn machine_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
     match machine_name {
         "MeerkatMachine" => return "meerkat_machine".into(),
         "MobMachine" => return "mob_machine".into(),
@@ -3814,16 +3835,16 @@ pub fn machine_slug(machine_name: &str) -> String {
     to_snake_case(trimmed)
 }
 
-fn legacy_machine_slug(machine_name: &str) -> Option<&'static str> {
-    match machine_name {
+fn legacy_machine_slug(machine_name: impl AsRef<str>) -> Option<&'static str> {
+    match machine_name.as_ref() {
         "MeerkatMachine" => Some("meerkat"),
         "MobMachine" => Some("mob"),
         _ => None,
     }
 }
 
-pub fn composition_slug(name: &str) -> String {
-    to_snake_case(name)
+pub fn composition_slug(name: impl AsRef<str>) -> String {
+    to_snake_case(name.as_ref())
 }
 
 pub fn to_snake_case(value: &str) -> String {

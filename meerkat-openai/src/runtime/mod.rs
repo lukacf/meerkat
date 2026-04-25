@@ -136,9 +136,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         .token_store
                         .as_ref()
                         .ok_or_else(|| interactive_login_error(binding))?;
+                    // Wave-c C-1 follow-up: typed atoms on both ConnectionRef
+                    // and TokenKey.
                     let key = meerkat_core::auth::TokenKey::new(
-                        binding.connection_ref.realm_id.clone(),
-                        binding.connection_ref.binding_id.clone(),
+                        binding.connection_ref.realm.clone(),
+                        binding.connection_ref.binding.clone(),
                     );
                     let persisted = store
                         .load(&key)
@@ -377,7 +379,6 @@ mod tests {
             source: meerkat_core::CredentialSourceSpec::InlineSecret {
                 secret: "sk-x".into(),
             },
-            storage: Default::default(),
             constraints: Default::default(),
             metadata_defaults: Default::default(),
         }
@@ -389,8 +390,9 @@ mod tests {
         let vb = rt
             .validate_binding(
                 &meerkat_core::ConnectionRef {
-                    realm_id: "dev".into(),
-                    binding_id: "default".into(),
+                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                    profile: None,
                 },
                 &backend("openai_api"),
                 &auth("api_key"),
@@ -406,8 +408,9 @@ mod tests {
         let err = rt
             .validate_binding(
                 &meerkat_core::ConnectionRef {
-                    realm_id: "dev".into(),
-                    binding_id: "default".into(),
+                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                    profile: None,
                 },
                 &backend("bogus_backend"),
                 &auth("api_key"),
@@ -424,8 +427,9 @@ mod tests {
         let err = rt
             .validate_binding(
                 &meerkat_core::ConnectionRef {
-                    realm_id: "dev".into(),
-                    binding_id: "default".into(),
+                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                    profile: None,
                 },
                 &backend("openai_api"),
                 &auth("managed_chatgpt_oauth"),
@@ -446,8 +450,9 @@ mod tests {
         let err = rt
             .validate_binding(
                 &meerkat_core::ConnectionRef {
-                    realm_id: "dev".into(),
-                    binding_id: "default".into(),
+                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                    profile: None,
                 },
                 &wrong,
                 &auth("api_key"),
@@ -470,8 +475,9 @@ mod tests {
         let vb = rt
             .validate_binding(
                 &meerkat_core::ConnectionRef {
-                    realm_id: "dev".into(),
-                    binding_id: "default".into(),
+                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                    profile: None,
                 },
                 &backend("openai_api"),
                 &auth("api_key"),

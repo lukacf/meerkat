@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 //! Detached-wake contract tests for background shell job notification.
 //!
 //! These tests verify the current runtime-loop-owned detached-wake paths that
@@ -19,7 +24,6 @@ use meerkat_core::ops_lifecycle::{
     OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use meerkat_runtime::detached_wake::DetachedWakeState;
 use meerkat_runtime::{
     ContinuationInput, InputDurability, InputOrigin, InputVisibility, MeerkatMachine,
     RuntimeOpsLifecycleRegistry,
@@ -292,7 +296,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             .unwrap();
     }
 
-    // Trigger the runtime loop with a prompt so maybe_signal_detached_wake fires
+    // Trigger the runtime loop with a prompt so the idle-wake path fires
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger_input = Input::Prompt(PromptInput {
         header: InputHeader {
@@ -431,17 +435,17 @@ async fn choke_004_completion_during_running_defers_wake() {
         .complete_operation(&op_id, op_result(&op_id, "done-while-running"))
         .unwrap();
 
-    // pending should be true at this point
-    // but the runtime loop hasn't reached maybe_signal_detached_wake yet
-    // because the executor is still sleeping
+    // The completion-feed entry is visible at this point, but the runtime loop
+    // hasn't reached the idle-wake path yet because the executor is still
+    // sleeping and the session is not quiescent.
 
     // Wait for the first turn to complete
     if let Some(handle) = handle {
         let _ = tokio::time::timeout(Duration::from_secs(3), handle.wait()).await;
     }
 
-    // After the turn completes and queue drains, maybe_signal_detached_wake
-    // fires and the waker task injects the continuation.
+    // After the turn completes and the queue drains, the idle-wake path
+    // injects the continuation from the completion feed.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // The executor should have been called at least twice:
@@ -595,18 +599,16 @@ fn unit_003_continuation_helper_builds_derived_invisible_steer() {
     assert!(continuation.request_id.is_none());
 }
 
-// ─── UNIT-004: DetachedWakeState arms only for BackgroundToolOp ───
+// ─── UNIT-004: Completion feed carries kind through so idle-wake can
+//              filter BackgroundToolOp vs MobMemberChild ───
 
 #[test]
-fn unit_004_detached_wake_arms_only_for_background_tool_op() {
+fn unit_004_completion_feed_carries_operation_kind() {
     let registry = RuntimeOpsLifecycleRegistry::new();
+    let feed = registry.completion_feed_handle();
+    let baseline = feed.watermark();
 
-    // Wire a detached wake state
-    let wake_state = Arc::new(DetachedWakeState::new());
-    let pending = Arc::clone(&wake_state.pending);
-    registry.set_detached_wake(Arc::clone(&wake_state));
-
-    // Register and complete a BackgroundToolOp
+    // Register and complete a BackgroundToolOp.
     let bg_spec = background_spec("bg-arms");
     let bg_id = bg_spec.id.clone();
     registry.register_operation(bg_spec).unwrap();
@@ -615,16 +617,7 @@ fn unit_004_detached_wake_arms_only_for_background_tool_op() {
         .complete_operation(&bg_id, op_result(&bg_id, "bg done"))
         .unwrap();
 
-    // pending should be true — BackgroundToolOp reached terminal
-    assert!(
-        pending.load(Ordering::Acquire),
-        "pending should be true after BackgroundToolOp completion"
-    );
-
-    // Reset pending for the next check
-    pending.store(false, Ordering::Release);
-
-    // Register and complete a MobMemberChild
+    // Register and complete a MobMemberChild.
     let mob_spec = mob_member_spec("mob-no-arm");
     let mob_id = mob_spec.id.clone();
     registry.register_operation(mob_spec).unwrap();
@@ -633,9 +626,14 @@ fn unit_004_detached_wake_arms_only_for_background_tool_op() {
         .complete_operation(&mob_id, op_result(&mob_id, "mob done"))
         .unwrap();
 
-    // pending should still be false — MobMemberChild should NOT arm wake
+    let batch = feed.list_since(baseline);
+    let kinds: Vec<_> = batch.entries.iter().map(|e| e.kind).collect();
     assert!(
-        !pending.load(Ordering::Acquire),
-        "pending should remain false after MobMemberChild completion"
+        kinds.contains(&OperationKind::BackgroundToolOp),
+        "idle-wake filter depends on BackgroundToolOp entries appearing in the feed"
+    );
+    assert!(
+        kinds.contains(&OperationKind::MobMemberChild),
+        "idle-wake filter depends on MobMemberChild entries appearing so it can skip them"
     );
 }

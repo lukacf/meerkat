@@ -1,5 +1,5 @@
 // @generated — protocol helpers for `surface_completion`
-// Composition: external_tool_bundle, Producer: external_tool_surface, Effect: ScheduleSurfaceCompletion
+// Composition: meerkat_mob_seam, Producer: meerkat, Effect: ScheduleSurfaceCompletion
 // Closure policy: AckRequired
 // Liveness: eventual feedback under surface connection liveness
 

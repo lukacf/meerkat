@@ -15,22 +15,26 @@ use meerkat_mcp_server::{MeerkatResumeInput, MeerkatRunInput};
 use serde_json::{Value, json};
 
 /// `meerkat_run` MCP input accepts `connection_ref` as an optional
-/// string field. The field round-trips through serde without loss and
-/// deserializes into the expected `Option<String>`.
+/// structured field. The field round-trips through serde without loss and
+/// deserializes into the expected typed `WireConnectionRef`.
 #[test]
 fn meerkat_run_input_accepts_connection_ref() {
     let body = json!({
         "prompt": "hi",
-        "connection_ref": "realm-x:bind-y"
+        "connection_ref": {
+            "realm": "realm-x",
+            "binding": "bind-y"
+        }
     });
 
     let input: MeerkatRunInput =
         serde_json::from_value(body).expect("input with connection_ref must deserialize");
-    assert_eq!(
-        input.connection_ref.as_deref(),
-        Some("realm-x:bind-y"),
-        "connection_ref must be preserved through deserialization"
-    );
+    let connection_ref = input
+        .connection_ref
+        .as_ref()
+        .expect("connection_ref must be preserved through deserialization");
+    assert_eq!(connection_ref.realm.as_str(), "realm-x");
+    assert_eq!(connection_ref.binding.as_str(), "bind-y");
 }
 
 /// `meerkat_run` MCP input omitting `connection_ref` still parses,

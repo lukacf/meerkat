@@ -1,0 +1,17 @@
+{
+    "session_id": "00000000-0000-0000-0000-000000000012",
+    "updated_at": "2025-10-01T12:00:00Z",
+    "snapshot": {
+        "id": "00000000-0000-0000-0000-000000000012",
+        "messages": [],
+        "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+        "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+        "metadata": {
+            "session_metadata": {
+                "provider_params": {
+                    "thinking": {"type": "enabled", "budget_tokens": 32000}
+                }
+            }
+        }
+    }
+}

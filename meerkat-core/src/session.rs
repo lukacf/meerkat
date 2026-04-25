@@ -22,8 +22,28 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// Current session format version
-pub const SESSION_VERSION: u32 = 1;
+/// Current session format version.
+///
+/// Version history:
+/// - v1 — pre-wave-c. `SessionMetadata.connection_ref` inner fields were
+///   untyped strings (`realm_id`, `binding_id`, `profile`); no per-entity
+///   schema version byte on `SessionMetadata`.
+/// - v2 — wave-c C-3. `ConnectionRef` inner fields are typed
+///   `RealmId`/`BindingId`/`ProfileId` newtypes; `SessionMetadata` carries
+///   a `schema_version` byte. Opportunistic upgrade-on-read —
+///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
+///   into v2 shape; the next `save()` persists v2.
+pub const SESSION_VERSION: u32 = 2;
+
+/// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
+/// so `SessionMetadata` can evolve independently of the Session envelope.
+///
+/// - v1 — pre-wave-c. Default on read for rows written before the byte
+///   was introduced.
+/// - v2 — wave-c C-3. Typed `ConnectionRef` inner fields; any future
+///   `SessionMetadata`-local shape change bumps this without moving
+///   `SESSION_VERSION`.
+pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
 
 /// A conversation session with full history
 ///
@@ -502,13 +522,22 @@ impl Session {
         self.version
     }
 
-    /// Get all messages
+    /// Get all messages.
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
-    /// Get mutable access to messages (triggers CoW if Arc is shared)
-    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+    /// Mutable access to the message buffer — *append-only witness escape hatch*.
+    ///
+    /// Intentionally `pub(crate)`: the only legitimate mutations of the
+    /// message history within a single `SessionId` are `push` / `push_batch`
+    /// (extend) and the two in-crate rewrite operations used by the agent
+    /// loop (compaction-summary replacement, synthetic-notice stripping).
+    /// Cross-crate consumers must route in-place content rewrites through
+    /// the typed proxy [`Session::externalize_media`]; shrink or replace
+    /// operations must go through [`Session::fork_at`] which rotates
+    /// `SessionId` (F1/F7 closure from the state-scope audit).
+    pub(crate) fn messages_mut_internal(&mut self) -> &mut Vec<Message> {
         Arc::make_mut(&mut self.messages)
     }
 
@@ -540,6 +569,25 @@ impl Session {
         let inner = Arc::make_mut(&mut self.messages);
         inner.extend(messages);
         self.updated_at = SystemTime::now();
+    }
+
+    /// Rewrite inline media payloads in-place as `BlobRef` pointers.
+    ///
+    /// Message count is invariant across this operation — `externalize`
+    /// only swaps inline image/media bytes for opaque blob references.
+    /// This is the cross-crate-legitimate rewrite operation that used
+    /// to require public `messages_mut()`; post-C-H1 callers in
+    /// `meerkat-session` go through this typed method.
+    ///
+    /// Does not touch `updated_at` — externalization is bookkeeping, not
+    /// a semantic session mutation.
+    pub async fn externalize_media(
+        &mut self,
+        blob_store: &dyn crate::BlobStore,
+        start: usize,
+    ) -> Result<(), crate::blob::BlobStoreError> {
+        let messages = Arc::make_mut(&mut self.messages);
+        crate::image_content::externalize_messages_from(blob_store, messages, start).await
     }
 
     /// Explicitly update the timestamp
@@ -850,6 +898,13 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionMetadata {
+    /// Per-entity schema version byte.
+    ///
+    /// Defaults to `1` on read so pre-wave-c rows without the field
+    /// deserialize cleanly; rewritten as `SESSION_METADATA_SCHEMA_VERSION`
+    /// on the next `save()` after a successful migration pass.
+    #[serde(default = "default_session_metadata_schema_version")]
+    pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
     #[serde(default = "default_structured_output_retries")]
@@ -893,6 +948,10 @@ pub struct SessionMetadata {
 
 fn default_structured_output_retries() -> u32 {
     2
+}
+
+fn default_session_metadata_schema_version() -> u32 {
+    1
 }
 
 /// Canonical durable LLM identity for a session.
@@ -1096,7 +1155,7 @@ pub struct SessionTooling {
     pub memory: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_skills: Option<Vec<crate::skills::SkillId>>,
+    pub active_skills: Option<Vec<crate::skills::SkillKey>>,
 }
 
 impl From<&Session> for SessionMeta {

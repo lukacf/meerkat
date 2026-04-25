@@ -78,16 +78,7 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
-| `POST` | `/realtime/open_info` | Issue a realtime websocket bootstrap token |
 | `POST` | `/realtime/status` | Read product-layer realtime status |
-| `POST` | `/realtime/capabilities` | Read product-layer realtime capabilities |
-| `GET` | `/sessions/{id}/status` | Read runtime state |
-| `GET` | `/sessions/{id}/realtime-attachment-status` | Read the runtime-owned realtime attachment status for a session |
-| `POST` | `/sessions/{id}/submit` | Admit runtime input explicitly |
-| `POST` | `/sessions/{id}/retire` | Retire a runtime |
-| `POST` | `/sessions/{id}/reset` | Reset a runtime |
-| `GET` | `/sessions/{id}/submissions` | List runtime input state entries |
-| `GET` | `/sessions/{session_id}/submissions/{submission_id}` | Read one runtime input state |
 | `GET` | `/auth/profiles` | List auth profiles |
 | `POST` | `/auth/profiles` | Create an auth profile |
 | `GET` | `/auth/profiles/{id}` | Read an auth profile |
@@ -106,8 +97,6 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/mob/{id}/fork-helper` | Fork a helper from an existing member (mob feature) |
 | `POST` | `/mob/{id}/wait-kickoff` | Wait for kickoff completion (mob feature) |
 | `GET` | `/mob/{id}/members/{agent_identity}/status` | Read member status (mob feature) |
-| `POST` | `/mob/{id}/members/{agent_identity}/realtime/attach` | Compatibility route present but unavailable; realtime is session-scoped (mob feature) |
-| `POST` | `/mob/{id}/members/{agent_identity}/realtime/detach` | Compatibility route present but unavailable; realtime is session-scoped (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
 | `GET` | `/skills` | List skills with provenance |
@@ -908,23 +897,6 @@ the session's model (or choose a realtime-capable default) to control
 whether the session runs in realtime mode. See the [Realtime
 guide](/guides/realtime) for the full capability-driven model, state
 machine, and reconfigure flow.
-
-### GET /runtime/\{id\}/realtime_attachment_status
-
-Read the runtime-owned realtime attachment status projection for a session.
-
-<ParamField path="id" type="string" required>
-  Session ID.
-</ParamField>
-
-```json Response
-{
-  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "status": "binding_ready"
-}
-```
-
-Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime guide](/guides/realtime#attachment-states) for the full state table and transition diagram.
 
 ## Error responses
 

@@ -1,5 +1,5 @@
 mod source {
-    #![allow(clippy::expect_used, clippy::assign_op_pattern)]
+    #![allow(dead_code, clippy::expect_used, clippy::assign_op_pattern)]
     //! MobMachine — DSL-generated canonical state.
     //!
     //! The generated `MobMachineState` is the machine-owned portion of mob state.
@@ -56,6 +56,24 @@ mod source {
     impl<T: Into<String>> From<T> for AgentRuntimeId {
         fn from(s: T) -> Self {
             Self(s.into())
+        }
+    }
+
+    /// Bridging type for mob id. Maps to `crate::ids::MobId`.
+    #[derive(
+        Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    )]
+    pub struct MobId(pub String);
+
+    impl<T: Into<String>> From<T> for MobId {
+        fn from(s: T) -> Self {
+            Self(s.into())
+        }
+    }
+
+    impl MobId {
+        pub fn from_domain(id: &crate::ids::MobId) -> Self {
+            Self(id.to_string())
         }
     }
     impl AgentRuntimeId {
@@ -602,6 +620,35 @@ mod source {
         }
     }
 
+    /// Typed wiring lifecycle notice kind for
+    /// [`MobMachineEffect::EmitWiringLifecycleNotice`]. Pair-valued (edge-keyed)
+    /// counterpart to [`MemberLifecycleKind`] (member-keyed). Emitted alongside
+    /// [`MobMachineEffect::WiringGraphChanged`] by `WireMembers`/`UnwireMembers`
+    /// transitions so external observers can reconstruct which identity pair
+    /// was wired or unwired.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub enum WiringLifecycleKind {
+        #[default]
+        Wired,
+        Unwired,
+    }
+
+    impl WiringLifecycleKind {
+        /// Stable discriminant for logging / wire surfaces.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Wired => "wired",
+                Self::Unwired => "unwired",
+            }
+        }
+    }
+
+    impl std::fmt::Display for WiringLifecycleKind {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+
     /// Typed kickoff-notice intent. Replaces the former literal-string `intent`
     /// field on [`MobMachineEffect::EmitKickoffLifecycleNotice`] — closed mirror
     /// of [`KickoffPhase`] with an additional `Started` intent variant for the
@@ -722,9 +769,9 @@ mod source {
                 loop_definition: Map<LoopInstanceId, LoopId>,
                 loop_depth: Map<LoopInstanceId, u32>,
                 loop_stage: Map<LoopInstanceId, Enum<LoopIterationStage>>,
-                loop_current_iteration: Map<LoopInstanceId, u32>,
-                loop_last_completed_iteration: Map<LoopInstanceId, u32>,
-                loop_max_iterations: Map<LoopInstanceId, u32>,
+                loop_current_iteration: Map<LoopInstanceId, u64>,
+                loop_last_completed_iteration: Map<LoopInstanceId, u64>,
+                loop_max_iterations: Map<LoopInstanceId, u64>,
                 loop_active_body_frame: Map<LoopInstanceId, Option<FrameId>>,
                 pending_spawn_count: u64,
                 coordinator_bound: bool,
@@ -758,39 +805,8 @@ mod source {
                 // updates and illegal status transitions (e.g. Completed→Pending).
                 in_progress_task_ids: Set<TaskId>,
                 completed_task_ids: Set<TaskId>,
-                // W3-H / dogma #4: canonical identity→bridge-session map for
-                // realtime WS observers. Key absence == Unbound; presence carries
-                // the current bridge session id that identity's realtime channel
-                // should pin to. Respawn updates the value atomically in the same
-                // DSL transition that rebinds the runtime id, emitting a typed
-                // `MemberSessionBindingRotated` effect — the observer handles
-                // rotation as a first-class machine-emitted meaning, not a
-                // shell-side pattern-match over a Cleared+Set debounce window
-                // (dogma #3: one owner of meaning).
-                //
-                // Track-B (R5): this map is the identity-level "member is bound to
-                // *some* session" fact. Realtime WS observers were the first
-                // consumer; the `RecomputeMobPeerOverlay` composition driver is
-                // the second and reads the same map plus `wiring_edges` to
-                // project peer endpoints onto live sessions.
                 member_session_bindings: Map<AgentIdentity, SessionId>,
-                // Track-B (R5): monotonically increasing counter that advances
-                // on every Track-B identity-level mutation
-                // (`WireMembers`/`UnwireMembers`/`BindMemberSession`/
-                // `RotateMemberSession`/`ReleaseMemberSession`). The machine
-                // emits `WiringGraphChanged { epoch }` or
-                // `MemberSessionBindingChanged { epoch, ... }` on the same
-                // transition that bumps this counter. Consumers (notably the
-                // `RecomputeMobPeerOverlay` composition driver) use the
-                // epoch to linearize recomputation and reject stale overlays
-                // against newer topology.
-                //
-                // The lifecycle-coupled `Spawn`/`Retire` transitions still
-                // emit the fine-grained `MemberSessionBindingSet`/
-                // `Rotated`/`Released` effects directly and do NOT advance
-                // this counter. Commit 4's driver watches both paths;
-                // Commit 5's cutover consolidates the lifecycle-coupled
-                // updates onto this canonical bump point.
+                pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
                 topology_epoch: u64,
             }
 
@@ -872,6 +888,7 @@ mod source {
                 in_progress_task_ids = EmptySet,
                 completed_task_ids = EmptySet,
                 member_session_bindings = EmptyMap,
+                pending_session_ingress_detach_runtime_ids = EmptySet,
                 topology_epoch = 0,
             }
 
@@ -921,7 +938,19 @@ mod source {
                     parent_node_id: FlowNodeId,
                     loop_id: LoopId,
                     depth: u32,
-                    max_iterations: u32,
+                    max_iterations: u64,
+                },
+                RecordLoopBodyFrameCompleted {
+                    loop_instance_id: LoopInstanceId,
+                    iteration: u64,
+                },
+                RecordLoopUntilConditionMet {
+                    loop_instance_id: LoopInstanceId,
+                    iteration: u64,
+                },
+                RecordLoopUntilConditionFailed {
+                    loop_instance_id: LoopInstanceId,
+                    iteration: u64,
                 },
                 ProjectRunStatus {
                     run_id: RunId,
@@ -945,19 +974,13 @@ mod source {
                 CancelFlow,
                 FlowStatus,
                 Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
-                Retire { agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId> },
+                Retire { agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId },
                 Respawn { agent_runtime_id: AgentRuntimeId },
                 RetireAll,
-                Wire,
-                Unwire,
                 // Track-B (R5): explicit identity-level wiring and session-binding
                 // mutation inputs. These drive `wiring_edges` and
                 // `member_session_bindings` directly at DSL authority,
-                // independent of the Spawn/Retire lifecycle. The existing
-                // no-arg `Wire`/`Unwire` and lifecycle-coupled binding
-                // updates on `Spawn`/`Retire` remain in place; the new inputs
-                // are the canonical path for surfaces that mutate topology
-                // without invoking the member lifecycle.
+                // independent of the Spawn/Retire lifecycle.
                 //
                 // The `edge` field on `WireMembers`/`UnwireMembers` carries a
                 // pre-normalized `WiringEdge` (a <= b). Callers construct the
@@ -967,6 +990,8 @@ mod source {
                 BindMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
                 RotateMemberSession { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
                 ReleaseMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
+                SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
+                SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
                 SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
                 CancelWork { work_id: WorkId },
                 CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1024,11 +1049,11 @@ mod source {
 
             signal MobMachineSignal {
                 ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-                RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+                RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
                 ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-                ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
-                RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
-                DestroyMob,
+                ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
+                RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
+                DestroyMob { session_id: SessionId },
                 ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
                 MarkCompleted,
                 StartRun,
@@ -1054,10 +1079,10 @@ mod source {
             }
 
             effect MobMachineEffect {
-                RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+                RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
                 RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
-                RequestRuntimeRetire,
-                RequestRuntimeDestroy,
+                RequestRuntimeRetire { session_id: SessionId },
+                RequestRuntimeDestroy { session_id: SessionId },
                 EmitMemberLifecycleNotice { kind: Enum<MemberLifecycleKind> },
                 EmitRunLifecycleNotice,
                 EmitFlowRunNotice,
@@ -1073,18 +1098,6 @@ mod source {
                 PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
                 PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
                 EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
-                // W3-H / dogma #4: canonical realtime-binding lifecycle effects.
-                // Three-variant shape (Set / Rotated / Released) so rotation is a
-                // first-class machine-emitted meaning rather than a shell-observer
-                // pattern-match over a Cleared+Set debounce window — the latter
-                // would re-impose the "shell interprets DSL state as semantic"
-                // pattern that dogma #3 specifically targets. Guard-split Spawn
-                // emits Set vs Rotated; guard-split Retire emits Released vs
-                // nothing, so each transition picks the correct typed effect
-                // atomically.
-                MemberSessionBindingSet { agent_identity: AgentIdentity, bridge_session_id: SessionId },
-                MemberSessionBindingRotated { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
-                MemberSessionBindingReleased { agent_identity: AgentIdentity, session_id: SessionId },
                 // Track-B (R5): canonical topology-change signals consumed by
                 // the `RecomputeMobPeerOverlay` composition driver.
                 //
@@ -1101,6 +1114,14 @@ mod source {
                 // snapshot.
                 WiringGraphChanged { epoch: u64 },
                 MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
+                // D-wiring-observability (#27): pair-valued notice emitted from
+                // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
+                // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
+                // the `WiringEdge` so external observers (event store,
+                // telemetry) can reconstruct which identity pair was wired or
+                // unwired. Separate from `EmitMemberLifecycleNotice` because
+                // wiring is pair-valued, not per-member.
+                EmitWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: WiringEdge },
             }
 
             disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -1122,11 +1143,9 @@ mod source {
             disposition PersistKickoffUpdate => local,
             disposition PersistKickoffFailureUpdate => local,
             disposition EmitKickoffLifecycleNotice => external,
-            disposition MemberSessionBindingSet => external,
-            disposition MemberSessionBindingRotated => external,
-            disposition MemberSessionBindingReleased => external,
             disposition WiringGraphChanged => external,
             disposition MemberSessionBindingChanged => external,
+            disposition EmitWiringLifecycleNotice => external,
 
             // =====================================================================
             // Invariants
@@ -1184,11 +1203,12 @@ mod source {
                     self.member_startup_runtime_ready.remove(agent_runtime_id);
                     self.member_startup_ready.remove(agent_runtime_id);
                     self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                    self.topology_epoch += 1;
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
+                emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(bridge_session_id) }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
-                emit MemberSessionBindingSet { agent_identity: agent_identity, bridge_session_id: bridge_session_id }
             }
 
             transition SpawnRunningReplacing {
@@ -1210,11 +1230,12 @@ mod source {
                     self.member_startup_runtime_ready.remove(agent_runtime_id);
                     self.member_startup_ready.remove(agent_runtime_id);
                     self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                    self.topology_epoch += 1;
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
+                emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
-                emit MemberSessionBindingRotated { agent_identity: agent_identity, old_session_id: replacing.get("value"), new_session_id: bridge_session_id }
             }
 
             transition ObserveRuntimeReady {
@@ -1423,7 +1444,7 @@ mod source {
             }
 
             transition RetireMember {
-                on signal RetireMember { agent_runtime_id, fence_token }
+                on signal RetireMember { agent_runtime_id, fence_token, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
                 guard "fence_token_present" { fence_token == fence_token }
@@ -1431,7 +1452,7 @@ mod source {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 }
                 to Running
-                emit RequestRuntimeRetire
+                emit RequestRuntimeRetire { session_id: session_id }
             }
 
             transition ObserveRuntimeRetired {
@@ -1449,12 +1470,12 @@ mod source {
                     self.member_state_markers.remove(agent_runtime_id);
                     self.active_run_count = 0;
                 }
-                to Stopped
+                to Running
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
             }
 
             transition ResetMember {
-                on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+                on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id }
                 guard {
                     self.lifecycle_phase == Phase::Running
                     || self.lifecycle_phase == Phase::Stopped
@@ -1475,12 +1496,12 @@ mod source {
                     self.member_startup_ready.remove(agent_runtime_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Reset }
             }
 
             transition RespawnMember {
-                on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+                on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 update {
                     self.active_run_count = 0;
@@ -1498,7 +1519,7 @@ mod source {
                     self.member_startup_ready.remove(agent_runtime_id);
                 }
                 to Running
-                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+                emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
             }
 
@@ -1512,12 +1533,13 @@ mod source {
             }
 
             transition DestroyMob {
-                on signal DestroyMob
+                on signal DestroyMob { session_id }
                 guard {
                     self.lifecycle_phase == Phase::Running
                     || self.lifecycle_phase == Phase::Stopped
                     || self.lifecycle_phase == Phase::Completed
                 }
+                guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
                 update {
                     self.live_runtime_ids = EmptySet;
                     self.runtime_fence_tokens = EmptyMap;
@@ -1525,12 +1547,13 @@ mod source {
                     self.member_startup_runtime_ready = EmptySet;
                     self.member_startup_ready = EmptySet;
                     self.member_state_markers = EmptyMap;
+                    self.pending_session_ingress_detach_runtime_ids = EmptySet;
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
                     self.coordinator_bound = false;
                 }
                 to Destroyed
-                emit RequestRuntimeDestroy
+                emit RequestRuntimeDestroy { session_id: session_id }
             }
 
             transition ObserveRuntimeDestroyed {
@@ -1665,14 +1688,6 @@ mod source {
             // Running self-loops (inputs)
             // =====================================================================
 
-            transition WireRunning {
-                on input Wire
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-                emit NotifyCoordinator
-            }
-
             // =====================================================================
             // Track-B (R5): identity-level wiring mutations.
             //
@@ -1692,6 +1707,7 @@ mod source {
                 }
                 to Running
                 emit WiringGraphChanged { epoch: self.topology_epoch }
+                emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
             }
 
             transition UnwireMembersRunning {
@@ -1704,6 +1720,7 @@ mod source {
                 }
                 to Running
                 emit WiringGraphChanged { epoch: self.topology_epoch }
+                emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
             }
 
             // =====================================================================
@@ -1727,7 +1744,6 @@ mod source {
                     self.topology_epoch += 1;
                 }
                 to Running
-                emit MemberSessionBindingSet { agent_identity: agent_identity, bridge_session_id: session_id }
                 emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(session_id) }
             }
 
@@ -1746,7 +1762,6 @@ mod source {
                     self.topology_epoch += 1;
                 }
                 to Running
-                emit MemberSessionBindingRotated { agent_identity: agent_identity, old_session_id: old_session_id, new_session_id: new_session_id }
                 emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(old_session_id), new_session_id: Some(new_session_id) }
             }
 
@@ -1764,7 +1779,6 @@ mod source {
                     self.topology_epoch += 1;
                 }
                 to Running
-                emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: session_id }
                 emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
             }
 
@@ -2251,7 +2265,79 @@ mod source {
                     self.loop_definition.insert(loop_instance_id, loop_id);
                     self.loop_depth.insert(loop_instance_id, depth);
                     self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                    self.loop_current_iteration.insert(loop_instance_id, 0u64);
+                    self.loop_last_completed_iteration.insert(loop_instance_id, 0u64);
                     self.loop_max_iterations.insert(loop_instance_id, max_iterations);
+                    self.loop_active_body_frame.insert(loop_instance_id, None);
+                }
+                to Running
+                emit EmitRunLifecycleNotice
+            }
+
+            transition RecordLoopBodyFrameCompletedRunning {
+                on input RecordLoopBodyFrameCompleted { loop_instance_id, iteration }
+                guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+                guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+                guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+                guard "body_frame_active" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::BodyFrameActive) }
+                guard "iteration_matches_current" { self.loop_current_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+                update {
+                    self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingUntilEvaluation);
+                    self.loop_last_completed_iteration.insert(loop_instance_id, iteration);
+                    self.loop_current_iteration.insert(loop_instance_id, iteration + 1u64);
+                    self.loop_active_body_frame.insert(loop_instance_id, None);
+                }
+                to Running
+                emit EmitRunLifecycleNotice
+            }
+
+            transition RecordLoopUntilConditionMetRunning {
+                on input RecordLoopUntilConditionMet { loop_instance_id, iteration }
+                guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+                guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+                guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+                guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+                guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+                update {
+                    self.loop_phase.insert(loop_instance_id, LoopStatus::Completed);
+                    self.loop_active_body_frame.insert(loop_instance_id, None);
+                }
+                to Running
+                emit EmitRunLifecycleNotice
+            }
+
+            transition RecordLoopUntilConditionFailedRunning {
+                on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+                guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+                guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+                guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+                guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+                guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+                guard "iterations_remaining" {
+                    self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                        < self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+                }
+                update {
+                    self.loop_stage.insert(loop_instance_id, LoopIterationStage::AwaitingBodyFrame);
+                    self.loop_active_body_frame.insert(loop_instance_id, None);
+                }
+                to Running
+                emit EmitRunLifecycleNotice
+            }
+
+            transition RecordLoopUntilConditionFailedExhausted {
+                on input RecordLoopUntilConditionFailed { loop_instance_id, iteration }
+                guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+                guard "known_loop" { self.loop_phase.contains_key(loop_instance_id) == true }
+                guard "loop_running" { self.loop_phase.get_cloned(loop_instance_id) == Some(LoopStatus::Running) }
+                guard "awaiting_until_evaluation" { self.loop_stage.get_cloned(loop_instance_id) == Some(LoopIterationStage::AwaitingUntilEvaluation) }
+                guard "iteration_matches_last_completed" { self.loop_last_completed_iteration.get_cloned(loop_instance_id) == Some(iteration) }
+                guard "iterations_exhausted" {
+                    self.loop_current_iteration.get_cloned(loop_instance_id).get("value")
+                        >= self.loop_max_iterations.get_cloned(loop_instance_id).get("value")
+                }
+                update {
+                    self.loop_phase.insert(loop_instance_id, LoopStatus::Exhausted);
                     self.loop_active_body_frame.insert(loop_instance_id, None);
                 }
                 to Running
@@ -2333,18 +2419,6 @@ mod source {
             }
 
             // =====================================================================
-            // Unwire
-            // =====================================================================
-
-            transition UnwireRunning {
-                on input Unwire
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-                emit NotifyCoordinator
-            }
-
-            // =====================================================================
             // CompleteFlow / FinishRun
             // =====================================================================
             //
@@ -2409,26 +2483,8 @@ mod source {
             // Retire / RetireAll
             // =====================================================================
 
-            // W3-H: Retire splits into three variants to keep caller/state
-            // consistency explicit at the DSL:
-            //   * Releasing — identity has a realtime binding AND caller
-            //     witnesses it with `releasing = Some(prior)`. Binding is
-            //     cleared; MemberSessionBindingReleased is emitted. This is
-            //     a terminal retire (user-initiated).
-            //   * PreservingBinding — identity has a realtime binding but
-            //     caller passes `releasing = None`. This is the retire-half
-            //     of a respawn: the binding map is intentionally left alone
-            //     so the replacement spawn's SpawnRunningReplacing path can
-            //     emit MemberSessionBindingRotated against the same entry.
-            //     No binding-release effect is emitted.
-            //   * NoBinding — identity has no realtime binding and caller
-            //     passes `releasing = None`. No-op on the map.
-            // All three add the Retiring state marker. Guards enforce
-            // caller/state consistency: mismatched caller fails "no
-            // transition matched" rather than silently picking the wrong
-            // branch.
             transition RetireRunningReleasing {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2437,14 +2493,16 @@ mod source {
                 update {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                     self.member_session_bindings.remove(agent_identity);
+                    self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+                    self.topology_epoch += 1;
                 }
                 to Running
-                emit RequestRuntimeRetire
-                emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+                emit RequestRuntimeRetire { session_id: session_id }
+                emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
             }
 
             transition RetireRunningPreservingBinding {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2454,11 +2512,11 @@ mod source {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 }
                 to Running
-                emit RequestRuntimeRetire
+                emit RequestRuntimeRetire { session_id: session_id }
             }
 
             transition RetireRunningNoBinding {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2468,11 +2526,11 @@ mod source {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 }
                 to Running
-                emit RequestRuntimeRetire
+                emit RequestRuntimeRetire { session_id: session_id }
             }
 
             transition RetireStoppedReleasing {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Stopped }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2481,14 +2539,58 @@ mod source {
                 update {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                     self.member_session_bindings.remove(agent_identity);
+                    self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+                    self.topology_epoch += 1;
                 }
                 to Stopped
-                emit RequestRuntimeRetire
-                emit MemberSessionBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+                emit RequestRuntimeRetire { session_id: session_id }
+                emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+            }
+
+            transition SessionIngressDetachedForMobDestroyRunning {
+                on input SessionIngressDetachedForMobDestroy { mob_id, agent_runtime_id }
+                guard { self.lifecycle_phase == Phase::Running }
+                guard "mob_id_present" { mob_id == mob_id }
+                guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+                update {
+                    self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
+                }
+                to Running
+            }
+
+            transition SessionIngressDetachedForMobDestroyStopped {
+                on input SessionIngressDetachedForMobDestroy { mob_id, agent_runtime_id }
+                guard { self.lifecycle_phase == Phase::Stopped }
+                guard "mob_id_present" { mob_id == mob_id }
+                guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+                update {
+                    self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
+                }
+                to Stopped
+            }
+
+            transition SessionIngressDetachFailedForMobDestroyRunning {
+                on input SessionIngressDetachFailedForMobDestroy { mob_id, agent_runtime_id, reason }
+                guard { self.lifecycle_phase == Phase::Running }
+                guard "mob_id_present" { mob_id == mob_id }
+                guard "reason_present" { reason == reason }
+                guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+                update {}
+                to Running
+            }
+
+            transition SessionIngressDetachFailedForMobDestroyStopped {
+                on input SessionIngressDetachFailedForMobDestroy { mob_id, agent_runtime_id, reason }
+                guard { self.lifecycle_phase == Phase::Stopped }
+                guard "mob_id_present" { mob_id == mob_id }
+                guard "reason_present" { reason == reason }
+                guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+                update {}
+                to Stopped
             }
 
             transition RetireStoppedPreservingBinding {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Stopped }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2498,11 +2600,11 @@ mod source {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 }
                 to Stopped
-                emit RequestRuntimeRetire
+                emit RequestRuntimeRetire { session_id: session_id }
             }
 
             transition RetireStoppedNoBinding {
-                on input Retire { agent_runtime_id, agent_identity, releasing }
+                on input Retire { agent_runtime_id, agent_identity, releasing, session_id }
                 guard { self.lifecycle_phase == Phase::Stopped }
                 guard "active_members_present" { self.live_runtime_ids != EmptySet }
                 guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -2512,7 +2614,7 @@ mod source {
                     self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 }
                 to Stopped
-                emit RequestRuntimeRetire
+                emit RequestRuntimeRetire { session_id: session_id }
             }
 
             transition RetireAllRunning {
@@ -2563,9 +2665,11 @@ mod source {
                     || self.lifecycle_phase == Phase::Stopped
                     || self.lifecycle_phase == Phase::Completed
                 }
+                guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
                 update {
                     self.live_runtime_ids = EmptySet;
                     self.runtime_fence_tokens = EmptyMap;
+                    self.pending_session_ingress_detach_runtime_ids = EmptySet;
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
                     self.coordinator_bound = false;
@@ -2752,6 +2856,152 @@ mod source {
                 authority.state.loop_stage.get(&loop_instance_id),
                 Some(&LoopIterationStage::AwaitingBodyFrame)
             );
+            assert_eq!(
+                authority
+                    .state
+                    .loop_current_iteration
+                    .get(&loop_instance_id),
+                Some(&0)
+            );
+            assert_eq!(
+                authority
+                    .state
+                    .loop_last_completed_iteration
+                    .get(&loop_instance_id),
+                Some(&0)
+            );
+        }
+
+        #[test]
+        fn loop_until_feedback_is_recorded_by_mob_machine() {
+            let mut authority = MobMachineAuthority::new();
+            let loop_instance_id = LoopInstanceId::from("loop-1");
+
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::CreateLoopSeed {
+                    loop_instance_id: loop_instance_id.clone(),
+                    parent_frame_id: FrameId::from("frame-root"),
+                    parent_node_id: FlowNodeId::from("loop-node"),
+                    loop_id: LoopId::from("repeat"),
+                    depth: 1,
+                    max_iterations: 2,
+                },
+            )
+            .expect("CreateLoopSeed should be accepted");
+            authority.state.loop_stage.insert(
+                loop_instance_id.clone(),
+                LoopIterationStage::BodyFrameActive,
+            );
+
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordLoopBodyFrameCompleted {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration: 0,
+                },
+            )
+            .expect("body completion should be accepted");
+            assert_eq!(
+                authority.state.loop_stage.get(&loop_instance_id),
+                Some(&LoopIterationStage::AwaitingUntilEvaluation)
+            );
+            assert_eq!(
+                authority
+                    .state
+                    .loop_current_iteration
+                    .get(&loop_instance_id),
+                Some(&1)
+            );
+
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordLoopUntilConditionFailed {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration: 0,
+                },
+            )
+            .expect("until=false should request another body frame");
+            assert_eq!(
+                authority.state.loop_stage.get(&loop_instance_id),
+                Some(&LoopIterationStage::AwaitingBodyFrame)
+            );
+
+            authority.state.loop_stage.insert(
+                loop_instance_id.clone(),
+                LoopIterationStage::BodyFrameActive,
+            );
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordLoopBodyFrameCompleted {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration: 1,
+                },
+            )
+            .expect("second body completion should be accepted");
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordLoopUntilConditionMet {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration: 1,
+                },
+            )
+            .expect("until=true should complete the loop");
+            assert_eq!(
+                authority.state.loop_phase.get(&loop_instance_id),
+                Some(&LoopStatus::Completed)
+            );
+        }
+
+        #[test]
+        fn observe_runtime_retired_clears_member_binding_without_stopping_mob() {
+            let mut authority = MobMachineAuthority::new();
+            let runtime_id = AgentRuntimeId::from("worker:1");
+            let fence_token = FenceToken(7);
+            authority.state.live_runtime_ids.insert(runtime_id.clone());
+            authority
+                .state
+                .externally_addressable_runtime_ids
+                .insert(runtime_id.clone());
+            authority
+                .state
+                .runtime_fence_tokens
+                .insert(runtime_id.clone(), fence_token);
+            authority
+                .state
+                .member_state_markers
+                .insert(runtime_id.clone(), MobMemberState::Retiring);
+            authority.state.active_run_count = 3;
+
+            let transition = authority
+                .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                    agent_runtime_id: runtime_id.clone(),
+                    fence_token,
+                })
+                .expect("runtime retire observation should be accepted");
+
+            assert_eq!(transition.to_phase, MobPhase::Running);
+            assert_eq!(authority.state.lifecycle_phase, MobPhase::Running);
+            assert!(!authority.state.live_runtime_ids.contains(&runtime_id));
+            assert!(
+                !authority
+                    .state
+                    .externally_addressable_runtime_ids
+                    .contains(&runtime_id)
+            );
+            assert!(
+                !authority
+                    .state
+                    .runtime_fence_tokens
+                    .contains_key(&runtime_id)
+            );
+            assert!(
+                !authority
+                    .state
+                    .member_state_markers
+                    .contains_key(&runtime_id)
+            );
+            assert_eq!(authority.state.active_run_count, 0);
         }
     }
 }

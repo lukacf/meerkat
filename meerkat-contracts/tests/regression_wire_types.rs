@@ -257,7 +257,10 @@ fn wire_session_history_roundtrip() {
     assert_eq!(wire.offset, roundtrip.offset);
     assert_eq!(wire.limit, roundtrip.limit);
     assert_eq!(wire.has_more, roundtrip.has_more);
-    assert_eq!(wire.messages, roundtrip.messages);
+    assert_eq!(
+        serde_json::to_value(&wire.messages).unwrap(),
+        serde_json::to_value(&roundtrip.messages).unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +449,9 @@ fn agent_event_all_variants_roundtrip() {
             delay_ms: 1000,
         },
         AgentEvent::SkillsResolved {
-            skills: vec![meerkat_core::skills::SkillId("test/skill".to_string())],
+            skills: vec![meerkat_core::skills::SkillKey::builtin(
+                meerkat_core::skills::SkillName::parse("test-skill").expect("valid name"),
+            )],
             injection_bytes: 256,
         },
         AgentEvent::SkillResolutionFailed {

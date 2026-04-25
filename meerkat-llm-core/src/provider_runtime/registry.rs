@@ -145,14 +145,6 @@ impl ProviderRuntimeRegistry {
         }
     }
 
-    /// Default registry — now delegates to the facade. llm-core cannot
-    /// reach per-provider crates (cycle), so `default_registry()` returns
-    /// an empty registry. Callers should use `meerkat::default_provider_registry()`
-    /// from the facade crate, which registers each provider's runtime.
-    pub fn default_registry() -> Self {
-        Self::empty()
-    }
-
     /// Install a custom runtime, replacing any previously registered
     /// runtime for that provider.
     pub fn with_runtime(mut self, runtime: Arc<dyn ProviderRuntime>) -> Self {
@@ -177,9 +169,18 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        // Wave-c C-1 follow-up: `ConnectionRef` retyped to
+        // `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`
+        // (connection.rs:100). Parse the raw realm / binding slugs here at
+        // the typed boundary — an invalid slug at this point means the
+        // `RealmConnectionSet` was built from malformed config, which is a
+        // resolver-level source error.
         let connection_ref = meerkat_core::ConnectionRef {
-            realm_id: realm.realm_id.clone(),
-            binding_id: binding.id.clone(),
+            realm: meerkat_core::RealmId::parse(&realm.realm_id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
+            binding: meerkat_core::BindingId::parse(&binding.id)
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
+            profile: None,
         };
         let runtime = self
             .runtimes
@@ -204,12 +205,6 @@ impl ProviderRuntimeRegistry {
                     "runtime-not-registered",
                 ))?;
         runtime.build_client(connection)
-    }
-}
-
-impl Default for ProviderRuntimeRegistry {
-    fn default() -> Self {
-        Self::default_registry()
     }
 }
 
@@ -251,37 +246,5 @@ mod tests {
             Some("sk-fake")
         );
         assert!((env.env_lookup)("OTHER").is_none());
-    }
-
-    #[test]
-    fn default_registry_is_empty_post_b2_split() {
-        // llm-core's default is empty — facade owns aggregation.
-        #[allow(deprecated)]
-        let r = ProviderRuntimeRegistry::default_registry();
-        assert!(r.get(Provider::OpenAI).is_none());
-        assert!(r.get(Provider::Anthropic).is_none());
-        assert!(r.get(Provider::Gemini).is_none());
-        assert!(r.get(Provider::SelfHosted).is_none());
-    }
-
-    #[test]
-    fn resolve_returns_scaffolding_stub() {
-        let r = ProviderRuntimeRegistry::default();
-        let realm = RealmConnectionSet {
-            realm_id: "dev".into(),
-            backends: Default::default(),
-            auth_profiles: Default::default(),
-            bindings: Default::default(),
-            default_binding: None,
-        };
-        let env = ResolverEnvironment::testing();
-        let result = futures::executor::block_on(r.resolve(&realm, "x", &env));
-        // Empty realm has no bindings — lookup_binding surfaces
-        // UnknownBinding which the registry stringifies into
-        // SourceResolutionFailed.
-        assert!(matches!(
-            result,
-            Err(ProviderAuthError::SourceResolutionFailed(_))
-        ));
     }
 }

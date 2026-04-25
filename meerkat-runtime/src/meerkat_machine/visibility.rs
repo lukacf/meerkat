@@ -270,36 +270,55 @@ impl MeerkatMachine {
             completions_present,
             ops_registry_present,
             attachment_live,
-            detached_wake_pending,
-            detached_wake_signaled,
             epoch_id,
             _visibility_state,
         ) = {
             let sessions = self.sessions.read().await;
             let entry = sessions.get(session_id)?;
-            let (detached_wake_pending, detached_wake_signaled) = entry
-                .detached_wake
-                .as_ref()
-                .map(|wake| {
-                    (
-                        wake.pending.load(Ordering::Acquire),
-                        wake.signaled.load(Ordering::Acquire),
-                    )
-                })
-                .map_or((None, None), |(pending, signaled)| {
-                    (Some(pending), Some(signaled))
-                });
+            // W6 Class B (`e5c5ecaf3`): the shell-side `control_projection`
+            // is no longer written by the finalize-* paths in the driver
+            // (`machine_retire` / `machine_destroy` / `machine_stop_runtime`
+            // / `machine_reset` used to call `set_control_projection(...)`
+            // pre-finalize, deleted by the shadow-truth cleanup). DSL is
+            // the canonical source for `lifecycle_phase` AND `current_run_id`
+            // (both fields were updated together by the deleted
+            // `set_control_projection` call; both are tracked on the DSL
+            // side at `dsl.rs::state.lifecycle_phase` + `state.current_run_id`).
+            // Project both from the DSL authority so `spine_snapshot` matches
+            // the DSL's visible control contract post-retire/destroy/reset.
+            // A retired drain uses an internal Running/pre_run_phase=Retired
+            // pair to execute preserved work, but remains externally Retired.
+            // `pre_run_phase` is also DSL-owned now, so the spine projects the
+            // whole lifecycle/run tuple from one authority.
+            // Mirrors `existing_session_runtime_state`.
+            let mut snapshot = entry.control_snapshot();
+            let (phase, current_run_id, pre_run_phase) = {
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    crate::meerkat_machine::dsl_authority::visible_runtime_phase_from_authority(
+                        &authority,
+                    ),
+                    crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
+                        &authority,
+                    ),
+                    crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority),
+                )
+            };
+            snapshot.phase = phase;
+            snapshot.current_run_id = current_run_id;
+            snapshot.pre_run_phase = pre_run_phase;
             (
                 Arc::clone(&entry.driver),
-                entry.control_snapshot(),
+                snapshot,
                 Arc::clone(&entry.completions),
                 Arc::clone(&entry.ops_lifecycle),
                 Arc::clone(&entry.cursor_state),
                 true,
                 true,
                 entry.attachment_is_live(),
-                detached_wake_pending,
-                detached_wake_signaled,
                 entry.epoch_id.clone(),
                 entry.tool_visibility_owner.visibility_state().ok()?,
             )
@@ -321,13 +340,35 @@ impl MeerkatMachine {
             }
         };
         let drain = {
-            let slots = self.comms_drain_slots.read().await;
-            if let Some(slot) = slots.get(session_id) {
-                MeerkatDrainSnapshot {
-                    slot_present: true,
-                    phase: Some(slot.phase),
-                    mode: slot.mode,
-                    handle_present: slot.handle.is_some(),
+            let sessions = self.sessions.read().await;
+            if let Some(entry) = sessions.get(session_id) {
+                let slot = &entry.drain_slot;
+                // Wave-c C-H2 (37cc46a44) collapsed the separate
+                // `comms_drain_slots` map into `RuntimeSessionEntry`, so
+                // the slot is structurally always present once the
+                // session is registered. `slot_present` must keep its
+                // pre-collapse semantics: "has this session been
+                // drain-spawned?" — i.e. true once the slot has moved
+                // past `Inactive` with no bindings. Inactive + no
+                // bindings + no handle means the slot has never run.
+                let activated = slot.phase != crate::meerkat_machine::CommsDrainPhase::Inactive
+                    || slot.mode.is_some()
+                    || slot.handle.is_some()
+                    || slot.bound_runtime.is_some();
+                if activated {
+                    MeerkatDrainSnapshot {
+                        slot_present: true,
+                        phase: Some(slot.phase),
+                        mode: slot.mode,
+                        handle_present: slot.handle.is_some(),
+                    }
+                } else {
+                    MeerkatDrainSnapshot {
+                        slot_present: false,
+                        phase: None,
+                        mode: None,
+                        handle_present: false,
+                    }
                 }
             } else {
                 MeerkatDrainSnapshot {
@@ -353,7 +394,6 @@ impl MeerkatMachine {
             completions_present,
             ops_registry_present,
             attachment_live,
-            detached_wake_present: detached_wake_pending.is_some(),
             epoch_id,
             cursor_state: {
                 let cursor_state = cursor_state.snapshot();
@@ -467,8 +507,6 @@ impl MeerkatMachine {
             pending_wait_request_id: ops_snapshot.pending_wait_request_id,
             wait_operation_ids: ops_snapshot.wait_operation_ids,
             operations: ops_snapshot.operations,
-            detached_wake_pending,
-            detached_wake_signaled,
         };
         let formal_state = {
             let mut available_fields = std::collections::BTreeMap::new();

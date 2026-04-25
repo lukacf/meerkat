@@ -43,23 +43,24 @@ pub async fn handle_add(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        meerkat::surface::resolve_persisted("mcp/add", params.persisted);
-
-        if let Err(err) = runtime
-            .mcp_stage_add(
+        let persisted = match runtime
+            .mcp_stage_add_with_persistence(
                 &session_id,
                 params.server_name.clone(),
                 params.server_config.clone(),
+                params.persisted,
             )
             .await
         {
-            return RpcResponse::error(id, err.code, err.message);
-        }
+            Ok(persisted) => persisted,
+            Err(err) => return RpcResponse::error(id, err.code, err.message),
+        };
 
         let response = meerkat::surface::mcp_live_response(
             params.session_id,
             meerkat_contracts::McpLiveOperation::Add,
             Some(params.server_name),
+            persisted,
         );
         RpcResponse::success(id, response)
     }
@@ -98,19 +99,23 @@ pub async fn handle_remove(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        meerkat::surface::resolve_persisted("mcp/remove", params.persisted);
-
-        if let Err(err) = runtime
-            .mcp_stage_remove(&session_id, params.server_name.clone())
+        let persisted = match runtime
+            .mcp_stage_remove_with_persistence(
+                &session_id,
+                params.server_name.clone(),
+                params.persisted,
+            )
             .await
         {
-            return RpcResponse::error(id, err.code, err.message);
-        }
+            Ok(persisted) => persisted,
+            Err(err) => return RpcResponse::error(id, err.code, err.message),
+        };
 
         let response = meerkat::surface::mcp_live_response(
             params.session_id,
             meerkat_contracts::McpLiveOperation::Remove,
             Some(params.server_name),
+            persisted,
         );
         RpcResponse::success(id, response)
     }
@@ -151,8 +156,6 @@ pub async fn handle_reload(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        meerkat::surface::resolve_persisted("mcp/reload", params.persisted);
-
         if let Err(err) = runtime
             .mcp_stage_reload(&session_id, params.server_name.clone())
             .await
@@ -164,6 +167,7 @@ pub async fn handle_reload(
             params.session_id,
             meerkat_contracts::McpLiveOperation::Reload,
             params.server_name,
+            false,
         );
         RpcResponse::success(id, response)
     }

@@ -123,7 +123,7 @@ mod e2e_tla {
     #[test]
     fn schema_structure() {
         let schema = TurnstileState::schema();
-        assert_eq!(schema.machine, "Turnstile");
+        assert_eq!(schema.machine.as_str(), "Turnstile");
         assert_eq!(schema.state.phase.variants.len(), 2);
         assert_eq!(schema.state.fields.len(), 2); // phase field excluded from schema
         assert_eq!(schema.transitions.len(), 4);
@@ -135,16 +135,30 @@ mod e2e_tla {
         let insert_locked = schema
             .transitions
             .iter()
-            .find(|t| t.name == "InsertCoinLocked")
+            .find(|t| t.name.as_str() == "InsertCoinLocked")
             .unwrap();
-        assert_eq!(insert_locked.from, vec!["Locked"]);
+        assert_eq!(
+            insert_locked
+                .from
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Locked"]
+        );
 
         let push_unlocked = schema
             .transitions
             .iter()
-            .find(|t| t.name == "PushUnlocked")
+            .find(|t| t.name.as_str() == "PushUnlocked")
             .unwrap();
-        assert_eq!(push_unlocked.from, vec!["Unlocked"]);
+        assert_eq!(
+            push_unlocked
+                .from
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Unlocked"]
+        );
     }
 
     // ---- Direction 3: Schema → TLA+ rendering ----
@@ -212,19 +226,20 @@ mod e2e_tla {
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
         let state = kernel.initial_state().expect("initial state should work");
 
-        assert_eq!(state.phase, "Locked");
+        assert_eq!(state.phase.as_str(), "Locked");
 
         // Feed InsertCoin input
         let input = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "InsertCoin".into(),
+            variant: meerkat_machine_schema::identity::InputVariantId::parse("InsertCoin")
+                .expect("valid input variant slug"),
             fields: std::collections::BTreeMap::new(),
         };
         let outcome = kernel
             .transition(&state, &input)
             .expect("InsertCoin should succeed");
-        assert_eq!(outcome.next_state.phase, "Unlocked");
+        assert_eq!(outcome.next_state.phase.as_str(), "Unlocked");
         assert_eq!(outcome.effects.len(), 1);
-        assert_eq!(outcome.effects[0].variant, "CoinAccepted");
+        assert_eq!(outcome.effects[0].variant.as_str(), "CoinAccepted");
     }
 
     // ---- Full e2e: DSL dispatch == kernel dispatch ----
@@ -249,7 +264,8 @@ mod e2e_tla {
 
         for (variant_name, dsl_input) in inputs {
             let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
-                variant: variant_name.into(),
+                variant: meerkat_machine_schema::identity::InputVariantId::parse(variant_name)
+                    .expect("valid input variant slug"),
                 fields: std::collections::BTreeMap::new(),
             };
 
@@ -269,7 +285,7 @@ mod e2e_tla {
                 // Same target phase
                 assert_eq!(
                     format!("{:?}", dsl_out.to_phase),
-                    kernel_out.next_state.phase,
+                    kernel_out.next_state.phase.as_str(),
                     "Phase mismatch on {variant_name}"
                 );
 
@@ -386,7 +402,7 @@ mod traffic_light {
     #[test]
     fn schema_has_correct_structure() {
         let schema = TrafficLightState::schema();
-        assert_eq!(schema.machine, "TrafficLight");
+        assert_eq!(schema.machine.as_str(), "TrafficLight");
         assert_eq!(schema.version, 1);
         assert_eq!(schema.state.phase.variants.len(), 2);
         assert_eq!(schema.transitions.len(), 2);
@@ -567,7 +583,7 @@ mod counter {
     #[test]
     fn schema_has_correct_structure() {
         let schema = CounterState::schema();
-        assert_eq!(schema.machine, "Counter");
+        assert_eq!(schema.machine.as_str(), "Counter");
         assert_eq!(schema.state.phase.variants.len(), 4);
         assert_eq!(schema.state.fields.len(), 3);
         assert_eq!(schema.transitions.len(), 5);
@@ -582,30 +598,33 @@ mod counter {
         let start = schema
             .transitions
             .iter()
-            .find(|t| t.name == "StartIdle")
+            .find(|t| t.name.as_str() == "StartIdle")
             .unwrap();
+        fn from_strs(t: &meerkat_machine_schema::TransitionSchema) -> Vec<&str> {
+            t.from.iter().map(|p| p.as_str()).collect()
+        }
         assert!(
-            start.from.contains(&"Stopped".to_string()),
+            from_strs(start).contains(&"Stopped"),
             "StartIdle should be from Stopped, got {:?}",
             start.from
         );
         // Should NOT include Counting or AtLimit (those require active=true)
-        assert!(!start.from.contains(&"Counting".to_string()));
-        assert!(!start.from.contains(&"AtLimit".to_string()));
+        assert!(!from_strs(start).contains(&"Counting"));
+        assert!(!from_strs(start).contains(&"AtLimit"));
 
         // StopActive guards on self.active → fires from Idle, Counting, AtLimit (all active=true)
         let stop = schema
             .transitions
             .iter()
-            .find(|t| t.name == "StopActive")
+            .find(|t| t.name.as_str() == "StopActive")
             .unwrap();
         assert!(
-            !stop.from.contains(&"Stopped".to_string()),
+            !from_strs(stop).contains(&"Stopped"),
             "StopActive should not be from Stopped"
         );
         // Should include at least Idle and Counting
         assert!(
-            stop.from.contains(&"Idle".to_string()) || stop.from.contains(&"Counting".to_string()),
+            from_strs(stop).contains(&"Idle") || from_strs(stop).contains(&"Counting"),
             "StopActive should fire from active phases, got {:?}",
             stop.from
         );
@@ -1038,7 +1057,14 @@ mod order_lifecycle {
 
     #[test]
     fn schema_is_valid() {
-        let schema = OrderLifecycleState::schema();
+        // Order-lifecycle is an in-module test fixture (not catalogued in
+        // `meerkat-machine-schema/src/catalog/dsl/mod.rs`). Its only
+        // named-type reference is the `OrderPhase` enum it declares
+        // locally. B-4 (`c0cb12071`) made `named_types` validation-gated;
+        // populate inline.
+        use meerkat_machine_schema::identity::NamedTypeBinding;
+        let mut schema = OrderLifecycleState::schema();
+        schema.named_types = vec![NamedTypeBinding::string("OrderPhase")];
         schema
             .validate()
             .expect("order lifecycle schema should be valid");
@@ -1047,7 +1073,7 @@ mod order_lifecycle {
     #[test]
     fn schema_has_correct_structure() {
         let schema = OrderLifecycleState::schema();
-        assert_eq!(schema.machine, "OrderLifecycle");
+        assert_eq!(schema.machine.as_str(), "OrderLifecycle");
         assert_eq!(schema.version, 1);
         assert_eq!(schema.state.phase.variants.len(), 6);
         assert_eq!(schema.state.fields.len(), 9); // lifecycle_phase excluded from schema
@@ -1068,37 +1094,47 @@ mod order_lifecycle {
         let add_item = schema
             .transitions
             .iter()
-            .find(|t| t.name == "AddItemDraft")
+            .find(|t| t.name.as_str() == "AddItemDraft")
             .unwrap();
-        assert_eq!(add_item.from, vec!["Draft"]);
+        assert_eq!(
+            add_item.from.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            vec!["Draft"]
+        );
 
         // SubmitDraft guards on lifecycle_phase == Draft
         let submit = schema
             .transitions
             .iter()
-            .find(|t| t.name == "SubmitDraft")
+            .find(|t| t.name.as_str() == "SubmitDraft")
             .unwrap();
-        assert_eq!(submit.from, vec!["Draft"]);
+        assert_eq!(
+            submit.from.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            vec!["Draft"]
+        );
 
         // AssignSubmitted guards on lifecycle_phase == Submitted
         let assign = schema
             .transitions
             .iter()
-            .find(|t| t.name == "AssignSubmitted")
+            .find(|t| t.name.as_str() == "AssignSubmitted")
             .unwrap();
-        assert_eq!(assign.from, vec!["Submitted"]);
+        assert_eq!(
+            assign.from.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            vec!["Submitted"]
+        );
 
         // CancelActive guards on is_active_phase(lifecycle_phase) — expands to Draft, Submitted, Assigned, Paid
         let cancel = schema
             .transitions
             .iter()
-            .find(|t| t.name == "CancelActive")
+            .find(|t| t.name.as_str() == "CancelActive")
             .unwrap();
         assert_eq!(cancel.from.len(), 4);
-        assert!(cancel.from.contains(&"Draft".to_string()));
-        assert!(cancel.from.contains(&"Submitted".to_string()));
-        assert!(cancel.from.contains(&"Assigned".to_string()));
-        assert!(cancel.from.contains(&"Paid".to_string()));
+        let cancel_strs: Vec<&str> = cancel.from.iter().map(|p| p.as_str()).collect();
+        assert!(cancel_strs.contains(&"Draft"));
+        assert!(cancel_strs.contains(&"Submitted"));
+        assert!(cancel_strs.contains(&"Assigned"));
+        assert!(cancel_strs.contains(&"Paid"));
     }
 }
 

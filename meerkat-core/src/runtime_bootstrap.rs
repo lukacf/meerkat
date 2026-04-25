@@ -7,11 +7,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::connection::{IdentityError, RealmId};
+
 /// Canonical state sharing locator.
+///
+/// Wave-c C-12 / C-1 follow-up: `realm_id: String` retyped to
+/// `realm: RealmId` to match the typed-atom rename C-1 did on
+/// `ConnectionRef`. Consumers must use `self.realm.as_str()` where a
+/// `&str` is required (path construction, logging, wire projection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealmLocator {
     pub state_root: PathBuf,
-    pub realm_id: String,
+    pub realm: RealmId,
 }
 
 /// Realm selection mode.
@@ -99,18 +106,21 @@ impl RealmConfig {
         Ok(default)
     }
 
-    /// Resolve a concrete `(state_root, realm_id)` locator.
+    /// Resolve a concrete `(state_root, realm)` locator.
     pub fn resolve_locator(&self) -> Result<RealmLocator, RuntimeBootstrapError> {
         let state_root = self.state_root.clone().unwrap_or_else(default_state_root);
-        let realm_id = match &self.selection {
+        let realm_raw = match &self.selection {
             RealmSelection::Explicit { realm_id } => realm_id.clone(),
             RealmSelection::Isolated => generate_realm_id(),
             RealmSelection::WorkspaceDerived { root } => derive_workspace_realm_id(root),
         };
-        Ok(RealmLocator {
-            state_root,
-            realm_id,
-        })
+        let realm = RealmId::parse(&realm_raw).map_err(|source| match source {
+            IdentityError::Empty => RuntimeBootstrapError::InvalidRealmId(realm_raw.clone()),
+            IdentityError::InvalidChar(_) => {
+                RuntimeBootstrapError::InvalidRealmId(realm_raw.clone())
+            }
+        })?;
+        Ok(RealmLocator { state_root, realm })
     }
 }
 
@@ -193,8 +203,8 @@ mod tests {
             selection: RealmSelection::WorkspaceDerived { root },
             ..RealmConfig::default()
         };
-        let a = cfg.resolve_locator().map(|locator| locator.realm_id);
-        let b = cfg.resolve_locator().map(|locator| locator.realm_id);
+        let a = cfg.resolve_locator().map(|locator| locator.realm);
+        let b = cfg.resolve_locator().map(|locator| locator.realm);
         assert!(a.is_ok());
         assert_eq!(a.ok(), b.ok());
     }

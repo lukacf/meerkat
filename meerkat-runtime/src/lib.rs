@@ -14,6 +14,23 @@
 //! Core-facing types (RunPrimitive, RunEvent, CoreExecutor, etc.) live in
 //! `meerkat-core::lifecycle`. This crate contains everything else.
 
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        unused_imports,
+        clippy::expect_used,
+        clippy::large_futures,
+        clippy::needless_borrow,
+        clippy::panic,
+        clippy::redundant_closure_for_method_calls,
+        clippy::redundant_clone,
+        clippy::type_complexity,
+        clippy::unnecessary_to_owned,
+        clippy::unwrap_used
+    )
+)]
+
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use tokio_with_wasm::alias::*;
@@ -29,9 +46,8 @@ pub mod comms_bridge;
 pub mod comms_drain;
 pub mod comms_trust_reconcile;
 pub mod completion;
-pub mod composition_dispatch;
+pub mod composition;
 pub(crate) mod control_plane;
-pub mod detached_wake;
 pub mod driver;
 pub mod durability;
 pub mod handles;
@@ -49,7 +65,6 @@ pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
-pub mod recompute_mob_peer_overlay;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
@@ -64,12 +79,7 @@ pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
     check_supersession, create_aggregate_input, is_coalescing_eligible,
 };
-pub use comms_trust_reconcile::{CommsTrustReconcileError, CommsTrustReconciler, ReconcileReport};
 pub use completion::{CompletionHandle, CompletionOutcome};
-pub use composition_dispatch::{
-    CompositionDispatcher, CompositionDriverTrait, DispatchedInput, DispatcherError, DriverError,
-    NoopCompositionDriver, ObservedEffect, RegisteredDriver, RoutedDispatch,
-};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
 pub use handles::{
@@ -97,8 +107,8 @@ pub use input_state::{
 };
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatMachine, PeerIngressOwner,
-    RuntimeBindingsError,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatConsumerSurface, MeerkatMachine,
+    PeerIngressOwner, RuntimeBindingsError,
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, RealtimeAttachmentSignalAuthority, RealtimeAttachmentStatus,
@@ -120,7 +130,6 @@ pub use policy::{
 };
 pub use policy_table::{DEFAULT_POLICY_VERSION, DefaultPolicyTable};
 pub use queue::InputQueue;
-pub use recompute_mob_peer_overlay::{MobPeerOverlayDispatch, RecomputeMobPeerOverlayDriver};
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,

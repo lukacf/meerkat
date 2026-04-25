@@ -40,6 +40,14 @@ impl AuditPolicy {
                 AuthorityModuleRule::new("meerkat-runtime/src/meerkat_machine.rs"),
                 AuthorityModuleRule::new("meerkat-mob/src/runtime/actor.rs"),
                 AuthorityModuleRule::new("meerkat-schedule/src/lifecycle.rs"),
+                // AuthMachine (dogma #43 resolved): the per-binding auth-lease
+                // lifecycle authority lives in meerkat-runtime. Every
+                // AuthMachine transition must route through the DSL kernel
+                // (`auth_machine::dsl::AuthMachineState::transition`), not
+                // handwritten reducers. Dead-code in this module signals that
+                // the handle trait is wired but the DSL kernel is not.
+                AuthorityModuleRule::new("meerkat-runtime/src/handles/auth_lease.rs"),
+                AuthorityModuleRule::new("meerkat-runtime/src/auth_machine/mod.rs"),
             ],
             protected_fields: vec![
                 ProtectedFieldRule::new(
@@ -168,17 +176,16 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
                 continue;
             };
             for consumer_machine in consumer_machines {
-                let consumer_input = default_consumer_input(
-                    &schema.machine,
-                    &disposition.effect_variant,
-                    consumer_machine,
-                );
+                let producer_str = schema.machine.as_str();
+                let effect_str = disposition.effect_variant.as_str();
+                let consumer_str = consumer_machine.as_str();
+                let consumer_input = default_consumer_input(producer_str, effect_str, consumer_str);
                 rules.push(RoutedEffectRealizationRule::new(
-                    schema.machine.clone(),
-                    disposition.effect_variant.clone(),
-                    consumer_machine.clone(),
+                    producer_str.to_string(),
+                    effect_str.to_string(),
+                    consumer_str.to_string(),
                     consumer_input,
-                    &default_allowed_paths(&schema.machine, consumer_machine),
+                    &default_allowed_paths(producer_str, consumer_str),
                 ));
             }
         }
@@ -187,11 +194,17 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
 }
 
 fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> String {
+    // Kept in lock-step with the typed `Route::to.input_variant` entries in
+    // the canonical composition schemas (see
+    // `meerkat-machine-schema/src/catalog/compositions.rs`). The RMAT audit
+    // `CompositionRouteSemanticCoverage` rule fails the build if this map
+    // and the typed routes disagree about which consumer input a given
+    // routed effect realizes.
     match (producer, effect_variant, consumer) {
         ("MobMachine", "RequestRuntimeBinding", "MeerkatMachine") => "PrepareBindings".to_string(),
-        // SubmitMemberWork -> SubmitMobWork route removed (unimplemented)
-        ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "RetireRuntime".to_string(),
-        ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "DestroyRuntime".to_string(),
+        ("MobMachine", "RequestRuntimeIngress", "MeerkatMachine") => "Ingest".to_string(),
+        ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "Retire".to_string(),
+        ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "Destroy".to_string(),
         ("MeerkatMachine", "RuntimeBound", "MobMachine") => "ObserveRuntimeReady".to_string(),
         ("MeerkatMachine", "RuntimeRetired", "MobMachine") => "ObserveRuntimeRetired".to_string(),
         ("MeerkatMachine", "RuntimeDestroyed", "MobMachine") => {
@@ -201,7 +214,10 @@ fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) 
             "ScheduleLifecycleMachine",
             "SupersedePendingOccurrences",
             "OccurrenceLifecycleMachine",
-        ) => "SupersedeByRevision".to_string(),
+        ) => "Supersede".to_string(),
+        ("OccurrenceLifecycleMachine", "OccurrencesSuperseded", "ScheduleLifecycleMachine") => {
+            "ConfirmOccurrencesSuperseded".to_string()
+        }
         _ => format!("{producer}:{effect_variant}->{consumer}"),
     }
 }
@@ -253,9 +269,9 @@ fn default_handoff_protocol_coverage() -> Vec<HandoffProtocolCoverageRule> {
         for disposition in &schema.effect_dispositions {
             if let Some(protocol_name) = &disposition.handoff_protocol {
                 rules.push(HandoffProtocolCoverageRule {
-                    machine: schema.machine.clone(),
-                    effect_variant: disposition.effect_variant.clone(),
-                    protocol_name: protocol_name.clone(),
+                    machine: schema.machine.as_str().to_string(),
+                    effect_variant: disposition.effect_variant.as_str().to_string(),
+                    protocol_name: protocol_name.as_str().to_string(),
                 });
             }
         }
@@ -284,7 +300,7 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                     .find(|m| m.instance_id == protocol.producer_instance)
                     && let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name)
                 {
-                    candidate_crates.push(&ms.rust.crate_name);
+                    candidate_crates.push(ms.rust.crate_name.as_str());
                 }
                 for feedback in &protocol.allowed_feedback_inputs {
                     if let Some(inst) = composition
@@ -293,21 +309,22 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                         .find(|m| m.instance_id == feedback.machine_instance)
                         && let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name)
                     {
-                        candidate_crates.push(&ms.rust.crate_name);
+                        candidate_crates.push(ms.rust.crate_name.as_str());
                     }
                 }
                 // Order-preserving dedup (Vec::dedup only removes adjacent duplicates)
                 let mut seen_crates = std::collections::BTreeSet::new();
                 candidate_crates.retain(|c| seen_crates.insert(*c));
-                let protocol_name = protocol.name.clone();
+                let protocol_name = protocol.name.as_str().to_string();
+                let mut candidate_paths = vec![protocol.rust.module_path.clone()];
+                candidate_paths.extend(candidate_crates.into_iter().map(|crate_name| {
+                    format!("{crate_name}/src/generated/protocol_{protocol_name}.rs")
+                }));
+                candidate_paths.sort();
+                candidate_paths.dedup();
                 rules.push(ProtocolRealizationSiteRule {
-                    protocol_name: protocol_name.clone(),
-                    candidate_paths: candidate_crates
-                        .into_iter()
-                        .map(|crate_name| {
-                            format!("{crate_name}/src/generated/protocol_{protocol_name}.rs")
-                        })
-                        .collect(),
+                    protocol_name,
+                    candidate_paths,
                 });
             }
         }
@@ -324,9 +341,9 @@ fn default_protocol_feedback_constraints() -> Vec<ProtocolFeedbackConstraintRule
         for protocol in &composition.handoff_protocols {
             for feedback in &protocol.allowed_feedback_inputs {
                 rules.push(ProtocolFeedbackConstraintRule {
-                    protocol_name: protocol.name.clone(),
-                    feedback_machine_instance: feedback.machine_instance.clone(),
-                    feedback_input_variant: feedback.input_variant.clone(),
+                    protocol_name: protocol.name.as_str().to_string(),
+                    feedback_machine_instance: feedback.machine_instance.as_str().to_string(),
+                    feedback_input_variant: feedback.input_variant.as_str().to_string(),
                 });
             }
         }
@@ -360,11 +377,11 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
             {
                 let has_terminals = machines
                     .iter()
-                    .find(|m| m.machine == machine_name)
+                    .find(|m| m.machine.as_str() == machine_name)
                     .is_some_and(|m| !m.state.terminal_phases.is_empty());
                 if has_terminals && seen.insert(protocol.name.clone()) {
                     rules.push(TerminalMappingConstraintRule {
-                        protocol_name: protocol.name.clone(),
+                        protocol_name: protocol.name.as_str().to_string(),
                         producer_machine: machine_name.to_string(),
                         helper_path: "meerkat-core/src/generated/terminal_surface_mapping.rs",
                     });
@@ -379,8 +396,9 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
 /// that short-circuit the machine-owned seam.
 ///
 /// Each rule binds a file (by suffix-match on the repo-relative path) to an AST
-/// pattern. Violations are errors unless annotated with
-/// `// RMAT-ALLOW(ForbiddenShellAuthorityReads)` on or above the offending span.
+/// pattern. Production violations are hard errors; `RMAT-ALLOW` is honored
+/// only under explicit test-fixture paths so canaries can exercise the
+/// suppression machinery without masking live shell/authority read seams.
 #[derive(Debug, Clone)]
 pub struct ForbiddenShellReadRule {
     pub path_suffix: &'static str,
@@ -411,8 +429,9 @@ pub enum ForbiddenShellReadKind {
 }
 
 /// Default forbidden-read rules. These encode what `scripts/rmat-read-seam-lint.sh`
-/// used to enforce via regex, but as AST-precise policy entries that reuse the
-/// existing `RMAT-ALLOW` suppression mechanism.
+/// used to enforce via regex, but as AST-precise policy entries. Production
+/// findings remain unsuppressed; fixture-only canaries may still exercise
+/// `RMAT-ALLOW` parsing.
 fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
     vec![
         // Mob actor shell: any `.phase()` read off something other than
@@ -493,13 +512,19 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
 fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
     match (producer, consumer) {
         ("MobMachine", "MeerkatMachine") | ("MeerkatMachine", "MobMachine") => {
+            // Post-wave-c `meerkat_machine.rs` was decomposed into the
+            // `meerkat_machine/` module directory; point at `mod.rs` so
+            // the realization-path existence check resolves.
             vec![
-                "meerkat-runtime/src/meerkat_machine.rs",
+                "meerkat-runtime/src/meerkat_machine/mod.rs",
                 "meerkat-mob/src/runtime/actor.rs",
                 "meerkat-mob/src/runtime/handle.rs",
             ]
         }
-        ("ScheduleLifecycleMachine", "OccurrenceLifecycleMachine") => {
+        ("ScheduleLifecycleMachine", "OccurrenceLifecycleMachine")
+        | ("OccurrenceLifecycleMachine", "ScheduleLifecycleMachine") => {
+            // Both directions of the schedule_bundle seam are realised
+            // via the same service driver path.
             vec!["meerkat-schedule/src/service.rs"]
         }
         _ => vec![],

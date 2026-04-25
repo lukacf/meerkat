@@ -307,7 +307,7 @@ impl CommsMessage {
             None if require_peer_auth => return None,
             None => InprocRegistry::global()
                 .get_name_by_pubkey(&envelope.from)
-                .unwrap_or_else(|| envelope.from.to_peer_id()),
+                .unwrap_or_else(|| envelope.from.to_pubkey_string()),
         };
 
         Self::from_external_with_resolved_peer(envelope, from_peer)
@@ -332,7 +332,7 @@ impl CommsMessage {
         let from_peer = entry.from_peer.clone().unwrap_or_else(|| {
             InprocRegistry::global()
                 .get_name_by_pubkey(&envelope.from)
-                .unwrap_or_else(|| envelope.from.to_peer_id())
+                .unwrap_or_else(|| envelope.from.to_pubkey_string())
         });
 
         Self::from_external_with_resolved_peer(envelope, from_peer)

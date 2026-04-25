@@ -181,7 +181,18 @@ impl AgentToolDispatcher for FilteredDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        // Wave B (V7): policy-denied calls surface as `AccessDenied`, not
+        // `NotFound`. A tool that the inner dispatcher does not know about
+        // still returns `NotFound` from the inner dispatcher itself — this
+        // wrapper only intervenes when the tool is visible upstream but
+        // excluded by the active policy.
         if !self.allowed_names.contains(call.name) {
+            let inner_knows_tool = self.inner.tools().iter().any(|t| t.name == call.name);
+            if inner_knows_tool {
+                return Err(ToolError::AccessDenied {
+                    name: call.name.to_string(),
+                });
+            }
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),
             });
@@ -304,20 +315,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_filtered_dispatcher_dispatch_blocked_tool_returns_not_found() {
+    async fn test_filtered_dispatcher_blocked_tool_returns_access_denied() {
         let inner = Arc::new(MockDispatcher::new(vec!["shell", "task_list"]));
         let policy = ToolAccessPolicy::DenyList(vec!["shell".to_string()]);
         let filtered = FilteredDispatcher::new(inner, &policy);
 
-        // Allowed tool succeeds
+        // Allowed tool succeeds.
         let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
         let result = filtered.dispatch(make_call("task_list", &args_raw)).await;
         assert!(result.is_ok());
 
-        // Blocked tool returns NotFound
+        // Policy-blocked tool returns `AccessDenied` — distinct from
+        // `NotFound` which is reserved for genuinely-missing tools.
         let result = filtered.dispatch(make_call("shell", &args_raw)).await;
         match result {
-            Err(ToolError::NotFound { name }) => assert_eq!(name, "shell"),
+            Err(ToolError::AccessDenied { name }) => assert_eq!(name, "shell"),
+            other => panic!("Expected AccessDenied error, got: {other:?}"),
+        }
+
+        // A genuinely-missing tool still surfaces as `NotFound`.
+        let result = filtered.dispatch(make_call("ghost", &args_raw)).await;
+        match result {
+            Err(ToolError::NotFound { name }) => assert_eq!(name, "ghost"),
             other => panic!("Expected NotFound error, got: {other:?}"),
         }
     }
@@ -353,12 +372,12 @@ mod tests {
             "dangerous_exec should not be visible in tools list"
         );
 
-        // Attempting to dispatch denied tools should fail
+        // Attempting to dispatch denied tools should fail with `AccessDenied`.
         let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
         let shell_result = filtered.dispatch(make_call("shell", &args_raw)).await;
         assert!(
-            matches!(shell_result, Err(ToolError::NotFound { .. })),
-            "shell dispatch should fail with NotFound"
+            matches!(shell_result, Err(ToolError::AccessDenied { .. })),
+            "shell dispatch should fail with AccessDenied"
         );
     }
 }

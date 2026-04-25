@@ -186,10 +186,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wiring_emits_topology_event() {
-        // When a mob member spawns and registers, the driver is created.
-        // The topology event would be emitted by the RuntimeControlPlane
-        // (not yet implemented). For now, verify the driver exists.
+    async fn register_exposes_driver_state() {
+        // Mob-member registration is owned by the runtime control plane:
+        // the registered session must have a live driver entry that surfaces
+        // through typed runtime-state queries.
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;

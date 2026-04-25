@@ -1,8 +1,7 @@
+use crate::event::MobEvent;
 use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
-use meerkat_core::comms::TrustedPeerSpec;
-use meerkat_core::types::SessionId;
-use std::collections::BTreeSet;
+use meerkat_core::comms::TrustedPeerDescriptor;
 
 mod sealed {
     pub trait Sealed {}
@@ -16,19 +15,7 @@ mod sealed {
 /// without touching the underlying projection directly.
 pub(crate) trait RosterMutator: sealed::Sealed {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool;
-    /// Re-project the `Retiring` marker set from the DSL. See
-    /// [`Roster::sync_retiring_projection`].
-    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>);
     fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool;
-    fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
-    fn wire_external_peer(
-        &mut self,
-        local: &MeerkatId,
-        peer_name: &MeerkatId,
-        spec: TrustedPeerSpec,
-    );
-    fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
-    fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId);
     fn set_kickoff(
         &mut self,
         agent_identity: &MeerkatId,
@@ -82,51 +69,79 @@ impl RosterAuthority {
         self.roster.list_all()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn list_retiring(&self) -> impl Iterator<Item = &RosterEntry> {
-        self.roster.list_retiring()
-    }
-
     pub(crate) fn by_profile(&self, profile: &ProfileName) -> impl Iterator<Item = &RosterEntry> {
         self.roster.by_profile(profile)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn find_by_label(&self, key: &str, value: &str) -> Option<&RosterEntry> {
-        self.roster.find_by_label(key, value)
-    }
-
     /// Get a specific roster entry.
-    #[allow(dead_code)]
     pub(crate) fn entry(&self, agent_identity: &MeerkatId) -> Option<RosterEntry> {
         self.roster.get(agent_identity).cloned()
     }
 
-    /// List all members currently `Active`.
-    #[allow(dead_code)]
-    pub(crate) fn active_members(&self) -> Vec<RosterEntry> {
-        self.roster.list().cloned().collect()
+    /// Apply a `MobEvent` through the underlying `Roster` projection so
+    /// live actor paths that append events also keep the roster's
+    /// projection fields (e.g. `wired_to`) in sync. Mirrors the replay
+    /// path's `Roster::apply` — same match arms, same mutations.
+    pub(crate) fn apply_event(&mut self, event: &MobEvent) {
+        self.roster.apply(event);
     }
 
-    /// List the members that have been marked `Retiring`.
-    #[allow(dead_code)]
-    pub(crate) fn retiring_members(&self) -> Vec<RosterEntry> {
-        self.roster.list_retiring().cloned().collect()
+    /// Restore a bidirectional local peer-wiring edge on the roster projection.
+    ///
+    /// Used by respawn wire-restoration: after a retire+spawn cycle the DSL
+    /// `wiring_edges` set still carries the edge (Retire does not clear it)
+    /// but the new `RosterEntry` for the replacement member starts with an
+    /// empty `wired_to` set. This helper re-projects the edge into both
+    /// endpoints without re-emitting `MembersWired` (the event is already in
+    /// the log from the original wire).
+    ///
+    /// Returns `true` if both endpoints were present and projected; `false`
+    /// if either endpoint was missing from the roster.
+    pub(crate) fn restore_local_peer_edge(&mut self, a: &AgentIdentity, b: &AgentIdentity) -> bool {
+        let a_present = self.roster.get_by_identity(a).is_some();
+        let b_present = self.roster.get_by_identity(b).is_some();
+        if !a_present || !b_present {
+            return false;
+        }
+        if let Some(entry_a) = self.roster.get_mut(a) {
+            entry_a.wired_to.insert(b.clone());
+        }
+        if let Some(entry_b) = self.roster.get_mut(b) {
+            entry_b.wired_to.insert(a.clone());
+        }
+        true
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn debug_assert_wiring_projection_consistent(&self) {
-        self.roster.debug_assert_wiring_projection_consistent();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn set_bridge_session_id(
+    /// Restore an external peer-wiring edge on the roster projection.
+    ///
+    /// Mirrors what the (wave-A-deleted) `ExternalPeerWired` event projection
+    /// used to do: inserts the peer name into the local member's `wired_to`
+    /// set and records the `TrustedPeerDescriptor` in `external_peer_specs`.
+    /// Returns `true` if the local entry was present and mutated.
+    ///
+    /// Used by respawn/resume wire-restoration paths which must preserve
+    /// `RosterEntry.external_peer_specs` and `wired_to` across member
+    /// replacement (D31 restore).
+    pub(crate) fn restore_external_peer_edge(
         &mut self,
-        agent_identity: &MeerkatId,
-        bridge_session_id: SessionId,
+        local: &AgentIdentity,
+        spec: TrustedPeerDescriptor,
     ) -> bool {
-        self.roster
-            .set_bridge_session_id(agent_identity, bridge_session_id)
+        let peer_name = AgentIdentity::from(spec.name.as_str());
+        if let Some(entry) = self.roster.get_mut(local) {
+            entry.wired_to.insert(peer_name.clone());
+            entry.external_peer_specs.insert(peer_name, spec);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Flip a roster entry to `Retiring` state. Mirrors
+    /// [`Roster::mark_retiring_by_identity`]. Returns `true` if the member
+    /// was present and was flipped to `Retiring`; `false` otherwise.
+    pub(crate) fn mark_retiring_by_identity(&mut self, identity: &AgentIdentity) -> bool {
+        self.roster.mark_retiring_by_identity(identity)
     }
 
     pub(crate) fn replace_backend_peer_binding_by_peer_id(
@@ -150,10 +165,6 @@ impl RosterMutator for RosterAuthority {
         self.roster.add(entry)
     }
 
-    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>) {
-        self.roster.sync_retiring_projection(retiring_runtime_ids);
-    }
-
     fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool {
         if self.roster.get(agent_identity).is_some() {
             self.roster.remove(agent_identity);
@@ -161,27 +172,6 @@ impl RosterMutator for RosterAuthority {
         } else {
             false
         }
-    }
-
-    fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        self.roster.wire(a, b);
-    }
-
-    fn wire_external_peer(
-        &mut self,
-        local: &MeerkatId,
-        peer_name: &MeerkatId,
-        spec: TrustedPeerSpec,
-    ) {
-        self.roster.wire_external(local, peer_name, spec);
-    }
-
-    fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        self.roster.unwire(a, b);
-    }
-
-    fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
-        self.roster.unwire_external(local, peer_name);
     }
 
     fn set_kickoff(

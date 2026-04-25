@@ -21,7 +21,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `runtime-lease-expiry` — runtime owner fairness still allows lease expiry to return a stuck occurrence to claimable
 
 ### Routes
-- `(none)`
+- `revision_supersede_enters_occurrence_authority`
+  - anchors: `schedule_driver`, `runtime_delivery_precursor`, `schedule_runtime_bundle_schema`
+  - scenarios: `runtime-delivery-feedback`, `runtime-lease-expiry`
+- `occurrence_supersede_ack_returns_to_schedule`
+  - anchors: `schedule_driver`, `runtime_delivery_precursor`, `schedule_runtime_bundle_schema`
+  - scenarios: `runtime-delivery-feedback`, `runtime-lease-expiry`
 
 ### Scheduler Rules
 - `(none)`

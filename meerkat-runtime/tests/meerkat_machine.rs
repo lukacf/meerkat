@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 
 use std::sync::{
     Arc,

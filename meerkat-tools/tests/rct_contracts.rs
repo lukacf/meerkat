@@ -666,11 +666,11 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     }
 }
 
-/// Regression test: Blocked tools must return NotFound on dispatch attempts.
+/// Regression test: Blocked tools must return AccessDenied on dispatch attempts.
 /// Even if a tool exists in the inner dispatcher, if it's blocked by policy,
-/// dispatch must fail with NotFound (not silently succeed).
+/// dispatch must fail with a policy-denied error (not silently succeed).
 #[tokio::test]
-async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found() {
+async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_access_denied() {
     use async_trait::async_trait;
     use meerkat_core::error::ToolError;
     use meerkat_core::ops::ToolAccessPolicy;
@@ -703,14 +703,17 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
     let policy = ToolAccessPolicy::DenyList(vec!["shell".to_string()]);
     let filtered = FilteredDispatcher::new(inner, &policy);
 
-    // Attempting to dispatch a blocked tool should return NotFound
+    // Attempting to dispatch a blocked tool should return AccessDenied.
     let result = dispatch_tool(&filtered, "shell", json!({})).await;
 
     match result {
-        Err(ToolError::NotFound { name }) => {
-            assert_eq!(name, "shell", "NotFound error should name the blocked tool");
+        Err(ToolError::AccessDenied { name }) => {
+            assert_eq!(
+                name, "shell",
+                "AccessDenied error should name the blocked tool"
+            );
         }
         Ok(_) => panic!("Dispatch to blocked tool should fail, not succeed!"),
-        Err(other) => panic!("Expected NotFound error, got: {other:?}"),
+        Err(other) => panic!("Expected AccessDenied error, got: {other:?}"),
     }
 }

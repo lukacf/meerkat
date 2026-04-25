@@ -22,6 +22,9 @@ machine! {
             realtime_binding_authority_epoch: Option<u64>,
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
+            realtime_reconnect_attempt_count: u64,
+            realtime_reconnect_next_retry_at_ms: Option<u64>,
+            realtime_reconnect_deadline_at_ms: Option<u64>,
             // Live-topology reconfigure phase — temporarily blocks realtime
             // publishes/attaches while an LLM-identity swap is in progress.
             live_topology_phase: Enum<LiveTopologyPhase>,
@@ -107,6 +110,20 @@ machine! {
             // `peer_ingress_mob_id` are populated iff the kind variant names
             // them; the `peer_ingress_owner_consistency` invariant enforces
             // pairing.
+            //
+            // C-F3 — `peer_ingress_mob_id` has a cross-machine "mob-exists"
+            // contract: when a mob is destroyed, every session whose
+            // `peer_ingress_mob_id == Some(that_mob)` must receive a
+            // `DetachIngress` input before the mob fires its own
+            // `RequestRuntimeDestroy`. That ordering is formalised as the
+            // `mob_destroying_session_ingress` handoff obligation declared
+            // on the canonical `MobMachine::RequestSessionIngressDetachForMobDestroy`
+            // effect in the `mob_destroy_session_ingress_bundle`
+            // composition. The `xtask seam-inventory`
+            // destroy-obligation-pairing check
+            // (`## Destroy-obligation Pairing`) flags any canonical
+            // routed `Request*Destroy*` effect that lacks the paired
+            // ingress-detach ack protocol.
             peer_ingress_owner_kind: Enum<PeerIngressOwnerKind>,
             peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
             peer_ingress_mob_id: Option<MobId>,
@@ -127,6 +144,27 @@ machine! {
             // transition. The `supervisor_binding_consistency` invariant
             // enforces that the companion fields are populated exactly
             // when `supervisor_binding_kind == Bound`.
+            //
+            // C-F2 formalises the step-lock as a pair of generated
+            // handoff obligations on the `supervisor_trust_bundle`
+            // composition:
+            //
+            //   * `supervisor_trust_publish` — producer effect
+            //     `PublishSupervisorTrustEdge`; realising actor
+            //     `supervisor_bridge_owner` calls
+            //     `meerkat-comms::Router::add_trusted_peer(...)` and
+            //     feeds back `SupervisorTrustEdgePublished` (success)
+            //     or `SupervisorTrustEdgePublishFailed` (failure,
+            //     triggers DSL rollback).
+            //   * `supervisor_trust_revoke` — producer effect
+            //     `RevokeSupervisorTrustEdge`; realising actor calls
+            //     `Router::remove_trusted_peer(...)` and feeds back
+            //     `SupervisorTrustEdgeRevoked` or
+            //     `SupervisorTrustEdgeRevokeFailed`.
+            //
+            // Both use `ClosurePolicy::AckRequired`. See
+            // `supervisor_trust_bundle` and `xtask seam-inventory` output
+            // (`## Declared Handoff Obligation Pairs`).
             supervisor_binding_kind: Enum<SupervisorBindingKind>,
             supervisor_bound_name: Option<String>,
             supervisor_bound_peer_id: Option<String>,
@@ -191,6 +229,9 @@ machine! {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
+            realtime_reconnect_attempt_count = 0,
+            realtime_reconnect_next_retry_at_ms = None,
+            realtime_reconnect_deadline_at_ms = None,
             live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
@@ -247,7 +288,7 @@ machine! {
                 next_active_visibility_revision: u64,
                 tool_visibility_delta: SessionToolVisibilityDelta,
             },
-            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
             NotifyDrainExited { reason: String },
             InterruptCurrentRun,
@@ -263,10 +304,10 @@ machine! {
                 staged_visibility_revision: u64,
             },
             Recover,
-            Retire,
+            Retire { session_id: SessionId },
             Reset,
             StopRuntimeExecutor,
-            Destroy,
+            Destroy { session_id: SessionId },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
             SetSilentIntents { session_id: SessionId, intents: Set<String> },
@@ -297,6 +338,12 @@ machine! {
             DetachRealtimeBinding,
             RequireRealtimeReattach,
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            ProjectRealtimeReconnectProgress {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
+            ClearRealtimeReconnectProgress,
             // Ops-barrier satisfaction feedback input (wired to the
             // `ops_barrier_satisfaction` handoff protocol on the compat
             // `mob_bundle` composition). Carries the exact operation ids
@@ -394,6 +441,38 @@ machine! {
                 epoch: u64,
             },
 
+            // Supervisor-trust-edge feedback inputs (C-F2 / wave-d D-d).
+            //
+            // The `PublishSupervisorTrustEdge` and `RevokeSupervisorTrustEdge`
+            // producer effects feed back through these four inputs. The
+            // `epoch` carries through from the producer effect so transitions
+            // can guard against stale
+            // acks — if the supervisor binding rotated forward between
+            // effect emission and ack arrival, the ack is rejected without
+            // mutating state. Guards: current binding is `Bound`; the
+            // `peer_id` and `epoch` both match `supervisor_bound_peer_id`
+            // / `supervisor_bound_epoch`. The transitions are phase-
+            // preserving self-loops: the feedback is a correlation fact,
+            // not a semantic state mutation.
+            SupervisorTrustEdgePublished {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgePublishFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+            SupervisorTrustEdgeRevoked {
+                peer_id: String,
+                epoch: u64,
+            },
+            SupervisorTrustEdgeRevokeFailed {
+                peer_id: String,
+                epoch: u64,
+                reason: String,
+            },
+
             // =====================================================================
             // Track-B (R5): peer-projection inputs.
             //
@@ -434,6 +513,19 @@ machine! {
                 epoch: u64,
                 endpoints: Set<PeerEndpoint>,
             },
+            PendingSucceeded {
+                surface_id: SurfaceId,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+            },
+            PendingFailed {
+                surface_id: SurfaceId,
+                pending_task_sequence: u64,
+                reason: String,
+            },
+            SnapshotAligned {
+                snapshot_epoch: u64,
+            },
         }
 
         surface_only [
@@ -462,14 +554,17 @@ machine! {
             StageAdd,
             StageRemove,
             StageReload,
-            ApplySurfaceBoundary,
-            PendingSucceeded,
-            PendingFailed,
+            ApplySurfaceBoundary {
+                surface_id: SurfaceId,
+                operation: Enum<SurfaceDeltaOperation>,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+                applied_at_turn: TurnNumber,
+            },
             CallStarted,
             CallFinished,
             FinalizeRemovalClean,
             FinalizeRemovalForced,
-            SnapshotAligned,
             ShutdownSurface,
         }
 
@@ -492,7 +587,7 @@ machine! {
             ApplyControlPlaneCommand,
             InitiateRecycle,
             IngressAccepted,
-            PostAdmissionSignal { signal: String },
+            PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
             CompletionResolved,
@@ -508,24 +603,29 @@ machine! {
             RetainTerminalRecord,
             EvictCompletedRecord,
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
-            // Wait-all barrier satisfaction. The handoff protocol's
-            // obligation payload (wait_request_id + operation_ids) lives
-            // on the compat `OpsBarrierBridgeMachine`'s mirror effect so
-            // the DSL-macro-constrained canonical effect can stay
-            // fieldless without expanding the DSL syntax. See
-            // `meerkat-machine-schema/src/compat/ops_barrier_bridge.rs`.
-            WaitAllSatisfied,
+            WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
             CollectCompletedResult,
             EnqueueClassifiedEntry,
             SpawnDrainTask,
-            ScheduleSurfaceCompletion,
-            RefreshVisibleSurfaceSet,
+            ScheduleSurfaceCompletion {
+                surface_id: SurfaceId,
+                operation: Enum<SurfaceDeltaOperation>,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+                applied_at_turn: TurnNumber,
+            },
+            RefreshVisibleSurfaceSet { snapshot_epoch: u64 },
             EmitExternalToolDelta,
             CloseSurfaceConnection,
             RejectSurfaceCall,
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
+            RealtimeReconnectProgressProjected {
+                attempt_count: u64,
+                next_retry_at_ms: Option<u64>,
+                deadline_at_ms: Option<u64>,
+            },
             // MCP server lifecycle effects. Emitted on each per-server state
             // transition so the shell can toggle the `[MCP_PENDING]` system
             // notice and refresh tool availability deterministically.
@@ -581,6 +681,14 @@ machine! {
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             PeerProjectionChanged { peer_projection_epoch: u64 },
             CommsTrustReconcileRequested { peer_projection_epoch: u64 },
+            PublishSupervisorTrustEdge {
+                peer_id: PeerId,
+                name: String,
+                address: String,
+                signing_public_key: Option<String>,
+                epoch: u64,
+            },
+            RevokeSupervisorTrustEdge { peer_id: PeerId, epoch: u64 },
         }
 
         // =====================================================================
@@ -618,17 +726,18 @@ machine! {
         disposition RetainTerminalRecord => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
-        disposition WaitAllSatisfied => local,
+        disposition WaitAllSatisfied => local handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
         disposition SpawnDrainTask => local,
-        disposition ScheduleSurfaceCompletion => local,
-        disposition RefreshVisibleSurfaceSet => external,
+        disposition ScheduleSurfaceCompletion => local handoff surface_completion,
+        disposition RefreshVisibleSurfaceSet => external handoff surface_snapshot_alignment,
         disposition EmitExternalToolDelta => external,
         disposition CloseSurfaceConnection => local,
         disposition RejectSurfaceCall => external,
         disposition RealtimeIntentProjected => external,
         disposition RealtimeBindingRotated => external,
+        disposition RealtimeReconnectProgressProjected => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
         disposition PeerInteractionStateChanged => external,
@@ -644,6 +753,8 @@ machine! {
         disposition LocalEndpointChanged => external,
         disposition PeerProjectionChanged => external,
         disposition CommsTrustReconcileRequested => external,
+        disposition PublishSupervisorTrustEdge => external handoff supervisor_trust_publish,
+        disposition RevokeSupervisorTrustEdge => external handoff supervisor_trust_revoke,
 
         // =====================================================================
         // Invariants
@@ -850,7 +961,7 @@ machine! {
         // 7. PrepareBindings: different source→target mappings per phase
         // Initializing → Initializing (no guard, emits RuntimeBound)
         transition PrepareBindingsInitializing {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -861,7 +972,7 @@ machine! {
         }
         // Idle → Attached
         transition PrepareBindingsIdle {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -872,7 +983,7 @@ machine! {
         }
         // Attached → Attached
         transition PrepareBindingsAttached {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -883,7 +994,7 @@ machine! {
         }
         // Running → Running
         transition PrepareBindingsRunning {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -894,7 +1005,7 @@ machine! {
         }
         // Retired → Retired
         transition PrepareBindingsRetired {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -905,7 +1016,7 @@ machine! {
         }
         // Stopped → Stopped (inline in hand-written catalog)
         transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -1086,7 +1197,7 @@ machine! {
 
         // 14. Retire: from [Idle, Attached, Running] → Retired
         transition RetireRequestedFromIdle {
-            on input Retire
+            on input Retire { session_id }
             guard {
                 self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
@@ -1156,7 +1267,7 @@ machine! {
 
         // 17. Destroy: from all non-Destroyed → Destroyed
         transition Destroy {
-            on input Destroy
+            on input Destroy { session_id }
             guard {
                 self.lifecycle_phase == Phase::Initializing
                 || self.lifecycle_phase == Phase::Idle
@@ -1338,7 +1449,7 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Idle + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionIdleImmediate {
@@ -1350,7 +1461,7 @@ machine! {
             update {}
             to Idle
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
         // Attached + immediate → Running (phase change!)
         transition AcceptWithCompletionAttachedImmediate {
@@ -1365,7 +1476,7 @@ machine! {
             }
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
             emit SubmitRunPrimitive
         }
         // Attached + queued (immediate=false, interrupt_yielding=false)
@@ -1378,7 +1489,7 @@ machine! {
             update {}
             to Attached
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
         transition AcceptWithCompletionRunningQueuedPassive {
@@ -1411,7 +1522,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "WakeLoop" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
         // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
         transition AcceptWithCompletionRunningInterruptYielding {
@@ -1423,7 +1534,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "InterruptYielding" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
@@ -1435,7 +1546,7 @@ machine! {
             update {}
             to Running
             emit IngressAccepted
-            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops
@@ -1668,23 +1779,35 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition ApplySurfaceBoundaryAttached {
-            on signal ApplySurfaceBoundary
+            on signal ApplySurfaceBoundary { surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
             to Attached
-            emit ScheduleSurfaceCompletion
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: operation,
+                pending_task_sequence: pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
         }
         transition ApplySurfaceBoundaryRunning {
-            on signal ApplySurfaceBoundary
+            on signal ApplySurfaceBoundary { surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
             to Running
-            emit ScheduleSurfaceCompletion
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: operation,
+                pending_task_sequence: pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
         }
         transition PendingSucceededAttached {
-            on signal PendingSucceeded
+            on input PendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1692,7 +1815,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingSucceededRunning {
-            on signal PendingSucceeded
+            on input PendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1700,7 +1823,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingFailedAttached {
-            on signal PendingFailed
+            on input PendingFailed { surface_id, pending_task_sequence, reason }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1708,7 +1831,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingFailedRunning {
-            on signal PendingFailed
+            on input PendingFailed { surface_id, pending_task_sequence, reason }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1776,7 +1899,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedAttached {
-            on signal SnapshotAligned
+            on input SnapshotAligned { snapshot_epoch }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1784,7 +1907,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedRunning {
-            on signal SnapshotAligned
+            on input SnapshotAligned { snapshot_epoch }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1920,6 +2043,40 @@ machine! {
                 self.realtime_reattach_required = false;
             }
             to Idle
+        }
+
+        transition ProjectRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeReconnectProgress { attempt_count, next_retry_at_ms, deadline_at_ms }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = attempt_count;
+                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
+                self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: attempt_count,
+                next_retry_at_ms: next_retry_at_ms,
+                deadline_at_ms: deadline_at_ms,
+            }
+        }
+
+        transition ClearRealtimeReconnectProgress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ClearRealtimeReconnectProgress
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: 0,
+                next_retry_at_ms: None,
+                deadline_at_ms: None,
+            }
         }
 
         // =====================================================================
@@ -2637,6 +2794,86 @@ machine! {
         }
 
         // =====================================================================
+        // Supervisor-trust-edge feedback transitions (C-F2 / wave-d D-d)
+        // =====================================================================
+        //
+        // Feedback acks for the `supervisor_trust_publish` /
+        // `supervisor_trust_revoke` handoff protocols. The realising shell
+        // (`comms_drain`) calls `Router::add_trusted_peer` /
+        // `remove_trusted_peer`, then stages one of these four inputs
+        // carrying the `epoch` it observed on the producer effect. Each
+        // transition is phase-preserving and guards on both `peer_id` and
+        // `epoch` matching the current binding — so an ack for epoch
+        // `N - 1` arriving after the binding has rotated to epoch `N` is
+        // rejected and the outstanding obligation stays open. The guards
+        // mirror the `supervisor_trust_bundle` composition's
+        // `correlation_fields = [peer_id, epoch]`.
+
+        transition SupervisorTrustEdgePublished {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublished { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgePublishFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgePublishFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevoked {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevoked { peer_id, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        transition SupervisorTrustEdgeRevokeFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {}
+            to Idle
+        }
+
+        // =====================================================================
         // Ops-barrier satisfaction (handoff feedback input)
         // =====================================================================
         //
@@ -2788,6 +3025,7 @@ stub_newtype!(FenceToken);
 stub_newtype!(RunId);
 stub_newtype!(InputId);
 stub_newtype!(WorkId);
+stub_newtype!(WaitRequestId);
 stub_newtype!(OperationId);
 stub_newtype!(SessionLlmIdentity);
 stub_newtype!(SessionToolVisibilityState);
@@ -2802,6 +3040,18 @@ pub enum SessionLlmCapabilitySurfaceStatus {
     #[default]
     Unresolved,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceDeltaOperation {
+    #[default]
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+stub_newtype!(SurfaceId);
+stub_newtype!(TurnNumber);
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
@@ -3021,36 +3271,150 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
-/// Track-B (R5): declarative peer endpoint descriptor.
+/// Typed admission-signal classifier for the `PostAdmissionSignal` effect
+/// (catalog DSL twin). Closed set of post-admission wake/interrupt intents
+/// emitted by the ingress authority so the shell dispatcher matches
+/// exhaustively on a typed discriminant instead of comparing string
+/// literals. Mirrors the runtime-side twin at
+/// `meerkat-runtime/src/meerkat_machine/dsl.rs::PostAdmissionSignalKind`;
+/// the shell-side `driver::ephemeral::PostAdmissionSignal` enum
+/// additionally carries a `None` bottom that the DSL never emits, so only
+/// the three emitted variants appear here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PostAdmissionSignalKind {
+    #[default]
+    WakeLoop,
+    InterruptYielding,
+    RequestImmediateProcessing,
+}
+
+/// Track-B (R5) / wave-c C-6r: typed declarative peer endpoint descriptor.
 ///
-/// Carries the three fields the comms runtime needs to install a
-/// trusted peer: `name` (human-readable), `peer_id` (Ed25519 public
-/// key), `address` (transport URL). Shape mirrors
-/// `meerkat_core::comms::TrustedPeerSpec` but lives here as a
-/// DSL-local type so the schema validator sees a consistent opaque
-/// struct shape (matching `WiringEdge` in `mob_machine`).
+/// Carries the fields the comms runtime needs to install a
+/// trusted peer: `name` (human-readable display slug), `peer_id`
+/// (Ed25519 pubkey-derived UUIDv5), `address` (transport URL), and
+/// `signing_key` (Ed25519 public key bytes used for envelope
+/// verification).
+/// Wave-c C-6r retypes the fields from bare `String` to typed
+/// newtypes — `PeerName`, `PeerId`, `PeerAddress`,
+/// `PeerSigningKey` — mirroring the runtime-side twin at
+/// `meerkat-runtime/src/meerkat_machine/dsl.rs::PeerEndpoint`. The
+/// two copies are required to stay structurally equivalent;
+/// the `peer_endpoint_structural_equivalence` tripwire in this
+/// crate's test harness asserts typed fields at both sites.
 ///
 /// Equality is component-wise. `PartialOrd` + `Ord` enable
 /// `BTreeSet<PeerEndpoint>` storage; `Hash` is retained for
 /// `HashSet` use at call sites that prefer it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct PeerEndpoint {
-    pub name: String,
-    pub peer_id: String,
-    pub address: String,
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
 }
 
 impl PeerEndpoint {
     pub fn new(
-        name: impl Into<String>,
-        peer_id: impl Into<String>,
-        address: impl Into<String>,
+        name: impl Into<PeerName>,
+        peer_id: impl Into<PeerId>,
+        address: impl Into<PeerAddress>,
+        signing_key: impl Into<PeerSigningKey>,
     ) -> Self {
         Self {
             name: name.into(),
             peer_id: peer_id.into(),
             address: address.into(),
+            signing_key: signing_key.into(),
         }
+    }
+}
+
+/// Schema-side twin of `meerkat-runtime/src/meerkat_machine/dsl.rs`'s
+/// `From<&TrustedPeerDescriptor> for PeerEndpoint`. Keeps the
+/// conversion available to consumers that see only the schema crate
+/// (codegen, kernels, schema-facing callers) without forcing them to
+/// re-route through the runtime DSL. Mirrors the runtime side
+/// field-for-field — the `peer_endpoint_structural_equivalence`
+/// tripwire fails if either copy drifts.
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+        Self {
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+            signing_key: PeerSigningKey(spec.pubkey),
+        }
+    }
+}
+
+/// Schema-local carrier for the Ed25519 public signing key that belongs to a
+/// peer endpoint. Mirrors the runtime DSL twin so schema/codegen consumers see
+/// the trust-store key material as part of the machine-owned projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerSigningKey(pub [u8; 32]);
+
+impl From<[u8; 32]> for PeerSigningKey {
+    fn from(key: [u8; 32]) -> Self {
+        Self(key)
+    }
+}
+
+/// Schema-local newtype for a peer display name. Mirrors the shape
+/// that `meerkat_core::comms::PeerName` exposes across the core seam;
+/// the schema catalog keeps a DSL-local copy so `MachineSchema`
+/// validation sees a consistent opaque-struct shape regardless of the
+/// typed core form.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerName(pub String);
+
+impl<T: Into<String>> From<T> for PeerName {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Schema-local newtype for the canonical routing identity of a peer
+/// (the UUIDv5-derived `PeerId` carried by `meerkat_core::comms::PeerId`).
+/// Stored as a slug string so `MachineSchema` validation sees a stable
+/// opaque shape; call sites convert to/from the core typed form at the
+/// runtime seam.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerId(pub String);
+
+impl<T: Into<String>> From<T> for PeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Schema-local newtype for a peer transport endpoint URL. Mirrors the
+/// shape of `meerkat_core::comms::PeerAddress` at the core seam; kept
+/// DSL-local so `MachineSchema` validation sees a stable opaque shape.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerAddress(pub String);
+
+impl<T: Into<String>> From<T> for PeerAddress {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl PeerAddress {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

@@ -400,22 +400,16 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 name: call.name.to_string(),
                 reason: e.to_string(),
             })?;
-        // First check if it's an allowed tool
-        if !self.allowed_tools.contains(call.name) {
-            // Check external dispatcher for non-allowed tools
-            if let Some(ref ext) = self.external
-                && ext.tools().iter().any(|t| t.name == call.name)
-            {
-                return ext.dispatch(call).await;
-            }
-            return Err(ToolError::NotFound {
-                name: call.name.to_string(),
-            });
-        }
-
-        // Check builtin tools
+        // Check builtin tools. Wave B (V7): a builtin tool that exists but
+        // is not in `allowed_tools` is policy-denied, not missing — callers
+        // see `AccessDenied` so surfaces can distinguish 403 from 404.
         for tool in &self.builtin_tools {
             if tool.name() == call.name {
+                if !self.allowed_tools.contains(tool.name()) {
+                    return Err(ToolError::AccessDenied {
+                        name: call.name.to_string(),
+                    });
+                }
                 let output = tool.call(args.clone()).await.map_err(|e| match e {
                     BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
                         name: call.name.to_string(),
@@ -452,6 +446,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
         if let Some(ref skill) = self.skill_tools {
             for tool in skill.tools() {
                 if tool.name() == call.name {
+                    if !self.allowed_tools.contains(tool.name()) {
+                        return Err(ToolError::AccessDenied {
+                            name: call.name.to_string(),
+                        });
+                    }
                     let output = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
                             name: call.name.to_string(),

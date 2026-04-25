@@ -390,7 +390,7 @@ async fn tcp_e2e_realtime_ws_host_coexists_with_tcp_rpc() {
 }
 
 #[tokio::test]
-async fn tcp_e2e_realtime_session_targets_use_product_capabilities_when_openai_is_configured() {
+async fn tcp_e2e_realtime_session_targets_accept_env_default_openai_credentials() {
     let (mut child, tcp_port, _ws_port) =
         spawn_rpc_tcp_with_realtime_ws_env(&[("OPENAI_API_KEY", "test-openai-key")]).await;
 
@@ -441,14 +441,18 @@ async fn tcp_e2e_realtime_session_targets_use_product_capabilities_when_openai_i
     let (read, write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let capabilities = read_response_for_id(&mut reader, 3).await;
+    assert!(
+        capabilities["error"].is_null(),
+        "realtime capabilities should resolve through env-default OpenAI auth: {capabilities}"
+    );
     let turning_modes = capabilities["result"]["capabilities"]["turning_modes"]
         .as_array()
-        .expect("turning_modes should be an array");
+        .unwrap_or_else(|| panic!("turning_modes should be an array: {capabilities}"));
     assert!(
         turning_modes
             .iter()
             .any(|mode| mode.as_str() == Some("explicit_commit")),
-        "session target capabilities should advertise explicit_commit when the product factory is configured: {capabilities}"
+        "env-default OpenAI credentials should expose product realtime capabilities: {capabilities}"
     );
 
     let mut stream = write.reunite(reader.into_inner()).unwrap();
@@ -471,7 +475,7 @@ async fn tcp_e2e_realtime_session_targets_use_product_capabilities_when_openai_i
     let open_info = read_response_for_id(&mut reader, 4).await;
     assert!(
         open_info["result"]["open_token"].as_str().is_some(),
-        "open_info should allow explicit_commit when the product factory is configured: {open_info}"
+        "env-default OpenAI credentials should open explicit_commit realtime sessions: {open_info}"
     );
 
     child.kill().await.ok();

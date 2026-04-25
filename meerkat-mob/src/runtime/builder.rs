@@ -611,12 +611,6 @@ impl MobBuilder {
             command_tx: command_tx.clone(),
             command_rx,
         };
-        // W3-H: preview handle gets a placeholder broadcast sender. The
-        // handle is only used for reconcile_resume which doesn't invoke
-        // realtime binding paths; the real binding channel is created in
-        // start_runtime_with_components alongside the actor that will emit
-        // onto it.
-        let (preview_realtime_binding_tx, _) = tokio::sync::broadcast::channel(1);
         let preview_handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster_state.clone(),
@@ -628,7 +622,6 @@ impl MobBuilder {
             restore_diagnostics,
             phase_watch_rx: preview_phase_rx,
             realtime_session_factory: realtime_session_factory.clone(),
-            realtime_binding_tx: preview_realtime_binding_tx,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -1184,9 +1177,72 @@ impl MobBuilder {
                 );
             }
 
-            provisioner
-                .reconcile_member_trust(&entry.member_ref, &desired_specs, &candidate_specs)
-                .await?;
+            // D31 resume wire-restoration: install trust for every desired
+            // edge and prune stale trust that matches one of "our own"
+            // candidate peers but is no longer in the wiring projection. The
+            // two-sided diff ensures (a) resumed members re-enter comms trust
+            // sets after restart / manual `force_remove_trust` test scaffolds,
+            // and (b) leftover trust entries from retired members or
+            // orphaned external peers are revoked so `peers()` matches the
+            // canonical roster projection.
+            let Some(comms_a) = local_comms else {
+                // Peer-only external members have no local comms runtime on
+                // the supervisor side; their trust lives on the remote
+                // process, so resume reconciles it through the supervisor
+                // bridge instead of mutating local state.
+                provisioner
+                    .reconcile_peer_only_trust(&entry.member_ref, &desired_specs)
+                    .await?;
+                continue;
+            };
+            let desired_peer_ids: std::collections::HashSet<String> = desired_specs
+                .iter()
+                .map(|spec| spec.peer_id.to_string())
+                .collect();
+            // `candidate_peer_ids` is retained as an explicit signal of the
+            // "our members" set — it currently guides diagnostics, and the
+            // d-external-peer-wire agent's work will extend the diff below
+            // to restrict pruning to the mob's own namespace once external
+            // peer wiring rejoins the canonical seam.
+            let _ = &candidate_specs;
+            let current_peers = comms_a.peers().await;
+            for current in &current_peers {
+                let current_peer_id = current.peer_id.to_string();
+                if desired_peer_ids.contains(&current_peer_id) {
+                    continue;
+                }
+                // Prune any trust entry that no longer corresponds to a
+                // desired edge. Resume aligns live comms trust with the
+                // canonical roster projection, so trust left behind from
+                // retired members or test scaffolding (see
+                // `test_resume_prunes_stale_trust_not_present_in_roster`)
+                // must be revoked here.
+                if let Err(error) = comms_a.remove_trusted_peer(&current_peer_id).await {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        peer = %current.name,
+                        %error,
+                        "resume: failed to prune stale trust"
+                    );
+                }
+            }
+            for spec in &desired_specs {
+                let spec_peer_id = spec.peer_id.to_string();
+                if current_peers
+                    .iter()
+                    .any(|entry| entry.peer_id.to_string() == spec_peer_id)
+                {
+                    continue;
+                }
+                if let Err(error) = comms_a.add_trusted_peer(spec.clone()).await {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        peer = %spec.name,
+                        %error,
+                        "resume: failed to re-establish trust"
+                    );
+                }
+            }
         }
         // Notify orchestrator that the mob resumed.
         if notify_orchestrator_on_resume
@@ -1252,8 +1308,6 @@ impl MobBuilder {
                                 event_tx: None,
                                 skill_references: None,
                                 flow_tool_overlay: None,
-                                additional_instructions: None,
-                                execution_kind: None,
                             },
                         )
                         .await?;
@@ -1370,12 +1424,6 @@ impl MobBuilder {
         // call before any DSL transition returns the right answer.
         let (phase_watch_tx_actor, phase_watch_rx) =
             tokio::sync::watch::channel(wiring_initial_phase);
-        // W3-H: broadcast channel for `MemberRealtimeBindingEvent`s. 128 is a
-        // comfortable capacity for the typical event rate (one event per
-        // spawn/respawn/retire). Slow subscribers are lag-tolerant — they
-        // miss intermediate rotations but can re-read the canonical binding
-        // map from the DSL authority on recovery.
-        let (realtime_binding_tx, _) = tokio::sync::broadcast::channel(128);
         let handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster.clone(),
@@ -1387,7 +1435,6 @@ impl MobBuilder {
             restore_diagnostics: restore_diagnostics.clone(),
             phase_watch_rx,
             realtime_session_factory,
-            realtime_binding_tx: realtime_binding_tx.clone(),
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(
             MultiBackendProvisioner::new(
@@ -1422,12 +1469,10 @@ impl MobBuilder {
             phase => phase,
         };
         // Plain mobs (orchestrator: None in the definition) skip orchestrator
-        // guards entirely; mobs with an orchestrator bind the topology
-        // coordinator when entering Running.
+        // guards entirely. The coordinator-bound fact is MobMachine state
+        // (see `coordinator_bound` in the mob DSL), initialized to `true`
+        // by the machine's init block; no shell-side bind is needed.
         let has_orchestrator = definition.orchestrator.is_some();
-        if has_orchestrator && initial_phase == MobState::Running {
-            topology_service.bind_coordinator();
-        }
         let flow_engine = FlowEngine::new(
             flow_executor,
             handle.clone(),
@@ -1441,6 +1486,26 @@ impl MobBuilder {
             events.clone(),
         );
         let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::new());
+
+        // Wave-c C-6c — flip the composition binding from `Standalone`
+        // to `Wired(_)` whenever a runtime adapter is present, wiring
+        // the mob producer into the `MeerkatConsumerSurface` on
+        // `MeerkatMachine`. Builds without `runtime-adapter` keep the
+        // standalone path (no consumer exists by construction).
+        #[cfg(feature = "runtime-adapter")]
+        let composition_binding = match &runtime_adapter {
+            Some(adapter) => {
+                let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
+                super::composition::attach_signal_dispatcher_to_runtime_adapter(
+                    adapter,
+                    command_tx.clone(),
+                );
+                binding
+            }
+            None => meerkat_runtime::composition::CompositionBinding::Standalone,
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
 
         let actor = MobActor {
             definition,
@@ -1477,7 +1542,8 @@ impl MobBuilder {
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,
-            realtime_binding_tx,
+            composition_binding,
+            pending_routed_effects: Vec::new(),
         };
         tokio::spawn(actor.run(command_rx));
 

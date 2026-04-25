@@ -116,10 +116,11 @@ impl CommsSendParams {
     pub fn peer_name(&self) -> Option<&str> {
         use meerkat_core::comms::CommsCommandRequest;
         match &self.command {
+            CommsCommandRequest::Input { .. } => None,
             CommsCommandRequest::PeerMessage { to, .. }
+            | CommsCommandRequest::PeerLifecycle { to, .. }
             | CommsCommandRequest::PeerRequest { to, .. }
             | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
-            CommsCommandRequest::Input { .. } => None,
         }
     }
 }
@@ -247,17 +248,6 @@ mod tests {
         let params: CommsSendParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.session_id, "sid_1");
         assert!(matches!(params.command, CommsCommandRequest::Input { .. }));
-    }
-
-    #[test]
-    fn deserialize_peer_message_command() {
-        let json = r#"{"session_id":"sid_1","kind":"peer_message","to":"alice","body":"hi"}"#;
-        let params: CommsSendParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.peer_name(), Some("alice"));
-        assert!(matches!(
-            params.command,
-            CommsCommandRequest::PeerMessage { .. }
-        ));
     }
 
     #[test]

@@ -3,7 +3,9 @@ use crate::store::SupervisorAuthorityRecord;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, SendReceipt, TrustedPeerSpec};
+use meerkat_core::comms::{
+    CommsCommand, InputStreamMode, PeerName, SendReceipt, TrustedPeerDescriptor,
+};
 use meerkat_core::interaction::{
     InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
 };
@@ -84,11 +86,13 @@ impl MobSupervisorBridge {
         self.runtime().await as Arc<dyn CoreCommsRuntime>
     }
 
-    pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerSpec, MobError> {
+    pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
-        TrustedPeerSpec::new(
+        let public_key = authority.keypair().public_key();
+        TrustedPeerDescriptor::unsigned_with_pubkey(
             self.participant_name.clone(),
             authority.public_peer_id,
+            *public_key.as_bytes(),
             format!("inproc://{}", self.participant_name),
         )
         .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))
@@ -97,7 +101,7 @@ impl MobSupervisorBridge {
     /// Send a typed bridge command and return the raw JSON response.
     pub(crate) async fn send_bridge_command(
         &self,
-        recipient: &TrustedPeerSpec,
+        recipient: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
     ) -> Result<serde_json::Value, MobError> {
@@ -112,13 +116,25 @@ impl MobSupervisorBridge {
 
     pub(crate) async fn request_json<T: serde::Serialize>(
         &self,
-        recipient: &TrustedPeerSpec,
+        recipient: &TrustedPeerDescriptor,
         intent: &str,
         payload: &T,
         timeout: Duration,
     ) -> Result<serde_json::Value, MobError> {
         let _request_guard = self.request_lock.lock().await;
         let runtime = self.runtime().await;
+        // #31 Wave D (D-trust-reconciliation subsystem 1): bootstrap comms
+        // trust for the recipient so the supervisor can address the external
+        // peer at all. The pre-Wave-A implementation did this via
+        // `runtime.add_trusted_peer(recipient.clone())` at the head of this
+        // method (deleted by `0ad584cde` as a shell-authority violation
+        // piggybacked onto every request). Restoring the trust bootstrap
+        // here keeps supervisor bridge commands (BindMember,
+        // AuthorizeSupervisor, WireMember, UnwireMember, RetireMember)
+        // deliverable at spawn time for external backend members — without
+        // the install, `send` below fails with
+        // `SendError::PeerNotFound(recipient.name)` because the supervisor
+        // runtime's trusted-peer directory is empty for the new member.
         runtime.add_trusted_peer(recipient.clone()).await?;
         let to = PeerName::new(recipient.name.clone()).map_err(|error| {
             MobError::WiringError(format!(

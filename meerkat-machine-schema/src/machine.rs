@@ -1,14 +1,18 @@
+use crate::identity::{
+    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId,
+    NamedTypeBinding, NamedTypeId, PhaseId, ProtocolId, SignalVariantId, TransitionId,
+};
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineSchema {
-    pub machine: String,
+    pub machine: MachineId,
     pub version: u32,
     pub rust: RustBinding,
     pub state: StateSchema,
     pub inputs: EnumSchema,
-    pub surface_only_inputs: Vec<String>,
+    pub surface_only_inputs: Vec<InputVariantId>,
     pub signals: EnumSchema,
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
@@ -16,6 +20,11 @@ pub struct MachineSchema {
     pub invariants: Vec<InvariantSchema>,
     pub transitions: Vec<TransitionSchema>,
     pub effect_dispositions: Vec<EffectDispositionRule>,
+    /// Authoritative Rust-type mapping for every `TypeRef::Named(NamedTypeId)`
+    /// referenced in this schema. The codegen consults this table rather
+    /// than matching on the type's name; a `NamedTypeId` referenced
+    /// without a matching binding is a schema-construction error.
+    pub named_types: Vec<NamedTypeBinding>,
     /// Override the CI step_limit for individual machine TLC verification.
     /// Machines with many state fields (e.g. a rich MobMachine flow/work region)
     /// may need a lower limit to keep CI verification tractable. `None` uses the
@@ -24,11 +33,21 @@ pub struct MachineSchema {
 }
 
 impl MachineSchema {
+    /// Look up the authoritative Rust binding for a named type referenced
+    /// by this schema. Returns `None` if the type is unbound.
+    pub fn named_type_binding(&self, name: &NamedTypeId) -> Option<&NamedTypeBinding> {
+        self.named_types
+            .iter()
+            .find(|binding| binding.name == *name)
+    }
+}
+
+impl MachineSchema {
     pub fn validate(&self) -> Result<(), MachineSchemaError> {
         let phase_names = self.state.phase.variants_by_name()?;
         let input_variants = self.inputs.variants_by_name()?;
         let surface_only_inputs = unique_names(
-            self.surface_only_inputs.iter().map(String::as_str),
+            self.surface_only_inputs.iter().map(AsRef::as_ref),
             "surface-only input",
         )?;
         let signal_variants = self.signals.variants_by_name()?;
@@ -42,16 +61,16 @@ impl MachineSchema {
             "helper/derived",
         )?;
 
-        if !phase_names.contains(&self.state.init.phase) {
+        if !phase_names.contains(self.state.init.phase.as_str()) {
             return Err(MachineSchemaError::UnknownPhase {
-                phase: self.state.init.phase.clone(),
+                phase: self.state.init.phase.as_str().to_owned(),
             });
         }
 
         for terminal in &self.state.terminal_phases {
-            if !phase_names.contains(terminal) {
+            if !phase_names.contains(terminal.as_str()) {
                 return Err(MachineSchemaError::UnknownPhase {
-                    phase: terminal.clone(),
+                    phase: terminal.as_str().to_owned(),
                 });
             }
         }
@@ -59,7 +78,7 @@ impl MachineSchema {
         for initializer in &self.state.init.fields {
             if !field_names.contains(initializer.field.as_str()) {
                 return Err(MachineSchemaError::UnknownField {
-                    field: initializer.field.clone(),
+                    field: initializer.field.as_str().to_owned(),
                 });
             }
         }
@@ -67,10 +86,10 @@ impl MachineSchema {
         for surface_only_input in &self.surface_only_inputs {
             if !input_variants
                 .iter()
-                .any(|variant| variant.as_str() == surface_only_input)
+                .any(|variant| *variant == surface_only_input.as_str())
             {
                 return Err(MachineSchemaError::UnknownSurfaceOnlyInputVariant {
-                    variant: surface_only_input.clone(),
+                    variant: surface_only_input.as_str().to_owned(),
                 });
             }
         }
@@ -92,51 +111,55 @@ impl MachineSchema {
 
         let mut transition_names = IndexSet::new();
         for transition in &self.transitions {
-            if transition.name.is_empty() {
+            if transition.name.as_str().is_empty() {
                 return Err(MachineSchemaError::EmptyName("transition"));
             }
             if !transition_names.insert(transition.name.as_str()) {
                 return Err(MachineSchemaError::DuplicateName {
                     kind: "transition",
-                    name: transition.name.clone(),
+                    name: transition.name.as_str().to_owned(),
                 });
             }
             for from in &transition.from {
-                if !phase_names.contains(from) {
+                if !phase_names.contains(from.as_str()) {
                     return Err(MachineSchemaError::UnknownPhase {
-                        phase: from.clone(),
+                        phase: from.as_str().to_owned(),
                     });
                 }
             }
-            match transition.on.kind {
-                TriggerKind::Input if !input_variants.contains(&transition.on.variant) => {
+            match &transition.on {
+                TriggerMatch::Input { variant, .. }
+                    if !input_variants.contains(variant.as_str()) =>
+                {
                     return Err(MachineSchemaError::UnknownInputVariant {
-                        variant: transition.on.variant.clone(),
+                        variant: variant.as_str().to_owned(),
                     });
                 }
-                TriggerKind::Signal if !signal_variants.contains(&transition.on.variant) => {
+                TriggerMatch::Signal { variant, .. }
+                    if !signal_variants.contains(variant.as_str()) =>
+                {
                     return Err(MachineSchemaError::UnknownSignalVariant {
-                        variant: transition.on.variant.clone(),
+                        variant: variant.as_str().to_owned(),
                     });
                 }
                 _ => {}
             }
-            if transition.on.kind == TriggerKind::Input
-                && surface_only_inputs.contains(transition.on.variant.as_str())
+            if let TriggerMatch::Input { variant, .. } = &transition.on
+                && surface_only_inputs.contains(variant.as_str())
             {
                 return Err(MachineSchemaError::SurfaceOnlyInputHasTransition {
-                    variant: transition.on.variant.clone(),
-                    transition: transition.name.clone(),
+                    variant: variant.as_str().to_owned(),
+                    transition: transition.name.as_str().to_owned(),
                 });
             }
-            if !phase_names.contains(&transition.to) {
+            if !phase_names.contains(transition.to.as_str()) {
                 return Err(MachineSchemaError::UnknownPhase {
-                    phase: transition.to.clone(),
+                    phase: transition.to.as_str().to_owned(),
                 });
             }
 
             let bindings = unique_names(
-                transition.on.bindings.iter().map(String::as_str),
+                transition.on.bindings().iter().map(AsRef::as_ref),
                 "transition binding",
             )?;
 
@@ -163,9 +186,9 @@ impl MachineSchema {
                 )?;
             }
             for effect in &transition.emit {
-                if !effect_variants.contains(&effect.variant) {
+                if !effect_variants.contains(effect.variant.as_str()) {
                     return Err(MachineSchemaError::UnknownEffectVariant {
-                        variant: effect.variant.clone(),
+                        variant: effect.variant.as_str().to_owned(),
                     });
                 }
                 for expr in effect.fields.values() {
@@ -182,33 +205,56 @@ impl MachineSchema {
             }
         }
 
+        // Validate named-type bindings: every `TypeRef::Named(id)` referenced
+        // anywhere in the schema must have a matching binding in `named_types`,
+        // and bindings must be unique by name. This is the authoritative
+        // single source of truth for how the codegen lowers named types —
+        // there is no name-based fallback.
+        let mut seen_bindings: IndexSet<&str> = IndexSet::new();
+        for binding in &self.named_types {
+            if !seen_bindings.insert(binding.name.as_str()) {
+                return Err(MachineSchemaError::DuplicateNamedTypeBinding {
+                    name: binding.name.as_str().to_owned(),
+                });
+            }
+        }
+        {
+            let mut referenced: IndexSet<String> = IndexSet::new();
+            collect_named_type_references_machine(self, &mut referenced);
+            for name in &referenced {
+                if !seen_bindings.contains(name.as_str()) {
+                    return Err(MachineSchemaError::MissingNamedTypeBinding { name: name.clone() });
+                }
+            }
+        }
+
         // Validate effect dispositions: every rule must reference a known effect variant,
         // no duplicates, and when dispositions are present every effect must be covered.
         if !self.effect_dispositions.is_empty() {
-            let mut disposed_variants = IndexSet::new();
+            let mut disposed_variants: IndexSet<&str> = IndexSet::new();
             for rule in &self.effect_dispositions {
-                if !effect_variants.contains(&rule.effect_variant) {
+                if !effect_variants.contains(rule.effect_variant.as_str()) {
                     return Err(MachineSchemaError::UnknownEffectDispositionVariant {
-                        variant: rule.effect_variant.clone(),
+                        variant: rule.effect_variant.as_str().to_owned(),
                     });
                 }
-                if !disposed_variants.insert(&rule.effect_variant) {
+                if !disposed_variants.insert(rule.effect_variant.as_str()) {
                     return Err(MachineSchemaError::DuplicateEffectDisposition {
-                        variant: rule.effect_variant.clone(),
+                        variant: rule.effect_variant.as_str().to_owned(),
                     });
                 }
                 if rule.handoff_protocol.is_some()
                     && matches!(rule.disposition, EffectDisposition::Routed { .. })
                 {
                     return Err(MachineSchemaError::HandoffProtocolOnRoutedEffect {
-                        variant: rule.effect_variant.clone(),
+                        variant: rule.effect_variant.as_str().to_owned(),
                     });
                 }
             }
             for variant in &effect_variants {
                 if !disposed_variants.contains(*variant) {
                     return Err(MachineSchemaError::MissingEffectDisposition {
-                        variant: (*variant).clone(),
+                        variant: (*variant).to_owned(),
                     });
                 }
             }
@@ -225,18 +271,18 @@ pub enum EffectDisposition {
     /// Observability/external side effect. No machine consumption expected.
     External,
     /// Must be routed to a consumer machine when both producer and consumer coexist in a composition.
-    Routed { consumer_machines: Vec<String> },
+    Routed { consumer_machines: Vec<MachineId> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectDispositionRule {
-    pub effect_variant: String,
+    pub effect_variant: EffectVariantId,
     pub disposition: EffectDisposition,
     /// When set, this effect participates in an owner-handoff protocol.
     /// The named protocol must be declared as an `EffectHandoffProtocol`
     /// in every composition that includes this machine.
     /// Only meaningful for `Local` or `External` dispositions.
-    pub handoff_protocol: Option<String>,
+    pub handoff_protocol: Option<ProtocolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,7 +296,7 @@ pub struct StateSchema {
     pub phase: EnumSchema,
     pub fields: Vec<FieldSchema>,
     pub init: InitSchema,
-    pub terminal_phases: Vec<String>,
+    pub terminal_phases: Vec<PhaseId>,
 }
 
 impl StateSchema {
@@ -264,13 +310,13 @@ impl StateSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitSchema {
-    pub phase: String,
+    pub phase: PhaseId,
     pub fields: Vec<FieldInit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldInit {
-    pub field: String,
+    pub field: FieldId,
     pub expr: Expr,
 }
 
@@ -281,16 +327,16 @@ pub struct EnumSchema {
 }
 
 impl EnumSchema {
-    pub(crate) fn variants_by_name(&self) -> Result<IndexSet<&String>, MachineSchemaError> {
-        let mut names = IndexSet::new();
+    pub(crate) fn variants_by_name(&self) -> Result<IndexSet<&str>, MachineSchemaError> {
+        let mut names: IndexSet<&str> = IndexSet::new();
         for variant in &self.variants {
-            if variant.name.is_empty() {
+            if variant.name.as_str().is_empty() {
                 return Err(MachineSchemaError::EmptyName("variant"));
             }
-            if !names.insert(&variant.name) {
+            if !names.insert(variant.name.as_str()) {
                 return Err(MachineSchemaError::DuplicateName {
                     kind: "variant",
-                    name: variant.name.clone(),
+                    name: variant.name.as_str().to_owned(),
                 });
             }
             unique_names(
@@ -301,10 +347,14 @@ impl EnumSchema {
         Ok(names)
     }
 
-    pub fn variant_named(&self, name: &str) -> Result<&VariantSchema, MachineSchemaError> {
+    pub fn variant_named(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<&VariantSchema, MachineSchemaError> {
+        let name = name.as_ref();
         self.variants
             .iter()
-            .find(|variant| variant.name == name)
+            .find(|variant| variant.name.as_str() == name)
             .ok_or_else(|| MachineSchemaError::UnknownVariant {
                 variant: name.to_owned(),
             })
@@ -313,17 +363,18 @@ impl EnumSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantSchema {
-    pub name: String,
+    pub name: EnumVariantId,
     pub fields: Vec<FieldSchema>,
 }
 
 impl VariantSchema {
-    pub fn field_named(&self, name: &str) -> Result<&FieldSchema, MachineSchemaError> {
+    pub fn field_named(&self, name: impl AsRef<str>) -> Result<&FieldSchema, MachineSchemaError> {
+        let name = name.as_ref();
         self.fields
             .iter()
-            .find(|field| field.name == name)
+            .find(|field| field.name.as_str() == name)
             .ok_or_else(|| MachineSchemaError::UnknownVariantField {
-                variant: self.name.clone(),
+                variant: self.name.as_str().to_owned(),
                 field: name.to_owned(),
             })
     }
@@ -331,7 +382,7 @@ impl VariantSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSchema {
-    pub name: String,
+    pub name: FieldId,
     pub ty: TypeRef,
 }
 
@@ -341,8 +392,8 @@ pub enum TypeRef {
     U32,
     U64,
     String,
-    Named(String),
-    Enum(String),
+    Named(NamedTypeId),
+    Enum(EnumTypeId),
     Option(Box<TypeRef>),
     Set(Box<TypeRef>),
     Seq(Box<TypeRef>),
@@ -367,12 +418,12 @@ pub struct InvariantSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSchema {
-    pub name: String,
-    pub from: Vec<String>,
+    pub name: TransitionId,
+    pub from: Vec<PhaseId>,
     pub on: TriggerMatch,
     pub guards: Vec<Guard>,
     pub updates: Vec<Update>,
-    pub to: String,
+    pub to: PhaseId,
     pub emit: Vec<EffectEmit>,
 }
 
@@ -382,11 +433,52 @@ pub enum TriggerKind {
     Signal,
 }
 
+/// Typed trigger match for a transition — the variant ID is carried at the
+/// right level of the sum discriminator.
+///
+/// Each transition fires on either an input or a signal; the `TriggerMatch`
+/// sum threads the correct typed identity through each arm so there is no
+/// stringly-typed `variant` field anywhere in the schema. The DSL macro
+/// emits the concrete arm at expansion time — `Input { variant:
+/// InputVariantId::parse(...) }` or `Signal { variant:
+/// SignalVariantId::parse(...) }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerMatch {
-    pub kind: TriggerKind,
-    pub variant: String,
-    pub bindings: Vec<String>,
+pub enum TriggerMatch {
+    Input {
+        variant: InputVariantId,
+        bindings: Vec<FieldId>,
+    },
+    Signal {
+        variant: SignalVariantId,
+        bindings: Vec<FieldId>,
+    },
+}
+
+impl TriggerMatch {
+    /// Structural trigger kind (convenience projection for validators that
+    /// still consult the `kind`/`variant` split).
+    pub fn kind(&self) -> TriggerKind {
+        match self {
+            Self::Input { .. } => TriggerKind::Input,
+            Self::Signal { .. } => TriggerKind::Signal,
+        }
+    }
+
+    /// Untyped slug accessor for the matched variant. Use [`TriggerMatch`]
+    /// directly when you need the typed identity.
+    pub fn variant_str(&self) -> &str {
+        match self {
+            Self::Input { variant, .. } => variant.as_str(),
+            Self::Signal { variant, .. } => variant.as_str(),
+        }
+    }
+
+    /// Typed bindings introduced by the destructure pattern.
+    pub fn bindings(&self) -> &[FieldId] {
+        match self {
+            Self::Input { bindings, .. } | Self::Signal { bindings, .. } => bindings,
+        }
+    }
 }
 
 pub type InputMatch = TriggerMatch;
@@ -399,68 +491,68 @@ pub struct Guard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectEmit {
-    pub variant: String,
-    pub fields: IndexMap<String, Expr>,
+    pub variant: EffectVariantId,
+    pub fields: IndexMap<FieldId, Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
     Assign {
-        field: String,
+        field: FieldId,
         expr: Expr,
     },
     Increment {
-        field: String,
+        field: FieldId,
         amount: u64,
     },
     Decrement {
-        field: String,
+        field: FieldId,
         amount: u64,
     },
     MapInsert {
-        field: String,
+        field: FieldId,
         key: Expr,
         value: Expr,
     },
     MapIncrement {
-        field: String,
+        field: FieldId,
         key: Expr,
         amount: u64,
     },
     MapDecrement {
-        field: String,
+        field: FieldId,
         key: Expr,
         amount: u64,
     },
     MapRemove {
-        field: String,
+        field: FieldId,
         key: Expr,
     },
     SetInsert {
-        field: String,
+        field: FieldId,
         value: Expr,
     },
     SetRemove {
-        field: String,
+        field: FieldId,
         value: Expr,
     },
     SeqAppend {
-        field: String,
+        field: FieldId,
         value: Expr,
     },
     SeqPrepend {
-        field: String,
+        field: FieldId,
         values: Expr,
     },
     SeqPopFront {
-        field: String,
+        field: FieldId,
     },
     SeqRemoveValue {
-        field: String,
+        field: FieldId,
         value: Expr,
     },
     SeqRemoveAll {
-        field: String,
+        field: FieldId,
         values: Expr,
     },
     Conditional {
@@ -479,11 +571,11 @@ impl Update {
     #[allow(clippy::too_many_arguments)]
     fn validate(
         &self,
-        phase_names: &IndexSet<&String>,
+        phase_names: &IndexSet<&str>,
         field_names: &IndexSet<&str>,
-        input_variants: &IndexSet<&String>,
-        signal_variants: &IndexSet<&String>,
-        effect_variants: &IndexSet<&String>,
+        input_variants: &IndexSet<&str>,
+        signal_variants: &IndexSet<&str>,
+        effect_variants: &IndexSet<&str>,
         helper_names: &IndexSet<&str>,
         bindings: &IndexSet<&str>,
     ) -> Result<(), MachineSchemaError> {
@@ -494,7 +586,7 @@ impl Update {
             | Self::SeqPopFront { field } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 if let Self::Assign { expr, .. } = self {
@@ -512,7 +604,7 @@ impl Update {
             Self::MapInsert { field, key, value } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 key.validate(
@@ -537,7 +629,7 @@ impl Update {
             Self::MapRemove { field, key } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 key.validate(
@@ -553,7 +645,7 @@ impl Update {
             Self::MapIncrement { field, key, .. } | Self::MapDecrement { field, key, .. } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 key.validate(
@@ -572,7 +664,7 @@ impl Update {
             | Self::SeqRemoveValue { field, value } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 value.validate(
@@ -588,7 +680,7 @@ impl Update {
             Self::SeqPrepend { field, values } | Self::SeqRemoveAll { field, values } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
                 values.validate(
@@ -683,15 +775,15 @@ pub enum Expr {
     U64(u64),
     String(String),
     NamedVariant {
-        enum_name: String,
-        variant: String,
+        enum_name: EnumTypeId,
+        variant: EnumVariantId,
     },
     EmptySet,
     EmptyMap,
     SeqLiteral(Vec<Expr>),
     CurrentPhase,
-    Phase(String),
-    Field(String),
+    Phase(PhaseId),
+    Field(FieldId),
     Binding(String),
     Variant(String),
     None,
@@ -748,11 +840,11 @@ impl Expr {
     #[allow(clippy::too_many_arguments)]
     fn validate(
         &self,
-        phase_names: &IndexSet<&String>,
+        phase_names: &IndexSet<&str>,
         field_names: &IndexSet<&str>,
-        input_variants: &IndexSet<&String>,
-        signal_variants: &IndexSet<&String>,
-        effect_variants: &IndexSet<&String>,
+        input_variants: &IndexSet<&str>,
+        signal_variants: &IndexSet<&str>,
+        effect_variants: &IndexSet<&str>,
         helper_names: &IndexSet<&str>,
         bindings: &IndexSet<&str>,
     ) -> Result<(), MachineSchemaError> {
@@ -779,16 +871,16 @@ impl Expr {
                 }
             }
             Self::Phase(phase) => {
-                if !phase_names.contains(phase) {
+                if !phase_names.contains(phase.as_str()) {
                     return Err(MachineSchemaError::UnknownPhase {
-                        phase: phase.clone(),
+                        phase: phase.as_str().to_owned(),
                     });
                 }
             }
             Self::Field(field) => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
-                        field: field.clone(),
+                        field: field.as_str().to_owned(),
                     });
                 }
             }
@@ -800,9 +892,9 @@ impl Expr {
                 }
             }
             Self::Variant(variant) => {
-                if !input_variants.contains(variant)
-                    && !signal_variants.contains(variant)
-                    && !effect_variants.contains(variant)
+                if !input_variants.contains(variant.as_str())
+                    && !signal_variants.contains(variant.as_str())
+                    && !effect_variants.contains(variant.as_str())
                 {
                     return Err(MachineSchemaError::UnknownVariant {
                         variant: variant.clone(),
@@ -1036,6 +1128,48 @@ impl Expr {
     }
 }
 
+/// Recursively collect every `NamedTypeId` slug referenced by a type tree.
+fn collect_named_type_references_type(ty: &TypeRef, out: &mut IndexSet<String>) {
+    match ty {
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Enum(_) => {}
+        TypeRef::Named(id) => {
+            out.insert(id.as_str().to_owned());
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            collect_named_type_references_type(inner, out);
+        }
+        TypeRef::Map(key, value) => {
+            collect_named_type_references_type(key, out);
+            collect_named_type_references_type(value, out);
+        }
+    }
+}
+
+/// Collect every named-type reference anywhere in a `MachineSchema`'s typed
+/// surface: state fields, variant fields (inputs/signals/effects),
+/// helpers + derived parameters and returns.
+pub(crate) fn collect_named_type_references_machine(
+    schema: &MachineSchema,
+    out: &mut IndexSet<String>,
+) {
+    for field in &schema.state.fields {
+        collect_named_type_references_type(&field.ty, out);
+    }
+    for enum_schema in [&schema.inputs, &schema.signals, &schema.effects] {
+        for variant in &enum_schema.variants {
+            for field in &variant.fields {
+                collect_named_type_references_type(&field.ty, out);
+            }
+        }
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        for param in &helper.params {
+            collect_named_type_references_type(&param.ty, out);
+        }
+        collect_named_type_references_type(&helper.returns, out);
+    }
+}
+
 fn unique_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
     kind: &'static str,
@@ -1074,6 +1208,8 @@ pub enum MachineSchemaError {
     MissingEffectDisposition { variant: String },
     HandoffProtocolOnRoutedEffect { variant: String },
     SurfaceOnlyInputHasTransition { variant: String, transition: String },
+    DuplicateNamedTypeBinding { name: String },
+    MissingNamedTypeBinding { name: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -1128,6 +1264,15 @@ impl fmt::Display for MachineSchemaError {
                     "surface-only input `{variant}` must not have transition `{transition}`"
                 )
             }
+            Self::DuplicateNamedTypeBinding { name } => {
+                write!(f, "duplicate named-type binding for `{name}`")
+            }
+            Self::MissingNamedTypeBinding { name } => {
+                write!(
+                    f,
+                    "named type `{name}` is referenced by this schema but has no NamedTypeBinding entry in `named_types`"
+                )
+            }
         }
     }
 }
@@ -1135,6 +1280,7 @@ impl fmt::Display for MachineSchemaError {
 impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use crate::{MachineSchemaError, catalog::dsl::dsl_meerkat_machine as meerkat_machine};
 
@@ -1142,7 +1288,7 @@ mod tests {
     fn validates_meerkat_machine_schema() {
         let schema = meerkat_machine();
 
-        assert_eq!(schema.machine, "MeerkatMachine");
+        assert_eq!(schema.machine.as_str(), "MeerkatMachine");
         // DSL-generated schema uses `rust: "self" / "catalog::dsl::meerkat_machine"`
         // because it lives inside meerkat-machine-schema itself. The runtime
         // owner is anchored in meerkat-runtime via its own `machine!` invocation.
@@ -1153,15 +1299,23 @@ mod tests {
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "PrepareBindingsIdle")
+                .any(|transition| transition.name.as_str() == "PrepareBindingsIdle")
         );
         assert!(
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "Destroy")
+                .any(|transition| transition.name.as_str() == "Destroy")
         );
-        assert_eq!(schema.state.terminal_phases, vec!["Destroyed"]);
+        assert_eq!(
+            schema
+                .state
+                .terminal_phases
+                .iter()
+                .map(|phase| phase.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["Destroyed".to_owned()]
+        );
         assert_eq!(schema.validate(), Ok(()));
     }
 
@@ -1174,7 +1328,7 @@ mod tests {
             !schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "RecordSendFailedAttached")
+                .any(|transition| transition.name.as_str() == "RecordSendFailedAttached")
         );
         assert_eq!(schema.validate(), Ok(()));
     }
@@ -1182,7 +1336,9 @@ mod tests {
     #[test]
     fn rejects_unknown_surface_only_inputs() {
         let mut schema = meerkat_machine();
-        schema.surface_only_inputs.push("DoesNotExist".into());
+        schema
+            .surface_only_inputs
+            .push(crate::identity::InputVariantId::parse("DoesNotExist").expect("slug"));
 
         assert_eq!(
             schema.validate(),
@@ -1195,12 +1351,14 @@ mod tests {
     #[test]
     fn rejects_surface_only_inputs_with_transitions() {
         let mut schema = meerkat_machine();
-        schema.surface_only_inputs.push("RegisterSession".into());
+        schema
+            .surface_only_inputs
+            .push(crate::identity::InputVariantId::parse("RegisterSession").expect("slug"));
         let transition = schema
             .transitions
             .iter()
-            .find(|transition| transition.on.variant == "RegisterSession")
-            .map(|transition| transition.name.clone())
+            .find(|transition| transition.on.variant_str() == "RegisterSession")
+            .map(|transition| transition.name.as_str().to_owned())
             .unwrap_or_default();
         assert!(
             !transition.is_empty(),

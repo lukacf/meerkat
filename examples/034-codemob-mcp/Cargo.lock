@@ -2405,6 +2405,7 @@ dependencies = [
 name = "meerkat-contracts"
 version = "0.6.0"
 dependencies = [
+ "base64",
  "chrono",
  "inventory",
  "meerkat-core",
@@ -2535,6 +2536,9 @@ dependencies = [
 name = "meerkat-machine-kernels"
 version = "0.6.0"
 dependencies = [
+ "indexmap",
+ "meerkat-core",
+ "meerkat-machine-dsl",
  "meerkat-machine-schema",
  "serde",
  "thiserror 2.0.18",
@@ -2545,7 +2549,10 @@ name = "meerkat-machine-schema"
 version = "0.6.0"
 dependencies = [
  "indexmap",
+ "meerkat-core",
  "meerkat-machine-dsl",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

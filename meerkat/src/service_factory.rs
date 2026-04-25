@@ -149,6 +149,30 @@ impl SessionAgent for FactoryAgent {
         self.agent.replace_client(client);
     }
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        // Atomically update the live client and the session's durable
+        // LLM identity so subsequent turns run against the new
+        // model/provider/connection_ref and persisted recovery sees
+        // the swap.
+        self.agent.replace_client(client);
+        if let Some(mut metadata) = self.agent.session().session_metadata() {
+            metadata.apply_llm_identity(&identity);
+            self.agent
+                .session_mut()
+                .set_session_metadata(metadata)
+                .map_err(|e| {
+                    meerkat_core::error::AgentError::ConfigError(format!(
+                        "failed to apply hot-swapped llm identity to session metadata: {e}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     fn update_keep_alive(&mut self, keep_alive: bool) {
         if let Some(mut metadata) = self.agent.session().session_metadata() {
             metadata.keep_alive = keep_alive;
@@ -177,29 +201,6 @@ impl SessionAgent for FactoryAgent {
         system_prompt: String,
     ) -> Result<(), meerkat_core::error::AgentError> {
         self.agent.session_mut().set_system_prompt(system_prompt);
-        Ok(())
-    }
-
-    fn hot_swap_llm_identity(
-        &mut self,
-        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
-        identity: meerkat_core::SessionLlmIdentity,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        let Some(mut metadata) = self.agent.session().session_metadata() else {
-            return Err(meerkat_core::error::AgentError::InternalError(
-                "session metadata missing during llm identity hot-swap".to_string(),
-            ));
-        };
-        metadata.apply_llm_identity(&identity);
-        self.agent
-            .session_mut()
-            .set_session_metadata(metadata)
-            .map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to update session metadata during llm identity hot-swap: {err}"
-                ))
-            })?;
-        self.agent.replace_client(client);
         Ok(())
     }
 
@@ -285,7 +286,7 @@ impl SessionAgent for FactoryAgent {
     }
 
     fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
-        Some(self.agent.execution_snapshot())
+        self.agent.execution_snapshot()
     }
 
     fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
@@ -1177,6 +1178,20 @@ mod tests {
         }
     }
 
+    fn make_session_request_with_connection(model: &str, binding: &str) -> CreateSessionRequest {
+        let mut req = make_session_request(model);
+        let build = meerkat_core::service::SessionBuildOptions {
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm: meerkat_core::RealmId::parse("default").expect("valid test realm"),
+                binding: meerkat_core::BindingId::parse(binding).expect("valid test binding"),
+                profile: None,
+            }),
+            ..Default::default()
+        };
+        req.build = Some(build);
+        req
+    }
+
     /// When realm config is populated and default_llm_client is None,
     /// build_agent() resolves the correct provider per-model from the Config map.
     /// This is the WASM code path after the default_llm_client fix.
@@ -1200,19 +1215,28 @@ mod tests {
 
         let (tx1, _rx1) = mpsc::channel(8);
         builder
-            .build_agent(&make_session_request("claude-sonnet-4-5"), tx1)
+            .build_agent(
+                &make_session_request_with_connection("claude-sonnet-4-5", "default_anthropic"),
+                tx1,
+            )
             .await
             .map_err(|e| format!("anthropic model should build: {e}"))?;
 
         let (tx2, _rx2) = mpsc::channel(8);
         builder
-            .build_agent(&make_session_request("gpt-5.4"), tx2)
+            .build_agent(
+                &make_session_request_with_connection("gpt-5.4", "default_openai"),
+                tx2,
+            )
             .await
             .map_err(|e| format!("openai model should build: {e}"))?;
 
         let (tx3, _rx3) = mpsc::channel(8);
         builder
-            .build_agent(&make_session_request("gemini-3-flash-preview"), tx3)
+            .build_agent(
+                &make_session_request_with_connection("gemini-3-flash-preview", "default_gemini"),
+                tx3,
+            )
             .await
             .map_err(|e| format!("gemini model should build: {e}"))?;
 

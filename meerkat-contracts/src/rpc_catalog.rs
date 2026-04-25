@@ -255,6 +255,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.runtime_available {
         methods.extend([
+            RpcMethodDescriptor::basic("session/status", "Get a session's current runtime state"),
+            RpcMethodDescriptor::basic("session/submit", "Accept a runtime input for a session"),
+            RpcMethodDescriptor::basic("session/retire", "Retire a session runtime"),
+            RpcMethodDescriptor::basic("session/reset", "Reset a session runtime"),
+            RpcMethodDescriptor::basic("session/submission", "Get a runtime input state"),
+            RpcMethodDescriptor::basic("session/submissions", "List active runtime inputs"),
             RpcMethodDescriptor::typed(
                 "realtime/open_info",
                 "Get bootstrap metadata for opening a realtime channel",
@@ -274,52 +280,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "RealtimeCapabilitiesResult",
             ),
             RpcMethodDescriptor::typed(
-                "session/status",
-                "Get a session's current runtime state",
-                "RuntimeStateParams",
-                "RuntimeStateResult",
-            ),
-            RpcMethodDescriptor::typed(
                 "session/realtime_attachment_status",
                 "Get a session's realtime attachment status",
                 "RuntimeRealtimeAttachmentStatusParams",
                 "RuntimeRealtimeAttachmentStatusResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/realtime_attachment_statuses",
-                "Batch: realtime attachment statuses for many sessions in one round-trip",
-                "RuntimeRealtimeAttachmentStatusesParams",
-                "RuntimeRealtimeAttachmentStatusesResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/submit",
-                "Accept a runtime input for a session",
-                "RuntimeAcceptParams",
-                "RuntimeAcceptResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/retire",
-                "Retire a session runtime",
-                "RuntimeRetireParams",
-                "RuntimeRetireResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/reset",
-                "Reset a session runtime",
-                "RuntimeResetParams",
-                "RuntimeResetResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/submission",
-                "Get the state of a specific input on a session",
-                "InputStateParams",
-                "InputStateResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/submissions",
-                "List active inputs for a session",
-                "InputListParams",
-                "InputListResult",
             ),
         ]);
     }

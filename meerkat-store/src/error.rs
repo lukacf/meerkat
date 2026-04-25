@@ -49,6 +49,15 @@ pub enum StoreError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("unsupported realm backend for '{realm_id}': '{backend}'")]
     UnsupportedRealmBackend { realm_id: String, backend: String },
+
+    /// Persisted manifest carried a realm id that fails the typed
+    /// slug validator (wave-c C-12 sibling retype — the on-disk form
+    /// is free-string but the domain type is `RealmId` which enforces
+    /// the slug grammar). Reported when an on-disk manifest was
+    /// hand-edited to an unparseable realm slug.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("invalid realm id slug in persisted manifest: '{0}'")]
+    InvalidRealmSlug(String),
 }
 
 impl StoreError {

@@ -153,6 +153,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
             }
         });
 
+        let turn_overrides = crate::session_runtime::SessionRuntime::turn_overrides_from_metadata(
+            primitive.turn_metadata(),
+        );
         let result = Box::pin(
             self.runtime.apply_runtime_turn(
                 &self.session_id,
@@ -166,28 +169,8 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 primitive
                     .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
-                primitive
-                    .turn_metadata()
-                    .and_then(|meta| meta.additional_instructions.clone()),
-                Some(crate::handlers::turn::TurnOverrides {
-                    keep_alive: primitive.turn_metadata().and_then(|meta| meta.keep_alive),
-                    model: primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.model.clone()),
-                    provider: primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.provider.clone()),
-                    provider_params: primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.provider_params.clone()),
-                    max_tokens: None,
-                    system_prompt: None,
-                    output_schema: None,
-                    structured_output_retries: None,
-                    connection_ref: primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.connection_ref.clone()),
-                }),
+                None,
+                turn_overrides,
             ),
         )
         .await;
@@ -280,10 +263,6 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
-            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
         };
 
         let result = self

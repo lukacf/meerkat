@@ -16,6 +16,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `retire-respawn-destroy` — member retires, respawns with a new runtime incarnation, and destroys cleanly
 
 ### Transitions
+- `WireMembersRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `UnwireMembersRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BindMemberSessionRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RotateMemberSessionRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ReleaseMemberSessionRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `SpawnRunningFresh`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
@@ -86,24 +101,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ResetToRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `WireRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `WireMembersRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `UnwireMembersRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `BindMemberSessionRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `RotateMemberSessionRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `ReleaseMemberSessionRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `TaskCreateRunning`
@@ -250,9 +247,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartRunRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `UnwireRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `CompleteFlowRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
@@ -275,6 +269,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireStoppedReleasing`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SessionIngressDetachedForMobDestroyRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SessionIngressDetachedForMobDestroyStopped`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SessionIngressDetachFailedForMobDestroyRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SessionIngressDetachFailedForMobDestroyStopped`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireStoppedPreservingBinding`
@@ -310,6 +316,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RequestRuntimeRetire`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RequestSessionIngressDetachForMobDestroy`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RequestRuntimeDestroy`
@@ -351,19 +360,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitTaskNotice`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `MemberSessionBindingSet`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `MemberSessionBindingRotated`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `MemberSessionBindingReleased`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `WiringGraphChanged`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `MemberSessionBindingChanged`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `EmitWiringLifecycleNotice`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 

@@ -15,7 +15,7 @@ use crate::runtime::reconcile::{
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
-    PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerSpec,
+    PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerDescriptor,
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -84,9 +84,19 @@ pub struct MobMemberSnapshot {
     /// Current lifecycle status.
     pub status: MobMemberStatus,
     /// Identity-native runtime ID for this incarnation.
-    pub agent_runtime_id: AgentRuntimeId,
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`
+    /// so external consumers use `agent_identity()` (derived from
+    /// `agent_runtime_id.identity`) as the public identity contract.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
     /// Fence token for the current incarnation.
-    pub fence_token: FenceToken,
+    ///
+    /// Binding-era atom used by the bridge for stale-command rejection.
+    /// `pub(crate)` + `#[serde(skip)]` so it does not leak into
+    /// app-facing payloads.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
     /// Preview of the current bridge session's last committed assistant text.
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
@@ -143,16 +153,23 @@ impl MobMemberSnapshot {
     pub fn agent_identity(&self) -> &AgentIdentity {
         &self.agent_runtime_id.identity
     }
+
+    /// Runtime incarnation identity for diagnostic/control projections.
+    ///
+    /// These atoms stay out of generic `Serialize` output so app-facing
+    /// receipts do not couple callers to bridge internals. Surfaces that own a
+    /// control contract, such as `mob/member_status`, must opt in through this
+    /// accessor and project the fields explicitly.
+    #[must_use]
+    pub fn runtime_identity_fields(&self) -> (&AgentRuntimeId, FenceToken) {
+        (&self.agent_runtime_id, self.fence_token)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MobMemberListEntry {
     /// Canonical member identity.
     pub agent_identity: AgentIdentity,
-    /// Identity-native runtime ID for this incarnation.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token for the current incarnation.
-    pub fence_token: FenceToken,
     /// Member role (profile name).
     pub role: ProfileName,
     pub runtime_mode: MobRuntimeMode,
@@ -173,10 +190,23 @@ pub struct MobMemberListEntry {
     // which regression-asserts that). Callers that need to bridge a
     // member to a realtime session use `mob/member_status`, which
     // surfaces `current_session_id` explicitly.
+    //
+    // `agent_runtime_id` and `fence_token` are binding-era atoms used
+    // by the bridge for wiring and stale-command rejection. They are
+    // `pub(crate)` and `#[serde(skip)]` so they do not leak to
+    // app-facing payloads (wire contract: app tools receive
+    // `agent_identity`, surfaces project `current_session_id` for
+    // realtime). External consumers that legitimately need these
+    // atoms (mob-mcp, mob-pack verify paths) route through a typed
+    // helper; they never reach into the field directly.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerSpec>,
+    pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerDescriptor>,
     #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
     #[serde(skip)]
@@ -191,6 +221,22 @@ impl MobMemberListEntry {
         self.current_session_id = current_bridge_session_id.clone();
         self.current_bridge_session_id = current_bridge_session_id;
         self
+    }
+
+    /// Typed helper for external consumers (mob-mcp, mob-pack verify, rpc
+    /// surface) that legitimately need the binding-era atoms to drive work
+    /// lane calls. Keeps the fields `pub(crate)` + `#[serde(skip)]` so they
+    /// never leak through Serialize/Debug-derived paths.
+    pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
+        (self.agent_runtime_id.clone(), self.fence_token)
+    }
+}
+
+impl WorkDeliveryReceipt {
+    /// Typed accessor for the submitting runtime identity. See
+    /// `MobMemberListEntry::binding_atoms` for rationale.
+    pub fn runtime_id(&self) -> &AgentRuntimeId {
+        &self.runtime_id
     }
 }
 
@@ -234,12 +280,15 @@ pub enum MobMemberStatus {
 pub struct MemberRespawnReceipt {
     /// The member identity that was respawned.
     pub identity: AgentIdentity,
-    /// Runtime id for the current incarnation after respawn completes.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token for the superseded incarnation.
-    pub previous_fence_token: FenceToken,
-    /// Fence token for the current incarnation.
-    pub fence_token: FenceToken,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) previous_fence_token: FenceToken,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 impl MemberRespawnReceipt {
@@ -330,10 +379,12 @@ pub enum MobDestroyError {
 pub struct PreviousMemberCleanupReport {
     /// Stable member identity.
     pub identity: AgentIdentity,
-    /// Runtime id of the incarnation being replaced.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token of the incarnation being replaced.
-    pub fence_token: FenceToken,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
     /// Whether graceful retire was attempted.
     pub retire_attempted: bool,
     /// Error returned from the graceful retire attempt, when any.
@@ -365,16 +416,25 @@ pub(crate) struct MemberSpawnReceipt {
 
 /// Public result from a successful member spawn.
 ///
-/// Carries identity-native fields only — no session IDs or internal refs.
+/// The identity-native `agent_identity` is the public contract — it is
+/// what app-facing payloads surface. `agent_runtime_id` and `fence_token`
+/// are carried for crate-internal bridging (provisioning, wiring) but
+/// `pub(crate)` so external consumers must route through a `MobMemberView`
+/// or the identity seam rather than reading these binding-era atoms
+/// directly.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct SpawnResult {
-    /// Stable member identity.
+    /// Stable member identity — the one app-facing identity atom.
     pub agent_identity: AgentIdentity,
-    /// Identity-native runtime ID for this incarnation.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token for stale-command rejection.
-    pub fence_token: FenceToken,
+    /// Composite runtime id. `pub(crate)` — binding-era detail, not
+    /// an app-facing identity.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Fence token for stale-command rejection. `pub(crate)` — the
+    /// bridge uses it; app-facing payloads do not surface it.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 impl SpawnResult {
@@ -437,12 +497,14 @@ pub enum MobRespawnError {
 pub struct MemberDeliveryReceipt {
     /// The member identity.
     pub identity: AgentIdentity,
-    /// Runtime id for the incarnation that accepted the work.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token for the incarnation that accepted the work.
-    pub fence_token: FenceToken,
     /// How the message was handled.
     pub handling_mode: HandlingMode,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
 }
 
 /// Receipt confirming that a unit of work was accepted by the work lane.
@@ -451,8 +513,9 @@ pub struct MemberDeliveryReceipt {
 pub struct WorkDeliveryReceipt {
     /// The work reference for the submitted unit.
     pub work_ref: WorkRef,
-    /// The runtime ID of the target member.
-    pub runtime_id: AgentRuntimeId,
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) runtime_id: AgentRuntimeId,
 }
 
 /// Options for helper convenience spawns.
@@ -467,6 +530,8 @@ pub struct HelperOptions {
     pub backend: Option<MobBackendKind>,
     /// Tool access policy for the helper.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Explicit auth binding used for the helper member's agent build.
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -479,10 +544,27 @@ pub struct HelperResult {
     pub tokens_used: u64,
     /// Stable member identity for the helper run.
     pub agent_identity: AgentIdentity,
-    /// Runtime id for the helper incarnation.
-    pub agent_runtime_id: AgentRuntimeId,
-    /// Fence token for the helper incarnation.
-    pub fence_token: FenceToken,
+    /// Identity-native runtime ID for this incarnation.
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the current incarnation.
+    ///
+    /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
+    #[serde(skip)]
+    pub(crate) fence_token: FenceToken,
+}
+
+impl HelperResult {
+    /// Typed helper for external consumers (CLI, mob-mcp, rpc surface) that
+    /// legitimately need the binding-era atoms to drive work-lane calls.
+    /// Keeps the fields `pub(crate)` + `#[serde(skip)]` so they never leak
+    /// through Serialize/Debug-derived paths. Mirrors
+    /// `MobMemberListEntry::binding_atoms`.
+    pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
+        (self.agent_runtime_id.clone(), self.fence_token)
+    }
 }
 
 /// Target for a wire operation from a local mob member.
@@ -492,7 +574,7 @@ pub enum PeerTarget {
     /// Another member in the same mob roster.
     Local(AgentIdentity),
     /// A trusted peer that lives outside the local mob roster.
-    External(TrustedPeerSpec),
+    External(TrustedPeerDescriptor),
 }
 
 // DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias
@@ -526,7 +608,6 @@ pub struct MobHandle {
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
     #[cfg(feature = "runtime-adapter")]
-    #[allow(dead_code)]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
     /// Read-only receiver for the actor's terminal-phase projection. The
@@ -546,13 +627,6 @@ pub struct MobHandle {
     /// provided (production mob paths typically wire the factory at the
     /// surface layer directly).
     pub(super) realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
-    /// W3-H: broadcast sender the actor uses to publish
-    /// `MemberRealtimeBindingEvent`s; handle holds a clone so callers can
-    /// `subscribe()` for new receivers. Dogma-#13 projection: DSL binding
-    /// map is the source of truth, events are rebuilable from transition
-    /// replay.
-    pub(super) realtime_binding_tx:
-        tokio::sync::broadcast::Sender<super::state::MemberRealtimeBindingEvent>,
 }
 
 impl MobHandle {
@@ -562,18 +636,6 @@ impl MobHandle {
         &self,
     ) -> Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> {
         self.realtime_session_factory.as_ref().map(Arc::clone)
-    }
-
-    /// W3-H: subscribe to this mob's `MemberRealtimeBindingEvent`s — the
-    /// stream of Set / Rotated / Released effects the MobMachine emits for
-    /// identity→session rebindings. Consumed by the realtime WS surface in
-    /// meerkat-rpc to atomically rotate a `MobMember` channel's target
-    /// session when the MobMachine rotates the binding (respawn flow) and
-    /// to close with a typed terminal frame when the binding is released.
-    pub fn subscribe_realtime_binding_events(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<super::state::MemberRealtimeBindingEvent> {
-        self.realtime_binding_tx.subscribe()
     }
 
     /// W3-H: read the current bridge session id bound to `agent_identity`
@@ -678,13 +740,11 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Per-member auth binding (deferral §1). When set, this member's
-    /// agent builds with `AgentBuildConfig.connection_ref = Some(this)`
-    /// — scoping credential resolution to the named realm + binding.
-    /// `None` means the member uses env-default / config-realm fallback
-    /// (mob members do NOT currently auto-inherit the spawner's
-    /// binding; that's a separate plumbing concern per dogma §19 —
-    /// we don't add a tri-state until Inherit has real semantics).
+    /// Per-member auth binding. When set, this member's agent builds with
+    /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
+    /// resolution to the named realm + binding. `None` means the caller did not
+    /// provide binding authority; build paths that require a binding must reject
+    /// the spawn instead of promoting an ambient fallback.
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
@@ -968,70 +1028,6 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::Wire { local, target } => {
-                self.send_actor_command(|reply_tx| MobCommand::Wire {
-                    local,
-                    target,
-                    reply_tx,
-                })
-                .await??;
-                Ok(MobMachineCommandResult::Unit)
-            }
-            MobMachineCommand::Unwire { local, target } => {
-                self.send_actor_command(|reply_tx| MobCommand::Unwire {
-                    local,
-                    target,
-                    reply_tx,
-                })
-                .await??;
-                Ok(MobMachineCommandResult::Unit)
-            }
-            // Track-B (R5): new explicit identity-level wiring and
-            // session-binding commands. Runtime handlers land with
-            // Commit 4's `RecomputeMobPeerOverlay` driver wiring;
-            // today they surface `MobError::Internal` to any surface
-            // that tries to drive them — the DSL accepts them but no
-            // shell-side handler exists yet.
-            MobMachineCommand::WireMembers { edge: _ } => Err(MobError::Internal(
-                "MobMachineCommand::WireMembers is declared on the DSL surface \
-                 but the runtime handler lands with the Track-B composition \
-                 driver in a follow-up commit"
-                    .into(),
-            )),
-            MobMachineCommand::UnwireMembers { edge: _ } => Err(MobError::Internal(
-                "MobMachineCommand::UnwireMembers is declared on the DSL surface \
-                 but the runtime handler lands with the Track-B composition \
-                 driver in a follow-up commit"
-                    .into(),
-            )),
-            MobMachineCommand::BindMemberSession {
-                agent_identity: _,
-                session_id: _,
-            } => Err(MobError::Internal(
-                "MobMachineCommand::BindMemberSession is declared on the DSL surface \
-                 but the runtime handler lands with the Track-B composition \
-                 driver in a follow-up commit"
-                    .into(),
-            )),
-            MobMachineCommand::RotateMemberSession {
-                agent_identity: _,
-                old_session_id: _,
-                new_session_id: _,
-            } => Err(MobError::Internal(
-                "MobMachineCommand::RotateMemberSession is declared on the DSL surface \
-                 but the runtime handler lands with the Track-B composition \
-                 driver in a follow-up commit"
-                    .into(),
-            )),
-            MobMachineCommand::ReleaseMemberSession {
-                agent_identity: _,
-                session_id: _,
-            } => Err(MobError::Internal(
-                "MobMachineCommand::ReleaseMemberSession is declared on the DSL surface \
-                 but the runtime handler lands with the Track-B composition \
-                 driver in a follow-up commit"
-                    .into(),
-            )),
             MobMachineCommand::SubmitWork(cmd) => {
                 // Shell dispatch is a thin forward: the mob actor owns
                 // work-origin legality via the MobMachine DSL. There is no
@@ -1307,6 +1303,24 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+            MobMachineCommand::Wire { local, target } => {
+                self.send_actor_command(|reply_tx| MobCommand::Wire {
+                    local,
+                    target,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
+            }
+            MobMachineCommand::Unwire { local, target } => {
+                self.send_actor_command(|reply_tx| MobCommand::Unwire {
+                    local,
+                    target,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
+            }
         }
     }
 
@@ -1417,7 +1431,7 @@ impl MobHandle {
             .comms_runtime(bridge_session_id)
             .await?;
         let peers = comms.peers().await;
-        let peers_by_id: HashMap<&str, &PeerDirectoryEntry> = peers
+        let peers_by_id: HashMap<String, &PeerDirectoryEntry> = peers
             .iter()
             .map(|peer| (peer.peer_id.as_str(), peer))
             .collect();
@@ -1434,7 +1448,7 @@ impl MobHandle {
             let wired_peer_meerkat = MeerkatId::from(wired_peer);
             let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
                 peers_by_id
-                    .get(spec.peer_id.as_str())
+                    .get(&spec.peer_id.as_str())
                     .copied()
                     .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
             } else {
@@ -2633,6 +2647,19 @@ impl MobHandle {
         agent_identity: MeerkatId,
         message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
+        // #31 Wave D: retiring members reject new internal work. This
+        // matches the `member()` gate for external turns so the observable
+        // contract is symmetric across the retire window.
+        {
+            let roster = self.roster.read().await;
+            match roster.get(&agent_identity) {
+                None => return Err(MobError::MemberNotFound(agent_identity)),
+                Some(entry) if entry.state != crate::roster::MemberState::Active => {
+                    return Err(MobError::MemberNotFound(agent_identity));
+                }
+                _ => {}
+            }
+        }
         let material = self.canonical_member_list_material(&agent_identity).await;
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: material.agent_runtime_id,
@@ -3363,6 +3390,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
+        spec.connection_ref = options.connection_ref;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3402,6 +3430,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
+        spec.connection_ref = options.connection_ref;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,
@@ -3537,9 +3566,41 @@ mod tests {
             serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
         // 0.6 clean break: session fields are #[serde(skip)] and must not appear
         assert!(snapshot_value.get("current_bridge_session_id").is_none());
-        // Identity-native fields must be present
-        assert!(!snapshot_value["agent_runtime_id"].is_null());
-        assert!(!snapshot_value["fence_token"].is_null());
+        // `agent_runtime_id` and `fence_token` are binding-era atoms marked
+        // `pub(crate)` + `#[serde(skip)]` per the struct definition — they
+        // are bridge-internal and must NOT leak into app-facing serialized
+        // payloads. The public identity contract is `agent_identity()`
+        // (derived from `agent_runtime_id.identity`).
+        assert!(snapshot_value.get("agent_runtime_id").is_none());
+        assert!(snapshot_value.get("fence_token").is_none());
+    }
+
+    #[test]
+    fn mob_member_snapshot_exposes_runtime_identity_only_by_accessor() {
+        let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(3));
+        let snapshot = MobMemberSnapshot {
+            status: MobMemberStatus::Active,
+            agent_runtime_id: runtime_id.clone(),
+            fence_token: FenceToken::new(9),
+            output_preview: None,
+            error: None,
+            tokens_used: 0,
+            is_final: false,
+            realtime_attachment_status: None,
+            current_session_id: None,
+            current_bridge_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+        };
+
+        let snapshot_value =
+            serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
+        assert!(snapshot_value.get("agent_runtime_id").is_none());
+        assert!(snapshot_value.get("fence_token").is_none());
+
+        let (projected_runtime_id, projected_fence_token) = snapshot.runtime_identity_fields();
+        assert_eq!(projected_runtime_id, &runtime_id);
+        assert_eq!(projected_fence_token, FenceToken::new(9));
     }
 
     #[test]
@@ -3601,13 +3662,15 @@ mod tests {
         );
         let receipt_value =
             serde_json::to_value(&receipt).expect("respawn receipt should serialize to json");
+        // Public contract: `identity` is the only identity field that
+        // surfaces in app-facing serialized output. The binding-era atoms
+        // (`agent_runtime_id`, `previous_fence_token`, `fence_token`) are
+        // `pub(crate)` + `#[serde(skip)]` on the struct definition — they
+        // are bridge-internal and must not leak.
         assert_eq!(receipt_value["identity"], "worker");
-        assert_eq!(
-            receipt_value["agent_runtime_id"],
-            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
-        );
-        assert_eq!(receipt_value["previous_fence_token"], 7);
-        assert_eq!(receipt_value["fence_token"], 8);
+        assert!(receipt_value.get("agent_runtime_id").is_none());
+        assert!(receipt_value.get("previous_fence_token").is_none());
+        assert!(receipt_value.get("fence_token").is_none());
 
         let delivery = MemberDeliveryReceipt {
             identity: AgentIdentity::from("worker"),
@@ -3618,11 +3681,12 @@ mod tests {
         let delivery_value =
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
         assert_eq!(delivery_value["identity"], "worker");
-        assert_eq!(delivery_value["fence_token"], 8);
+        assert!(delivery_value.get("agent_runtime_id").is_none());
+        assert!(delivery_value.get("fence_token").is_none());
     }
 
     #[test]
-    fn helper_result_serializes_identity_native_runtime_fields() {
+    fn helper_result_omits_binding_era_atoms_in_serialized_output() {
         let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(2));
         let result = HelperResult {
             output: Some("done".to_string()),
@@ -3633,12 +3697,15 @@ mod tests {
         };
 
         let value = serde_json::to_value(&result).expect("helper result should serialize to json");
+        // Public contract: `agent_identity`, `output`, `tokens_used` surface
+        // in app-facing output. The binding-era atoms (`agent_runtime_id`,
+        // `fence_token`) are `pub(crate)` + `#[serde(skip)]` per the struct
+        // definition — bridge-internal and must not leak. Session fields
+        // were never present.
         assert_eq!(value["agent_identity"], "worker");
-        assert_eq!(
-            value["agent_runtime_id"],
-            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
-        );
-        assert_eq!(value["fence_token"], 9);
+        assert_eq!(value["tokens_used"], 7);
+        assert!(value.get("agent_runtime_id").is_none());
+        assert!(value.get("fence_token").is_none());
         assert!(value.get("session_id").is_none());
         assert!(value.get("bridge_session_id").is_none());
     }

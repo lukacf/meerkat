@@ -18,6 +18,7 @@ use meerkat_core::{
 };
 
 use crate::input::Input;
+use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
@@ -75,27 +76,61 @@ fn input_boundary(input: &Input) -> RunApplyBoundary {
     }
 }
 
-fn input_turn_metadata(
+/// Canonical runtime-side constructor for [`RuntimeTurnMetadata`].
+///
+/// This is the ONLY construction site for `RuntimeTurnMetadata` inside
+/// `meerkat-runtime/src/`. Any other literal/default construction is an
+/// RMAT-governed seam leak; the `turn_metadata_single_construction_site`
+/// integration test greps for that invariant at build time.
+pub(crate) fn for_input(
     input: &Input,
 ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     match input {
         Input::Prompt(prompt) => prompt.turn_metadata.clone(),
         Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
-        Input::ExternalEvent(event) => Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(event.handling_mode),
-                render_metadata: event.render_metadata.clone(),
-                ..Default::default()
-            },
-        ),
-        Input::Continuation(continuation) => Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(continuation.handling_mode),
-                ..Default::default()
-            },
-        ),
+        Input::ExternalEvent(event) => Some(RuntimeTurnMetadata {
+            handling_mode: Some(event.handling_mode),
+            render_metadata: event.render_metadata.clone(),
+            ..Default::default()
+        }),
+        Input::Continuation(continuation) => Some(RuntimeTurnMetadata {
+            handling_mode: Some(continuation.handling_mode),
+            ..Default::default()
+        }),
         _ => None,
     }
+}
+
+/// Merge the per-input turn metadata carried by a staged batch into a single
+/// typed carrier. Scalar conflicts (two inputs disagreeing on e.g. `model`)
+/// are refused with a typed error and the batch is treated as if no metadata
+/// could be synthesized safely — the caller falls back to `None` and the
+/// conflict is surfaced through structured tracing.
+pub(crate) fn merge_batch_turn_metadata(
+    inputs: &[(meerkat_core::lifecycle::InputId, Input)],
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    let mut acc: Option<RuntimeTurnMetadata> = None;
+    for (_, input) in inputs {
+        let Some(meta) = for_input(input) else {
+            continue;
+        };
+        match acc.as_mut() {
+            None => acc = Some(meta),
+            Some(existing) => {
+                if let Err(conflict) = existing.merge(meta) {
+                    tracing::error!(
+                        field = conflict.field,
+                        reason = conflict.reason,
+                        "batch turn-metadata merge conflict; dropping batch metadata"
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+    acc.filter(|m| !m.is_empty())
 }
 
 fn resolve_completion_waiters(
@@ -128,147 +163,137 @@ fn resolve_completion_waiters(
     }
 }
 
-/// Merge turn metadata from all inputs in a batch.
+fn primitive_admitted_content_shape(primitive: &RunPrimitive) -> String {
+    match primitive {
+        RunPrimitive::StagedInput(staged) => {
+            match (staged.appends.is_empty(), staged.context_appends.is_empty()) {
+                (false, false) => "conversation+context",
+                (false, true) => "conversation",
+                (true, false) => "context",
+                (true, true) => "empty",
+            }
+        }
+        RunPrimitive::ImmediateAppend(_) => "immediate_append",
+        RunPrimitive::ImmediateContextAppend(_) => "immediate_context",
+        _ => "conversation",
+    }
+    .to_string()
+}
+
+fn primitive_turn_start_input(
+    run_id: &RunId,
+    primitive: &RunPrimitive,
+) -> Option<crate::meerkat_machine::dsl::MeerkatMachineInput> {
+    let admitted_content_shape = primitive_admitted_content_shape(primitive);
+    match primitive {
+        RunPrimitive::ImmediateAppend(_) => Some(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateAppend {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            },
+        ),
+        RunPrimitive::ImmediateContextAppend(_) => Some(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            },
+        ),
+        RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty() && !staged.context_appends.is_empty() =>
+        {
+            Some(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                    admitted_content_shape,
+                },
+            )
+        }
+        RunPrimitive::StagedInput(staged) if staged.appends.is_empty() => None,
+        RunPrimitive::StagedInput(_) => Some(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            },
+        ),
+        _ => Some(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            },
+        ),
+    }
+}
+
+async fn prepare_turn_state_for_primitive(
+    driver: &crate::meerkat_machine::SharedDriver,
+    run_id: &RunId,
+    primitive: &RunPrimitive,
+) -> Result<(), crate::RuntimeDriverError> {
+    let Some(input) = primitive_turn_start_input(run_id, primitive) else {
+        return Ok(());
+    };
+    let authority = {
+        let driver = driver.lock().await;
+        driver.shared_dsl_authority()
+    };
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Retired drain path: `machine_begin_run` treats Retired as
+    // `is_retired_drain` and skips the `Prepare` DSL input, leaving
+    // phase at Retired. The turn-start transitions
+    // (`StartConversationRun{Initializing,Attached}` /
+    // `StartImmediate{Append,Context}{Initializing,Attached}`) only
+    // guard on Initializing/Attached — no Retired variant. Skip the
+    // signal during drain; shell-side `set_control_projection` has
+    // already advanced control so `executor.apply` proceeds next.
+    if auth.state.lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
+        return Ok(());
+    }
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input)
+        .map(|_| ())
+        .map_err(|err| {
+            crate::RuntimeDriverError::Internal(format!(
+                "failed to start runtime turn state for run {run_id}: {err}"
+            ))
+        })
+}
+
+fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
+    let source_name = match &event.header.source {
+        crate::input::InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
+            source_name.as_str()
+        }
+        _ => event.event_type.as_str(),
+    };
+    let body = event
+        .payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim);
+
+    meerkat_core::interaction::format_external_event_projection(source_name, body)
+}
+
+/// Build a core-owned [`PeerConversationProjection`] from a runtime
+/// [`crate::input::PeerInput`]. Returns `None` when the input has no
+/// peer-originated source (e.g. a mob-internal peer input without a
+/// `peer_id` header) or carries no convention — both shapes are
+/// legitimate "no projection available" rather than errors, so the
+/// caller falls through to the legacy body-as-text path.
 ///
-/// Later inputs override scalar fields (last writer wins); collection
-/// fields (skill_references, additional_instructions) accumulate.
-fn merge_batch_turn_metadata(
-    inputs: &[(InputId, Input)],
-) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
-
-    let mut merged: Option<RuntimeTurnMetadata> = None;
-    for (_, input) in inputs {
-        let Some(meta) = input_turn_metadata(input) else {
-            continue;
-        };
-        let m = merged.get_or_insert_with(RuntimeTurnMetadata::default);
-        if meta.handling_mode.is_some() {
-            m.handling_mode = meta.handling_mode;
-        }
-        if meta.keep_alive.is_some() {
-            m.keep_alive = meta.keep_alive;
-        }
-        if meta.model.is_some() {
-            m.model = meta.model;
-        }
-        if meta.provider.is_some() {
-            m.provider = meta.provider;
-        }
-        if meta.provider_params.is_some() {
-            m.provider_params = meta.provider_params;
-        }
-        if meta.render_metadata.is_some() {
-            m.render_metadata = meta.render_metadata;
-        }
-        if meta.flow_tool_overlay.is_some() {
-            m.flow_tool_overlay = meta.flow_tool_overlay;
-        }
-        // Accumulate collection fields.
-        if let Some(refs) = meta.skill_references {
-            m.skill_references.get_or_insert_with(Vec::new).extend(refs);
-        }
-        if let Some(instrs) = meta.additional_instructions {
-            m.additional_instructions
-                .get_or_insert_with(Vec::new)
-                .extend(instrs);
-        }
-    }
-    merged
-}
-
-fn input_to_append(input: &Input) -> Option<ConversationAppend> {
-    if matches!(
-        input,
-        Input::Peer(crate::input::PeerInput {
-            convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
-            ..
-        })
-    ) {
-        return None;
-    }
-
-    let content = match input {
-        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: p.blocks.clone().unwrap_or_default(),
-        },
-        Input::Peer(p) if p.blocks.is_some() => {
-            let raw_blocks = p.blocks.clone().unwrap_or_default();
-            if let Some(prefix) = peer_block_prefix_text(p) {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
-                blocks.extend(raw_blocks);
-                CoreRenderable::Blocks { blocks }
-            } else {
-                // Legacy fallback for non-message or non-peer-identified inputs.
-                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
-                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
-                });
-                if p.body.is_empty() || body_already_in_blocks {
-                    CoreRenderable::Blocks { blocks: raw_blocks }
-                } else {
-                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                        text: p.body.clone(),
-                    }];
-                    blocks.extend(raw_blocks);
-                    CoreRenderable::Blocks { blocks }
-                }
-            }
-        }
-        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: f.blocks.clone().unwrap_or_default(),
-        },
-        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: e.blocks.clone().unwrap_or_default(),
-        },
-        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
-            CoreRenderable::Text {
-                text: input_to_prompt(input),
-            }
-        }
-        Input::Continuation(_) | Input::Operation(_) => return None,
-    };
-
-    Some(ConversationAppend {
-        role: ConversationAppendRole::User,
-        content,
-    })
-}
-
-fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let projection = peer_projection(input)?;
-
-    Some(ConversationContextAppend {
-        key: projection.context_key()?,
-        content: CoreRenderable::Text {
-            text: projection.prompt_text(),
-        },
-    })
-}
-
-fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
-    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
-}
-
-fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
-    peer_projection_from_peer_input(peer)
-        .map(|projection| {
-            let prompt = projection.prompt_text();
-            if prompt.is_empty() {
-                peer.body.clone()
-            } else {
-                prompt
-            }
-        })
-        .unwrap_or_else(|| peer.body.clone())
-}
-
-fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
-    let Input::Peer(peer) = input else {
-        return None;
-    };
-    peer_projection_from_peer_input(peer)
-}
-
+/// The projection carries the full peer metadata (peer_id, request_id,
+/// intent, payload, phase/status) and owns the semantic rendering
+/// primitives (`prompt_text`, `block_prefix_text`, `context_key`) so
+/// the runtime-loop shell never needs to format peer messages itself.
 fn peer_projection_from_peer_input(
     peer: &crate::input::PeerInput,
 ) -> Option<PeerConversationProjection> {
@@ -328,20 +353,125 @@ fn peer_projection_from_peer_input(
     }
 }
 
-fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
-    let source_name = match &event.header.source {
-        crate::input::InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
-            source_name.as_str()
-        }
-        _ => event.event_type.as_str(),
+/// Borrowing shim — lift an [`Input`] to its core peer projection when
+/// the input is a `PeerInput` with a peer-origin header. Used by the
+/// context-append path where the caller already has an `&Input`.
+fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
+    let Input::Peer(peer) = input else {
+        return None;
     };
-    let body = event
-        .payload
-        .get("body")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim);
+    peer_projection_from_peer_input(peer)
+}
 
-    meerkat_core::interaction::format_external_event_projection(source_name, body)
+/// Rendered prompt-text projection for a peer input.
+///
+/// For peer-originated inputs this returns the core-owned
+/// `PeerConversationProjection::prompt_text()` (the typed semantic
+/// rendering). For non-peer-originated sources (e.g. mob-internal
+/// peer inputs with no `peer_id` header, or convention=None), the
+/// raw `body` is the shell's best available fallback — the core
+/// projection would return an empty string and the runtime would
+/// otherwise ferry an empty prompt.
+fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
+    peer_projection_from_peer_input(peer)
+        .map(|projection| {
+            let prompt = projection.prompt_text();
+            if prompt.is_empty() {
+                peer.body.clone()
+            } else {
+                prompt
+            }
+        })
+        .unwrap_or_else(|| peer.body.clone())
+}
+
+/// Optional block prefix (`"[COMMS MESSAGE from <peer_id>]"`) for peer
+/// inputs that carry a `PeerConvention::Message`. Returns `None` for
+/// request / response conventions (those route through the
+/// context-append path instead) and for non-peer-originated inputs.
+fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
+    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
+}
+
+/// Convert an `Input` into a `ConversationAppend` on the `User` role,
+/// or `None` if the input contributes no user-visible append. The
+/// main exclusion is `ResponseTerminal` peer inputs — those land on
+/// the typed context-append path (`input_to_context_append`) so the
+/// LLM sees them as system context, not as a fresh user turn.
+fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+    if matches!(
+        input,
+        Input::Peer(crate::input::PeerInput {
+            convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+            ..
+        })
+    ) {
+        return None;
+    }
+
+    let content = match input {
+        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: p.blocks.clone().unwrap_or_default(),
+        },
+        Input::Peer(p) if p.blocks.is_some() => {
+            let raw_blocks = p.blocks.clone().unwrap_or_default();
+            if let Some(prefix) = peer_block_prefix_text(p) {
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                blocks.extend(raw_blocks);
+                CoreRenderable::Blocks { blocks }
+            } else {
+                // Non-peer-identified peer inputs: keep the body-as-prefix
+                // fallback that predated the typed peer projection; the
+                // projection seam is limited to conventioned peer-origin
+                // inputs. Empty or already-embedded body is a no-op.
+                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
+                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
+                });
+                if p.body.is_empty() || body_already_in_blocks {
+                    CoreRenderable::Blocks { blocks: raw_blocks }
+                } else {
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                        text: p.body.clone(),
+                    }];
+                    blocks.extend(raw_blocks);
+                    CoreRenderable::Blocks { blocks }
+                }
+            }
+        }
+        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: f.blocks.clone().unwrap_or_default(),
+        },
+        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: e.blocks.clone().unwrap_or_default(),
+        },
+        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+            CoreRenderable::Text {
+                text: input_to_prompt(input),
+            }
+        }
+        Input::Continuation(_) | Input::Operation(_) => return None,
+    };
+
+    Some(ConversationAppend {
+        role: ConversationAppendRole::User,
+        content,
+    })
+}
+
+/// Convert an `Input` into a `ConversationContextAppend` when the
+/// input is a peer `ResponseTerminal` (the only current context-append
+/// shape). The context key and rendered text are both owned by the
+/// core projection; the runtime-loop shell only maps from the typed
+/// projection into the core-renderable payload.
+fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
+    let projection = peer_projection(input)?;
+
+    Some(ConversationContextAppend {
+        key: projection.context_key()?,
+        content: CoreRenderable::Text {
+            text: projection.prompt_text(),
+        },
+    })
 }
 
 pub(crate) fn inputs_to_primitive_with_boundary(
@@ -415,7 +545,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
-    detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
     machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
@@ -453,13 +582,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 .unwrap_or(initial_watermark);
 
         loop {
-            // Build a future for the idle wake. Feed-based if available,
-            // otherwise falls back to DetachedWakeState Notify.
+            // Build a future for the idle wake. Backed by the completion feed
+            // when present; otherwise pends forever (no background ops can
+            // complete without a feed-producing ops registry).
             let idle_wake = async {
                 if let Some(ref feed) = completion_feed {
                     feed.wait_for_advance(observed_seq).await;
-                } else if let Some(ref state) = detached_wake {
-                    state.notify.notified().await;
                 } else {
                     std::future::pending::<()>().await;
                 }
@@ -505,7 +633,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             if maybe_inject_feed_wake(
                                 &driver,
                                 completion_feed.as_deref(),
-                                detached_wake.as_ref(),
                                 &mut observed_seq,
                                 &mut last_injected_seq,
                                 epoch_cursor_state.as_deref(),
@@ -585,28 +712,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
                             }
                         }
-                    } else if let Some(ref state) = detached_wake
-                        && state.pending.load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        // Legacy detached wake path (no feed).
-                        let input = crate::input::Input::Continuation(
-                            crate::input::ContinuationInput::detached_background_op_completed(),
-                        );
-                        let mut d = driver.lock().await;
-                        if d.as_driver_mut().accept_input(input).await.is_ok() {
-                            clear_legacy_detached_wake_signal(state);
-                        }
-                        drop(d);
-                        if process_queue(
-                            &driver,
-                            &mut *executor,
-                            &mut control_rx,
-                            completions.as_ref(),
-                        &machine_weak, &session_id,)
-                        .await
-                        {
-                            break;
-                        }
                     }
                 }
             }
@@ -624,96 +729,61 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 ///
 /// Called after queue processing completes (session has returned to idle).
 /// Returns `true` if a continuation was injected (caller should process_queue).
-/// Supports both feed-based (new) and DetachedWakeState (legacy) paths.
 async fn maybe_inject_feed_wake(
     driver: &crate::meerkat_machine::SharedDriver,
     feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
-    wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
 ) -> bool {
-    if let Some(feed) = feed {
-        let batch = feed.list_since(*observed_seq);
+    let Some(feed) = feed else {
+        return false;
+    };
+    let batch = feed.list_since(*observed_seq);
 
-        let has_new_bg_completion = batch.entries.iter().any(|e| {
-            e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
-                && e.seq > *last_injected_seq
-        });
+    let has_new_bg_completion = batch.entries.iter().any(|e| {
+        e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
+            && e.seq > *last_injected_seq
+    });
 
-        if !has_new_bg_completion {
-            // No new BG completions — advance to prevent hot-spin
-            // on non-BG entries (MobMemberChild, etc.).
-            *observed_seq = batch.watermark;
-            if let Some(cs) = epoch_cursor_state {
-                cs.runtime_observed_seq
-                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
-            }
-            return false;
-        }
-
-        // Verify quiescence before injecting.
-        let d = driver.lock().await;
-        if !d.is_quiescent_for_detached_wake() {
-            // Non-quiescent: do NOT advance observed_seq. The completion
-            // stays visible for the next wake so it's not permanently lost.
-            return false;
-        }
-        drop(d);
-
-        let input = crate::input::Input::Continuation(
-            crate::input::ContinuationInput::detached_background_op_completed(),
-        );
-        let mut d = driver.lock().await;
-        if d.as_driver_mut().accept_input(input).await.is_ok() {
-            *last_injected_seq = batch.watermark;
-            if let Some(cs) = epoch_cursor_state {
-                cs.runtime_last_injected_seq
-                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
-            }
-        }
-        // Advance cursor after injection attempt (quiescent path).
+    if !has_new_bg_completion {
+        // No new BG completions — advance to prevent hot-spin
+        // on non-BG entries (MobMemberChild, etc.).
         *observed_seq = batch.watermark;
         if let Some(cs) = epoch_cursor_state {
             cs.runtime_observed_seq
                 .store(batch.watermark, std::sync::atomic::Ordering::Release);
         }
-        true
-    } else {
-        // Legacy DetachedWakeState path
-        let Some(state) = wake_state else {
-            return false;
-        };
-
-        if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
-            return false;
-        }
-        if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
-            return false;
-        }
-
-        let d = driver.lock().await;
-        if !d.is_quiescent_for_detached_wake() {
-            return false;
-        }
-        drop(d);
-
-        // Legacy path: fire notify to wake the idle arm on next iteration.
-        state
-            .signaled
-            .store(true, std::sync::atomic::Ordering::Release);
-        state.notify.notify_one();
-        false // Legacy path doesn't inject inline — idle arm handles it
+        return false;
     }
-}
 
-fn clear_legacy_detached_wake_signal(state: &crate::detached_wake::DetachedWakeState) {
-    state
-        .pending
-        .store(false, std::sync::atomic::Ordering::Release);
-    state
-        .signaled
-        .store(false, std::sync::atomic::Ordering::Release);
+    // Verify quiescence before injecting.
+    let d = driver.lock().await;
+    if !d.is_quiescent_for_detached_wake() {
+        // Non-quiescent: do NOT advance observed_seq. The completion
+        // stays visible for the next wake so it's not permanently lost.
+        return false;
+    }
+    drop(d);
+
+    let input = crate::input::Input::Continuation(
+        crate::input::ContinuationInput::detached_background_op_completed(),
+    );
+    let mut d = driver.lock().await;
+    if d.as_driver_mut().accept_input(input).await.is_ok() {
+        *last_injected_seq = batch.watermark;
+        if let Some(cs) = epoch_cursor_state {
+            cs.runtime_last_injected_seq
+                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+        }
+    }
+    // Advance cursor after injection attempt (quiescent path).
+    *observed_seq = batch.watermark;
+    if let Some(cs) = epoch_cursor_state {
+        cs.runtime_observed_seq
+            .store(batch.watermark, std::sync::atomic::Ordering::Release);
+    }
+    true
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -746,8 +816,15 @@ async fn process_queue(
         let dequeued = {
             let mut d = driver.lock().await;
 
-            // Only process if the runtime can process queue (Idle or Retired)
-            if !d.can_process_queue() {
+            // Immediate attached steer pre-binds the DSL run before waking the
+            // loop. Honor that Running/current_run_id pair as a queued batch
+            // that is already prepared by the checked-in machine.
+            let prebound_run_id = if d.runtime_state() == RuntimeState::Running {
+                d.current_run_id()
+            } else {
+                None
+            };
+            if !d.can_process_queue() && prebound_run_id.is_none() {
                 return false;
             }
 
@@ -771,7 +848,7 @@ async fn process_queue(
                 return false;
             }
 
-            let run_id = RunId::new();
+            let run_id = prebound_run_id.unwrap_or_else(RunId::new);
 
             // The checked-in Meerkat machine owns the coarse "this dequeued
             // batch has now become a run" transition, including unwind on
@@ -794,14 +871,26 @@ async fn process_queue(
 
         match dequeued {
             Some((input_ids, staged_ids, run_id, primitive)) => {
-                if crate::meerkat_machine::prepare_runtime_loop_batch_start(
+                if let Err(err) = crate::meerkat_machine::prepare_runtime_loop_batch_start(
                     driver,
                     run_id.clone(),
                     &staged_ids,
                 )
                 .await
-                .is_err()
                 {
+                    tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
+                    return false;
+                }
+                if let Err(error) =
+                    prepare_turn_state_for_primitive(driver, &run_id, &primitive).await
+                {
+                    tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
+                    let _ = crate::meerkat_machine::fail_runtime_loop_run(
+                        driver,
+                        run_id,
+                        error.to_string(),
+                    )
+                    .await;
                     return false;
                 }
 
@@ -883,8 +972,11 @@ async fn process_queue(
                             }
                         }
                         let mut d = driver.lock().await;
-                        let should_continue =
-                            d.take_wake_requested() && d.has_queued_input_outside(&input_ids);
+                        let should_continue = d.has_queued_input_outside(&input_ids);
+                        if should_continue {
+                            d.defer_queued_inputs_behind_backlog(&input_ids);
+                            d.take_wake_requested();
+                        }
                         drop(d);
                         if should_continue {
                             continue;
@@ -1158,6 +1250,38 @@ mod tests {
             other => return Err(format!("expected text content, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn staged_conversation_input_starts_conversation_turn_state() -> Result<(), String> {
+        let input = make_prompt("test prompt");
+        let input_id = input.id().clone();
+        let primitive = input_to_primitive(&input, input_id);
+        let run_id = RunId::new();
+
+        let start_input = primitive_turn_start_input(&run_id, &primitive)
+            .ok_or_else(|| "expected staged content input to start turn state".to_string())?;
+
+        match start_input {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: got_run_id,
+                primitive_kind,
+                admitted_content_shape,
+                ..
+            } => {
+                assert_eq!(
+                    got_run_id,
+                    crate::meerkat_machine::dsl::RunId::from_domain(&run_id)
+                );
+                assert_eq!(
+                    primitive_kind,
+                    crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn
+                );
+                assert_eq!(admitted_content_shape, "conversation");
+                Ok(())
+            }
+            other => Err(format!("expected StartConversationRun, got {other:?}")),
+        }
     }
 
     #[test]
@@ -1713,22 +1837,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clear_legacy_detached_wake_signal_resets_pending_and_signaled() {
-        let state = crate::detached_wake::DetachedWakeState::new();
-        state
-            .pending
-            .store(true, std::sync::atomic::Ordering::Release);
-        state
-            .signaled
-            .store(true, std::sync::atomic::Ordering::Release);
-
-        clear_legacy_detached_wake_signal(&state);
-
-        assert!(!state.pending.load(std::sync::atomic::Ordering::Acquire));
-        assert!(!state.signaled.load(std::sync::atomic::Ordering::Acquire));
-    }
-
     #[tokio::test]
     async fn maybe_inject_feed_wake_feed_path_injects_inline_continuation_when_quiescent() {
         let driver = make_shared_ephemeral_driver("feed-inline");
@@ -1749,7 +1857,6 @@ mod tests {
         let injected = maybe_inject_feed_wake(
             &driver,
             Some(feed.as_ref()),
-            None,
             &mut observed_seq,
             &mut last_injected_seq,
             None,
@@ -1781,40 +1888,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maybe_inject_feed_wake_legacy_path_sets_signaled_without_inline_injection() {
-        let driver = make_shared_ephemeral_driver("legacy-signal");
-        let state = Arc::new(crate::detached_wake::DetachedWakeState::new());
-        state
-            .pending
-            .store(true, std::sync::atomic::Ordering::Release);
-
+    async fn maybe_inject_feed_wake_without_feed_is_noop() {
+        let driver = make_shared_ephemeral_driver("no-feed");
         let mut observed_seq = 0;
         let mut last_injected_seq = 0;
 
         let injected = maybe_inject_feed_wake(
             &driver,
             None,
-            Some(&state),
             &mut observed_seq,
             &mut last_injected_seq,
             None,
         )
         .await;
 
-        assert!(
-            !injected,
-            "legacy detached wake should only signal the idle arm, not inject inline"
-        );
-        assert!(state.pending.load(std::sync::atomic::Ordering::Acquire));
-        assert!(state.signaled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!injected, "no feed means no injection");
         assert_eq!(observed_seq, 0);
         assert_eq!(last_injected_seq, 0);
 
         let guard = driver.lock().await;
         assert!(
             guard.as_driver().active_input_ids().is_empty(),
-            "legacy signaling path should not enqueue a continuation inline"
+            "no feed must not enqueue anything"
         );
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_no_bg_completions_advances_observed_seq() {
+        let driver = make_shared_ephemeral_driver("advance-only");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+        )
+        .await;
+
+        assert!(!injected, "empty feed should not inject");
+        assert_eq!(observed_seq, feed.watermark());
+        assert_eq!(last_injected_seq, 0);
+
+        let guard = driver.lock().await;
+        assert!(guard.as_driver().active_input_ids().is_empty());
     }
 
     // --- execution_kind stamping tests ---

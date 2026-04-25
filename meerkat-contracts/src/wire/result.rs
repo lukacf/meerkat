@@ -5,6 +5,51 @@ use serde::{Deserialize, Serialize};
 use super::WireUsage;
 use meerkat_core::{RunResult, SchemaWarning, SessionId};
 
+/// Typed tool-error classification carried on the wire.
+///
+/// Added in Wave B (V7). The classification is distinct from `NotFound` so
+/// that policy-denied tool calls surface as `AccessDenied` end-to-end —
+/// SDK clients, REST handlers, and RPC callers can map `AccessDenied` to
+/// HTTP 403 and `NotFound` to HTTP 404 without sniffing message strings.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolErrorClass {
+    NotFound,
+    AccessDenied,
+    InvalidArguments,
+    Timeout,
+    Internal,
+}
+
+impl WireToolErrorClass {
+    /// Stable wire string used across REST/RPC error payloads.
+    #[allow(dead_code)]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::AccessDenied => "access_denied",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::Timeout => "timeout",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl From<&meerkat_core::error::ToolError> for WireToolErrorClass {
+    fn from(value: &meerkat_core::error::ToolError) -> Self {
+        use meerkat_core::error::ToolError;
+        match value {
+            ToolError::NotFound { .. } => Self::NotFound,
+            ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::InvalidArguments { .. } => Self::InvalidArguments,
+            ToolError::Timeout { .. } => Self::Timeout,
+            _ => Self::Internal,
+        }
+    }
+}
+
 /// Canonical run result for wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireRunResult {

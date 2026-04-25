@@ -102,6 +102,14 @@ def make_prompt_input(
     operator_eligible: bool = True,
     turn_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if turn_metadata is not None:
+        turn_metadata = dict(turn_metadata)
+        additional = turn_metadata.get("additional_instructions")
+        if isinstance(additional, list):
+            turn_metadata["additional_instructions"] = [
+                {"kind": "system", "body": item} if isinstance(item, str) else item
+                for item in additional
+            ]
     payload: dict[str, Any] = {
         "input_type": "prompt",
         "header": {

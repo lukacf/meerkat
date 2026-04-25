@@ -3,6 +3,14 @@
 //! Provides a JSON-RPC 2.0 stdio interface for IDE integration,
 //! desktop apps, and automation tools.
 
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::large_futures,
+    clippy::redundant_closure_for_method_calls,
+    clippy::unnested_or_patterns
+)]
+
 // Keep the lib-unit harness focused on the protocol/error contract tests that
 // Phase 0 smokes directly. The heavier router/runtime behavior suites still run
 // through integration-test targets and the phase verification commands.

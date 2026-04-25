@@ -1,5 +1,5 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
-import type { AgentEvent, Usage } from './generated/events.js';
+import type { AgentEvent, SkillKey, Usage } from './generated/events.js';
 
 // ─── Bootstrap config ───────────────────────────────────────────
 
@@ -42,13 +42,12 @@ export interface InitResult {
  * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
  * deleted. Credentials flow from bootstrap-populated realm config
  * (`initRuntimeFromConfig`) or the host's registered external-auth
- * resolver (`register_external_auth_resolver`). Per-session binding
- * is selected via `connectionRef` ("realm:binding" form).
+ * resolver (`register_external_auth_resolver`).
  */
 export interface SessionConfig {
   /** LLM model identifier. */
   model: string;
-  /** Optional "realm:binding" selector; overrides default provider-match. */
+  /** Optional realm-qualified auth binding reference (`realm:binding[:profile]`). */
   connectionRef?: string;
   /** System prompt. */
   systemPrompt?: string;
@@ -98,12 +97,6 @@ export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
 export interface RenderMetadata {
   class: RenderClass;
   salience?: RenderSalience;
-}
-
-/** Options for a single turn. */
-export interface TurnOptions {
-  /** Additional instructions for this turn only. */
-  additionalInstructions?: string[];
 }
 
 /** Runtime system-context append request. */
@@ -192,9 +185,11 @@ export type {
   RunFailedEvent,
   RunStartedEvent,
   SessionId,
-  SkillId,
+  SkillKey,
+  SkillName,
   SkillsResolvedEvent,
   SkillResolutionFailedEvent,
+  SourceUuid,
   StopReason,
   StreamTruncatedEvent,
   TextCompleteEvent,
@@ -224,6 +219,9 @@ export type {
   InteractionCompleteEvent,
   InteractionFailedEvent,
 } from './generated/events.js';
+
+/** Backward-compatible alias for the generated skill key shape. */
+export type SkillId = SkillKey;
 
 // ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 

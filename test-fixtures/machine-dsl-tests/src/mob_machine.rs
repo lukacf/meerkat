@@ -1062,6 +1062,19 @@ impl<T: Into<String>> From<T> for WorkId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_machine_schema::identity::{FieldId, InputVariantId, PhaseId};
+
+    fn fid(s: &str) -> FieldId {
+        FieldId::parse(s).expect("valid field slug")
+    }
+
+    fn ivid(s: &str) -> InputVariantId {
+        InputVariantId::parse(s).expect("valid input variant slug")
+    }
+
+    fn assert_phase_eq(dsl_phase: impl std::fmt::Debug, kernel_phase: &PhaseId) {
+        assert_eq!(format!("{:?}", dsl_phase), kernel_phase.as_str());
+    }
 
     // ---- Runtime dispatch tests ----
 
@@ -1163,7 +1176,22 @@ mod tests {
 
     #[test]
     fn schema_validates() {
-        let schema = MobMachineState::schema();
+        // B-4 (`c0cb12071`): every `TypeRef::Named(...)` in the schema must
+        // have a matching entry in `MachineSchema.named_types`. The DSL
+        // macro emits `named_types: vec![]`; production catalogs populate
+        // them via `catalog::dsl::mod::with_named_types`. This test-fixture
+        // mirrors the mob-machine catalog binding set from
+        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_mob_machine`.
+        use meerkat_machine_schema::identity::NamedTypeBinding;
+        let mut schema = MobMachineState::schema();
+        schema.named_types = vec![
+            NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::u64("Generation"),
+            NamedTypeBinding::string("AgentIdentity"),
+            NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("MobPhase"),
+            NamedTypeBinding::string("WorkId"),
+        ];
         schema
             .validate()
             .expect("mob machine schema should validate");
@@ -1205,33 +1233,33 @@ mod tests {
         .unwrap();
 
         let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "Spawn".into(),
+            variant: ivid("Spawn"),
             fields: std::collections::BTreeMap::from([
                 (
-                    "agent_identity".into(),
+                    fid("agent_identity"),
                     meerkat_machine_kernels::test_oracle::KernelValue::String("agent-1".into()),
                 ),
                 (
-                    "agent_runtime_id".into(),
+                    fid("agent_runtime_id"),
                     meerkat_machine_kernels::test_oracle::KernelValue::String("rt-1".into()),
                 ),
                 (
-                    "fence_token".into(),
+                    fid("fence_token"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
-                    "generation".into(),
+                    fid("generation"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(0),
                 ),
                 (
-                    "external_addressable".into(),
+                    fid("external_addressable"),
                     meerkat_machine_kernels::test_oracle::KernelValue::Bool(true),
                 ),
             ]),
         };
         let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();
 
-        assert_eq!(format!("{:?}", dsl_r.to_phase), kernel_r.next_state.phase);
+        assert_phase_eq(&dsl_r.to_phase, &kernel_r.next_state.phase);
         assert_eq!(dsl_r.effects.len(), kernel_r.effects.len());
 
         kernel_state = kernel_r.next_state;
@@ -1239,7 +1267,7 @@ mod tests {
         // Run Stop through both
         let dsl_r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop);
         let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "Stop".into(),
+            variant: ivid("Stop"),
             fields: std::collections::BTreeMap::new(),
         };
         let kernel_r = kernel.transition(&kernel_state, &kernel_input);

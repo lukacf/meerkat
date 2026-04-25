@@ -1,0 +1,15 @@
+{
+    "id": "00000000-0000-0000-0000-000000000008",
+    "messages": [],
+    "session_llm_identity": {
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+    },
+    "session_metadata": {
+        "connection_ref": {
+            "realm": "prod",
+            "binding": "openai_main",
+            "profile": null
+        }
+    }
+}

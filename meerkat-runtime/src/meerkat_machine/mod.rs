@@ -20,7 +20,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
-use std::sync::atomic::Ordering;
 
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
@@ -43,7 +42,7 @@ use crate::meerkat_machine_types::{
     MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
     MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatFormalStateProjection,
     MeerkatInputsSnapshot, MeerkatLedgerSnapshot, MeerkatMachineCommand,
-    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineLegacyRunPrepared,
+    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunPrepared,
     MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot, SessionLlmCapabilityDelta,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
@@ -81,6 +80,7 @@ pub(crate) use driver::{
 pub(crate) mod driver;
 
 mod comms_drain;
+pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
 mod dispatch_ingress;
@@ -95,9 +95,11 @@ mod session_management;
 mod traits;
 mod visibility;
 
+pub use composition::{MeerkatCompositionSignalDispatcher, MeerkatConsumerSurface};
+
 pub use comms_drain::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerIngressOwner, SupervisorBinding,
-    SupervisorBindingStageError,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerEndpointStageError, PeerIngressOwner,
+    SupervisorBinding, SupervisorBindingStageError,
 };
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
@@ -143,9 +145,6 @@ struct RuntimeSessionEntry {
     /// Registration phase — explicit type-level distinction between
     /// "registered but inert" and "executor attached."
     phase: RegistrationPhase,
-    /// Detached-wake state for background op completions.
-    /// Shared with the runtime loop which selects on the Notify directly.
-    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
     /// DSL authority for coarse lifecycle phase transitions.
     /// Sync field — validates transitions, writes back phase.
     ///
@@ -156,6 +155,24 @@ struct RuntimeSessionEntry {
     /// including several Maps/Sets) so holding a reference to a
     /// `RuntimeSessionEntry` does not bloat async future sizes.
     dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+    /// Per-session comms drain lifecycle slot.
+    ///
+    /// Collapsed from the sibling `MeerkatMachine.comms_drain_slots:
+    /// RwLock<HashMap<SessionId, CommsDrainSlot>>` in wave-c C-H2 (F5 in
+    /// docs/wave-c-prep/state-scope-audit.md) — keeping the slot here
+    /// makes "session exists" a single HashMap insertion and eliminates
+    /// the class of bugs where the sibling map and the session map
+    /// could fall out of sync across a registration/unregistration
+    /// boundary.
+    drain_slot: CommsDrainSlot,
+    /// D-track-b: per-session trust reconciler consuming the DSL-owned
+    /// `CommsTrustReconcileRequested` effect. Lazily constructed on the
+    /// first `stage_*_peer_endpoint` / `stage_apply_mob_peer_overlay`
+    /// call so the reconciler is bound to the caller-supplied
+    /// [`CommsRuntime`] (the same runtime the session's drain is
+    /// bound to). Re-used across subsequent stager calls so the
+    /// applied-view epoch watermark is monotonically advanced.
+    trust_reconciler: Option<Arc<crate::comms_trust_reconcile::CommsTrustReconciler>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -239,9 +256,6 @@ impl RuntimeSessionEntry {
             // Don't regress to Queuing if another task is mid-attach;
             // Active with dead channels goes back to Queuing for retry.
             self.phase = RegistrationPhase::Queuing;
-            // Clear detached wake state — it will be re-created on
-            // re-registration along with the new runtime loop.
-            self.detached_wake = None;
             return true;
         }
         false
@@ -350,14 +364,40 @@ impl MeerkatMachine {
         String,
     > {
         let authority = self.session_dsl_authority(session_id).await?;
-        let mut authority = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous_state = Box::new(authority.state.clone());
-        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map(|transition| transition.effects)
-            .map_err(|err| dsl_authority::map_error(err, context))?;
+        let (previous_state, effects) = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous_state = Box::new(authority.state.clone());
+            let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                .map(|transition| transition.effects)
+                .map_err(|err| dsl_authority::map_error(err, context))?;
+            (previous_state, effects)
+        };
+        self.dispatch_routed_signals_from_effects(&effects).await?;
         Ok((previous_state, effects))
+    }
+
+    async fn dispatch_routed_signals_from_effects(
+        &self,
+        effects: &[dsl::MeerkatMachineEffect],
+    ) -> Result<(), String> {
+        let dispatcher = {
+            self.composition_signal_dispatcher
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        let Some(dispatcher) = dispatcher else {
+            return Ok(());
+        };
+
+        for effect in effects {
+            if let Some(signal) = composition::lift_routed_signal(effect) {
+                composition::dispatch_routed_signal(&dispatcher, signal).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn restore_session_dsl_state(
@@ -413,8 +453,6 @@ pub struct MeerkatMachine {
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
-    /// Per-session comms drain lifecycle.
-    comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Canonical owner of "this session id is currently active" — replaces
@@ -424,6 +462,11 @@ pub struct MeerkatMachine {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
+    /// Optional typed signal dispatcher for MeerkatMachine lifecycle
+    /// effects routed by `meerkat_mob_seam` into MobMachine observation
+    /// signals.
+    composition_signal_dispatcher:
+        StdRwLock<Option<composition::MeerkatCompositionSignalDispatcher>>,
 }
 
 impl MeerkatMachine {
@@ -443,9 +486,9 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: None,
             blob_store: None,
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
 
@@ -456,9 +499,9 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(blob_store),
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
 
@@ -474,9 +517,9 @@ impl MeerkatMachine {
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: None,
-            comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
 
@@ -486,6 +529,55 @@ impl MeerkatMachine {
     /// machine instance so tests / parallel runtimes do not collide.
     pub fn session_claim_handle(&self) -> Arc<dyn meerkat_core::handles::SessionClaimHandle> {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
+    }
+
+    /// Attach the typed composition signal dispatcher used for
+    /// MeerkatMachine -> MobMachine lifecycle observation routes.
+    pub fn set_composition_signal_dispatcher(
+        &self,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) {
+        let mut slot = self
+            .composition_signal_dispatcher
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(dispatcher);
+    }
+
+    /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
+    /// composition dispatcher against the session's shared DSL authority.
+    ///
+    /// The caller is
+    /// [`crate::meerkat_machine::composition::MeerkatConsumerSurface::apply_routed_input`];
+    /// it has already projected producer fields into the typed
+    /// [`dsl::MeerkatMachineInput`] shape. This method performs the
+    /// session lookup + DSL-lock-scoped apply. A typed transition error
+    /// from the kernel is surfaced as a `String` so the dispatcher can
+    /// map it onto `DispatchRefusal::ConsumerRefused`.
+    pub async fn apply_routed_meerkat_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+    ) -> Result<(), String> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            format!(
+                "session `{session_id}` is not registered with this MeerkatMachine; \
+                 cannot deliver routed input"
+            )
+        })?;
+        let authority = Arc::clone(&entry.dsl_authority);
+        drop(sessions);
+
+        let effects = {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+                .map(|transition| transition.effects)
+                .map_err(|err| format!("{err}"))?
+        };
+        self.dispatch_routed_signals_from_effects(&effects).await
     }
 
     #[cfg(test)]
@@ -676,6 +768,7 @@ impl MeerkatMachine {
             | MeerkatMachineCommand::Destroy { .. }
             | MeerkatMachineCommand::RuntimeState { .. }
             | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
+            | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
             | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
                 .execute_meerkat_machine_control_command(command)
                 .await

@@ -486,10 +486,19 @@ pub struct OperationInput {
     pub event: OpEvent,
 }
 
-/// Classify an input's execution intent for the runtime loop.
+/// Classify an input's typed execution intent for the runtime loop.
 ///
-/// `Continuation` inputs map to `ResumePending`; everything else is `ContentTurn`.
-/// Terminal peer responses are always `ContentTurn` regardless of handling_mode.
+/// `Input::Continuation` is the only variant that resumes a pending
+/// `CallbackPending`-style turn; every other variant carries fresh
+/// content and is a full `ContentTurn`. Terminal peer responses, even
+/// when carrying `HandlingMode::Steer`, always classify as
+/// `ContentTurn` — the steer discriminator gates the run boundary
+/// (`RunCheckpoint` vs `RunStart`), not the execution kind.
+///
+/// This function is the single classification site consulted by
+/// `runtime_loop::inputs_to_primitive_with_boundary` when it computes
+/// the `execution_kind` for a staged batch (any `ContentTurn` in the
+/// batch wins).
 pub(crate) fn classify_execution_kind(
     input: &Input,
 ) -> meerkat_core::lifecycle::RuntimeExecutionKind {

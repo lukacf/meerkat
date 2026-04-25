@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     state.realtime_rpc_tcp_addr = args.realtime_rpc_tcp;
     tracing::info!(
-        realm_id = %state.realm_id,
+        realm_id = %state.realm,
         backend = %state.backend,
         store_path = %state.store_path.display(),
         default_model = %state.default_model,

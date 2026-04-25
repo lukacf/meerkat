@@ -70,6 +70,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Superseded`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_start_complete_fail`
+- `OccurrencesSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`
 - `DeliveryFailed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_start_complete_fail`

@@ -49,7 +49,14 @@ export type InteractionId = string;
 
 export type SessionId = string;
 
-export type SkillId = string;
+export interface SkillKey {
+  skill_name: SkillName;
+  source_uuid: SourceUuid;
+}
+
+export type SkillName = string;
+
+export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
 
@@ -241,7 +248,7 @@ export interface RetryingEvent {
 
 export interface SkillsResolvedEvent {
   injection_bytes: number;
-  skills: SkillId[];
+  skills: SkillKey[];
   type: "skills_resolved";
 }
 

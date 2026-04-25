@@ -36,8 +36,7 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
 function sessionToWasm(config: SessionConfig): Record<string, unknown> {
   // Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
   // deleted. Credentials come from bootstrap-populated config.realm or
-  // the host's registered external-auth resolver; connection_ref is
-  // the optional per-session binding selector.
+  // the host's registered external-auth resolver.
   return {
     model: config.model,
     connection_ref: config.connectionRef,
@@ -78,7 +77,7 @@ export interface WasmModule {
   destroy_runtime: () => void;
   create_session_simple: (configJson: string) => number;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
-  start_turn: (handle: number, prompt: string, optionsJson: string) => Promise<string>;
+  start_turn: (handle: number, prompt: string) => Promise<string>;
   get_session_state: (handle: number) => string;
   destroy_session: (handle: number) => void;
   poll_events: (handle: number) => string;

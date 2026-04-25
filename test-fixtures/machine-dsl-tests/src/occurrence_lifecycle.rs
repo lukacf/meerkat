@@ -347,6 +347,15 @@ pub enum OccurrenceFailureClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+
+    fn fid(s: &str) -> FieldId {
+        FieldId::parse(s).expect("valid field slug")
+    }
+
+    fn ivid(s: &str) -> InputVariantId {
+        InputVariantId::parse(s).expect("valid input variant slug")
+    }
 
     // ---- Runtime dispatch tests ----
 
@@ -472,7 +481,19 @@ mod tests {
 
     #[test]
     fn schema_validates() {
-        let schema = OccurrenceLifecycleMachineState::schema();
+        // Mirror the occurrence-lifecycle catalog binding set from
+        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_occurrence_lifecycle_machine`.
+        // B-4 (`c0cb12071`) made `named_types` validation-gated; DSL macro
+        // emits `vec![]`.
+        use meerkat_machine_schema::identity::NamedTypeBinding;
+        let mut schema = OccurrenceLifecycleMachineState::schema();
+        schema.named_types = vec![
+            NamedTypeBinding::string("ClaimToken"),
+            NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string("OccurrenceLifecycleState"),
+            NamedTypeBinding::string("ScheduleId"),
+        ];
         schema
             .validate()
             .expect("occurrence lifecycle schema should validate");
@@ -512,29 +533,32 @@ mod tests {
         .unwrap();
 
         let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "Claim".into(),
+            variant: ivid("Claim"),
             fields: std::collections::BTreeMap::from([
                 (
-                    "owner_id".into(),
+                    fid("owner_id"),
                     meerkat_machine_kernels::test_oracle::KernelValue::String("w".into()),
                 ),
                 (
-                    "at_utc_ms".into(),
+                    fid("at_utc_ms"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
-                    "lease_expires_at_utc_ms".into(),
+                    fid("lease_expires_at_utc_ms"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(2),
                 ),
                 (
-                    "claim_token".into(),
+                    fid("claim_token"),
                     meerkat_machine_kernels::test_oracle::KernelValue::String("t".into()),
                 ),
             ]),
         };
         let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();
 
-        assert_eq!(format!("{:?}", dsl_r.to_phase), kernel_r.next_state.phase);
+        assert_eq!(
+            format!("{:?}", dsl_r.to_phase),
+            kernel_r.next_state.phase.as_str()
+        );
         assert_eq!(dsl_r.effects.len(), kernel_r.effects.len());
 
         kernel_state = kernel_r.next_state;
@@ -549,18 +573,18 @@ mod tests {
             },
         );
         let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "Skip".into(),
+            variant: ivid("Skip"),
             fields: std::collections::BTreeMap::from([
                 (
-                    "detail".into(),
+                    fid("detail"),
                     meerkat_machine_kernels::test_oracle::KernelValue::None,
                 ),
                 (
-                    "failure_class".into(),
+                    fid("failure_class"),
                     meerkat_machine_kernels::test_oracle::KernelValue::None,
                 ),
                 (
-                    "at_utc_ms".into(),
+                    fid("at_utc_ms"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(5),
                 ),
             ]),

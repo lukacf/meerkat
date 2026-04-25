@@ -121,52 +121,14 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::SessionId,
     >,
+    pub pending_session_ingress_detach_runtime_ids:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobStartupKickoffSnapshot {
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
-}
-
-/// W3-H: mob-side event mirror of the MobMachine's
-/// `MemberSessionBindingSet / Rotated / Released` DSL effects. The mob
-/// actor forwards each DSL effect onto a `broadcast::Sender` so external
-/// observers (notably the realtime WS in meerkat-rpc, which needs this
-/// type at its visibility boundary to type the receiver) can subscribe to
-/// identity→session binding lifecycle without needing to poll.
-///
-/// Each variant carries the `mob_id` the event originated from plus the
-/// `agent_identity` it concerns so subscribers can filter to only the
-/// events they care about.
-///
-/// Three-variant shape intentional — rotation is a first-class
-/// machine-emitted meaning. Collapsing to a Cleared+Set pair would push
-/// "interpret a debounce window as rotation" into the observer, which is
-/// exactly the pattern dogma #3 targets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberRealtimeBindingEvent {
-    /// The identity gained a fresh realtime binding (no prior binding).
-    Set {
-        mob_id: crate::ids::MobId,
-        agent_identity: crate::ids::AgentIdentity,
-        bridge_session_id: meerkat_core::types::SessionId,
-    },
-    /// The identity's realtime binding atomically rotated to a new bridge
-    /// session (respawn flow — shell retired the old member then spawned a
-    /// replacement under the same identity).
-    Rotated {
-        mob_id: crate::ids::MobId,
-        agent_identity: crate::ids::AgentIdentity,
-        old_session_id: meerkat_core::types::SessionId,
-        new_session_id: meerkat_core::types::SessionId,
-    },
-    /// The identity's realtime binding was released (terminal retire).
-    Released {
-        mob_id: crate::ids::MobId,
-        agent_identity: crate::ids::AgentIdentity,
-        session_id: meerkat_core::types::SessionId,
-    },
 }
 
 /// Heap-allocated payload for `MobCommand::SubmitWork`. Boxing keeps the
@@ -210,16 +172,6 @@ pub(super) enum MobCommand {
         >,
     },
     RetireAll {
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    Wire {
-        local: MeerkatId,
-        target: super::handle::PeerTarget,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    Unwire {
-        local: MeerkatId,
-        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Unified work-lane ingress: the MobMachine DSL decides work-origin
@@ -267,6 +219,9 @@ pub(super) enum MobCommand {
     ProjectMachineInput {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ProjectMachineSignal {
+        signal: mob_dsl::MobMachineSignal,
     },
     FlowFinished {
         run_id: RunId,
@@ -371,6 +326,29 @@ pub(super) enum MobCommand {
     },
     ForceCancel {
         agent_identity: MeerkatId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Wire a local mob member to a peer target.
+    ///
+    /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority
+    /// via `MobMachineInput::WireMembers { edge }`. This command is the
+    /// thin shell forward: the actor normalizes `(local, target)` into a
+    /// `WiringEdge`, applies the DSL input, and records
+    /// `MobEventKind::MembersWired` on acceptance. No shell-side
+    /// reconciliation of comms trust edges or peer-added notifications is
+    /// performed here (those were shell-authority patterns deleted in
+    /// Wave A and not restored in Wave D).
+    Wire {
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Unwire a local mob member from a peer target. Mirror of `Wire`.
+    /// Forwards to `MobMachineInput::UnwireMembers { edge }` and records
+    /// `MobEventKind::MembersUnwired` on acceptance.
+    Unwire {
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     SetSpawnPolicy {

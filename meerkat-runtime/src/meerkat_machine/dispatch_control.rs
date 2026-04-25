@@ -54,7 +54,6 @@ impl MeerkatMachine {
                         .unwrap_or(RuntimeState::Destroyed)
                         .is_idle_or_attached();
                     let resolved = drv.resolve_admission_for_runtime_idle(&input, runtime_idle);
-                    let preview_run_id = RunId::new();
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -66,9 +65,6 @@ impl MeerkatMachine {
                                 .request_immediate_processing,
                             interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
                             wake_if_idle: resolved.coarse_flags.wake_if_idle,
-                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                &preview_run_id,
-                            ),
                         },
                         "AcceptWithCompletion(Ingest)",
                     )
@@ -97,9 +93,6 @@ impl MeerkatMachine {
                                             .request_immediate_processing,
                                         interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
                                         wake_if_idle: resolved.coarse_flags.wake_if_idle,
-                                        run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                            &preview_run_id,
-                                        ),
                                     },
                                     "AcceptWithCompletion(Ingest)",
                                 )
@@ -185,25 +178,22 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Retire,
-                        "Retire",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
+                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                            &session_id,
+                        ),
+                    },
+                    "Retire",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
-                let mut report = match machine_retire(&mut drv).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        drop(drv);
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                    }
-                };
+                let mut report = machine_retire(&mut drv)
+                    .await
+                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                 drop(drv);
 
                 if report.inputs_pending_drain > 0 {
@@ -243,26 +233,19 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Recycle,
-                        "Recycle",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Recycle,
+                    "Recycle",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let (transferred, active_after_recycle) = {
                     let mut drv = driver.lock().await;
-                    let transferred = match machine_recycle_preserving_work(&mut drv).await {
-                        Ok(transferred) => transferred,
-                        Err(err) => {
-                            drop(drv);
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                        }
-                    };
+                    let transferred = machine_recycle_preserving_work(&mut drv)
+                        .await
+                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
 
                     let active_after_recycle = drv.as_driver().active_input_ids();
                     (transferred, active_after_recycle)
@@ -302,25 +285,18 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Reset,
-                        "Reset",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Reset,
+                    "Reset",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
-                let report = match machine_reset(&mut drv).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        drop(drv);
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                    }
-                };
+                let report = machine_reset(&mut drv)
+                    .await
+                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                 drop(drv);
 
                 let mut comp = completions.lock().await;
@@ -344,26 +320,21 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Recover,
-                        "Recover",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Recover,
+                    "Recover",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let (report, active_after_recover) = {
                     let mut drv = driver.lock().await;
-                    let report = match drv.as_driver_mut().recover().await {
-                        Ok(report) => report,
-                        Err(err) => {
-                            drop(drv);
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                        }
-                    };
+                    let report = drv
+                        .as_driver_mut()
+                        .recover()
+                        .await
+                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                     let active_after_recover = drv.as_driver().active_input_ids();
                     (report, active_after_recover)
                 };
@@ -413,7 +384,11 @@ impl MeerkatMachine {
                 }
                 self.preview_session_dsl_input(
                     &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
+                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                            &session_id,
+                        ),
+                    },
                     "Destroy",
                 )
                 .await
@@ -428,7 +403,11 @@ impl MeerkatMachine {
 
                 self.apply_session_dsl_input(
                     &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
+                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                            &session_id,
+                        ),
+                    },
                     "Destroy",
                 )
                 .await
@@ -460,6 +439,24 @@ impl MeerkatMachine {
                 let status = project_realtime_attachment_status(&authority.state);
                 Ok(MeerkatMachineCommandResult::RealtimeAttachmentStatus(
                     status,
+                ))
+            }
+            MeerkatMachineCommand::RuntimeRealtimeChannelStatus { session_id } => {
+                let sessions = self.sessions.read().await;
+                let entry = sessions.get(&session_id).ok_or_else(|| {
+                    RuntimeControlPlaneError::NotFound(LogicalRuntimeId::new(
+                        session_id.to_string(),
+                    ))
+                })?;
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let status = project_realtime_attachment_status(&authority.state);
+                let reconnect = project_realtime_reconnect_progress(&authority.state);
+                let channel_status = status.to_channel_status(reconnect.as_ref());
+                Ok(MeerkatMachineCommandResult::RealtimeChannelStatus(
+                    channel_status,
                 ))
             }
             MeerkatMachineCommand::LoadBoundaryReceipt {
@@ -505,4 +502,41 @@ fn project_realtime_attachment_status(
         RealtimeBindingState::BindingReady => RealtimeAttachmentStatus::BindingReady,
         RealtimeBindingState::ReplacementPending => RealtimeAttachmentStatus::ReplacementPending,
     }
+}
+
+/// Wave-c C-9c R4: project the DSL's reconnect-progress fields onto the
+/// shell-facing `ReconnectProgress` struct. Returns `None` when the
+/// overlay has cleared (`attempt_count == 0` and no pending retry) —
+/// the default state for a binding that isn't actively reconnecting.
+fn project_realtime_reconnect_progress(
+    state: &super::dsl::MeerkatMachineState,
+) -> Option<crate::meerkat_machine_types::ReconnectProgress> {
+    use crate::meerkat_machine_types::ReconnectProgress;
+    use chrono::{DateTime, Utc};
+
+    let attempt_count_u64 = state.realtime_reconnect_attempt_count;
+    let next_retry_at_ms = state.realtime_reconnect_next_retry_at_ms;
+    let deadline_at_ms = state.realtime_reconnect_deadline_at_ms;
+
+    if attempt_count_u64 == 0 && next_retry_at_ms.is_none() && deadline_at_ms.is_none() {
+        return None;
+    }
+
+    fn ms_to_utc(ms: Option<u64>) -> Option<DateTime<Utc>> {
+        ms.and_then(|ms| {
+            let secs = i64::try_from(ms / 1_000).ok()?;
+            let nanos = u32::try_from((ms % 1_000) * 1_000_000).ok()?;
+            DateTime::<Utc>::from_timestamp(secs, nanos)
+        })
+    }
+
+    // Surface clamp: `RealtimeChannelStatus.attempt_count` is u32 on the wire;
+    // any DSL-side overflow pegs at u32::MAX rather than wrapping.
+    let attempt_count = u32::try_from(attempt_count_u64).unwrap_or(u32::MAX);
+
+    Some(ReconnectProgress::new(
+        attempt_count,
+        ms_to_utc(next_retry_at_ms),
+        ms_to_utc(deadline_at_ms),
+    ))
 }

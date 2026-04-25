@@ -392,4 +392,5 @@ pub enum DispositionKind {
 pub struct DispositionDef {
     pub effect: Ident,
     pub kind: DispositionKind,
+    pub handoff_protocol: Option<Ident>,
 }

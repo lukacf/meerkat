@@ -1383,6 +1383,23 @@ pub enum OperationKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_machine_schema::identity::{FieldId, InputVariantId, PhaseId, SignalVariantId};
+
+    fn fid(s: &str) -> FieldId {
+        FieldId::parse(s).expect("valid field slug")
+    }
+
+    fn ivid(s: &str) -> InputVariantId {
+        InputVariantId::parse(s).expect("valid input variant slug")
+    }
+
+    fn svid(s: &str) -> SignalVariantId {
+        SignalVariantId::parse(s).expect("valid signal variant slug")
+    }
+
+    fn assert_phase_eq(dsl_phase: impl std::fmt::Debug, kernel_phase: &PhaseId) {
+        assert_eq!(format!("{:?}", dsl_phase), kernel_phase.as_str());
+    }
 
     // ---- Direction 1: runtime dispatch works ----
 
@@ -1519,7 +1536,45 @@ mod tests {
 
     #[test]
     fn schema_validates() {
-        let schema = MeerkatMachineState::schema();
+        // Mirror the meerkat-machine catalog binding set from
+        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_meerkat_machine`.
+        // B-4 (`c0cb12071`) made `MachineSchema.named_types` validation-
+        // gated; catalogs populate via `with_named_types`, DSL macro
+        // emits `vec![]`, so the test fixture must populate inline.
+        use meerkat_machine_schema::identity::NamedTypeBinding;
+        let mut schema = MeerkatMachineState::schema();
+        schema.named_types = vec![
+            NamedTypeBinding::u64("BoundarySequence"),
+            NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::u64("Generation"),
+            NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("CommsRuntimeId"),
+            NamedTypeBinding::string("InputId"),
+            NamedTypeBinding::string("McpServerId"),
+            NamedTypeBinding::string("MeerkatPhase"),
+            NamedTypeBinding::string("MobId"),
+            NamedTypeBinding::string("OperationId"),
+            NamedTypeBinding::string("OperationKind"),
+            NamedTypeBinding::string("PeerCorrelationId"),
+            NamedTypeBinding::string("RunId"),
+            NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string("SessionLlmCapabilitySurface"),
+            NamedTypeBinding::string("SessionLlmCapabilitySurfaceStatus"),
+            NamedTypeBinding::string("SessionLlmIdentity"),
+            NamedTypeBinding::string("SessionToolVisibilityDelta"),
+            NamedTypeBinding::string("SessionToolVisibilityState"),
+            NamedTypeBinding::string("ToolFilter"),
+            NamedTypeBinding::string("ToolVisibilityWitness"),
+            NamedTypeBinding::string("WorkId"),
+            // PeerEndpoint etc. are type_path bindings in the catalog;
+            // for this test-fixture lib-scope validation, string is
+            // sufficient (validation checks binding existence, not the
+            // Rust-atom shape).
+            NamedTypeBinding::string("PeerEndpoint"),
+            NamedTypeBinding::string("PeerName"),
+            NamedTypeBinding::string("PeerId"),
+            NamedTypeBinding::string("PeerAddress"),
+        ];
         schema
             .validate()
             .expect("meerkat machine schema should validate");
@@ -1567,7 +1622,7 @@ mod tests {
         auth.apply_signal(MeerkatMachineSignal::Initialize).unwrap();
         // Advance kernel with Initialize signal
         let init_signal = meerkat_machine_kernels::test_oracle::KernelSignal {
-            variant: "Initialize".into(),
+            variant: svid("Initialize"),
             fields: std::collections::BTreeMap::new(),
         };
         let ko = kernel
@@ -1583,9 +1638,9 @@ mod tests {
             },
         );
         let ki = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "RegisterSession".into(),
+            variant: ivid("RegisterSession"),
             fields: std::collections::BTreeMap::from([(
-                "session_id".into(),
+                fid("session_id"),
                 meerkat_machine_kernels::test_oracle::KernelValue::String("s1".into()),
             )]),
         };
@@ -1598,7 +1653,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_phase_eq(&d.to_phase, &k.next_state.phase);
             kernel_state = k.next_state.clone();
         }
 
@@ -1612,18 +1667,18 @@ mod tests {
             },
         );
         let ki = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "PrepareBindings".into(),
+            variant: ivid("PrepareBindings"),
             fields: std::collections::BTreeMap::from([
                 (
-                    "agent_runtime_id".into(),
+                    fid("agent_runtime_id"),
                     meerkat_machine_kernels::test_oracle::KernelValue::String("rt-1".into()),
                 ),
                 (
-                    "fence_token".into(),
+                    fid("fence_token"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
                 (
-                    "generation".into(),
+                    fid("generation"),
                     meerkat_machine_kernels::test_oracle::KernelValue::U64(1),
                 ),
             ]),
@@ -1637,7 +1692,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_phase_eq(&d.to_phase, &k.next_state.phase);
             assert_eq!(d.effects.len(), k.effects.len());
             kernel_state = k.next_state.clone();
         }
@@ -1646,7 +1701,7 @@ mod tests {
         let dsl_result =
             MeerkatMachineMutator::apply(&mut auth, MeerkatMachineInput::StopRuntimeExecutor);
         let ki = meerkat_machine_kernels::test_oracle::KernelInput {
-            variant: "StopRuntimeExecutor".into(),
+            variant: ivid("StopRuntimeExecutor"),
             fields: std::collections::BTreeMap::new(),
         };
         let kr = kernel.transition(&kernel_state, &ki);
@@ -1658,7 +1713,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_phase_eq(&d.to_phase, &k.next_state.phase);
             kernel_state = k.next_state.clone();
         }
     }

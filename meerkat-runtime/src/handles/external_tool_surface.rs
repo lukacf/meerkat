@@ -87,6 +87,7 @@ impl RuntimeExternalToolSurfaceHandle {
 
 impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     fn register(&self, surface_id: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceRegister { surface_id },
             "ExternalToolSurfaceHandle::register",
@@ -94,6 +95,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceStageAdd { surface_id, now_ms },
             "ExternalToolSurfaceHandle::stage_add",
@@ -101,6 +103,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceStageRemove { surface_id, now_ms },
             "ExternalToolSurfaceHandle::stage_remove",
@@ -108,6 +111,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceStageReload { surface_id, now_ms },
             "ExternalToolSurfaceHandle::stage_reload",
@@ -120,6 +124,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         now_ms: u64,
         current_turn: u64,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceApplyBoundary {
                 surface_id,
@@ -136,6 +141,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceMarkPendingSucceeded {
                 surface_id,
@@ -151,6 +157,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         surface_id: String,
         reason: String,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceMarkPendingFailed { surface_id, reason },
             "ExternalToolSurfaceHandle::mark_pending_failed",
@@ -158,6 +165,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceCallStarted { surface_id },
             "ExternalToolSurfaceHandle::call_started",
@@ -165,6 +173,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceCallFinished { surface_id },
             "ExternalToolSurfaceHandle::call_finished",
@@ -172,6 +181,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceFinalizeRemovalClean { surface_id },
             "ExternalToolSurfaceHandle::finalize_removal_clean",
@@ -179,6 +189,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceFinalizeRemovalForced { surface_id },
             "ExternalToolSurfaceHandle::finalize_removal_forced",
@@ -186,6 +197,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceSnapshotAligned { epoch },
             "ExternalToolSurfaceHandle::snapshot_aligned",
@@ -193,6 +205,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SurfaceShutdown,
             "ExternalToolSurfaceHandle::shutdown_surface",

@@ -33,51 +33,6 @@ fn conservative_phase_one_capabilities() -> RealtimeCapabilities {
     }
 }
 
-fn channel_status(
-    state: RealtimeChannelState,
-    reason: Option<&str>,
-    attempt_count: u32,
-) -> RealtimeChannelStatus {
-    RealtimeChannelStatus {
-        state,
-        attempt_count,
-        next_retry_at: None,
-        deadline_at: None,
-        reason: reason.map(str::to_string),
-    }
-}
-
-pub(crate) fn realtime_status_from_runtime(
-    status: meerkat_runtime::RealtimeAttachmentStatus,
-) -> RealtimeChannelStatus {
-    match status {
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached => channel_status(
-            RealtimeChannelState::Closed,
-            Some("no realtime channel is open for this target"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound
-        | meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => channel_status(
-            RealtimeChannelState::Opening,
-            Some("realtime attachment is pending"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
-            channel_status(RealtimeChannelState::Ready, None, 0)
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment replacement is pending"),
-            1,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment requires reattach"),
-            1,
-        ),
-    }
-}
-
 /// W3-H: resolve a RealtimeChannelTarget to a concrete bridge session id.
 /// On mob-enabled builds this routes through the MobMcpState resolver
 /// (SessionTarget parses directly; MobMember reads the MobMachine's
@@ -108,35 +63,6 @@ async fn resolve_realtime_target_session(
                 .to_string(),
         ),
     }
-}
-
-pub async fn handle_realtime_status(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-    #[cfg(feature = "mob")] mob_state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
-) -> RpcResponse {
-    let params: RealtimeStatusParams = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-
-    let session_id = match resolve_realtime_target_session(
-        &params.target,
-        #[cfg(feature = "mob")]
-        mob_state,
-    )
-    .await
-    {
-        Ok(sid) => sid,
-        Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
-    };
-    let status = match adapter.realtime_attachment_status(&session_id).await {
-        Ok(status) => realtime_status_from_runtime(status),
-        Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
-    };
-
-    RpcResponse::success(id, RealtimeStatusResult { status })
 }
 
 pub async fn handle_realtime_capabilities(
@@ -172,12 +98,40 @@ pub async fn handle_realtime_capabilities(
     RpcResponse::success(id, RealtimeCapabilitiesResult { capabilities })
 }
 
+pub async fn handle_realtime_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    adapter: &dyn SessionServiceRuntimeExt,
+    #[cfg(feature = "mob")] mob_state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
+) -> RpcResponse {
+    let params: RealtimeStatusParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+
+    let session_id = match resolve_realtime_target_session(
+        &params.target,
+        #[cfg(feature = "mob")]
+        mob_state,
+    )
+    .await
+    {
+        Ok(sid) => sid,
+        Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
+    };
+
+    match adapter.realtime_channel_status(&session_id).await {
+        Ok(status) => RpcResponse::success(id, RealtimeStatusResult { status }),
+        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
+    }
+}
+
 pub async fn handle_realtime_open_info(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
     realtime_ws_host: Option<&crate::realtime_ws::RealtimeWsHost>,
-    realm_id: Option<&str>,
+    realm_id: Option<&meerkat_core::connection::RealmId>,
     #[cfg(feature = "mob")] mob_state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
 ) -> RpcResponse {
     let params: RealtimeOpenRequest = match parse_params(params) {
@@ -225,7 +179,7 @@ pub async fn handle_realtime_open_info(
     };
 
     let open_info = realtime_ws_host
-        .issue_open_info(params, capabilities, realm_id.map(str::to_string))
+        .issue_open_info(params, capabilities, realm_id.map(ToString::to_string))
         .await;
     RpcResponse::success(id, open_info)
 }

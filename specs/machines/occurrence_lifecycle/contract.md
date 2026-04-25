@@ -47,6 +47,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Skipped`
 - `Misfired`
 - `Superseded`
+- `OccurrencesSuperseded`(occurrence_id: OccurrenceId, superseding_revision: u64)
 - `DeliveryFailed`
 - `LeaseExpired`
 
@@ -98,7 +99,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `SupersedePendingOrLive`
 - From: `Pending`, `Claimed`, `Dispatching`, `AwaitingCompletion`
 - On: `Supersede`(superseded_by_revision, at_utc_ms)
-- Emits: `Superseded`
+- Emits: `Superseded`, `OccurrencesSuperseded`
 - To: `Superseded`
 
 ### `DeliveryFailedFromClaimedOrLive`

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::ops_lifecycle::{
@@ -47,10 +47,22 @@ fn mob_member_spec(name: &str) -> OperationSpec {
 }
 
 fn peer_handle(name: &str) -> OperationPeerHandle {
+    // Wave-c C-6r: tests construct `TrustedPeerDescriptor` via the
+    // string-shaped `new` helper; a UUIDv5 slug from the name gives
+    // every test a stable peer_id without needing a live
+    // `CommsRuntime::public_key()` handle. The C-5 pubkey field
+    // defaults to zero — legitimate for inproc test peers that rely
+    // on the router's identity map rather than envelope-signature
+    // verification.
+    let peer_id = meerkat_core::comms::PeerId::new();
     OperationPeerHandle {
-        peer_name: name.into(),
-        trusted_peer: TrustedPeerSpec::new(name, format!("{name}-id"), format!("inproc://{name}"))
-            .unwrap(),
+        peer_name: meerkat_core::comms::PeerName::new(name).unwrap(),
+        trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
+            name,
+            peer_id.as_str(),
+            format!("inproc://{name}"),
+        )
+        .unwrap(),
     }
 }
 
@@ -65,7 +77,6 @@ fn op_result(id: &meerkat_core::ops_lifecycle::OperationId, content: &str) -> Op
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_register_progress_peer_ready_complete_and_watch() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = mob_member_spec("member-alpha");
@@ -138,7 +149,6 @@ async fn ops_lifecycle_contract_register_progress_peer_ready_complete_and_watch(
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes() {
     let registry = RuntimeOpsLifecycleRegistry::new();
 
@@ -221,7 +231,6 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_terminate_owner_resolves_all_pending_watches_once() {
     let registry = RuntimeOpsLifecycleRegistry::new();
 
@@ -285,7 +294,6 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_a = SessionId::new();
@@ -325,7 +333,6 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
 }
 
 #[tokio::test]
-#[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_background_events() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
@@ -374,7 +381,6 @@ async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_ba
 // ─── Phase B contract tests ───
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_bounded_completed_retention_evicts_oldest() {
     let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
         max_completed: 3,
@@ -416,7 +422,6 @@ async fn ops_lifecycle_contract_bounded_completed_retention_evicts_oldest() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_multi_listener_completion_all_receive_outcome() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = background_spec("multi-listen");
@@ -440,7 +445,6 @@ async fn ops_lifecycle_contract_multi_listener_completion_all_receive_outcome() 
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
     let registry = RuntimeOpsLifecycleRegistry::new();
 
@@ -494,7 +498,6 @@ async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_wait_all_unknown_id_returns_not_found() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let unknown = OperationId::new();
@@ -503,7 +506,6 @@ async fn ops_lifecycle_contract_wait_all_unknown_id_returns_not_found() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_collect_completed_drains_terminal_operations() {
     let registry = RuntimeOpsLifecycleRegistry::new();
 
@@ -535,7 +537,6 @@ async fn ops_lifecycle_contract_collect_completed_drains_terminal_operations() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_snapshot_includes_peer_handle() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = mob_member_spec("peer-snap");
@@ -552,11 +553,10 @@ async fn ops_lifecycle_contract_snapshot_includes_peer_handle() {
 
     let snap2 = registry.snapshot(&op_id).unwrap();
     assert!(snap2.peer_handle.is_some());
-    assert_eq!(snap2.peer_handle.unwrap().peer_name, "peer-snap");
+    assert_eq!(snap2.peer_handle.unwrap().peer_name.as_str(), "peer-snap");
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_snapshot_includes_timestamps() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = background_spec("timestamps");
@@ -587,7 +587,6 @@ async fn ops_lifecycle_contract_snapshot_includes_timestamps() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_max_concurrent_enforcement() {
     let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
         max_completed: 256,
@@ -624,7 +623,6 @@ async fn ops_lifecycle_contract_max_concurrent_enforcement() {
 }
 
 #[tokio::test]
-#[ignore = "Phase B ops-lifecycle upgrade contract"]
 async fn ops_lifecycle_contract_max_concurrent_none_means_unlimited() {
     let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
         max_completed: 256,

@@ -34,6 +34,12 @@ pub enum WireRuntimeBinding {
         address: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bootstrap_token: Option<BridgeBootstrapToken>,
+        /// Ed25519 signing pubkey (32 bytes) of the external peer. Required
+        /// for the supervisor to install a non-zero-pubkey trust entry so
+        /// real-comms signed-envelope replies admit past ingress trust
+        /// check. Absent on legacy bindings that pre-date pubkey plumbing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pubkey: Option<[u8; 32]>,
     },
 }
 
@@ -114,7 +120,12 @@ pub struct MobToolConfigInput {
 }
 
 /// Profile binding input: either an inline profile or a realm profile reference.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Not `Eq`: `Inline(MobProfileInput)` transitively carries float provider
+/// params (`temperature`, `top_p`) so `Eq` cannot be derived without
+/// losing fidelity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum MobProfileBindingInput {
@@ -127,7 +138,7 @@ pub enum MobProfileBindingInput {
     Inline(MobProfileInput),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobProfileInput {
@@ -148,8 +159,11 @@ pub struct MobProfileInput {
     pub max_inline_peer_notifications: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
+    /// Non-`Eq` field: `WireProviderParamsOverride` contains float scalars
+    /// (`temperature`, `top_p`) so the struct can't derive `Eq` without
+    /// losing fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,7 +406,9 @@ const fn default_event_router_buffer_size() -> usize {
 /// bookkeeping fields such as internal owner/runtime bindings,
 /// `session_cleanup_policy`, `is_implicit`, and internal-only profile tool
 /// bundles are intentionally not part of this schema.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Not `Eq`: `profiles` transitively carries float provider params.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobDefinitionInput {
@@ -438,12 +454,22 @@ pub struct MobCreateResult {
 }
 
 /// Minimal trusted peer spec for public mob wiring surfaces.
+///
+/// `pubkey` is the Ed25519 signing public key (32 bytes) required so the
+/// receiver can verify envelope signatures after trust registration.
+/// Serialized as a 32-element JSON array of numbers (matching
+/// `BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —
+/// the corresponding `TrustedPeerDescriptor::pubkey` will then be all
+/// zeros, which makes signature verification fail closed. Production
+/// clients MUST send the real pubkey.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireTrustedPeerSpec {
     pub name: String,
     pub peer_id: String,
     pub address: String,
+    #[serde(default)]
+    pub pubkey: [u8; 32],
 }
 
 /// Target for a mob wire/unwire call.

@@ -4,6 +4,10 @@
 use crate::tokio;
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::lifecycle::run_primitive::{
+    AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
+    StructuredProviderExtension,
+};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, StopReason,
@@ -23,8 +27,10 @@ pub struct LlmClientAdapter {
     model: String,
     /// Optional channel to emit streaming text deltas.
     event_tx: Option<mpsc::Sender<AgentEvent>>,
-    /// Provider-specific parameters to pass with every request.
-    provider_params: Option<Value>,
+    /// Default typed per-request provider-specific knobs. Overridden on
+    /// a per-call basis when [`AgentLlmClient::stream_response`] is
+    /// invoked with `Some(provider_params)`.
+    provider_params: Option<ProviderTag>,
     /// Per-interaction event tap for streaming events to subscribers.
     event_tap: meerkat_core::EventTap,
 }
@@ -55,8 +61,10 @@ impl LlmClientAdapter {
         }
     }
 
-    /// Set provider-specific parameters to pass with every request.
-    pub fn with_provider_params(mut self, params: Option<Value>) -> Self {
+    /// Set default typed provider-specific parameters to apply on every
+    /// request. Per-call `Option<&Value>` overrides from
+    /// [`AgentLlmClient::stream_response`] take precedence when present.
+    pub fn with_provider_params(mut self, params: Option<ProviderTag>) -> Self {
         self.provider_params = params;
         self
     }
@@ -65,6 +73,37 @@ impl LlmClientAdapter {
     pub fn with_event_tap(mut self, tap: meerkat_core::EventTap) -> Self {
         self.event_tap = tap;
         self
+    }
+
+    /// Project the untyped `Option<&Value>` coming from
+    /// [`AgentLlmClient::stream_response`] into a typed
+    /// [`ProviderTag`] rooted in the adapter's provider. Unknown keys
+    /// fall through to `ProviderTag::Unknown { bag }` rather than
+    /// silently dropping (see `StructuredProviderExtension`).
+    fn project_value_to_provider_tag(&self, value: &Value) -> ProviderTag {
+        let provider = self.client.provider();
+        let fallback_unknown = |ns: &str| ProviderTag::Unknown {
+            bag: StructuredProviderExtension {
+                namespace: ns.to_string(),
+                key: "provider_params".to_string(),
+                body: value.to_string(),
+            },
+        };
+        match provider {
+            "anthropic" => match AnthropicProviderTag::from_legacy_value(value) {
+                Ok(t) => ProviderTag::Anthropic(t),
+                Err(_) => fallback_unknown("anthropic"),
+            },
+            "openai" => match OpenAiProviderTag::from_legacy_value(value) {
+                Ok(t) => ProviderTag::OpenAi(t),
+                Err(_) => fallback_unknown("openai"),
+            },
+            "gemini" | "google" => match GeminiProviderTag::from_legacy_value(value) {
+                Ok(t) => ProviderTag::Gemini(t),
+                Err(_) => fallback_unknown("gemini"),
+            },
+            other => fallback_unknown(other),
+        }
     }
 }
 
@@ -84,9 +123,10 @@ impl AgentLlmClient for LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
-        let effective_params = provider_params
-            .cloned()
-            .or_else(|| self.provider_params.clone());
+        let effective_params = match provider_params {
+            Some(value) => Some(self.project_value_to_provider_tag(value)),
+            None => self.provider_params.clone(),
+        };
 
         let request = LlmRequest {
             model: self.model.clone(),

@@ -17,6 +17,7 @@ use meerkat_contracts::{
 };
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
+use meerkat_mob::runtime::MobMemberSnapshot;
 use meerkat_mob::{
     AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobId,
     MobMemberStatus, MobRespawnError, MobRuntimeMode, RunId, SpawnMemberSpec, SpawnResult,
@@ -103,6 +104,35 @@ fn member_list_entry_wire(
         error: entry.error.clone(),
         is_final: entry.is_final,
     }
+}
+
+/// Project the deep member-status snapshot into its explicit RPC control
+/// shape. The domain snapshot intentionally skips runtime incarnation atoms in
+/// generic serde so app-facing receipts cannot leak them by accident; this
+/// endpoint owns the diagnostic/control contract and therefore opts in.
+fn member_status_payload(snapshot: &MobMemberSnapshot) -> serde_json::Value {
+    let mut value = match serde_json::to_value(snapshot) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                "failed to serialize MobMemberSnapshot for mob/member_status"
+            );
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+    };
+    let (agent_runtime_id, fence_token) = snapshot.runtime_identity_fields();
+    if let serde_json::Value::Object(fields) = &mut value {
+        fields.insert(
+            "agent_runtime_id".to_string(),
+            serde_json::to_value(agent_runtime_id).unwrap_or(serde_json::Value::Null),
+        );
+        fields.insert(
+            "fence_token".to_string(),
+            serde_json::json!(fence_token.get()),
+        );
+    }
+    value
 }
 
 pub async fn handle_create(
@@ -201,6 +231,7 @@ pub async fn handle_members(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobSpawnParams {
     pub mob_id: String,
     pub profile: String,
@@ -263,6 +294,13 @@ pub struct MobSpawnParams {
     /// mob definition.
     #[serde(default)]
     pub override_profile: Option<meerkat_mob::Profile>,
+    /// Explicit provider binding for this member's session build.
+    ///
+    /// The mob runtime refuses ambient credential selection; callers
+    /// that spawn live model-backed members must name the realm binding
+    /// that owns auth resolution.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 pub async fn handle_spawn(
@@ -292,10 +330,12 @@ pub async fn handle_spawn(
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             } => meerkat_mob::RuntimeBinding::External {
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             },
         });
     }
@@ -319,6 +359,9 @@ pub async fn handle_spawn(
     }
     if let Some(override_profile) = params.override_profile {
         spec.override_profile = Some(override_profile);
+    }
+    if let Some(connection_ref) = params.connection_ref {
+        spec.connection_ref = Some(connection_ref);
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
@@ -353,6 +396,8 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -390,6 +435,7 @@ pub async fn handle_spawn_many(
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
         spec.additional_instructions = s.additional_instructions.clone();
+        spec.connection_ref = s.connection_ref.clone();
         specs.push(spec);
     }
 
@@ -1243,7 +1289,8 @@ async fn resolve_member_ref(
         .into_iter()
         .find(|entry| entry.agent_identity == identity)
         .ok_or_else(|| format!("member {identity} not found in mob {mob_id}"))?;
-    Ok((mob_id, identity, entry.agent_runtime_id, entry.fence_token))
+    let (agent_runtime_id, fence_token) = entry.binding_atoms();
+    Ok((mob_id, identity, agent_runtime_id, fence_token))
 }
 
 pub async fn handle_submit_work(
@@ -1283,7 +1330,7 @@ pub async fn handle_submit_work(
         .await
     {
         Ok(receipt) => {
-            let identity_str = receipt.runtime_id.identity.to_string();
+            let identity_str = receipt.runtime_id().identity.to_string();
             let body = MobSubmitWorkResult {
                 mob_id: mob_id.to_string(),
                 work_ref: receipt.work_ref.to_string(),
@@ -1367,7 +1414,7 @@ pub async fn handle_member_status(
         )
         .await
     {
-        Ok(snapshot) => RpcResponse::success(id, serde_json::json!(snapshot)),
+        Ok(snapshot) => RpcResponse::success(id, member_status_payload(&snapshot)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1607,6 +1654,21 @@ pub async fn handle_mob_turn_start(
         Ok(h) => h,
         Err(err) => return invalid_params(id, err.to_string()),
     };
+    let runtime_mode = handle
+        .list_members()
+        .await
+        .into_iter()
+        .find(|entry| entry.agent_identity == identity)
+        .map(|entry| entry.runtime_mode);
+    if matches!(runtime_mode, Some(MobRuntimeMode::AutonomousHost)) {
+        return invalid_params(
+            id,
+            format!(
+                "mob/turn_start is only valid for turn_driven members; \
+                 autonomous member '{identity}' is driven by mob kickoff and mob/member_send"
+            ),
+        );
+    }
     let session_id = match handle.resolve_bridge_session_id(&identity).await {
         Some(sid) => sid,
         None => {
@@ -1675,10 +1737,12 @@ fn spawn_spec_from_wire(
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             } => meerkat_mob::RuntimeBinding::External {
                 peer_id,
                 address,
                 bootstrap_token,
+                pubkey,
             },
         });
     }
@@ -1962,6 +2026,10 @@ mod tests {
                 "peer_description": "",
                 "external_addressable": false
             },
+            "connection_ref": {
+                "realm": "dev",
+                "binding": "default_anthropic"
+            },
         });
         let params: MobSpawnParams =
             serde_json::from_value(value).expect("spawn params with full surface deserialize");
@@ -2002,6 +2070,12 @@ mod tests {
             .as_ref()
             .expect("override_profile round-trips through serde");
         assert_eq!(override_profile.model, "claude-sonnet-4-6");
+        let connection_ref = params
+            .connection_ref
+            .as_ref()
+            .expect("connection_ref round-trips through serde");
+        assert_eq!(connection_ref.realm.as_str(), "dev");
+        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
 
         // And all older fields that aren't set stay None so the additive
         // wire extension doesn't break prior callers.
@@ -2017,6 +2091,7 @@ mod tests {
         assert!(minimal_params.budget_split_policy.is_none());
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
+        assert!(minimal_params.connection_ref.is_none());
     }
 
     #[test]

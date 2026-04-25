@@ -12,46 +12,25 @@ use crate::roster::RosterEntry;
 // DisposalStep
 // ---------------------------------------------------------------------------
 
-/// Named cleanup step, ordered by execution priority.
-///
-/// Ordering invariants (documented + tested):
-///   - `StopHostLoop` first — member must not be running when peers learn of
-///     retirement
-///   - `NotifyPeers` before `RemoveTrustEdges` — peers should hear "I'm
-///     leaving" while they can still verify the sender's identity
-///   - `ArchiveSession` after trust cleanup — session cannot receive new comms
-///     after trust is gone
-///   - `PruneWireEdgeLocks` is infallible finalization, runs in the finally
-///     block alongside roster removal
-///
-/// `RemoveFromRoster` is deliberately **not** a variant — it runs
-/// unconditionally in `dispose_member`'s finally block, outside the
-/// policy-driven loop. This makes it structurally impossible for a policy to
-/// skip or abort before roster removal.
-///
-/// Adding a variant forces a match arm in `MobActor::execute_step`
-/// (compiler-enforced).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum DisposalStep {
     StopHostLoop,
     NotifyPeers,
-    RemoveTrustEdges,
     ArchiveSession,
 }
 
 impl DisposalStep {
     /// The ordered sequence of policy-driven steps.
-    pub(super) const ORDERED: [DisposalStep; 4] = [
+    pub(super) const ORDERED: [DisposalStep; 3] = [
         DisposalStep::StopHostLoop,
         DisposalStep::NotifyPeers,
-        DisposalStep::RemoveTrustEdges,
         DisposalStep::ArchiveSession,
     ];
 
     /// Whether this step involves peer communication that is expected to fail
     /// during concurrent bulk teardown.
     pub(super) fn is_peer_step(self) -> bool {
-        matches!(self, Self::NotifyPeers | Self::RemoveTrustEdges)
+        matches!(self, Self::NotifyPeers)
     }
 }
 
@@ -60,7 +39,6 @@ impl std::fmt::Display for DisposalStep {
         match self {
             Self::StopHostLoop => f.write_str("StopHostLoop"),
             Self::NotifyPeers => f.write_str("NotifyPeers"),
-            Self::RemoveTrustEdges => f.write_str("RemoveTrustEdges"),
             Self::ArchiveSession => f.write_str("ArchiveSession"),
         }
     }
@@ -261,7 +239,6 @@ mod tests {
         // Verify the predicate classifies steps correctly.
         assert!(!DisposalStep::StopHostLoop.is_peer_step());
         assert!(DisposalStep::NotifyPeers.is_peer_step());
-        assert!(DisposalStep::RemoveTrustEdges.is_peer_step());
         assert!(!DisposalStep::ArchiveSession.is_peer_step());
     }
 
@@ -301,7 +278,6 @@ mod tests {
     #[test]
     fn test_disposal_step_ordering_invariants() {
         let steps = DisposalStep::ORDERED;
-        // StopHostLoop must come before NotifyPeers
         let stop_idx = steps
             .iter()
             .position(|s| *s == DisposalStep::StopHostLoop)
@@ -309,10 +285,6 @@ mod tests {
         let notify_idx = steps
             .iter()
             .position(|s| *s == DisposalStep::NotifyPeers)
-            .unwrap();
-        let trust_idx = steps
-            .iter()
-            .position(|s| *s == DisposalStep::RemoveTrustEdges)
             .unwrap();
         let archive_idx = steps
             .iter()
@@ -324,12 +296,8 @@ mod tests {
             "StopHostLoop must precede NotifyPeers"
         );
         assert!(
-            notify_idx < trust_idx,
-            "NotifyPeers must precede RemoveTrustEdges"
-        );
-        assert!(
-            trust_idx < archive_idx,
-            "RemoveTrustEdges must precede ArchiveSession"
+            notify_idx < archive_idx,
+            "NotifyPeers must precede ArchiveSession"
         );
     }
 
@@ -337,10 +305,6 @@ mod tests {
     fn test_disposal_step_display() {
         assert_eq!(DisposalStep::StopHostLoop.to_string(), "StopHostLoop");
         assert_eq!(DisposalStep::NotifyPeers.to_string(), "NotifyPeers");
-        assert_eq!(
-            DisposalStep::RemoveTrustEdges.to_string(),
-            "RemoveTrustEdges"
-        );
         assert_eq!(DisposalStep::ArchiveSession.to_string(), "ArchiveSession");
     }
 }

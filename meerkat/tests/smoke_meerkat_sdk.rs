@@ -1,5 +1,10 @@
 #![cfg(feature = "integration-real-tests")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 //!
 //! E2E smoke tests for the Meerkat native Rust SDK.
 //!
@@ -45,7 +50,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
-        provider_params: Option<&serde_json::Value>,
+        _provider_params: Option<&serde_json::Value>,
     ) -> Result<LlmStreamResult, AgentError> {
         let request = LlmRequest {
             model: self.model.clone(),
@@ -54,7 +59,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             max_tokens,
             temperature,
             stop_sequences: None,
-            provider_params: provider_params.cloned(),
+            provider_params: None,
         };
 
         let mut stream = self.client.stream(&request);
@@ -1216,8 +1221,6 @@ mod scenario_09_session_service {
 
             skill_references: None,
             flow_tool_overlay: None,
-            additional_instructions: None,
-            execution_kind: None,
         };
 
         let turn_result = service
@@ -1681,8 +1684,6 @@ mod scenario_22_runtime_host_comms {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
-                additional_instructions: None,
-                execution_kind: None,
             };
 
             let result = self
@@ -1795,7 +1796,10 @@ mod scenario_22_runtime_host_comms {
             "You are Agent A. Wait for messages.".to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(true),
+                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(60),
+                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
+                    }),
                     ..Default::default()
                 },
             ),

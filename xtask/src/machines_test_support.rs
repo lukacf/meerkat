@@ -95,7 +95,7 @@ impl CanonicalRegistry {
             .machines
             .iter()
             .map(|schema| MachineEntry {
-                slug: machine_slug(&schema.machine),
+                slug: machine_slug(schema.machine.as_str()),
                 schema: schema.clone(),
             })
             .collect::<Vec<_>>();
@@ -104,7 +104,7 @@ impl CanonicalRegistry {
             .compositions
             .iter()
             .map(|schema| CompositionEntry {
-                slug: composition_slug(&schema.name),
+                slug: composition_slug(schema.name.as_str()),
                 schema: schema.clone(),
             })
             .collect::<Vec<_>>();
@@ -139,10 +139,12 @@ fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec
             entries
                 .iter()
                 .find(|entry| {
-                    entry.schema.machine == *wanted
+                    entry.schema.machine.as_str() == wanted.as_str()
                         || entry.slug == *wanted
-                        || legacy_machine_slug(&entry.schema.machine) == Some(wanted.as_str())
-                        || entry.schema.machine.strip_suffix("Machine") == Some(wanted.as_str())
+                        || legacy_machine_slug(entry.schema.machine.as_str())
+                            == Some(wanted.as_str())
+                        || entry.schema.machine.as_str().strip_suffix("Machine")
+                            == Some(wanted.as_str())
                 })
                 .cloned()
                 .ok_or_else(|| anyhow!("unknown machine selection `{wanted}`"))
@@ -163,7 +165,9 @@ fn select_compositions(
         .map(|wanted| {
             entries
                 .iter()
-                .find(|entry| entry.schema.name == *wanted || entry.slug == *wanted)
+                .find(|entry| {
+                    entry.schema.name.as_str() == wanted.as_str() || entry.slug == *wanted
+                })
                 .cloned()
                 .ok_or_else(|| anyhow!("unknown composition selection `{wanted}`"))
         })

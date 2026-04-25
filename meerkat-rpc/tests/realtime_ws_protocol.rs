@@ -716,7 +716,10 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
         history_before_commit.message_count, baseline_history.message_count,
         "explicit_commit input should not reach canonical history before commit_turn"
     );
-    assert_eq!(history_before_commit.messages, baseline_history.messages);
+    assert_eq!(
+        serde_json::to_value(&history_before_commit.messages).unwrap(),
+        serde_json::to_value(&baseline_history.messages).unwrap(),
+    );
 
     ws_stream
         .send(WsMessage::Text(
@@ -745,8 +748,8 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
         baseline_history.message_count
     );
     assert_eq!(
-        history_still_uncommitted.messages,
-        baseline_history.messages
+        serde_json::to_value(&history_still_uncommitted.messages).unwrap(),
+        serde_json::to_value(&baseline_history.messages).unwrap(),
     );
 
     ws_stream
@@ -1023,7 +1026,10 @@ async fn explicit_commit_disconnect_discards_uncommitted_transcript() {
         history_after_disconnect.message_count, baseline_history.message_count,
         "disconnecting before commit_turn must not write staged transcript into canonical history"
     );
-    assert_eq!(history_after_disconnect.messages, baseline_history.messages);
+    assert_eq!(
+        serde_json::to_value(&history_after_disconnect.messages).unwrap(),
+        serde_json::to_value(&baseline_history.messages).unwrap(),
+    );
 
     server.abort();
 }
@@ -1675,7 +1681,10 @@ async fn cancelled_provider_turn_does_not_surface_public_completion_or_commit_pa
         history_after_cancel.message_count, baseline_history.message_count,
         "cancelled provider turn must not append partial assistant output into canonical history"
     );
-    assert_eq!(history_after_cancel.messages, baseline_history.messages);
+    assert_eq!(
+        serde_json::to_value(&history_after_cancel.messages).unwrap(),
+        serde_json::to_value(&baseline_history.messages).unwrap(),
+    );
 
     let _ = ws_stream.close(None).await;
     server.abort();

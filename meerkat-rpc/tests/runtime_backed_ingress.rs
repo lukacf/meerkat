@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -107,7 +112,6 @@ async fn read_response(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok server surface E2E suite"]
 async fn runtime_backed_ingress_red_ok_rpc_session_create_and_turn_start_roundtrip() {
     let (mut writer, mut reader, server_handle) = spawn_test_server();
 

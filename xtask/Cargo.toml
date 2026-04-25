@@ -35,6 +35,7 @@ meerkat-machine-codegen = { path = "../meerkat-machine-codegen", optional = true
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 
 [dev-dependencies]
+serde_yaml.workspace = true
 tempfile.workspace = true
 
 [[test]]

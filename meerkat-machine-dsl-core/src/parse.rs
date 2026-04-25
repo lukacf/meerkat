@@ -518,7 +518,7 @@ fn parse_effect_emit(input: ParseStream) -> Result<EffectEmitDef> {
 }
 
 // ---------------------------------------------------------------------------
-// disposition EffectName => local | external | routed [Machine1, ...]
+// disposition EffectName => local | external | routed [Machine1, ...] [handoff ProtocolName]
 // ---------------------------------------------------------------------------
 
 fn parse_disposition(input: ParseStream) -> Result<DispositionDef> {
@@ -539,11 +539,26 @@ fn parse_disposition(input: ParseStream) -> Result<DispositionDef> {
             ));
         }
     };
+    let handoff_protocol = if input.peek(Ident)
+        && input
+            .fork()
+            .parse::<Ident>()
+            .is_ok_and(|id| id == "handoff")
+    {
+        let _handoff_kw: Ident = input.parse()?;
+        Some(input.parse()?)
+    } else {
+        None
+    };
     // Optional trailing comma
     if input.peek(Token![,]) {
         let _: Token![,] = input.parse()?;
     }
-    Ok(DispositionDef { effect, kind })
+    Ok(DispositionDef {
+        effect,
+        kind,
+        handoff_protocol,
+    })
 }
 
 // ---------------------------------------------------------------------------

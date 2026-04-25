@@ -296,8 +296,9 @@ impl JsonlStore {
         let mut contents = String::new();
         file.read_to_string(&mut contents).await?;
 
-        let session: Session =
-            serde_json::from_str(&contents).map_err(StoreError::Serialization)?;
+        let session =
+            meerkat_core::session_migrations::deserialize_session_migrating(contents.as_bytes())
+                .map_err(|err| StoreError::Internal(err.to_string()))?;
 
         Ok(Some(session))
     }
@@ -345,6 +346,13 @@ impl JsonlStore {
 #[async_trait]
 impl SessionStore for JsonlStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
+        // boundary before the JSONL row is rewritten on disk.
+        let previous = self
+            .load_impl(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        meerkat_core::session_store::append_only_save_guard(session, previous.as_ref())?;
         self.save_impl(session)
             .await
             .map_err(into_session_store_error)

@@ -1,3 +1,7 @@
+use crate::identity::{
+    ActorId, CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
+    PhaseId, ProtocolId, RouteId, SignalVariantId, TransitionId,
+};
 use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
 use std::collections::BTreeMap;
@@ -5,7 +9,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
-    pub name: String,
+    pub name: CompositionId,
     pub machines: Vec<MachineInstance>,
     pub actors: Vec<ActorSchema>,
     pub handoff_protocols: Vec<EffectHandoffProtocol>,
@@ -28,7 +32,7 @@ pub struct CompositionSchema {
 /// Declares a named actor participating in a composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorSchema {
-    pub name: String,
+    pub name: ActorId,
     pub kind: ActorKind,
 }
 
@@ -48,19 +52,19 @@ pub enum ActorKind {
 pub struct EffectHandoffProtocol {
     /// Protocol name — must match `handoff_protocol` on the producing
     /// machine's `EffectDispositionRule`.
-    pub name: String,
+    pub name: ProtocolId,
     /// The machine instance that produces the effect.
-    pub producer_instance: String,
+    pub producer_instance: MachineInstanceId,
     /// The effect variant that triggers this protocol.
-    pub effect_variant: String,
+    pub effect_variant: EffectVariantId,
     /// The owner actor that realizes the effect.
-    pub realizing_actor: String,
+    pub realizing_actor: ActorId,
     /// Fields from the effect variant that correlate the obligation to feedback.
-    pub correlation_fields: Vec<String>,
+    pub correlation_fields: Vec<FieldId>,
     /// Fields from the effect variant captured in the outstanding obligation record.
     ///
     /// `correlation_fields` must be a subset of these fields.
-    pub obligation_fields: Vec<String>,
+    pub obligation_fields: Vec<FieldId>,
     /// Machine inputs the owner may submit as feedback.
     pub allowed_feedback_inputs: Vec<FeedbackInputRef>,
     /// When and how the obligation must be closed.
@@ -101,9 +105,9 @@ pub enum ProtocolGenerationMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackInputRef {
     /// The machine instance receiving the feedback.
-    pub machine_instance: String,
+    pub machine_instance: MachineInstanceId,
     /// The input variant on that machine.
-    pub input_variant: String,
+    pub input_variant: InputVariantId,
     /// Exhaustive field bindings used to construct the feedback input.
     pub field_bindings: Vec<FeedbackFieldBinding>,
 }
@@ -112,7 +116,7 @@ pub struct FeedbackInputRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackFieldBinding {
     /// Target field on the feedback input variant.
-    pub input_field: String,
+    pub input_field: FieldId,
     /// Source of the value used to populate the target field.
     pub source: FeedbackFieldSource,
 }
@@ -121,9 +125,28 @@ pub struct FeedbackFieldBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedbackFieldSource {
     /// Value must come from the outstanding obligation record.
-    ObligationField(String),
+    ObligationField(FieldId),
     /// Value is supplied by the realizing owner at feedback time.
+    /// Free-form string key into owner context — not a kernel identity.
     OwnerContext(String),
+}
+
+/// Rust-side HandleBridge metadata for one feedback input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleBridgeFeedbackBinding {
+    pub input_variant: InputVariantId,
+    pub method_name: String,
+    /// Per-call suffix applied to `obligation.<field>` references when
+    /// constructing handle-method arguments. Keys are typed obligation
+    /// field ids; values are suffixes like `.0`, `.clone()`, `.into()`.
+    /// Absent entries emit bare `obligation.<field>`.
+    pub arg_accessors: BTreeMap<FieldId, String>,
+    /// Positional list of obligation fields forwarded to the handle
+    /// method. `None` falls back to every obligation-sourced feedback
+    /// binding in declaration order. Use `Some(vec![...])` when the
+    /// feedback input carries correlation fields the handle method does
+    /// not accept.
+    pub forwarded_fields: Option<Vec<FieldId>>,
 }
 
 /// Explicit Rust binding metadata for generated protocol helper modules.
@@ -156,27 +179,9 @@ pub struct ProtocolRustBinding {
     /// Handle trait path used by `HandleBridge` helpers. Required when
     /// `generation_mode` or `additional_modes` contains `HandleBridge`.
     pub handle_trait_path: Option<String>,
-    /// Handle trait method name per feedback input. Keys are
-    /// `FeedbackInputRef::input_variant`, values are the snake_case method
-    /// on `handle_trait_path`. Required for each feedback entry emitted
-    /// through the `HandleBridge` mode.
-    pub handle_method_names: BTreeMap<String, String>,
-    /// Per-call suffix applied to `obligation.<field>` references when
-    /// constructing handle-method arguments. Keys are
-    /// `"{input_variant}.{obligation_field}"`; values are suffixes like
-    /// `.0`, `.clone()`, `.into()`. Absent entries emit bare
-    /// `obligation.<field>`. Lets the schema declare a single newtype
-    /// unwrap without ceding typed-field correctness.
-    pub handle_arg_accessors: BTreeMap<String, String>,
-    /// Per-feedback list of obligation field names (in positional order)
-    /// that get forwarded to the handle method. Keys are
-    /// `FeedbackInputRef::input_variant`. Absent entries fall back to
-    /// "every obligation-sourced field in binding order," which works
-    /// when the handle-method signature mirrors the feedback input. Set
-    /// this when the feedback input carries fields the handle method
-    /// does not accept (e.g., a correlation `wait_request_id` that the
-    /// runtime handle never uses).
-    pub handle_method_forwarded_fields: BTreeMap<String, Vec<String>>,
+    /// HandleBridge metadata per feedback input. Required for each
+    /// feedback entry emitted through the `HandleBridge` mode.
+    pub handle_feedback_bindings: Vec<HandleBridgeFeedbackBinding>,
     /// Kernel-codegen-emitted input enums wrap each variant in a named
     /// payload struct under an `inputs` submodule
     /// (`Input::VariantName(inputs::VariantName { ... })`). DSL-emitted
@@ -193,6 +198,17 @@ pub struct ProtocolRustBinding {
     ///
     /// Must not include the primary `generation_mode` — no duplicates.
     pub additional_modes: Vec<ProtocolGenerationMode>,
+}
+
+impl ProtocolRustBinding {
+    pub fn handle_feedback_binding(
+        &self,
+        input_variant: &InputVariantId,
+    ) -> Option<&HandleBridgeFeedbackBinding> {
+        self.handle_feedback_bindings
+            .iter()
+            .find(|binding| binding.input_variant == *input_variant)
+    }
 }
 
 /// Declares the primary generated helper return contract.
@@ -235,9 +251,9 @@ pub struct CompositionDriverRustBinding {
 /// this descriptor to install the driver and route observed effects through
 /// its decision function.
 ///
-/// This is the declarative seam that replaces the previously hand-crafted
-/// `flow_frame_loop` driver template: any composition can now declare a
-/// driver without the codegen knowing about it by name.
+/// This is the declarative seam that replaces hand-crafted per-composition
+/// driver templates: any composition can now declare a driver without the
+/// codegen knowing about it by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriver {
     /// Stable logical name — used for driver registration at runtime and
@@ -259,9 +275,9 @@ pub struct CompositionDriver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchedEffect {
     /// Producer machine instance id within the composition.
-    pub producer_instance: String,
+    pub producer_instance: MachineInstanceId,
     /// Effect variant name on that producer's effect enum.
-    pub effect_variant: String,
+    pub effect_variant: EffectVariantId,
 }
 
 /// A single dispatch route — the driver may emit inputs on this target.
@@ -270,22 +286,23 @@ pub struct DriverDispatchRoute {
     /// Stable logical dispatch name — the decision function references
     /// this when emitting an input, and the runtime dispatcher uses it
     /// to route the payload.
-    pub name: String,
+    pub name: RouteId,
     /// Target machine instance id within the composition.
-    pub target_instance: String,
+    pub target_instance: MachineInstanceId,
     /// Whether the dispatch lands on an input or a signal.
+    /// Structural kind tag; mirrors the arm of `input_variant`.
     pub target_kind: RouteTargetKind,
-    /// Variant name on the target's input/signal enum.
-    pub input_variant: String,
+    /// Typed slug for the dispatched variant, sum-tagged by input/signal.
+    pub input_variant: RouteVariantId,
 }
 
 /// Declares how a routed effect selects its concrete target machine instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTargetSelector {
     /// Route name this selector applies to.
-    pub route_name: String,
+    pub route_name: RouteId,
     /// Logical selector field on the destination side.
-    pub selector_field: String,
+    pub selector_field: FieldId,
     /// Source of the selector value.
     pub source: RouteBindingSource,
 }
@@ -293,7 +310,7 @@ pub struct RouteTargetSelector {
 /// Describes an atomic persistence bundle for a composition-owned driver plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionTransactionPlan {
-    /// Stable transaction-plan name.
+    /// Stable transaction-plan name. Free-form — not a kernel identity.
     pub name: String,
     /// Host/runtime trigger or entrypoint that requests this plan.
     pub trigger: String,
@@ -302,9 +319,9 @@ pub struct CompositionTransactionPlan {
     /// Existing store primitive that realizes the plan atomically.
     pub store_primitive: String,
     /// Deterministic routes included in the bundle.
-    pub route_names: Vec<String>,
+    pub route_names: Vec<RouteId>,
     /// Handoff protocols explicitly closed or emitted by the bundle.
-    pub protocol_names: Vec<String>,
+    pub protocol_names: Vec<ProtocolId>,
 }
 
 /// Determines when a handoff obligation is considered closed.
@@ -320,9 +337,10 @@ pub enum ClosurePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitness {
+    /// Stable witness name. Free-form; not a kernel identity.
     pub name: String,
     pub preload_inputs: Vec<CompositionWitnessInput>,
-    pub expected_routes: Vec<String>,
+    pub expected_routes: Vec<RouteId>,
     pub expected_scheduler_rules: Vec<SchedulerRule>,
     pub expected_states: Vec<CompositionWitnessState>,
     pub expected_transitions: Vec<CompositionWitnessTransition>,
@@ -332,28 +350,28 @@ pub struct CompositionWitness {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessInput {
-    pub machine: String,
-    pub input_variant: String,
+    pub machine: MachineInstanceId,
+    pub input_variant: InputVariantId,
     pub fields: Vec<CompositionWitnessField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessField {
-    pub field: String,
+    pub field: FieldId,
     pub expr: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessState {
-    pub machine: String,
-    pub phase: Option<String>,
+    pub machine: MachineInstanceId,
+    pub phase: Option<PhaseId>,
     pub fields: Vec<CompositionWitnessField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessTransition {
-    pub machine: String,
-    pub transition: String,
+    pub machine: MachineInstanceId,
+    pub transition: TransitionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,17 +464,21 @@ impl CompositionSchema {
         for machine in &self.machines {
             if !actor_ids.contains(machine.actor.as_str()) {
                 return Err(CompositionSchemaError::UnknownActor {
-                    actor: machine.actor.clone(),
+                    actor: machine.actor.as_str().to_owned(),
                 });
             }
-            let Some(actor_schema) = self.actors.iter().find(|a| a.name == machine.actor) else {
+            let Some(actor_schema) = self
+                .actors
+                .iter()
+                .find(|a| a.name.as_str() == machine.actor.as_str())
+            else {
                 return Err(CompositionSchemaError::UnknownActor {
-                    actor: machine.actor.clone(),
+                    actor: machine.actor.as_str().to_owned(),
                 });
             };
             if actor_schema.kind != ActorKind::Machine {
                 return Err(CompositionSchemaError::ActorKindMismatch {
-                    actor: machine.actor.clone(),
+                    actor: machine.actor.as_str().to_owned(),
                     expected: ActorKind::Machine,
                     actual: actor_schema.kind.clone(),
                 });
@@ -470,54 +492,54 @@ impl CompositionSchema {
         )?;
         for protocol in &self.handoff_protocols {
             let _ = unique_names(
-                protocol.correlation_fields.iter().map(String::as_str),
+                protocol.correlation_fields.iter().map(AsRef::as_ref),
                 "handoff correlation field",
             )?;
             let _ = unique_names(
-                protocol.obligation_fields.iter().map(String::as_str),
+                protocol.obligation_fields.iter().map(AsRef::as_ref),
                 "handoff obligation field",
             )?;
             for field in &protocol.correlation_fields {
                 if !protocol.obligation_fields.contains(field) {
                     return Err(
                         CompositionSchemaError::HandoffCorrelationFieldNotInObligation {
-                            protocol: protocol.name.clone(),
-                            field: field.clone(),
+                            protocol: protocol.name.as_str().to_owned(),
+                            field: field.as_str().to_owned(),
                         },
                     );
                 }
             }
             if !machine_ids.contains(protocol.producer_instance.as_str()) {
                 return Err(CompositionSchemaError::UnknownHandoffProducer {
-                    protocol: protocol.name.clone(),
-                    instance: protocol.producer_instance.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
+                    instance: protocol.producer_instance.as_str().to_owned(),
                 });
             }
             if !actor_ids.contains(protocol.realizing_actor.as_str()) {
                 return Err(CompositionSchemaError::UnknownHandoffActor {
-                    protocol: protocol.name.clone(),
-                    actor: protocol.realizing_actor.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
+                    actor: protocol.realizing_actor.as_str().to_owned(),
                 });
             }
             let Some(realizing) = self
                 .actors
                 .iter()
-                .find(|a| a.name == protocol.realizing_actor)
+                .find(|a| a.name.as_str() == protocol.realizing_actor.as_str())
             else {
                 return Err(CompositionSchemaError::UnknownHandoffActor {
-                    protocol: protocol.name.clone(),
-                    actor: protocol.realizing_actor.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
+                    actor: protocol.realizing_actor.as_str().to_owned(),
                 });
             };
             if realizing.kind != ActorKind::Owner {
                 return Err(CompositionSchemaError::HandoffActorNotOwner {
-                    protocol: protocol.name.clone(),
-                    actor: protocol.realizing_actor.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
+                    actor: protocol.realizing_actor.as_str().to_owned(),
                 });
             }
             if protocol.rust.module_path.is_empty() {
                 return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                    protocol: protocol.name.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
                     detail: "module_path must not be empty".into(),
                 });
             }
@@ -526,7 +548,7 @@ impl CompositionSchema {
             for (idx, extra) in protocol.rust.additional_modes.iter().enumerate() {
                 if *extra == protocol.rust.generation_mode {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail: format!(
                             "additional_modes[{idx}] duplicates the primary generation_mode ({extra:?})"
                         ),
@@ -534,7 +556,7 @@ impl CompositionSchema {
                 }
                 if protocol.rust.additional_modes[..idx].contains(extra) {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail: format!("additional_modes contains {extra:?} more than once"),
                     });
                 }
@@ -543,8 +565,8 @@ impl CompositionSchema {
             for feedback in &protocol.allowed_feedback_inputs {
                 if !machine_ids.contains(feedback.machine_instance.as_str()) {
                     return Err(CompositionSchemaError::UnknownHandoffFeedbackMachine {
-                        protocol: protocol.name.clone(),
-                        machine: feedback.machine_instance.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
+                        machine: feedback.machine_instance.as_str().to_owned(),
                     });
                 }
             }
@@ -556,12 +578,12 @@ impl CompositionSchema {
         for route in &self.routes {
             if !machine_ids.contains(route.from_machine.as_str()) {
                 return Err(CompositionSchemaError::UnknownMachine {
-                    machine: route.from_machine.clone(),
+                    machine: route.from_machine.as_str().to_owned(),
                 });
             }
             if !machine_ids.contains(route.to.machine.as_str()) {
                 return Err(CompositionSchemaError::UnknownMachine {
-                    machine: route.to.machine.clone(),
+                    machine: route.to.machine.as_str().to_owned(),
                 });
             }
             let _ = unique_names(
@@ -576,12 +598,12 @@ impl CompositionSchema {
         for selector in &self.route_target_selectors {
             if !route_names.contains(selector.route_name.as_str()) {
                 return Err(CompositionSchemaError::UnknownRouteTargetSelectorRoute {
-                    route: selector.route_name.clone(),
+                    route: selector.route_name.as_str().to_owned(),
                 });
             }
-            if selector.selector_field.is_empty() {
+            if selector.selector_field.as_str().is_empty() {
                 return Err(CompositionSchemaError::InvalidRouteTargetSelector {
-                    route: selector.route_name.clone(),
+                    route: selector.route_name.as_str().to_owned(),
                     detail: "selector_field must not be empty".into(),
                 });
             }
@@ -590,13 +612,13 @@ impl CompositionSchema {
         if let Some(driver) = &self.driver {
             if driver.name.is_empty() {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
-                    composition: self.name.clone(),
+                    composition: self.name.as_str().to_owned(),
                     detail: "driver name must not be empty".into(),
                 });
             }
             if driver.rust.module_path.is_empty() {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
-                    composition: self.name.clone(),
+                    composition: self.name.as_str().to_owned(),
                     detail: "module_path must not be empty".into(),
                 });
             }
@@ -606,7 +628,7 @@ impl CompositionSchema {
                 || driver.rust.decision_type.is_empty()
             {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
-                    composition: self.name.clone(),
+                    composition: self.name.as_str().to_owned(),
                     detail: "driver_type, store_plan_type, work_type, and decision_type must not be empty"
                         .into(),
                 });
@@ -621,7 +643,7 @@ impl CompositionSchema {
                 .map(|watched| format!("{}::{}", watched.producer_instance, watched.effect_variant))
                 .collect();
             let _ = unique_names(
-                watched_keys.iter().map(String::as_str),
+                watched_keys.iter().map(AsRef::as_ref),
                 "composition driver watched effect",
             )?;
 
@@ -656,7 +678,7 @@ impl CompositionSchema {
                 if !route_names.contains(route_name.as_str()) {
                     return Err(CompositionSchemaError::UnknownTransactionPlanRoute {
                         plan: plan.name.clone(),
-                        route: route_name.clone(),
+                        route: route_name.as_str().to_owned(),
                     });
                 }
             }
@@ -664,7 +686,7 @@ impl CompositionSchema {
                 if !protocol_names.contains(protocol_name.as_str()) {
                     return Err(CompositionSchemaError::UnknownTransactionPlanProtocol {
                         plan: plan.name.clone(),
-                        protocol: protocol_name.clone(),
+                        protocol: protocol_name.as_str().to_owned(),
                     });
                 }
             }
@@ -673,7 +695,7 @@ impl CompositionSchema {
         for entry_input in &self.entry_inputs {
             if !machine_ids.contains(entry_input.machine.as_str()) {
                 return Err(CompositionSchemaError::UnknownMachine {
-                    machine: entry_input.machine.clone(),
+                    machine: entry_input.machine.as_str().to_owned(),
                 });
             }
         }
@@ -687,7 +709,7 @@ impl CompositionSchema {
             for preload in &witness.preload_inputs {
                 if !machine_ids.contains(preload.machine.as_str()) {
                     return Err(CompositionSchemaError::UnknownMachine {
-                        machine: preload.machine.clone(),
+                        machine: preload.machine.as_str().to_owned(),
                     });
                 }
                 let _ = unique_names(
@@ -696,17 +718,17 @@ impl CompositionSchema {
                 )?;
             }
             let _ = unique_names(
-                witness.expected_routes.iter().map(String::as_str),
+                witness.expected_routes.iter().map(AsRef::as_ref),
                 "witness expected route",
             )?;
             for route in &witness.expected_routes {
                 if !route_names.contains(route.as_str()) {
                     return Err(CompositionSchemaError::UnknownWitnessRoute {
                         witness: witness.name.clone(),
-                        route: route.clone(),
+                        route: route.as_str().to_owned(),
                     });
                 }
-                witnessed_routes.insert(route.clone());
+                witnessed_routes.insert(route.as_str().to_owned());
             }
             for rule in &witness.expected_scheduler_rules {
                 if !self
@@ -729,9 +751,9 @@ impl CompositionSchema {
         }
 
         for route in &self.routes {
-            if !witnessed_routes.contains(&route.name) {
+            if !witnessed_routes.contains(route.name.as_str()) {
                 return Err(CompositionSchemaError::MissingWitnessRouteCoverage {
-                    route: route.name.clone(),
+                    route: route.name.as_str().to_owned(),
                 });
             }
         }
@@ -750,12 +772,12 @@ impl CompositionSchema {
         for priority in &self.actor_priorities {
             if !actor_ids.contains(priority.higher.as_str()) {
                 return Err(CompositionSchemaError::UnknownActor {
-                    actor: priority.higher.clone(),
+                    actor: priority.higher.as_str().to_owned(),
                 });
             }
             if !actor_ids.contains(priority.lower.as_str()) {
                 return Err(CompositionSchemaError::UnknownActor {
-                    actor: priority.lower.clone(),
+                    actor: priority.lower.as_str().to_owned(),
                 });
             }
         }
@@ -765,12 +787,12 @@ impl CompositionSchema {
                 SchedulerRule::PreemptWhenReady { higher, lower } => {
                     if !actor_ids.contains(higher.as_str()) {
                         return Err(CompositionSchemaError::UnknownActor {
-                            actor: higher.clone(),
+                            actor: higher.as_str().to_owned(),
                         });
                     }
                     if !actor_ids.contains(lower.as_str()) {
                         return Err(CompositionSchemaError::UnknownActor {
-                            actor: lower.clone(),
+                            actor: lower.as_str().to_owned(),
                         });
                     }
                 }
@@ -784,14 +806,14 @@ impl CompositionSchema {
             for actor in &invariant.references_actors {
                 if !actor_ids.contains(actor.as_str()) {
                     return Err(CompositionSchemaError::UnknownActor {
-                        actor: actor.clone(),
+                        actor: actor.as_str().to_owned(),
                     });
                 }
             }
             for machine in &invariant.references_machines {
                 if !machine_ids.contains(machine.as_str()) {
                     return Err(CompositionSchemaError::UnknownMachine {
-                        machine: machine.clone(),
+                        machine: machine.as_str().to_owned(),
                     });
                 }
             }
@@ -812,10 +834,10 @@ impl CompositionSchema {
                     if !present {
                         return Err(CompositionSchemaError::MissingRequiredRoute {
                             invariant: invariant.name.clone(),
-                            from_machine: from_machine.clone(),
-                            effect_variant: effect_variant.clone(),
-                            to_machine: to_machine.clone(),
-                            input_variant: input_variant.clone(),
+                            from_machine: from_machine.as_str().to_owned(),
+                            effect_variant: effect_variant.as_str().to_owned(),
+                            to_machine: to_machine.as_str().to_owned(),
+                            input_variant: input_variant.as_str().to_owned(),
                         });
                     }
                 }
@@ -834,10 +856,10 @@ impl CompositionSchema {
                     if !present {
                         return Err(CompositionSchemaError::MissingRequiredObservedInputRoute {
                             invariant: invariant.name.clone(),
-                            from_machine: from_machine.clone(),
-                            effect_variant: effect_variant.clone(),
-                            to_machine: to_machine.clone(),
-                            input_variant: input_variant.clone(),
+                            from_machine: from_machine.as_str().to_owned(),
+                            effect_variant: effect_variant.as_str().to_owned(),
+                            to_machine: to_machine.as_str().to_owned(),
+                            input_variant: input_variant.as_str().to_owned(),
                         });
                     }
                 }
@@ -858,11 +880,11 @@ impl CompositionSchema {
                     if !present {
                         return Err(CompositionSchemaError::MissingRequiredObservedRoute {
                             invariant: invariant.name.clone(),
-                            route_name: route_name.clone(),
-                            from_machine: from_machine.clone(),
-                            effect_variant: effect_variant.clone(),
-                            to_machine: to_machine.clone(),
-                            input_variant: input_variant.clone(),
+                            route_name: route_name.as_str().to_owned(),
+                            from_machine: from_machine.as_str().to_owned(),
+                            effect_variant: effect_variant.as_str().to_owned(),
+                            to_machine: to_machine.as_str().to_owned(),
+                            input_variant: input_variant.as_str().to_owned(),
                         });
                     }
                 }
@@ -874,8 +896,8 @@ impl CompositionSchema {
                     if !present {
                         return Err(CompositionSchemaError::MissingRequiredActorPriority {
                             invariant: invariant.name.clone(),
-                            higher: higher.clone(),
-                            lower: lower.clone(),
+                            higher: higher.as_str().to_owned(),
+                            lower: lower.as_str().to_owned(),
                         });
                     }
                 }
@@ -906,10 +928,10 @@ impl CompositionSchema {
                         if !present {
                             return Err(CompositionSchemaError::MissingOutcomeRoute {
                                 invariant: invariant.name.clone(),
-                                from_machine: from_machine.clone(),
-                                effect_variant: effect_variant.clone(),
-                                to_machine: target.machine.clone(),
-                                input_variant: target.input_variant.clone(),
+                                from_machine: from_machine.as_str().to_owned(),
+                                effect_variant: effect_variant.as_str().to_owned(),
+                                to_machine: target.machine.as_str().to_owned(),
+                                input_variant: target.input_variant.as_str().to_owned(),
                             });
                         }
                     }
@@ -926,9 +948,9 @@ impl CompositionSchema {
                     });
                     if !present {
                         return Err(CompositionSchemaError::MissingHandoffProtocol {
-                            from_instance: producer_instance.clone(),
-                            effect_variant: effect_variant.clone(),
-                            expected_protocol: protocol_name.clone(),
+                            from_instance: producer_instance.as_str().to_owned(),
+                            effect_variant: effect_variant.as_str().to_owned(),
+                            expected_protocol: protocol_name.as_str().to_owned(),
                         });
                     }
                 }
@@ -952,7 +974,7 @@ impl CompositionSchema {
         for machine in &self.machines {
             if !schema_names.contains(machine.machine_name.as_str()) {
                 return Err(CompositionSchemaError::UnknownMachineSchema {
-                    schema: machine.machine_name.clone(),
+                    schema: machine.machine_name.as_str().to_owned(),
                 });
             }
         }
@@ -963,11 +985,11 @@ impl CompositionSchema {
                 .find(|schema| {
                     self.machines.iter().any(|instance| {
                         instance.instance_id == route.from_machine
-                            && instance.machine_name == schema.machine
+                            && instance.machine_name.as_str() == schema.machine.as_str()
                     })
                 })
                 .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                    machine: route.from_machine.clone(),
+                    machine: route.from_machine.as_str().to_owned(),
                 })?;
 
             let to_schema = schemas
@@ -975,27 +997,27 @@ impl CompositionSchema {
                 .find(|schema| {
                     self.machines.iter().any(|instance| {
                         instance.instance_id == route.to.machine
-                            && instance.machine_name == schema.machine
+                            && instance.machine_name.as_str() == schema.machine.as_str()
                     })
                 })
                 .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                    machine: route.to.machine.clone(),
+                    machine: route.to.machine.as_str().to_owned(),
                 })?;
 
             let from_effects = from_schema
                 .effects
                 .variants_by_name()
                 .map_err(CompositionSchemaError::MachineSchema)?;
-            if !from_effects.contains(&route.effect_variant) {
+            if !from_effects.contains(route.effect_variant.as_str()) {
                 return Err(CompositionSchemaError::UnknownRouteEffect {
-                    machine: route.from_machine.clone(),
-                    effect: route.effect_variant.clone(),
+                    machine: route.from_machine.as_str().to_owned(),
+                    effect: route.effect_variant.as_str().to_owned(),
                 });
             }
 
             let from_variant = from_schema
                 .effects
-                .variant_named(&route.effect_variant)
+                .variant_named(route.effect_variant.as_str())
                 .map_err(CompositionSchemaError::MachineSchema)?;
             let to_variant = match route.to.kind {
                 RouteTargetKind::Input => {
@@ -1003,15 +1025,15 @@ impl CompositionSchema {
                         .inputs
                         .variants_by_name()
                         .map_err(CompositionSchemaError::MachineSchema)?;
-                    if !to_inputs.contains(&route.to.input_variant) {
+                    if !to_inputs.contains(route.to.input_variant.as_str()) {
                         return Err(CompositionSchemaError::UnknownRouteInput {
-                            machine: route.to.machine.clone(),
-                            input: route.to.input_variant.clone(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            input: route.to.input_variant.as_str().to_owned(),
                         });
                     }
                     to_schema
                         .inputs
-                        .variant_named(&route.to.input_variant)
+                        .variant_named(route.to.input_variant.as_str())
                         .map_err(CompositionSchemaError::MachineSchema)?
                 }
                 RouteTargetKind::Signal => {
@@ -1019,22 +1041,22 @@ impl CompositionSchema {
                         .signals
                         .variants_by_name()
                         .map_err(CompositionSchemaError::MachineSchema)?;
-                    if !to_signals.contains(&route.to.input_variant) {
+                    if !to_signals.contains(route.to.input_variant.as_str()) {
                         return Err(CompositionSchemaError::UnknownRouteSignal {
-                            machine: route.to.machine.clone(),
-                            signal: route.to.input_variant.clone(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            signal: route.to.input_variant.as_str().to_owned(),
                         });
                     }
                     to_schema
                         .signals
-                        .variant_named(&route.to.input_variant)
+                        .variant_named(route.to.input_variant.as_str())
                         .map_err(CompositionSchemaError::MachineSchema)?
                 }
             };
 
             for binding in &route.bindings {
                 let to_field = to_variant
-                    .field_named(&binding.to_field)
+                    .field_named(binding.to_field.as_str())
                     .map_err(CompositionSchemaError::MachineSchema)?;
 
                 match &binding.source {
@@ -1043,7 +1065,7 @@ impl CompositionSchema {
                         allow_named_alias,
                     } => {
                         let from_field_schema = from_variant
-                            .field_named(from_field)
+                            .field_named(from_field.as_str())
                             .map_err(CompositionSchemaError::MachineSchema)?;
 
                         let exact_match = from_field_schema.ty == to_field.ty;
@@ -1055,12 +1077,12 @@ impl CompositionSchema {
 
                         if !exact_match && !named_alias_match {
                             return Err(CompositionSchemaError::RouteFieldTypeMismatch {
-                                route: route.name.clone(),
-                                from_machine: route.from_machine.clone(),
-                                from_field: from_field.clone(),
+                                route: route.name.as_str().to_owned(),
+                                from_machine: route.from_machine.as_str().to_owned(),
+                                from_field: from_field.as_str().to_owned(),
                                 from_ty: from_field_schema.ty.clone(),
-                                to_machine: route.to.machine.clone(),
-                                to_field: binding.to_field.clone(),
+                                to_machine: route.to.machine.as_str().to_owned(),
+                                to_field: binding.to_field.as_str().to_owned(),
                                 to_ty: to_field.ty.clone(),
                             });
                         }
@@ -1068,17 +1090,17 @@ impl CompositionSchema {
                     RouteBindingSource::Literal(expr) => {
                         if !route_literal_expr_allowed(expr) {
                             return Err(CompositionSchemaError::UnsupportedRouteLiteral {
-                                route: route.name.clone(),
-                                to_machine: route.to.machine.clone(),
-                                to_field: binding.to_field.clone(),
+                                route: route.name.as_str().to_owned(),
+                                to_machine: route.to.machine.as_str().to_owned(),
+                                to_field: binding.to_field.as_str().to_owned(),
                             });
                         }
 
                         if !literal_matches_type(expr, &to_field.ty) {
                             return Err(CompositionSchemaError::RouteLiteralTypeMismatch {
-                                route: route.name.clone(),
-                                to_machine: route.to.machine.clone(),
-                                to_field: binding.to_field.clone(),
+                                route: route.name.as_str().to_owned(),
+                                to_machine: route.to.machine.as_str().to_owned(),
+                                to_field: binding.to_field.as_str().to_owned(),
                                 to_ty: to_field.ty.clone(),
                             });
                         }
@@ -1098,21 +1120,21 @@ impl CompositionSchema {
                 .find(|schema| {
                     self.machines.iter().any(|instance| {
                         instance.instance_id == entry_input.machine
-                            && instance.machine_name == schema.machine
+                            && instance.machine_name.as_str() == schema.machine.as_str()
                     })
                 })
                 .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                    machine: entry_input.machine.clone(),
+                    machine: entry_input.machine.as_str().to_owned(),
                 })?;
 
             let input_variants = machine_schema
                 .inputs
                 .variants_by_name()
                 .map_err(CompositionSchemaError::MachineSchema)?;
-            if !input_variants.contains(&entry_input.input_variant) {
+            if !input_variants.contains(entry_input.input_variant.as_str()) {
                 return Err(CompositionSchemaError::UnknownRouteInput {
-                    machine: entry_input.machine.clone(),
-                    input: entry_input.input_variant.clone(),
+                    machine: entry_input.machine.as_str().to_owned(),
+                    input: entry_input.input_variant.as_str().to_owned(),
                 });
             }
         }
@@ -1124,14 +1146,14 @@ impl CompositionSchema {
                     .find(|schema| {
                         self.machines.iter().any(|instance| {
                             instance.instance_id == watched.producer_instance
-                                && instance.machine_name == schema.machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
                         })
                     })
                     .ok_or_else(|| {
                         CompositionSchemaError::UnknownCompositionDriverWatchedMachine {
-                            composition: self.name.clone(),
+                            composition: self.name.as_str().to_owned(),
                             driver: driver.name.clone(),
-                            instance: watched.producer_instance.clone(),
+                            instance: watched.producer_instance.as_str().to_owned(),
                         }
                     })?;
 
@@ -1139,13 +1161,13 @@ impl CompositionSchema {
                     .effects
                     .variants_by_name()
                     .map_err(CompositionSchemaError::MachineSchema)?;
-                if !effect_variants.contains(&watched.effect_variant) {
+                if !effect_variants.contains(watched.effect_variant.as_str()) {
                     return Err(
                         CompositionSchemaError::UnknownCompositionDriverWatchedEffect {
-                            composition: self.name.clone(),
+                            composition: self.name.as_str().to_owned(),
                             driver: driver.name.clone(),
-                            instance: watched.producer_instance.clone(),
-                            effect_variant: watched.effect_variant.clone(),
+                            instance: watched.producer_instance.as_str().to_owned(),
+                            effect_variant: watched.effect_variant.as_str().to_owned(),
                         },
                     );
                 }
@@ -1157,14 +1179,14 @@ impl CompositionSchema {
                     .find(|schema| {
                         self.machines.iter().any(|instance| {
                             instance.instance_id == dispatch.target_instance
-                                && instance.machine_name == schema.machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
                         })
                     })
                     .ok_or_else(|| {
                         CompositionSchemaError::UnknownCompositionDriverDispatchMachine {
-                            composition: self.name.clone(),
+                            composition: self.name.as_str().to_owned(),
                             driver: driver.name.clone(),
-                            instance: dispatch.target_instance.clone(),
+                            instance: dispatch.target_instance.as_str().to_owned(),
                         }
                     })?;
 
@@ -1178,14 +1200,14 @@ impl CompositionSchema {
                         .variants_by_name()
                         .map_err(CompositionSchemaError::MachineSchema)?,
                 };
-                if !known_variants.contains(&dispatch.input_variant) {
+                if !known_variants.contains(dispatch.input_variant.as_str()) {
                     return Err(
                         CompositionSchemaError::UnknownCompositionDriverDispatchVariant {
-                            composition: self.name.clone(),
+                            composition: self.name.as_str().to_owned(),
                             driver: driver.name.clone(),
-                            instance: dispatch.target_instance.clone(),
+                            instance: dispatch.target_instance.as_str().to_owned(),
                             target_kind: dispatch.target_kind,
-                            variant: dispatch.input_variant.clone(),
+                            variant: dispatch.input_variant.as_str().to_owned(),
                         },
                     );
                 }
@@ -1199,34 +1221,34 @@ impl CompositionSchema {
                     .find(|schema| {
                         self.machines.iter().any(|instance| {
                             instance.instance_id == preload.machine
-                                && instance.machine_name == schema.machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
                         })
                     })
                     .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                        machine: preload.machine.clone(),
+                        machine: preload.machine.as_str().to_owned(),
                     })?;
 
                 let input_variant = machine_schema
                     .inputs
-                    .variant_named(&preload.input_variant)
+                    .variant_named(preload.input_variant.as_str())
                     .map_err(CompositionSchemaError::MachineSchema)?;
 
                 for field in &preload.fields {
                     let target_field = input_variant
-                        .field_named(&field.field)
+                        .field_named(field.field.as_str())
                         .map_err(CompositionSchemaError::MachineSchema)?;
                     if !route_literal_expr_allowed(&field.expr) {
                         return Err(CompositionSchemaError::UnsupportedWitnessLiteral {
                             witness: witness.name.clone(),
-                            machine: preload.machine.clone(),
-                            field: field.field.clone(),
+                            machine: preload.machine.as_str().to_owned(),
+                            field: field.field.as_str().to_owned(),
                         });
                     }
                     if !literal_matches_type(&field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessLiteralTypeMismatch {
                             witness: witness.name.clone(),
-                            machine: preload.machine.clone(),
-                            field: field.field.clone(),
+                            machine: preload.machine.as_str().to_owned(),
+                            field: field.field.as_str().to_owned(),
                             ty: target_field.ty.clone(),
                         });
                     }
@@ -1240,9 +1262,9 @@ impl CompositionSchema {
                     if !present {
                         return Err(CompositionSchemaError::MissingWitnessField {
                             witness: witness.name.clone(),
-                            machine: preload.machine.clone(),
-                            input_variant: preload.input_variant.clone(),
-                            field: field.name.clone(),
+                            machine: preload.machine.as_str().to_owned(),
+                            input_variant: preload.input_variant.as_str().to_owned(),
+                            field: field.name.as_str().to_owned(),
                         });
                     }
                 }
@@ -1254,11 +1276,11 @@ impl CompositionSchema {
                     .find(|schema| {
                         self.machines.iter().any(|instance| {
                             instance.instance_id == state.machine
-                                && instance.machine_name == schema.machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
                         })
                     })
                     .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                        machine: state.machine.clone(),
+                        machine: state.machine.as_str().to_owned(),
                     })?;
 
                 if let Some(phase) = &state.phase {
@@ -1267,11 +1289,11 @@ impl CompositionSchema {
                         .phase
                         .variants_by_name()
                         .map_err(CompositionSchemaError::MachineSchema)?;
-                    if !phases.contains(phase) {
+                    if !phases.contains(phase.as_str()) {
                         return Err(CompositionSchemaError::UnknownWitnessPhase {
                             witness: witness.name.clone(),
-                            machine: state.machine.clone(),
-                            phase: phase.clone(),
+                            machine: state.machine.as_str().to_owned(),
+                            phase: phase.as_str().to_owned(),
                         });
                     }
                 }
@@ -1289,21 +1311,21 @@ impl CompositionSchema {
                         .find(|candidate| candidate.name == field.field)
                         .ok_or_else(|| CompositionSchemaError::UnknownWitnessStateField {
                             witness: witness.name.clone(),
-                            machine: state.machine.clone(),
-                            field: field.field.clone(),
+                            machine: state.machine.as_str().to_owned(),
+                            field: field.field.as_str().to_owned(),
                         })?;
                     if !route_literal_expr_allowed(&field.expr) {
                         return Err(CompositionSchemaError::UnsupportedWitnessStateLiteral {
                             witness: witness.name.clone(),
-                            machine: state.machine.clone(),
-                            field: field.field.clone(),
+                            machine: state.machine.as_str().to_owned(),
+                            field: field.field.as_str().to_owned(),
                         });
                     }
                     if !literal_matches_type(&field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessStateLiteralTypeMismatch {
                             witness: witness.name.clone(),
-                            machine: state.machine.clone(),
-                            field: field.field.clone(),
+                            machine: state.machine.as_str().to_owned(),
+                            field: field.field.as_str().to_owned(),
                             ty: target_field.ty.clone(),
                         });
                     }
@@ -1327,11 +1349,11 @@ impl CompositionSchema {
                 .find(|schema| {
                     self.machines.iter().any(|instance| {
                         instance.instance_id == protocol.producer_instance
-                            && instance.machine_name == schema.machine
+                            && instance.machine_name.as_str() == schema.machine.as_str()
                     })
                 })
                 .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                    machine: protocol.producer_instance.clone(),
+                    machine: protocol.producer_instance.as_str().to_owned(),
                 })?;
 
             // Effect variant must exist on the producer.
@@ -1339,10 +1361,10 @@ impl CompositionSchema {
                 .effects
                 .variants_by_name()
                 .map_err(CompositionSchemaError::MachineSchema)?;
-            if !effect_variants.contains(&protocol.effect_variant) {
+            if !effect_variants.contains(protocol.effect_variant.as_str()) {
                 return Err(CompositionSchemaError::UnknownHandoffEffect {
-                    protocol: protocol.name.clone(),
-                    effect: protocol.effect_variant.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
+                    effect: protocol.effect_variant.as_str().to_owned(),
                 });
             }
 
@@ -1351,39 +1373,37 @@ impl CompositionSchema {
                 .effect_dispositions
                 .iter()
                 .find(|rule| rule.effect_variant == protocol.effect_variant);
-            if let Some(rule) = disposition_rule {
-                match &rule.handoff_protocol {
-                    Some(hp) if hp == &protocol.name => {}
-                    _ => {
-                        return Err(CompositionSchemaError::HandoffProtocolMismatch {
-                            protocol: protocol.name.clone(),
-                            effect_variant: protocol.effect_variant.clone(),
-                            expected_protocol: protocol.name.clone(),
-                        });
-                    }
+            match disposition_rule.and_then(|rule| rule.handoff_protocol.as_ref()) {
+                Some(hp) if hp == &protocol.name => {}
+                _ => {
+                    return Err(CompositionSchemaError::HandoffProtocolMismatch {
+                        protocol: protocol.name.as_str().to_owned(),
+                        effect_variant: protocol.effect_variant.as_str().to_owned(),
+                        expected_protocol: protocol.name.as_str().to_owned(),
+                    });
                 }
             }
 
             // Correlation fields must exist on the effect variant.
             let effect_variant_schema = producer_schema
                 .effects
-                .variant_named(&protocol.effect_variant)
+                .variant_named(protocol.effect_variant.as_str())
                 .map_err(CompositionSchemaError::MachineSchema)?;
             for field in &protocol.correlation_fields {
-                effect_variant_schema.field_named(field).map_err(|_| {
-                    CompositionSchemaError::UnknownHandoffCorrelationField {
-                        protocol: protocol.name.clone(),
-                        field: field.clone(),
-                    }
-                })?;
+                effect_variant_schema
+                    .field_named(field.as_str())
+                    .map_err(|_| CompositionSchemaError::UnknownHandoffCorrelationField {
+                        protocol: protocol.name.as_str().to_owned(),
+                        field: field.as_str().to_owned(),
+                    })?;
             }
             for field in &protocol.obligation_fields {
-                effect_variant_schema.field_named(field).map_err(|_| {
-                    CompositionSchemaError::UnknownHandoffObligationField {
-                        protocol: protocol.name.clone(),
-                        field: field.clone(),
-                    }
-                })?;
+                effect_variant_schema
+                    .field_named(field.as_str())
+                    .map_err(|_| CompositionSchemaError::UnknownHandoffObligationField {
+                        protocol: protocol.name.as_str().to_owned(),
+                        field: field.as_str().to_owned(),
+                    })?;
             }
 
             // Feedback inputs must exist on their target machines.
@@ -1393,21 +1413,21 @@ impl CompositionSchema {
                     .find(|schema| {
                         self.machines.iter().any(|instance| {
                             instance.instance_id == feedback.machine_instance
-                                && instance.machine_name == schema.machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
                         })
                     })
                     .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-                        machine: feedback.machine_instance.clone(),
+                        machine: feedback.machine_instance.as_str().to_owned(),
                     })?;
                 let input_variants = target_schema
                     .inputs
                     .variants_by_name()
                     .map_err(CompositionSchemaError::MachineSchema)?;
-                if !input_variants.contains(&feedback.input_variant) {
+                if !input_variants.contains(feedback.input_variant.as_str()) {
                     return Err(CompositionSchemaError::UnknownHandoffFeedbackInput {
-                        protocol: protocol.name.clone(),
-                        machine: feedback.machine_instance.clone(),
-                        input: feedback.input_variant.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
+                        machine: feedback.machine_instance.as_str().to_owned(),
+                        input: feedback.input_variant.as_str().to_owned(),
                     });
                 }
                 let _ = unique_names(
@@ -1419,7 +1439,7 @@ impl CompositionSchema {
                 )?;
                 let input_variant_schema = target_schema
                     .inputs
-                    .variant_named(&feedback.input_variant)
+                    .variant_named(feedback.input_variant.as_str())
                     .map_err(CompositionSchemaError::MachineSchema)?;
                 for field in &input_variant_schema.fields {
                     if !feedback
@@ -1428,22 +1448,22 @@ impl CompositionSchema {
                         .any(|binding| binding.input_field == field.name)
                     {
                         return Err(CompositionSchemaError::MissingHandoffFeedbackBinding {
-                            protocol: protocol.name.clone(),
-                            machine: feedback.machine_instance.clone(),
-                            input: feedback.input_variant.clone(),
-                            field: field.name.clone(),
+                            protocol: protocol.name.as_str().to_owned(),
+                            machine: feedback.machine_instance.as_str().to_owned(),
+                            input: feedback.input_variant.as_str().to_owned(),
+                            field: field.name.as_str().to_owned(),
                         });
                     }
                 }
                 for binding in &feedback.field_bindings {
                     input_variant_schema
-                        .field_named(&binding.input_field)
+                        .field_named(binding.input_field.as_str())
                         .map_err(
                             |_| CompositionSchemaError::UnknownHandoffFeedbackInputField {
-                                protocol: protocol.name.clone(),
-                                machine: feedback.machine_instance.clone(),
-                                input: feedback.input_variant.clone(),
-                                field: binding.input_field.clone(),
+                                protocol: protocol.name.as_str().to_owned(),
+                                machine: feedback.machine_instance.as_str().to_owned(),
+                                input: feedback.input_variant.as_str().to_owned(),
+                                field: binding.input_field.as_str().to_owned(),
                             },
                         )?;
                     if let FeedbackFieldSource::ObligationField(field) = &binding.source
@@ -1451,8 +1471,8 @@ impl CompositionSchema {
                     {
                         return Err(
                             CompositionSchemaError::UnknownHandoffBindingObligationField {
-                                protocol: protocol.name.clone(),
-                                field: field.clone(),
+                                protocol: protocol.name.as_str().to_owned(),
+                                field: field.as_str().to_owned(),
                             },
                         );
                     }
@@ -1465,10 +1485,10 @@ impl CompositionSchema {
                         )
                     }) {
                         return Err(CompositionSchemaError::MissingCorrelationBinding {
-                            protocol: protocol.name.clone(),
-                            machine: feedback.machine_instance.clone(),
-                            input: feedback.input_variant.clone(),
-                            obligation_field: correlation_field.clone(),
+                            protocol: protocol.name.as_str().to_owned(),
+                            machine: feedback.machine_instance.as_str().to_owned(),
+                            input: feedback.input_variant.as_str().to_owned(),
+                            obligation_field: correlation_field.as_str().to_owned(),
                         });
                     }
                 }
@@ -1480,14 +1500,14 @@ impl CompositionSchema {
             ) {
                 let Some(trigger) = protocol.rust.executor_trigger_input_variant.as_ref() else {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail: "executor_trigger_input_variant missing after executor validation"
                             .into(),
                     });
                 };
                 producer_schema.inputs.variant_named(trigger).map_err(|_| {
                     CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail: format!(
                             "executor_trigger_input_variant `{trigger}` does not exist on producer"
                         ),
@@ -1501,12 +1521,12 @@ impl CompositionSchema {
                         && route.effect_variant == protocol.effect_variant
                         && route.to.machine == feedback.machine_instance
                         && route.to.kind == RouteTargetKind::Input
-                        && route.to.input_variant == feedback.input_variant
+                        && route.to.input_variant.as_str() == feedback.input_variant.as_str()
                 }) {
                     return Err(CompositionSchemaError::DirectRouteBypassesHandoffProtocol {
-                        protocol: protocol.name.clone(),
-                        machine: feedback.machine_instance.clone(),
-                        input: feedback.input_variant.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
+                        machine: feedback.machine_instance.as_str().to_owned(),
+                        input: feedback.input_variant.as_str().to_owned(),
                     });
                 }
             }
@@ -1517,8 +1537,8 @@ impl CompositionSchema {
             {
                 return Err(
                     CompositionSchemaError::TerminalClosureRequiresTerminalPhases {
-                        protocol: protocol.name.clone(),
-                        producer_instance: protocol.producer_instance.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
+                        producer_instance: protocol.producer_instance.as_str().to_owned(),
                     },
                 );
             }
@@ -1530,9 +1550,11 @@ impl CompositionSchema {
             for machine_instance in &self.machines {
                 let machine_schema = schemas
                     .iter()
-                    .find(|schema| schema.machine == machine_instance.machine_name)
+                    .find(|schema| {
+                        schema.machine.as_str() == machine_instance.machine_name.as_str()
+                    })
                     .ok_or_else(|| CompositionSchemaError::UnknownMachineSchema {
-                        schema: machine_instance.machine_name.clone(),
+                        schema: machine_instance.machine_name.as_str().to_owned(),
                     })?;
 
                 for rule in &machine_schema.effect_dispositions {
@@ -1553,10 +1575,16 @@ impl CompositionSchema {
                                 });
                                 if !route_exists {
                                     return Err(CompositionSchemaError::MissingRoutedEffect {
-                                        from_instance: machine_instance.instance_id.clone(),
-                                        effect_variant: rule.effect_variant.clone(),
-                                        consumer_machine: consumer_machine_name.clone(),
-                                        consumer_instance: consumer_inst.instance_id.clone(),
+                                        from_instance: machine_instance
+                                            .instance_id
+                                            .as_str()
+                                            .to_owned(),
+                                        effect_variant: rule.effect_variant.as_str().to_owned(),
+                                        consumer_machine: consumer_machine_name.as_str().to_owned(),
+                                        consumer_instance: consumer_inst
+                                            .instance_id
+                                            .as_str()
+                                            .to_owned(),
                                     });
                                 }
                             }
@@ -1570,9 +1598,11 @@ impl CompositionSchema {
             for machine_instance in &self.machines {
                 let machine_schema = schemas
                     .iter()
-                    .find(|schema| schema.machine == machine_instance.machine_name)
+                    .find(|schema| {
+                        schema.machine.as_str() == machine_instance.machine_name.as_str()
+                    })
                     .ok_or_else(|| CompositionSchemaError::UnknownMachineSchema {
-                        schema: machine_instance.machine_name.clone(),
+                        schema: machine_instance.machine_name.as_str().to_owned(),
                     })?;
 
                 for rule in &machine_schema.effect_dispositions {
@@ -1584,9 +1614,9 @@ impl CompositionSchema {
                         });
                         if !protocol_exists {
                             return Err(CompositionSchemaError::MissingHandoffProtocol {
-                                from_instance: machine_instance.instance_id.clone(),
-                                effect_variant: rule.effect_variant.clone(),
-                                expected_protocol: protocol_name.clone(),
+                                from_instance: machine_instance.instance_id.as_str().to_owned(),
+                                effect_variant: rule.effect_variant.as_str().to_owned(),
+                                expected_protocol: protocol_name.as_str().to_owned(),
                             });
                         }
                     }
@@ -1600,23 +1630,24 @@ impl CompositionSchema {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineInstance {
-    pub instance_id: String,
-    pub machine_name: String,
-    pub actor: String,
+    pub instance_id: MachineInstanceId,
+    pub machine_name: MachineId,
+    pub actor: ActorId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryInput {
+    /// Free-form entry-point name. Not a kernel identity.
     pub name: String,
-    pub machine: String,
-    pub input_variant: String,
+    pub machine: MachineInstanceId,
+    pub input_variant: InputVariantId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
-    pub name: String,
-    pub from_machine: String,
-    pub effect_variant: String,
+    pub name: RouteId,
+    pub from_machine: MachineInstanceId,
+    pub effect_variant: EffectVariantId,
     pub to: RouteTarget,
     pub bindings: Vec<RouteFieldBinding>,
     pub delivery: RouteDelivery,
@@ -1624,9 +1655,27 @@ pub struct Route {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTarget {
-    pub machine: String,
+    pub machine: MachineInstanceId,
+    /// Structural kind tag; kept alongside `input_variant` for callers
+    /// that dispatch on kind without unwrapping the typed slug. The
+    /// invariant `self.kind == self.input_variant.kind()` is enforced by
+    /// the `RouteTarget::new` constructor and asserted in validate().
     pub kind: RouteTargetKind,
-    pub input_variant: String,
+    /// Typed slug for the target variant, sum-tagged by input/signal.
+    pub input_variant: RouteVariantId,
+}
+
+impl RouteTarget {
+    /// Construct a `RouteTarget` whose `kind` tag is in sync with the
+    /// wrapped [`RouteVariantId`] arm.
+    pub fn new(machine: MachineInstanceId, input_variant: RouteVariantId) -> Self {
+        let kind = input_variant.kind();
+        Self {
+            machine,
+            kind,
+            input_variant,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1635,16 +1684,61 @@ pub enum RouteTargetKind {
     Signal,
 }
 
+/// Typed sum for the polymorphic `input_variant` slug on [`RouteTarget`],
+/// [`DriverDispatchRoute`], and the `input_variant` fields of every
+/// [`CompositionInvariantKind`] variant that references one.
+///
+/// The slug is semantically an [`InputVariantId`] when the target is an
+/// input and a [`SignalVariantId`] when the target is a signal. Carrying
+/// the typed discriminator alongside the slug eliminates the last
+/// stringly-typed identity on the composition surface (parallel to the
+/// [`crate::machine::TriggerMatch`] sum on the machine surface).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteVariantId {
+    Input(InputVariantId),
+    Signal(SignalVariantId),
+}
+
+impl RouteVariantId {
+    /// Borrow the slug regardless of the input/signal arm.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Input(id) => id.as_str(),
+            Self::Signal(id) => id.as_str(),
+        }
+    }
+
+    /// Report the structural kind of the wrapped identity.
+    pub fn kind(&self) -> RouteTargetKind {
+        match self {
+            Self::Input(_) => RouteTargetKind::Input,
+            Self::Signal(_) => RouteTargetKind::Signal,
+        }
+    }
+}
+
+impl std::fmt::Display for RouteVariantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for RouteVariantId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteFieldBinding {
-    pub to_field: String,
+    pub to_field: FieldId,
     pub source: RouteBindingSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteBindingSource {
     Field {
-        from_field: String,
+        from_field: FieldId,
         allow_named_alias: bool,
     },
     Literal(Expr),
@@ -1663,62 +1757,63 @@ pub enum RouteDelivery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerRule {
-    PreemptWhenReady { higher: String, lower: String },
+    PreemptWhenReady { higher: ActorId, lower: ActorId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPriority {
-    pub higher: String,
-    pub lower: String,
+    pub higher: ActorId,
+    pub lower: ActorId,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionInvariant {
+    /// Free-form invariant name. Not a kernel identity.
     pub name: String,
     pub kind: CompositionInvariantKind,
     pub statement: String,
-    pub references_machines: Vec<String>,
-    pub references_actors: Vec<String>,
+    pub references_machines: Vec<MachineInstanceId>,
+    pub references_actors: Vec<ActorId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositionInvariantKind {
     RoutePresent {
-        from_machine: String,
-        effect_variant: String,
-        to_machine: String,
-        input_variant: String,
+        from_machine: MachineInstanceId,
+        effect_variant: EffectVariantId,
+        to_machine: MachineInstanceId,
+        input_variant: RouteVariantId,
     },
     ObservedInputOriginatesFromEffect {
-        to_machine: String,
-        input_variant: String,
-        from_machine: String,
-        effect_variant: String,
+        to_machine: MachineInstanceId,
+        input_variant: RouteVariantId,
+        from_machine: MachineInstanceId,
+        effect_variant: EffectVariantId,
     },
     ObservedRouteInputOriginatesFromEffect {
-        route_name: String,
-        to_machine: String,
-        input_variant: String,
-        from_machine: String,
-        effect_variant: String,
+        route_name: RouteId,
+        to_machine: MachineInstanceId,
+        input_variant: RouteVariantId,
+        from_machine: MachineInstanceId,
+        effect_variant: EffectVariantId,
     },
     ActorPriorityPresent {
-        higher: String,
-        lower: String,
+        higher: ActorId,
+        lower: ActorId,
     },
     SchedulerRulePresent {
         rule: SchedulerRule,
     },
     OutcomeHandled {
-        from_machine: String,
-        effect_variant: String,
+        from_machine: MachineInstanceId,
+        effect_variant: EffectVariantId,
         required_targets: Vec<RouteTarget>,
     },
     HandoffProtocolCovered {
-        producer_instance: String,
-        effect_variant: String,
-        protocol_name: String,
+        producer_instance: MachineInstanceId,
+        effect_variant: EffectVariantId,
+        protocol_name: ProtocolId,
     },
 }
 
@@ -1755,7 +1850,7 @@ fn validate_generation_mode_binding(
                 || rust.executor_trigger_input_variant.is_none()
             {
                 return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                    protocol: protocol.name.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
                     detail:
                         "Executor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, error_type_path, and executor_trigger_input_variant"
                             .into(),
@@ -1765,7 +1860,7 @@ fn validate_generation_mode_binding(
         ProtocolGenerationMode::EffectExtractor => {
             if rust.effect_enum_path.is_none() {
                 return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                    protocol: protocol.name.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
                     detail: "EffectExtractor protocols require effect_enum_path".into(),
                 });
             }
@@ -1784,7 +1879,7 @@ fn validate_generation_mode_binding(
                     || rust.error_type_path.is_none()
                 {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail:
                             "EffectExtractor with authority_type_path set also requires mutator_trait_path, input_enum_path, transition_type_path, and error_type_path"
                                 .into(),
@@ -1799,7 +1894,7 @@ fn validate_generation_mode_binding(
                         .contains(&ProtocolGenerationMode::HandleBridge);
                 if !has_handle_bridge {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail:
                             "EffectExtractor without authority_type_path must stack HandleBridge (or declare no feedback inputs)"
                                 .into(),
@@ -1816,7 +1911,7 @@ fn validate_generation_mode_binding(
                 || rust.bridge_source_type_path.is_none()
             {
                 return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                    protocol: protocol.name.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
                     detail:
                         "ShellBridge protocols require authority_type_path, mutator_trait_path, input_enum_path, transition_type_path, error_type_path, and bridge_source_type_path"
                             .into(),
@@ -1826,20 +1921,20 @@ fn validate_generation_mode_binding(
         ProtocolGenerationMode::HandleBridge => {
             if rust.handle_trait_path.is_none() {
                 return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                    protocol: protocol.name.clone(),
+                    protocol: protocol.name.as_str().to_owned(),
                     detail: "HandleBridge protocols require handle_trait_path".into(),
                 });
             }
             // Every feedback input must have a handle method mapping.
             for feedback in &protocol.allowed_feedback_inputs {
-                if !rust
-                    .handle_method_names
-                    .contains_key(&feedback.input_variant)
+                if rust
+                    .handle_feedback_binding(&feedback.input_variant)
+                    .is_none()
                 {
                     return Err(CompositionSchemaError::InvalidHandoffRustBinding {
-                        protocol: protocol.name.clone(),
+                        protocol: protocol.name.as_str().to_owned(),
                         detail: format!(
-                            "HandleBridge protocol missing handle_method_names entry for feedback input `{}`",
+                            "HandleBridge protocol missing handle_feedback_bindings entry for feedback input `{}`",
                             feedback.input_variant
                         ),
                     });
@@ -2589,11 +2684,11 @@ fn validate_witness_transition_ref(
         .find(|schema| {
             composition.machines.iter().any(|instance| {
                 instance.instance_id == transition.machine
-                    && instance.machine_name == schema.machine
+                    && instance.machine_name.as_str() == schema.machine.as_str()
             })
         })
         .ok_or_else(|| CompositionSchemaError::UnknownMachine {
-            machine: transition.machine.clone(),
+            machine: transition.machine.as_str().to_owned(),
         })?;
 
     let present = machine_schema
@@ -2603,8 +2698,8 @@ fn validate_witness_transition_ref(
     if !present {
         return Err(CompositionSchemaError::UnknownWitnessTransition {
             witness: witness.name.clone(),
-            machine: transition.machine.clone(),
-            transition: transition.transition.clone(),
+            machine: transition.machine.as_str().to_owned(),
+            transition: transition.transition.as_str().to_owned(),
         });
     }
 

@@ -1811,6 +1811,47 @@ export class MeerkatClient {
     await this.request("session/archive", { session_id: sessionId });
   }
 
+  /**
+   * Runtime-control surface wrappers.
+   *
+   * Thin pass-throughs to the canonical runtime RPC methods. Typed
+   * request/response shapes live on the Rust wire contracts
+   * (`meerkat-contracts/src/wire/runtime.rs`); callers that need typed
+   * parameter shapes consume the generated types from
+   * `sdks/typescript/src/generated/`. Exposed here so the
+   * rpc-surface-alignment + sdk-wrapper-freshness gates see the method
+   * names in the TS source tree.
+   * @internal
+   */
+  async _runtimeStatus(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/status", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmit(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submit", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmission(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submission", params);
+  }
+
+  /** @internal */
+  async _runtimeSubmissions(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/submissions", params);
+  }
+
+  /** @internal */
+  async _runtimeRetire(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/retire", params);
+  }
+
+  /** @internal */
+  async _runtimeReset(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("session/reset", params);
+  }
+
   /** @internal */
   async _send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
     return this.send(sessionId, command);
@@ -1837,17 +1878,6 @@ export class MeerkatClient {
     sessionId: string,
   ): Promise<Record<string, unknown>> {
     return this.request("comms/peers", { session_id: sessionId });
-  }
-
-  async status(sessionId: string): Promise<RuntimeStateResult> {
-    const result = await this.request("session/status", { session_id: sessionId });
-    if (typeof result.state !== "string" || result.state.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/status response: missing state",
-      );
-    }
-    return result as unknown as RuntimeStateResult;
   }
 
   async runtimeRealtimeAttachmentStatus(
@@ -1944,68 +1974,6 @@ export class MeerkatClient {
       );
     }
     return result as unknown as RealtimeCapabilitiesResult;
-  }
-
-  async submit(
-    sessionId: string,
-    input: Record<string, unknown>,
-  ): Promise<RuntimeAcceptResult> {
-    const result = await this.request("session/submit", { session_id: sessionId, input });
-    if (typeof result.outcome_type !== "string" || result.outcome_type.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/submit response: missing outcome_type",
-      );
-    }
-    return result as unknown as RuntimeAcceptResult;
-  }
-
-  async retire(sessionId: string): Promise<RuntimeRetireResult> {
-    const result = await this.request("session/retire", { session_id: sessionId });
-    if (typeof result.inputs_abandoned !== "number") {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/retire response: missing inputs_abandoned",
-      );
-    }
-    return result as unknown as RuntimeRetireResult;
-  }
-
-  async reset(sessionId: string): Promise<RuntimeResetResult> {
-    const result = await this.request("session/reset", { session_id: sessionId });
-    if (typeof result.inputs_abandoned !== "number") {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/reset response: missing inputs_abandoned",
-      );
-    }
-    return result as unknown as RuntimeResetResult;
-  }
-
-  async submission(sessionId: string, submissionId: string): Promise<WireInputState | null> {
-    const result = await this.request("session/submission", {
-      session_id: sessionId,
-      input_id: submissionId,
-    });
-    if (result === null) {
-      return null;
-    }
-    if (typeof result !== "object" || result === null) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/submission response: expected object or null",
-      );
-    }
-    return result as unknown as WireInputState;
-  }
-
-  async submissions(sessionId: string): Promise<string[]> {
-    const result = (await this.request("session/submissions", {
-      session_id: sessionId,
-    })) as unknown as InputListResult;
-    return Array.isArray(result.input_ids)
-      ? result.input_ids.map((inputId) => String(inputId))
-      : [];
   }
 
   // -- Auth + realm (Phase 4d) --------------------------------------------
@@ -2807,12 +2775,6 @@ export class MeerkatClient {
 
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
-    if (options.connectionRef) {
-      params.connection_ref = {
-        realm_id: options.connectionRef.realmId,
-        binding_id: options.connectionRef.bindingId,
-      };
-    }
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options.maxTokens) params.max_tokens = options.maxTokens;
     if (options.outputSchema != null) params.output_schema = options.outputSchema;

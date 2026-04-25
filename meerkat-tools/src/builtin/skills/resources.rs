@@ -1,10 +1,13 @@
 //! Skill resource tools.
+//!
+//! Keyed by typed `SkillKey` (source_uuid + skill_name) — no slash-string
+//! parsing anywhere on the ingress path.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use meerkat_core::skills::{SkillId, SkillRuntime};
+use meerkat_core::skills::{SkillKey, SkillName, SkillRuntime, SourceUuid};
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,14 +17,35 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
 struct SkillListResourcesArgs {
-    id: String,
+    source_uuid: String,
+    skill_name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
 struct SkillReadResourceArgs {
-    id: String,
+    source_uuid: String,
+    skill_name: String,
     path: String,
+}
+
+fn parse_key(args: &Value) -> Result<SkillKey, BuiltinToolError> {
+    let source_raw = args
+        .get("source_uuid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'source_uuid'".into()))?;
+    let skill_raw = args
+        .get("skill_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'skill_name'".into()))?;
+    let source_uuid =
+        SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    let skill_name =
+        SkillName::parse(skill_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    Ok(SkillKey {
+        source_uuid,
+        skill_name,
+    })
 }
 
 pub struct SkillListResourcesTool {
@@ -44,15 +68,6 @@ impl SkillReadResourceTool {
     }
 }
 
-fn canonical_key(id: &SkillId) -> Value {
-    match id.0.split_once('/') {
-        Some((source_uuid, skill_name)) => {
-            json!({"source_uuid": source_uuid, "skill_name": skill_name})
-        }
-        None => json!({"source_uuid": Value::Null, "skill_name": id.0}),
-    }
-}
-
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for SkillListResourcesTool {
@@ -63,7 +78,8 @@ impl BuiltinTool for SkillListResourcesTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "skill_list_resources".into(),
-            description: "List resources and artifacts exposed by a skill.\n\nResources are supplementary files bundled with a skill — templates, example data, configuration files, reference documents, etc. Use this to discover what is available before reading specific resources with skill_read_resource.\n\nThe id must be a canonical skill ID from browse_skills (e.g. \"extraction/email\").\n\nExample:\n  skill_list_resources {\"id\": \"extraction/email\"}\n  Returns: {\"id\": \"extraction/email\", \"artifacts\": [{\"path\": \"templates/default.txt\", \"description\": \"Default extraction template\", \"size_bytes\": 512}, {\"path\": \"examples/invoice.json\", \"description\": \"Sample invoice extraction\", \"size_bytes\": 1024}]}".into(),
+            description:
+                "List resources exposed by a skill identified by (source_uuid, skill_name).".into(),
             input_schema: crate::schema::schema_for::<SkillListResourcesArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -77,20 +93,21 @@ impl BuiltinTool for SkillListResourcesTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-            BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
-        })?;
-
-        let id = SkillId(id_str.to_string());
-        let artifacts = self
+        let raw_key = parse_key(&args)?;
+        // Apply source-identity lineage remaps before dispatch.
+        let key = self
             .engine
-            .list_artifacts(&id)
+            .canonical_skill_key(&raw_key)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
-
+        let artifacts = self
+            .engine
+            .list_artifacts(&key)
+            .await
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         Ok(ToolOutput::Json(json!({
-            "id": id.0,
-            "canonical_key": canonical_key(&id),
+            "source_uuid": key.source_uuid.to_string(),
+            "skill_name": key.skill_name.as_str(),
             "artifacts": artifacts,
         })))
     }
@@ -106,7 +123,9 @@ impl BuiltinTool for SkillReadResourceTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "skill_read_resource".into(),
-            description: "Read the content of a specific resource/artifact exposed by a skill.\n\nUse skill_list_resources first to discover available artifact paths, then read specific ones. Resources can be templates, example data, configuration, or any supplementary content bundled with the skill.\n\nParameters:\n- id: Canonical skill ID (e.g. \"extraction/email\").\n- path: Artifact path from skill_list_resources (e.g. \"templates/default.txt\").\n\nExample:\n  skill_read_resource {\"id\": \"extraction/email\", \"path\": \"templates/default.txt\"}\n  Returns: {\"id\": \"extraction/email\", \"artifact\": {\"path\": \"templates/default.txt\", \"content\": \"From: {{sender}}\\nSubject: {{subject}}\\n...\"}}".into(),
+            description:
+                "Read a resource at `path` from a skill identified by (source_uuid, skill_name)."
+                    .into(),
             input_schema: crate::schema::schema_for::<SkillReadResourceArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -120,23 +139,25 @@ impl BuiltinTool for SkillReadResourceTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-            BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
-        })?;
-        let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            BuiltinToolError::InvalidArgs("Missing required 'path' parameter".into())
-        })?;
-
-        let id = SkillId(id_str.to_string());
-        let artifact = self
+        let raw_key = parse_key(&args)?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'path' parameter".into()))?;
+        // Apply source-identity lineage remaps before dispatch.
+        let key = self
             .engine
-            .read_artifact(&id, path)
+            .canonical_skill_key(&raw_key)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
-
+        let artifact = self
+            .engine
+            .read_artifact(&key, path)
+            .await
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         Ok(ToolOutput::Json(json!({
-            "id": id.0,
-            "canonical_key": canonical_key(&id),
+            "source_uuid": key.source_uuid.to_string(),
+            "skill_name": key.skill_name.as_str(),
             "artifact": artifact,
         })))
     }

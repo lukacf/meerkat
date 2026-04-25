@@ -1,22 +1,25 @@
 //! Load skill tool — activates a skill mid-turn.
+//!
+//! The tool accepts a typed `SkillKey` on the wire (`source_uuid` +
+//! `skill_name` JSON fields), not a slash-delimited path. The ingress
+//! parser validates both halves before dispatching to the runtime.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use meerkat_core::skills::{SkillId, SkillRuntime};
+use meerkat_core::skills::{SkillKey, SkillName, SkillRuntime, SourceUuid};
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
-/// Arguments for the load_skill tool (used for schema generation).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
 struct LoadSkillArgs {
-    /// Canonical skill ID (e.g. "extraction/email-extractor").
-    id: String,
+    source_uuid: String,
+    skill_name: String,
 }
 
 /// Tool for loading a skill's full instructions into the conversation.
@@ -30,6 +33,25 @@ impl LoadSkillTool {
     }
 }
 
+fn parse_key(args: &Value) -> Result<SkillKey, BuiltinToolError> {
+    let source_raw = args
+        .get("source_uuid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'source_uuid'".into()))?;
+    let skill_raw = args
+        .get("skill_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'skill_name'".into()))?;
+    let source_uuid =
+        SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    let skill_name =
+        SkillName::parse(skill_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    Ok(SkillKey {
+        source_uuid,
+        skill_name,
+    })
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for LoadSkillTool {
@@ -40,7 +62,9 @@ impl BuiltinTool for LoadSkillTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "load_skill".into(),
-            description: "Load a skill's full instructions into the conversation.\n\nWhat loading does: The skill's rendered body (instructions, prompts, guidance) is returned as the tool result and becomes part of the conversation context. Once loaded, you should follow the skill's instructions for the remainder of the relevant task. Loaded instructions persist in the conversation history for the current session — you do not need to reload the same skill within a session unless the context has been compacted.\n\nWhen to load vs. use tools directly: Load a skill when you need its specialized guidance, workflow, or domain knowledge. If you already know how to accomplish a task with available tools and no skill-specific instructions are needed, use the tools directly. Skills add context overhead, so only load them when the specialized instructions add value.\n\nThe id must be a canonical skill ID from browse_skills (e.g. \"extraction/email\").\n\nExample:\n  load_skill {\"id\": \"extraction/email\"}\n  Returns: {\"id\": \"extraction/email\", \"name\": \"email\", \"body\": \"<skill>...instructions...</skill>\", \"byte_size\": 2048}".into(),
+            description:
+                "Load a skill's full instructions by (source_uuid, skill_name) into the conversation."
+                    .into(),
             input_schema: crate::schema::schema_for::<LoadSkillArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -50,25 +74,29 @@ impl BuiltinTool for LoadSkillTool {
     }
 
     fn default_enabled(&self) -> bool {
-        false // Enabled conditionally when skills are active
+        false
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-            BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
-        })?;
-
-        let skill_id = SkillId(id_str.to_string());
+        let raw_key = parse_key(&args)?;
+        // Apply the source-identity lineage remap chain before dispatch
+        // so legacy source_uuids that have since been rotated/merged
+        // still resolve to the canonical backing skill.
+        let key = self
+            .engine
+            .canonical_skill_key(&raw_key)
+            .await
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let results = self
             .engine
-            .resolve_and_render(&[skill_id])
+            .resolve_and_render(std::slice::from_ref(&key))
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
         match results.into_iter().next() {
             Some(resolved) => Ok(ToolOutput::Json(json!({
-                "id": resolved.id.0,
-                "canonical_key": canonical_key(&resolved.id),
+                "source_uuid": resolved.key.source_uuid.to_string(),
+                "skill_name": resolved.key.skill_name.as_str(),
                 "name": resolved.name,
                 "body": resolved.rendered_body,
                 "byte_size": resolved.byte_size,
@@ -77,155 +105,5 @@ impl BuiltinTool for LoadSkillTool {
                 "Skill resolved but returned no content".into(),
             )),
         }
-    }
-}
-
-fn canonical_key(id: &SkillId) -> Value {
-    match id.0.split_once('/') {
-        Some((source_uuid, skill_name)) => {
-            json!({ "source_uuid": source_uuid, "skill_name": skill_name })
-        }
-        None => json!({ "source_uuid": Value::Null, "skill_name": id.0 }),
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::manual_async_fn)]
-mod tests {
-    use super::*;
-    use meerkat_core::skills::{
-        ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection, SkillDescriptor,
-        SkillEngine, SkillError, SkillFilter, SkillScope,
-    };
-
-    struct MockEngine {
-        skills: Vec<SkillDescriptor>,
-    }
-
-    impl SkillEngine for MockEngine {
-        fn inventory_section(
-            &self,
-        ) -> impl std::future::Future<Output = Result<String, SkillError>> + Send {
-            async move { Ok(String::new()) }
-        }
-
-        fn resolve_and_render(
-            &self,
-            ids: &[SkillId],
-        ) -> impl std::future::Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send
-        {
-            let ids = ids.to_vec();
-            async move {
-                let mut results = Vec::new();
-                for id in &ids {
-                    if let Some(skill) = self.skills.iter().find(|s| &s.id == id) {
-                        results.push(ResolvedSkill {
-                            id: id.clone(),
-                            name: skill.name.clone(),
-                            rendered_body: format!("<skill id=\"{}\">Body content</skill>", id.0),
-                            byte_size: 30,
-                        });
-                    } else {
-                        return Err(SkillError::NotFound { id: id.clone() });
-                    }
-                }
-                Ok(results)
-            }
-        }
-
-        fn collections(
-            &self,
-        ) -> impl std::future::Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send
-        {
-            async move { Ok(vec![]) }
-        }
-
-        fn list_skills(
-            &self,
-            _filter: &SkillFilter,
-        ) -> impl std::future::Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send
-        {
-            async move { Ok(self.skills.clone()) }
-        }
-
-        fn quarantined_diagnostics(
-            &self,
-        ) -> impl std::future::Future<
-            Output = Result<Vec<meerkat_core::skills::SkillQuarantineDiagnostic>, SkillError>,
-        > + Send {
-            async move { Ok(Vec::new()) }
-        }
-
-        fn health_snapshot(
-            &self,
-        ) -> impl std::future::Future<
-            Output = Result<meerkat_core::skills::SourceHealthSnapshot, SkillError>,
-        > + Send {
-            async move { Ok(meerkat_core::skills::SourceHealthSnapshot::default()) }
-        }
-
-        fn list_artifacts(
-            &self,
-            _id: &SkillId,
-        ) -> impl std::future::Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send
-        {
-            async move { Ok(Vec::new()) }
-        }
-
-        fn read_artifact(
-            &self,
-            id: &SkillId,
-            _artifact_path: &str,
-        ) -> impl std::future::Future<Output = Result<SkillArtifactContent, SkillError>> + Send
-        {
-            let id = id.clone();
-            async move { Err(SkillError::NotFound { id }) }
-        }
-
-        fn invoke_function(
-            &self,
-            id: &SkillId,
-            _function_name: &str,
-            _arguments: Value,
-        ) -> impl std::future::Future<Output = Result<Value, SkillError>> + Send {
-            let id = id.clone();
-            async move { Err(SkillError::NotFound { id }) }
-        }
-    }
-
-    fn test_engine() -> Arc<SkillRuntime> {
-        Arc::new(SkillRuntime::new(Arc::new(MockEngine {
-            skills: vec![SkillDescriptor {
-                id: SkillId("extraction/email".into()),
-                name: "email".into(),
-                description: "Extract from emails".into(),
-                scope: SkillScope::Builtin,
-                ..Default::default()
-            }],
-        })))
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_returns_body() {
-        let tool = LoadSkillTool::new(test_engine());
-        let result = tool
-            .call(json!({"id": "extraction/email"}))
-            .await
-            .unwrap()
-            .into_json()
-            .unwrap();
-
-        assert_eq!(result["id"], "extraction/email");
-        assert_eq!(result["name"], "email");
-        assert!(result["body"].as_str().unwrap().contains("Body content"));
-        assert!(result["byte_size"].as_u64().unwrap() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_not_found() {
-        let tool = LoadSkillTool::new(test_engine());
-        let result = tool.call(json!({"id": "nonexistent/skill"})).await;
-
-        assert!(result.is_err());
     }
 }

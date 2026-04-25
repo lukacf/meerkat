@@ -1,5 +1,5 @@
 // @generated — protocol helpers for `surface_snapshot_alignment`
-// Composition: external_tool_bundle, Producer: external_tool_surface, Effect: RefreshVisibleSurfaceSet
+// Composition: meerkat_mob_seam, Producer: meerkat, Effect: RefreshVisibleSurfaceSet
 // Closure policy: AckRequired
 // Liveness: eventual snapshot acknowledgement under surface host liveness
 

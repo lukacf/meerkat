@@ -1,11 +1,17 @@
 //! Canonical session locator grammar shared across surfaces.
 
 use meerkat_core::SessionId;
+use meerkat_core::connection::RealmId;
 
 /// Parsed session locator input.
+///
+/// `realm_id` is typed post-C-2: a validated `RealmId` newtype, constructed
+/// via `RealmId::parse` at the parse boundary so the slug rules live in
+/// `meerkat_core::connection` and callers cannot ferry raw strings past
+/// validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLocator {
-    pub realm_id: Option<String>,
+    pub realm_id: Option<RealmId>,
     pub session_id: SessionId,
 }
 
@@ -22,7 +28,7 @@ pub enum SessionLocatorError {
     RealmMismatch { provided: String, active: String },
 }
 
-pub fn format_session_ref(realm_id: &str, session_id: &SessionId) -> String {
+pub fn format_session_ref(realm_id: &RealmId, session_id: &SessionId) -> String {
     format!("{realm_id}:{session_id}")
 }
 
@@ -65,16 +71,27 @@ fn validate_explicit_realm_id(realm_id: &str) -> Result<(), SessionLocatorError>
 
 impl SessionLocator {
     /// Parse either a bare `<session_id>` or `<realm_id>:<session_id>`.
+    ///
+    /// Applies locator-specific realm-id rules (64-char cap, rejects
+    /// UUID-like slugs, ASCII alphanumeric + `-`/`_`) before constructing
+    /// the typed `RealmId`. These rules are stricter than the core
+    /// `RealmId::parse` slug validator because locators must stay
+    /// unambiguous relative to UUID session ids.
     pub fn parse(input: &str) -> Result<Self, SessionLocatorError> {
         if let Some((realm_part, session_part)) = input.split_once(':') {
             if realm_part.is_empty() || session_part.is_empty() {
                 return Err(SessionLocatorError::InvalidFormat);
             }
             validate_explicit_realm_id(realm_part)?;
+            // `validate_explicit_realm_id` already enforces a stricter
+            // character set than `RealmId::parse`; any string it accepts
+            // is a valid core slug.
+            let realm_id = RealmId::parse(realm_part)
+                .map_err(|_| SessionLocatorError::InvalidRealmId(realm_part.to_string()))?;
             let session_id = SessionId::parse(session_part)
                 .map_err(|_| SessionLocatorError::InvalidSessionId(session_part.to_string()))?;
             return Ok(Self {
-                realm_id: Some(realm_part.to_string()),
+                realm_id: Some(realm_id),
                 session_id,
             });
         }
@@ -90,14 +107,14 @@ impl SessionLocator {
     /// locator realm matches.
     pub fn resolve_for_realm(
         input: &str,
-        active_realm_id: &str,
+        active_realm_id: &RealmId,
     ) -> Result<SessionId, SessionLocatorError> {
         let locator = Self::parse(input)?;
         if let Some(provided) = locator.realm_id
-            && provided != active_realm_id
+            && &provided != active_realm_id
         {
             return Err(SessionLocatorError::RealmMismatch {
-                provided,
+                provided: provided.to_string(),
                 active: active_realm_id.to_string(),
             });
         }
@@ -119,7 +136,10 @@ mod tests {
 
         let explicit = SessionLocator::parse(&format!("team-alpha:{sid}"))
             .expect("session_ref locator should parse");
-        assert_eq!(explicit.realm_id.as_deref(), Some("team-alpha"));
+        assert_eq!(
+            explicit.realm_id.as_ref().map(RealmId::to_string),
+            Some("team-alpha".to_string())
+        );
         assert_eq!(explicit.session_id, sid);
     }
 
@@ -154,7 +174,8 @@ mod tests {
     #[test]
     fn session_locator_realm_mismatch_is_rejected() {
         let sid = SessionId::new();
-        let result = SessionLocator::resolve_for_realm(&format!("alpha:{sid}"), "beta");
+        let beta = RealmId::parse("beta").expect("valid realm id");
+        let result = SessionLocator::resolve_for_realm(&format!("alpha:{sid}"), &beta);
         assert!(matches!(
             result,
             Err(SessionLocatorError::RealmMismatch { .. })

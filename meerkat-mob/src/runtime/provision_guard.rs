@@ -117,7 +117,7 @@ mod tests {
     use crate::runtime::handle::MemberSpawnReceipt;
     use crate::runtime::provisioner::ProvisionMemberRequest;
     use async_trait::async_trait;
-    use meerkat_core::comms::TrustedPeerSpec;
+    use meerkat_core::comms::TrustedPeerDescriptor;
     use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::ops::OperationId;
     use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -202,17 +202,8 @@ mod tests {
             _member_ref: &MemberRef,
             _fallback_name: &str,
             _fallback_peer_id: &str,
-        ) -> Result<TrustedPeerSpec, MobError> {
+        ) -> Result<TrustedPeerDescriptor, MobError> {
             Err(MobError::Internal("not implemented".into()))
-        }
-
-        async fn reconcile_member_trust(
-            &self,
-            _member_ref: &MemberRef,
-            _desired_specs: &[TrustedPeerSpec],
-            _candidate_specs: &[TrustedPeerSpec],
-        ) -> Result<(), MobError> {
-            Ok(())
         }
 
         async fn active_operation_id_for_member(

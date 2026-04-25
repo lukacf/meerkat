@@ -105,7 +105,7 @@ pub async fn resolve_simple_secret(
                     .into(),
             ))
         }
-        CredentialSourceSpec::ManagedStore { .. } | CredentialSourceSpec::PlatformDefault => {
+        CredentialSourceSpec::PlatformDefault => {
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
     }
@@ -252,9 +252,16 @@ pub async fn resolve_external_authorizer(
     materialize_external_auth_lease(
         binding,
         envelope,
+        // Wave-c C-1 follow-up: `ConnectionRef` has no `Display` impl by
+        // wave-b design (the opaque `realm:binding` string form was
+        // deleted so no code path silently ferries the join through the
+        // runtime). Project realm/binding explicitly at this log/ident
+        // site.
         format!(
-            "external:{}:{}",
-            binding.connection_ref, binding.auth_profile.id
+            "external:{}:{}:{}",
+            binding.connection_ref.realm.as_str(),
+            binding.connection_ref.binding.as_str(),
+            binding.auth_profile.id,
         ),
     )
 }
@@ -381,9 +388,7 @@ fn enforce_metadata_requirements(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::{
-        AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, CredentialStorageSpec, Provider,
-    };
+    use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
     };
@@ -452,8 +457,9 @@ mod tests {
     fn binding() -> ValidatedBinding {
         ValidatedBinding {
             connection_ref: ConnectionRef {
-                realm_id: "dev".into(),
-                binding_id: "default".into(),
+                realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                profile: None,
             },
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(
@@ -476,7 +482,6 @@ mod tests {
                 source: CredentialSourceSpec::ExternalResolver {
                     handle: "host".into(),
                 },
-                storage: CredentialStorageSpec::default(),
                 constraints: Default::default(),
                 metadata_defaults: meerkat_core::AuthMetadataDefaults {
                     organization_id: Some("org-default".into()),

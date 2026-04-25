@@ -4,8 +4,11 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Machines
 - `occurrence`: `OccurrenceLifecycleMachine` @ actor `occurrence_authority`
+- `schedule`: `ScheduleLifecycleMachine` @ actor `schedule_authority`
 
 ## Routes
+- `revision_supersede_enters_occurrence_authority`: `schedule`.`SupersedePendingOccurrences` -> `occurrence`.`Supersede` [Immediate]
+- `occurrence_supersede_ack_returns_to_schedule`: `occurrence`.`OccurrencesSuperseded` -> `schedule`.`ConfirmOccurrencesSuperseded` [Immediate]
 
 ## Target Selectors
 - `(none)`

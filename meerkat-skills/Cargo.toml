@@ -13,9 +13,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["skills-git"]
+default = []
+# HTTP transport is native-only today; wasm resolver paths return a typed
+# unavailable transport error when an HTTP repository is configured.
 skills-http = ["dep:reqwest", "dep:urlencoding"]
-skills-git = ["dep:gix"]
 
 [dependencies]
 meerkat-core = { workspace = true }
@@ -29,12 +30,11 @@ strum = { workspace = true }
 serde_yaml = { workspace = true }
 indexmap = "2"
 regex = "1"
-reqwest = { workspace = true, optional = true }
 urlencoding = { version = "2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-gix = { version = "0.79", default-features = false, features = ["blocking-network-client", "worktree-mutation", "revision"], optional = true }
+reqwest = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -47,7 +47,10 @@ reqwest = { workspace = true }
 urlencoding = "2"
 
 [package.metadata.cargo-machete]
-ignored = ["async-trait", "strum"]  # proc macros (derive)
+# async-trait, strum: proc macros (derive).
+# reqwest/urlencoding/wiremock: native HTTP transport and wiremock-driven
+# integration tests.
+ignored = ["async-trait", "strum", "reqwest", "urlencoding", "wiremock"]
 
 [lints]
 workspace = true

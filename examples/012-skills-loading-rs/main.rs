@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 //! # 012 -- Skills Loading (Rust)
 //!
 //! Skills inject domain-specific knowledge and behavioral instructions into
@@ -27,9 +29,9 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillId, SkillRuntime, SkillScope};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillRuntime, SkillScope};
 use meerkat_core::skills::SkillEngine as _;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument};
+use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillKey, SkillName};
 use meerkat_skills::source::SourceNode;
 use meerkat_skills::{
     CompositeSkillSource, DefaultSkillEngine, FilesystemSkillSource, InMemorySkillSource,
@@ -62,14 +64,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with the application rather than loaded from the filesystem.
 
     let code_review_skill = SkillDocument {
-        descriptor: SkillDescriptor {
-            id: SkillId("review/rust-reviewer".to_string()),
-            name: "Rust Code Reviewer".to_string(),
-            description: "Reviews Rust code for idiomatic patterns, \
-                          safety issues, and performance."
-                .to_string(),
-            scope: SkillScope::Builtin,
-            ..Default::default()
+        descriptor: {
+            let mut d = SkillDescriptor::new(
+                SkillKey::builtin(
+                    SkillName::parse("review-rust-reviewer").expect("valid skill name"),
+                ),
+                "Rust Code Reviewer",
+                "Reviews Rust code for idiomatic patterns, \
+                          safety issues, and performance.",
+            );
+            d.scope = SkillScope::Builtin;
+            d
         },
         body: r"## Role
 You are a senior code reviewer specializing in Rust.
@@ -95,12 +100,16 @@ Be direct and specific. No fluff. Focus on correctness and idiomatic Rust."
     };
 
     let api_design_skill = SkillDocument {
-        descriptor: SkillDescriptor {
-            id: SkillId("review/api-designer".to_string()),
-            name: "API Designer".to_string(),
-            description: "Designs RESTful APIs following best practices.".to_string(),
-            scope: SkillScope::Builtin,
-            ..Default::default()
+        descriptor: {
+            let mut d = SkillDescriptor::new(
+                SkillKey::builtin(
+                    SkillName::parse("review-api-designer").expect("valid skill name"),
+                ),
+                "API Designer",
+                "Designs RESTful APIs following best practices.",
+            );
+            d.scope = SkillScope::Builtin;
+            d
         },
         body: r"## Role
 You are an API design consultant.
@@ -188,9 +197,11 @@ You are a security auditor reviewing code for vulnerabilities.
     let inventory = engine.inventory_section().await?;
     println!("{inventory}\n");
 
-    println!("=== Resolved Skill: review/rust-reviewer ===\n");
+    println!("=== Resolved Skill: review-rust-reviewer ===\n");
     let resolved = engine
-        .resolve_and_render(&[SkillId("review/rust-reviewer".to_string())])
+        .resolve_and_render(&[SkillKey::builtin(
+            SkillName::parse("review-rust-reviewer").expect("valid skill name"),
+        )])
         .await?;
     for skill in &resolved {
         println!("Name: {}", skill.name);

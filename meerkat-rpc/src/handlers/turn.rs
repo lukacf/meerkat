@@ -98,16 +98,17 @@ pub type TurnResult = meerkat_contracts::WireRunResult;
 // ---------------------------------------------------------------------------
 
 fn canonical_skill_ids(
-    runtime: &SessionRuntime,
+    _runtime: &SessionRuntime,
     skill_refs: Option<Vec<SkillRef>>,
-    skill_references: Option<Vec<String>>,
+    _skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
+    // Post-wave-a dogma: legacy string `skill_references` path has been retired;
+    // only typed `skill_refs` is consulted at the wire boundary.
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
-        skill_references,
     };
-    params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+    Ok(params.canonical_skill_keys())
 }
 
 /// Collect per-turn override fields into a struct for `SessionRuntime::start_turn`.
@@ -125,7 +126,7 @@ pub struct TurnOverrides {
 }
 
 impl TurnOverrides {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.keep_alive.is_none()
             && self.model.is_none()
             && self.provider.is_none()
@@ -223,13 +224,29 @@ pub async fn handle_start(
     if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
         && !runtime_adapter.session_has_executor(&session_id).await
     {
-        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-            runtime.clone(),
-            session_id.clone(),
-        ));
-        runtime_adapter
-            .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+        #[cfg(feature = "mob")]
+        {
+            if let Err(err) = runtime
+                .ensure_runtime_session_for_rotation(&session_id)
+                .await
+            {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("runtime executor registration failed: {err}"),
+                );
+            }
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                runtime.clone(),
+                session_id.clone(),
+            ));
+            runtime_adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await;
+        }
     }
 
     let result = match runtime

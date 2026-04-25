@@ -14,61 +14,18 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 mod identity;
-pub use identity::{SkillAlias, SourceIdentityRegistry};
+pub use identity::{ResolveError, SkillAlias, SourceIdentityRegistry};
 
 // ---------------------------------------------------------------------------
-// Skill ID
+// Canonical identity (Skills V4)
 // ---------------------------------------------------------------------------
 
-/// Skill identifier — newtype for type safety.
-///
-/// The canonical format is a slash-delimited path: `{collection-path}/{name}`.
-/// Examples: `"extraction/email-extractor"`, `"a/b/c"`, `"pdf-processing"`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SkillId(pub String);
-
-impl SkillId {
-    /// Extract the collection path (everything before the last `/`).
-    ///
-    /// Returns `None` for root-level skills (no `/` in the ID).
-    pub fn collection(&self) -> Option<&str> {
-        self.0.rfind('/').map(|pos| &self.0[..pos])
-    }
-
-    /// Extract the spec-compliant flat name (last path segment).
-    pub fn skill_name(&self) -> &str {
-        match self.0.rfind('/') {
-            Some(pos) => &self.0[pos + 1..],
-            None => &self.0,
-        }
-    }
-}
-
-impl std::fmt::Display for SkillId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for SkillId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for SkillId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Canonical identity (Skills V2.1 Phase 0)
-// ---------------------------------------------------------------------------
+/// Canonical source UUID shared by embedded (component-crate `inventory`)
+/// registrations. Embedded skills all live inside this single logical source.
+pub const BUILTIN_SOURCE_UUID: Uuid = Uuid::from_u128(0x0000_0000_0000_4b11_8111_0000_0000_0001);
 
 /// Canonical source identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct SourceUuid(Uuid);
@@ -80,8 +37,17 @@ impl SourceUuid {
             .map_err(|e| SkillError::Parse(format!("invalid source_uuid '{value}': {e}").into()))
     }
 
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
+    }
+
+    /// The canonical UUID for builtin (inventory-registered) skills.
+    pub fn builtin() -> Self {
+        Self(BUILTIN_SOURCE_UUID)
     }
 }
 
@@ -106,7 +72,7 @@ impl std::fmt::Display for SourceUuid {
 }
 
 /// Canonical skill slug (lowercase, dash-separated).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct SkillName(String);
@@ -165,20 +131,133 @@ impl std::fmt::Display for SkillName {
 }
 
 /// Canonical runtime identity for a skill.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// This is the single identity carried across every surface — the wire parses
+/// directly into this struct, tools receive this struct, the registry stores
+/// this struct. There is no slash-delimited string path form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillKey {
     pub source_uuid: SourceUuid,
     pub skill_name: SkillName,
 }
 
-/// Boundary compatibility reference: legacy string or structured key.
+impl SkillKey {
+    pub fn new(source_uuid: SourceUuid, skill_name: SkillName) -> Self {
+        Self {
+            source_uuid,
+            skill_name,
+        }
+    }
+
+    /// Build a `SkillKey` whose source is the builtin (inventory) source.
+    pub fn builtin(skill_name: SkillName) -> Self {
+        Self {
+            source_uuid: SourceUuid::builtin(),
+            skill_name,
+        }
+    }
+}
+
+impl std::fmt::Display for SkillKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.source_uuid, self.skill_name)
+    }
+}
+
+/// Structured skill reference for wire/surface input.
+///
+/// Post-V4 this has exactly one variant — `Structured` — and is kept only as a
+/// typed enum to leave room for future source-scoped variants (e.g. alias or
+/// capability-scoped forms) without changing the trait surface. No legacy
+/// string form, no slash-delimited path, no untagged fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(untagged)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SkillRef {
-    Legacy(String),
     Structured(SkillKey),
+}
+
+impl SkillRef {
+    pub fn key(&self) -> &SkillKey {
+        match self {
+            Self::Structured(key) => key,
+        }
+    }
+
+    pub fn into_key(self) -> SkillKey {
+        match self {
+            Self::Structured(key) => key,
+        }
+    }
+}
+
+impl From<SkillKey> for SkillRef {
+    fn from(key: SkillKey) -> Self {
+        Self::Structured(key)
+    }
+}
+
+/// Slug-validated capability identifier for skill requirements.
+///
+/// Replaces the legacy `Vec<String>` capability lists with a typed
+/// namespace. Parsed at construction, so callers cannot smuggle invalid
+/// identifiers into descriptors or requirements.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct CapabilityId(String);
+
+impl CapabilityId {
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        if value.is_empty() {
+            return Err(SkillError::Parse("capability_id cannot be empty".into()));
+        }
+
+        let bytes = value.as_bytes();
+        if bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
+            return Err(SkillError::Parse(
+                format!("invalid capability_id '{value}': cannot start/end with '-'").into(),
+            ));
+        }
+
+        if value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            && !value.contains("--")
+        {
+            return Ok(Self(value.to_string()));
+        }
+
+        Err(SkillError::Parse(
+            format!("invalid capability_id '{value}': expected lowercase slug [a-z0-9_-], no '--'")
+                .into(),
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CapabilityId {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<CapabilityId> for String {
+    fn from(value: CapabilityId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for CapabilityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Source transport class used for identity governance.
@@ -211,7 +290,12 @@ pub struct SourceIdentityRecord {
     pub display_name: String,
     pub transport_kind: SourceTransportKind,
     pub fingerprint: String,
+    #[serde(default = "default_source_identity_status")]
     pub status: SourceIdentityStatus,
+}
+
+fn default_source_identity_status() -> SourceIdentityStatus {
+    SourceIdentityStatus::Active
 }
 
 /// Lineage event for source identity governance.
@@ -322,8 +406,7 @@ impl Default for SourceHealthSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillQuarantineDiagnostic {
-    pub source_uuid: SourceUuid,
-    pub skill_id: SkillId,
+    pub key: SkillKey,
     pub location: String,
     pub error_code: String,
     pub error_class: String,
@@ -387,29 +470,43 @@ pub enum SkillScope {
 
 /// Metadata describing a skill.
 ///
-/// This is the **single authoritative definition**. The `source_name` field is
+/// `key` is the single authoritative identifier. The `source_name` field is
 /// set by `CompositeSkillSource` when merging named sources. Individual
 /// `SkillSource` implementations leave it empty.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillDescriptor {
-    /// Canonical namespaced ID: `"extraction/email-extractor"`.
-    /// This is the ONLY identifier used across all layers.
-    pub id: SkillId,
+    /// Canonical SkillKey (source_uuid + skill_name).
+    pub key: SkillKey,
     /// Human-readable name from SKILL.md frontmatter (e.g. `"email-extractor"`).
-    /// Typically matches the last segment of the ID but is independently set.
     pub name: String,
     pub description: String,
     pub scope: SkillScope,
-    /// Capability IDs required for this skill (as string forms of CapabilityId).
-    pub requires_capabilities: Vec<String>,
     /// Extensible metadata (from SKILL.md frontmatter `metadata:` field).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub metadata: IndexMap<String, String>,
+    /// Capability requirements (typed slugs; replaces the legacy
+    /// `Vec<String>` path).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_requirements: Vec<CapabilityId>,
     /// Repository name this skill came from (e.g. "company", "project").
     /// Populated by `CompositeSkillSource` from the `NamedSource` wrapper.
     /// Empty string for sources used outside `CompositeSkillSource`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_name: String,
+}
+
+impl SkillDescriptor {
+    pub fn new(key: SkillKey, name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            key,
+            name: name.into(),
+            description: description.into(),
+            scope: SkillScope::default(),
+            metadata: IndexMap::new(),
+            capability_requirements: Vec::new(),
+            source_name: String::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,36 +528,29 @@ pub struct SkillDocument {
 /// Filter for listing skills.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillFilter {
-    /// Segment-aware recursive prefix filter: return all skills whose
-    /// collection path starts with this value at a `/` boundary.
-    ///
-    /// `"extraction"` matches `extraction/email`, `extraction/medical/x`
-    /// but NOT `extract/something` or `extractions/foo`.
-    ///
-    /// Implementation: match when skill's collection path == filter
-    /// OR skill's collection path starts with `"{filter}/"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub collection: Option<String>,
-    /// Free-text search across name + description (all collections).
+    /// Free-text search across name + description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    /// Filter to a single source UUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_uuid: Option<SourceUuid>,
 }
 
-/// A skill collection (derived from namespaced IDs).
+/// A skill collection (derived from source UUIDs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillCollection {
-    /// Collection path prefix (e.g. `"extraction"` or `"extraction/medical"`).
-    pub path: String,
+    /// Source UUID that this collection groups by.
+    pub source_uuid: SourceUuid,
     /// Human-readable description.
     pub description: String,
-    /// Number of skills in this collection (recursive — includes subcollections).
+    /// Number of skills in this collection.
     pub count: usize,
 }
 
 /// A resolved skill ready for injection.
 #[derive(Debug, Clone)]
 pub struct ResolvedSkill {
-    pub id: SkillId,
+    pub key: SkillKey,
     pub name: String,
     /// The rendered `<skill>` XML block, sanitized and size-limited.
     pub rendered_body: String,
@@ -487,63 +577,36 @@ pub struct SkillArtifactContent {
 // Collection derivation
 // ---------------------------------------------------------------------------
 
-/// Check whether a skill's collection path matches a prefix filter at
-/// segment boundaries.
-///
-/// `"extraction"` matches skills with collection `"extraction"`,
-/// `"extraction/medical"`, etc. but NOT `"extract"` or `"extractions"`.
-pub fn collection_matches_prefix(skill_collection: Option<&str>, prefix: &str) -> bool {
-    match skill_collection {
-        None => false,
-        Some(coll) => {
-            coll == prefix
-                || (coll.starts_with(prefix) && coll.as_bytes().get(prefix.len()) == Some(&b'/'))
-        }
-    }
-}
-
-/// Derive top-level collections from a list of skill descriptors.
-///
-/// Returns unique top-level collection paths with their recursive skill counts.
-/// Skills without a collection (root-level) are not included.
+/// Derive collections from a list of skill descriptors by grouping on
+/// `SourceUuid`.
 pub fn derive_collections(skills: &[SkillDescriptor]) -> Vec<SkillCollection> {
-    // Count skills per top-level collection prefix.
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<SourceUuid, usize> = BTreeMap::new();
     for skill in skills {
-        if let Some(coll) = skill.id.collection() {
-            // Extract top-level: first segment only
-            let top = match coll.find('/') {
-                Some(pos) => &coll[..pos],
-                None => coll,
-            };
-            *counts.entry(top.to_string()).or_default() += 1;
-        }
+        *counts.entry(skill.key.source_uuid.clone()).or_default() += 1;
     }
     counts
         .into_iter()
-        .map(|(path, count)| SkillCollection {
+        .map(|(source_uuid, count)| SkillCollection {
             description: if count == 1 {
                 "1 skill".to_string()
             } else {
                 format!("{count} skills")
             },
-            path,
+            source_uuid,
             count,
         })
         .collect()
 }
 
 /// Apply a `SkillFilter` to a slice of descriptors.
-///
-/// Filters by iterating once instead of cloning the entire slice upfront.
 pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<SkillDescriptor> {
     let query_lower = filter.query.as_ref().map(|q| q.to_lowercase());
 
     skills
         .iter()
         .filter(|s| {
-            if let Some(ref prefix) = filter.collection
-                && !collection_matches_prefix(s.id.collection(), prefix)
+            if let Some(ref source) = filter.source_uuid
+                && &s.key.source_uuid != source
             {
                 return false;
             }
@@ -558,10 +621,6 @@ pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<Ski
         .cloned()
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Introspection
@@ -587,16 +646,13 @@ pub struct SkillIntrospectionEntry {
 /// Errors from skill operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SkillError {
-    #[error("skill not found: {id}")]
-    NotFound { id: SkillId },
+    #[error("skill not found: {key}")]
+    NotFound { key: SkillKey },
 
-    #[error("skill requires unavailable capability: {capability}")]
-    CapabilityUnavailable { id: SkillId, capability: String },
-
-    #[error("ambiguous skill reference '{reference}' matches: {matches:?}")]
-    Ambiguous {
-        reference: String,
-        matches: Vec<SkillId>,
+    #[error("skill '{key}' requires unavailable capability: {capability}")]
+    CapabilityUnavailable {
+        key: SkillKey,
+        capability: CapabilityId,
     },
 
     #[error("skill loading failed: {0}")]
@@ -639,9 +695,6 @@ pub enum SkillError {
         to_skill_name: String,
     },
 
-    #[error("invalid legacy skill reference '{reference}': expected '<source_uuid>/<skill_name>'")]
-    InvalidLegacySkillRefFormat { reference: String },
-
     #[error("unknown skill alias '{alias}'")]
     UnknownSkillAlias { alias: String },
 
@@ -658,17 +711,19 @@ pub enum SkillError {
 
 /// Source of skill definitions.
 pub trait SkillSource: Send + Sync {
-    /// List skill descriptors, optionally filtered by collection prefix or query.
+    /// List skill descriptors, optionally filtered by source UUID or query.
     fn list(
         &self,
         filter: &SkillFilter,
     ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send;
 
-    /// Load a skill document by its canonical ID.
-    fn load(&self, id: &SkillId) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send;
+    /// Load a skill document by its canonical key.
+    fn load(
+        &self,
+        key: &SkillKey,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send;
 
-    /// List top-level collections with counts.
-    /// Default implementation derives collections from skill ID prefixes.
+    /// List collections with counts. Default derives from `list()`.
     fn collections(&self) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
         async {
             let all = self.list(&SkillFilter::default()).await?;
@@ -693,39 +748,37 @@ pub trait SkillSource: Send + Sync {
     /// List resources/artifacts exposed by a skill.
     fn list_artifacts(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
     ) -> impl Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send {
-        let missing = id.clone();
-        async move { Err(SkillError::NotFound { id: missing }) }
+        let missing = key.clone();
+        async move { Err(SkillError::NotFound { key: missing }) }
     }
 
     /// Read a specific artifact from a skill.
     fn read_artifact(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send {
-        let missing = id.clone();
+        let missing = key.clone();
         let _ = artifact_path;
-        async move { Err(SkillError::NotFound { id: missing }) }
+        async move { Err(SkillError::NotFound { key: missing }) }
     }
 
     /// Invoke a skill-defined function with structured arguments.
     fn invoke_function(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         function_name: &str,
         arguments: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
-        let missing = id.clone();
+        let missing = key.clone();
         let _ = function_name;
         let _ = arguments;
-        async move { Err(SkillError::NotFound { id: missing }) }
+        async move { Err(SkillError::NotFound { key: missing }) }
     }
 
     /// List all skills with provenance information (active + shadowed).
-    ///
-    /// Default implementation wraps `list()` results as all active.
     fn list_all_with_provenance(
         &self,
         filter: &SkillFilter,
@@ -744,14 +797,12 @@ pub trait SkillSource: Send + Sync {
     }
 
     /// Load a skill from a specific named source, bypassing first-wins resolution.
-    ///
-    /// Default implementation ignores `source_name` and delegates to `load()`.
     fn load_from_source(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         _source_name: Option<&str>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
-        async move { self.load(id).await }
+        async move { self.load(key).await }
     }
 }
 
@@ -767,8 +818,11 @@ where
         async move { (**self).list(filter).await }
     }
 
-    fn load(&self, id: &SkillId) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
-        async move { (**self).load(id).await }
+    fn load(
+        &self,
+        key: &SkillKey,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        async move { (**self).load(key).await }
     }
 
     fn collections(&self) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
@@ -789,26 +843,30 @@ where
 
     fn list_artifacts(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
     ) -> impl Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send {
-        async move { (**self).list_artifacts(id).await }
+        async move { (**self).list_artifacts(key).await }
     }
 
     fn read_artifact(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send {
-        async move { (**self).read_artifact(id, artifact_path).await }
+        async move { (**self).read_artifact(key, artifact_path).await }
     }
 
     fn invoke_function(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         function_name: &str,
         arguments: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
-        async move { (**self).invoke_function(id, function_name, arguments).await }
+        async move {
+            (**self)
+                .invoke_function(key, function_name, arguments)
+                .await
+        }
     }
 
     fn list_all_with_provenance(
@@ -820,11 +878,11 @@ where
 
     fn load_from_source(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         source_name: Option<&str>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
         let source_name = source_name.map(ToString::to_string);
-        async move { (**self).load_from_source(id, source_name.as_deref()).await }
+        async move { (**self).load_from_source(key, source_name.as_deref()).await }
     }
 }
 
@@ -833,10 +891,10 @@ pub trait SkillEngine: Send + Sync {
     /// Generate the system prompt inventory (XML, compact).
     fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send;
 
-    /// Resolve skill IDs and render injection content.
+    /// Resolve skill keys and render injection content.
     fn resolve_and_render(
         &self,
-        ids: &[SkillId],
+        keys: &[SkillKey],
     ) -> impl Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send;
 
     /// List collections (delegates to source).
@@ -861,27 +919,25 @@ pub trait SkillEngine: Send + Sync {
     /// List resources/artifacts exposed by a skill.
     fn list_artifacts(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
     ) -> impl Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send;
 
     /// Read a specific artifact from a skill.
     fn read_artifact(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send;
 
     /// Invoke a skill-defined function with structured arguments.
     fn invoke_function(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         function_name: &str,
         arguments: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send;
 
     /// List all skills with provenance and shadow information.
-    ///
-    /// Default implementation wraps `list_skills()` results as all active.
     fn list_all_with_provenance(
         &self,
         filter: &SkillFilter,
@@ -900,39 +956,56 @@ pub trait SkillEngine: Send + Sync {
     }
 
     /// Load a skill from a specific named source, bypassing first-wins resolution.
-    ///
-    /// Default implementation ignores `source_name` and delegates to `resolve_and_render()`.
     fn load_from_source(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         _source_name: Option<&str>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
         let _ = _source_name;
-        let missing = id.clone();
-        async move { Err(SkillError::NotFound { id: missing }) }
+        let missing = key.clone();
+        async move { Err(SkillError::NotFound { key: missing }) }
+    }
+
+    /// Apply the engine's source-identity lineage remap chain to `key`,
+    /// producing the canonical `SkillKey` to use for downstream resolve
+    /// operations. Engines that do not own a `SourceIdentityRegistry`
+    /// return the input unchanged — the default preserves pre-V4
+    /// behavior for lightweight/test engines while giving registry-backed
+    /// engines (e.g. `meerkat_skills::DefaultSkillEngine`) a typed seam
+    /// that builtin skill tools can consume before calling resolve,
+    /// closing the lineage-remap gap on `load_skill` / `read_artifact` /
+    /// `invoke_function` / `list_artifacts`.
+    fn canonical_skill_key(
+        &self,
+        key: &SkillKey,
+    ) -> impl Future<Output = Result<SkillKey, SkillError>> + Send {
+        let canonical = key.clone();
+        async move { Ok(canonical) }
     }
 }
 
 type OwnedSkillFuture<T> = Pin<Box<dyn Future<Output = Result<T, SkillError>> + Send + 'static>>;
 type InventoryFn = dyn Fn() -> OwnedSkillFuture<String> + Send + Sync;
-type ResolveFn = dyn Fn(Vec<SkillId>) -> OwnedSkillFuture<Vec<ResolvedSkill>> + Send + Sync;
+type ResolveFn = dyn Fn(Vec<SkillKey>) -> OwnedSkillFuture<Vec<ResolvedSkill>> + Send + Sync;
 type CollectionsFn = dyn Fn() -> OwnedSkillFuture<Vec<SkillCollection>> + Send + Sync;
 type ListSkillsFn = dyn Fn(SkillFilter) -> OwnedSkillFuture<Vec<SkillDescriptor>> + Send + Sync;
 type QuarantinedDiagnosticsFn =
     dyn Fn() -> OwnedSkillFuture<Vec<SkillQuarantineDiagnostic>> + Send + Sync;
 type HealthSnapshotFn = dyn Fn() -> OwnedSkillFuture<SourceHealthSnapshot> + Send + Sync;
-type ListArtifactsFn = dyn Fn(SkillId) -> OwnedSkillFuture<Vec<SkillArtifact>> + Send + Sync;
+type ListArtifactsFn = dyn Fn(SkillKey) -> OwnedSkillFuture<Vec<SkillArtifact>> + Send + Sync;
 type ReadArtifactFn =
-    dyn Fn(SkillId, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
-type InvokeFunctionFn =
-    dyn Fn(SkillId, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value> + Send + Sync;
+    dyn Fn(SkillKey, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
+type InvokeFunctionFn = dyn Fn(SkillKey, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value>
+    + Send
+    + Sync;
 type ListAllWithProvenanceFn =
     dyn Fn(SkillFilter) -> OwnedSkillFuture<Vec<SkillIntrospectionEntry>> + Send + Sync;
 type LoadFromSourceFn =
-    dyn Fn(SkillId, Option<String>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
+    dyn Fn(SkillKey, Option<String>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
+type CanonicalSkillKeyFn = dyn Fn(SkillKey) -> OwnedSkillFuture<SkillKey> + Send + Sync;
 
 #[derive(Clone)]
-#[allow(clippy::struct_field_names)] // fields are function pointers; _fn suffix is intentional
+#[allow(clippy::struct_field_names)]
 pub struct SkillRuntime {
     inventory_fn: Arc<InventoryFn>,
     resolve_fn: Arc<ResolveFn>,
@@ -945,6 +1018,7 @@ pub struct SkillRuntime {
     invoke_function_fn: Arc<InvokeFunctionFn>,
     list_all_with_provenance_fn: Arc<ListAllWithProvenanceFn>,
     load_from_source_fn: Arc<LoadFromSourceFn>,
+    canonical_skill_key_fn: Arc<CanonicalSkillKeyFn>,
 }
 
 impl SkillRuntime {
@@ -962,6 +1036,7 @@ impl SkillRuntime {
         let read_artifact_engine = Arc::clone(&engine);
         let invoke_function_engine = Arc::clone(&engine);
         let provenance_engine = Arc::clone(&engine);
+        let canonical_engine = Arc::clone(&engine);
         let load_from_source_engine = engine;
 
         Self {
@@ -969,9 +1044,9 @@ impl SkillRuntime {
                 let engine = Arc::clone(&inventory_engine);
                 Box::pin(async move { engine.inventory_section().await })
             }),
-            resolve_fn: Arc::new(move |ids: Vec<SkillId>| {
+            resolve_fn: Arc::new(move |keys: Vec<SkillKey>| {
                 let engine = Arc::clone(&resolve_engine);
-                Box::pin(async move { engine.resolve_and_render(&ids).await })
+                Box::pin(async move { engine.resolve_and_render(&keys).await })
             }),
             collections_fn: Arc::new(move || {
                 let engine = Arc::clone(&collections_engine);
@@ -989,29 +1064,35 @@ impl SkillRuntime {
                 let engine = Arc::clone(&health_engine);
                 Box::pin(async move { engine.health_snapshot().await })
             }),
-            list_artifacts_fn: Arc::new(move |id: SkillId| {
+            list_artifacts_fn: Arc::new(move |key: SkillKey| {
                 let engine = Arc::clone(&list_artifacts_engine);
-                Box::pin(async move { engine.list_artifacts(&id).await })
+                Box::pin(async move { engine.list_artifacts(&key).await })
             }),
-            read_artifact_fn: Arc::new(move |id: SkillId, artifact_path: String| {
+            read_artifact_fn: Arc::new(move |key: SkillKey, artifact_path: String| {
                 let engine = Arc::clone(&read_artifact_engine);
-                Box::pin(async move { engine.read_artifact(&id, &artifact_path).await })
+                Box::pin(async move { engine.read_artifact(&key, &artifact_path).await })
             }),
             invoke_function_fn: Arc::new(
-                move |id: SkillId, function_name: String, arguments: serde_json::Value| {
+                move |key: SkillKey, function_name: String, arguments: serde_json::Value| {
                     let engine = Arc::clone(&invoke_function_engine);
-                    Box::pin(
-                        async move { engine.invoke_function(&id, &function_name, arguments).await },
-                    )
+                    Box::pin(async move {
+                        engine
+                            .invoke_function(&key, &function_name, arguments)
+                            .await
+                    })
                 },
             ),
             list_all_with_provenance_fn: Arc::new(move |filter: SkillFilter| {
                 let engine = Arc::clone(&provenance_engine);
                 Box::pin(async move { engine.list_all_with_provenance(&filter).await })
             }),
-            load_from_source_fn: Arc::new(move |id: SkillId, source_name: Option<String>| {
+            load_from_source_fn: Arc::new(move |key: SkillKey, source_name: Option<String>| {
                 let engine = Arc::clone(&load_from_source_engine);
-                Box::pin(async move { engine.load_from_source(&id, source_name.as_deref()).await })
+                Box::pin(async move { engine.load_from_source(&key, source_name.as_deref()).await })
+            }),
+            canonical_skill_key_fn: Arc::new(move |key: SkillKey| {
+                let engine = Arc::clone(&canonical_engine);
+                Box::pin(async move { engine.canonical_skill_key(&key).await })
             }),
         }
     }
@@ -1022,9 +1103,9 @@ impl SkillRuntime {
 
     pub async fn resolve_and_render(
         &self,
-        ids: &[SkillId],
+        keys: &[SkillKey],
     ) -> Result<Vec<ResolvedSkill>, SkillError> {
-        (self.resolve_fn)(ids.to_vec()).await
+        (self.resolve_fn)(keys.to_vec()).await
     }
 
     pub async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError> {
@@ -1048,25 +1129,25 @@ impl SkillRuntime {
         (self.health_snapshot_fn)().await
     }
 
-    pub async fn list_artifacts(&self, id: &SkillId) -> Result<Vec<SkillArtifact>, SkillError> {
-        (self.list_artifacts_fn)(id.clone()).await
+    pub async fn list_artifacts(&self, key: &SkillKey) -> Result<Vec<SkillArtifact>, SkillError> {
+        (self.list_artifacts_fn)(key.clone()).await
     }
 
     pub async fn read_artifact(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         artifact_path: &str,
     ) -> Result<SkillArtifactContent, SkillError> {
-        (self.read_artifact_fn)(id.clone(), artifact_path.to_string()).await
+        (self.read_artifact_fn)(key.clone(), artifact_path.to_string()).await
     }
 
     pub async fn invoke_function(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         function_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, SkillError> {
-        (self.invoke_function_fn)(id.clone(), function_name.to_string(), arguments).await
+        (self.invoke_function_fn)(key.clone(), function_name.to_string(), arguments).await
     }
 
     pub async fn list_all_with_provenance(
@@ -1078,10 +1159,16 @@ impl SkillRuntime {
 
     pub async fn load_from_source(
         &self,
-        id: &SkillId,
+        key: &SkillKey,
         source_name: Option<&str>,
     ) -> Result<SkillDocument, SkillError> {
-        (self.load_from_source_fn)(id.clone(), source_name.map(ToString::to_string)).await
+        (self.load_from_source_fn)(key.clone(), source_name.map(ToString::to_string)).await
+    }
+
+    /// Apply the engine's source-identity lineage remap chain to `key`.
+    /// See [`SkillEngine::canonical_skill_key`] for semantics.
+    pub async fn canonical_skill_key(&self, key: &SkillKey) -> Result<SkillKey, SkillError> {
+        (self.canonical_skill_key_fn)(key.clone()).await
     }
 }
 
@@ -1094,253 +1181,20 @@ impl SkillRuntime {
 mod tests {
     use super::*;
 
-    // --- SkillIntrospectionEntry ---
-
-    #[test]
-    fn test_skill_introspection_entry_serde_roundtrip() {
-        let entry = SkillIntrospectionEntry {
-            descriptor: SkillDescriptor {
-                id: SkillId("extraction/email".into()),
-                name: "email".into(),
-                description: "Extract emails".into(),
-                scope: SkillScope::Builtin,
-                source_name: "embedded".into(),
-                ..Default::default()
-            },
-            shadowed_by: None,
-            is_active: true,
-        };
-
-        let json = serde_json::to_value(&entry).expect("serialize");
-        // Descriptor fields are flattened
-        assert_eq!(json["name"], "email");
-        assert_eq!(json["is_active"], true);
-        assert!(json.get("shadowed_by").is_none());
-
-        let decoded: SkillIntrospectionEntry = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(decoded.descriptor.id.0, "extraction/email");
-        assert!(decoded.is_active);
-        assert!(decoded.shadowed_by.is_none());
+    fn test_key(skill: &str) -> SkillKey {
+        SkillKey {
+            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid uuid"),
+            skill_name: SkillName::parse(skill).expect("valid slug"),
+        }
     }
 
     #[test]
-    fn test_skill_introspection_entry_shadowed_roundtrip() {
-        let entry = SkillIntrospectionEntry {
-            descriptor: SkillDescriptor {
-                id: SkillId("shared/skill".into()),
-                name: "skill".into(),
-                description: "A skill".into(),
-                scope: SkillScope::Project,
-                source_name: "company".into(),
-                ..Default::default()
-            },
-            shadowed_by: Some("project".into()),
-            is_active: false,
-        };
-
-        let json = serde_json::to_value(&entry).expect("serialize");
-        assert_eq!(json["shadowed_by"], "project");
-        assert_eq!(json["is_active"], false);
-
-        let decoded: SkillIntrospectionEntry = serde_json::from_value(json).expect("deserialize");
-        assert!(!decoded.is_active);
-        assert_eq!(decoded.shadowed_by.as_deref(), Some("project"));
-    }
-
-    // --- SkillId ---
-
-    #[test]
-    fn test_skill_id_collection_extraction() {
-        let id = SkillId("extraction/email".into());
-        assert_eq!(id.collection(), Some("extraction"));
-    }
-
-    #[test]
-    fn test_skill_id_nested_collection() {
-        let id = SkillId("a/b/c".into());
-        assert_eq!(id.collection(), Some("a/b"));
-    }
-
-    #[test]
-    fn test_skill_id_root_level() {
-        let id = SkillId("pdf".into());
-        assert_eq!(id.collection(), None);
-    }
-
-    #[test]
-    fn test_skill_id_name_extraction() {
-        let id = SkillId("extraction/email".into());
-        assert_eq!(id.skill_name(), "email");
-
-        let root = SkillId("pdf-processing".into());
-        assert_eq!(root.skill_name(), "pdf-processing");
-
-        let nested = SkillId("a/b/c".into());
-        assert_eq!(nested.skill_name(), "c");
-    }
-
-    // --- SkillFilter ---
-
-    #[test]
-    fn test_skill_filter_default_is_empty() {
-        let filter = SkillFilter::default();
-        assert!(filter.collection.is_none());
-        assert!(filter.query.is_none());
-    }
-
-    // --- derive_collections ---
-
-    #[test]
-    fn test_derive_collections_basic() {
-        let skills = vec![
-            SkillDescriptor {
-                id: SkillId("extraction/email".into()),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("extraction/fiction".into()),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("formatting/markdown".into()),
-                ..Default::default()
-            },
-        ];
-
-        let collections = derive_collections(&skills);
-        assert_eq!(collections.len(), 2);
-
-        let extraction = collections.iter().find(|c| c.path == "extraction");
-        assert!(extraction.is_some());
-        assert_eq!(extraction.map(|c| c.count), Some(2));
-
-        let formatting = collections.iter().find(|c| c.path == "formatting");
-        assert!(formatting.is_some());
-        assert_eq!(formatting.map(|c| c.count), Some(1));
-    }
-
-    #[test]
-    fn test_derive_collections_nested() {
-        let skills = vec![
-            SkillDescriptor {
-                id: SkillId("extraction/email".into()),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("extraction/medical/diagnosis".into()),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("extraction/medical/imaging/ct".into()),
-                ..Default::default()
-            },
-        ];
-
-        let collections = derive_collections(&skills);
-        // All nest under top-level "extraction"
-        assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].path, "extraction");
-        assert_eq!(collections[0].count, 3);
-    }
-
-    #[test]
-    fn test_derive_collections_empty() {
-        let collections = derive_collections(&[]);
-        assert!(collections.is_empty());
-
-        // Root-level skills don't create collections
-        let skills = vec![SkillDescriptor {
-            id: SkillId("pdf-processing".into()),
-            ..Default::default()
-        }];
-        let collections = derive_collections(&skills);
-        assert!(collections.is_empty());
-    }
-
-    // --- collection_matches_prefix (segment-aware) ---
-
-    #[test]
-    fn test_collection_prefix_match_segment() {
-        // "extraction" matches "extraction" and "extraction/medical" but not "extract"
-        assert!(collection_matches_prefix(Some("extraction"), "extraction"));
-        assert!(collection_matches_prefix(
-            Some("extraction/medical"),
-            "extraction"
-        ));
-        assert!(!collection_matches_prefix(Some("extract"), "extraction"));
-        assert!(!collection_matches_prefix(
-            Some("extractions"),
-            "extraction"
-        ));
-        assert!(!collection_matches_prefix(None, "extraction"));
-    }
-
-    // --- apply_filter ---
-
-    #[test]
-    fn test_apply_filter_collection() {
-        let skills = vec![
-            SkillDescriptor {
-                id: SkillId("extraction/email".into()),
-                name: "email".into(),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("formatting/md".into()),
-                name: "md".into(),
-                ..Default::default()
-            },
-        ];
-
-        let filtered = apply_filter(
-            &skills,
-            &SkillFilter {
-                collection: Some("extraction".into()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id.0, "extraction/email");
-    }
-
-    #[test]
-    fn test_apply_filter_query() {
-        let skills = vec![
-            SkillDescriptor {
-                id: SkillId("a/email".into()),
-                name: "email".into(),
-                description: "Extract from emails".into(),
-                ..Default::default()
-            },
-            SkillDescriptor {
-                id: SkillId("b/fiction".into()),
-                name: "fiction".into(),
-                description: "Extract from fiction".into(),
-                ..Default::default()
-            },
-        ];
-
-        let filtered = apply_filter(
-            &skills,
-            &SkillFilter {
-                query: Some("email".into()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name, "email");
-    }
-
-    #[test]
-    fn test_source_uuid_json_roundtrip_stable() {
-        let raw = "dc256086-0d2f-4f61-a307-320d4148107f";
-        let parsed = SourceUuid::parse(raw).expect("valid uuid should parse");
-        let json = serde_json::to_string(&parsed).expect("source uuid should serialize");
-        assert_eq!(json, format!("\"{raw}\""));
-
-        let decoded: SourceUuid =
-            serde_json::from_str(&json).expect("source uuid should deserialize");
-        assert_eq!(decoded, parsed);
+    fn test_skill_key_json_roundtrip() {
+        let key = test_key("email-extractor");
+        let json = serde_json::to_string(&key).expect("serialize");
+        let decoded: SkillKey = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, key);
     }
 
     #[test]
@@ -1348,139 +1202,111 @@ mod tests {
         assert!(SkillName::parse("email-extractor").is_ok());
         assert!(SkillName::parse("EmailExtractor").is_err());
         assert!(SkillName::parse("email_extractor").is_err());
+        assert!(SkillName::parse("-leading").is_err());
+        assert!(SkillName::parse("trailing-").is_err());
+        assert!(SkillName::parse("double--dash").is_err());
+        assert!(SkillName::parse("").is_err());
     }
 
     #[test]
-    fn test_skill_key_json_roundtrip_stable() {
-        let key = SkillKey {
-            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
-                .expect("valid source uuid"),
-            skill_name: SkillName::parse("email-extractor").expect("valid skill slug"),
-        };
-
-        let json = serde_json::to_string(&key).expect("skill key should serialize");
-        let decoded: SkillKey = serde_json::from_str(&json).expect("skill key should deserialize");
-        assert_eq!(decoded, key);
+    fn test_capability_id_slug_validation() {
+        assert!(CapabilityId::parse("builtins").is_ok());
+        assert!(CapabilityId::parse("shell_patterns").is_ok());
+        assert!(CapabilityId::parse("mcp-bridge").is_ok());
+        assert!(CapabilityId::parse("").is_err());
+        assert!(CapabilityId::parse("-leading").is_err());
+        assert!(CapabilityId::parse("trailing-").is_err());
+        assert!(CapabilityId::parse("double--dash").is_err());
+        assert!(CapabilityId::parse("UPPER").is_err());
+        assert!(CapabilityId::parse("space x").is_err());
     }
 
     #[test]
-    fn test_skill_ref_boundary_legacy_and_structured_equivalence() {
-        let legacy = SkillRef::Legacy("extraction/email".to_string());
-        let structured = SkillRef::Structured(SkillKey {
-            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
-                .expect("valid source uuid"),
-            skill_name: SkillName::parse("email-extractor").expect("valid skill slug"),
-        });
-
-        let legacy_json = serde_json::to_string(&legacy).expect("legacy ref should serialize");
-        let structured_json =
-            serde_json::to_string(&structured).expect("structured ref should serialize");
-
-        let legacy_roundtrip: SkillRef =
-            serde_json::from_str(&legacy_json).expect("legacy ref should deserialize");
-        let structured_roundtrip: SkillRef =
-            serde_json::from_str(&structured_json).expect("structured ref should deserialize");
-
-        assert_eq!(legacy_roundtrip, legacy);
-        assert_eq!(structured_roundtrip, structured);
+    fn test_capability_id_json_roundtrip() {
+        let cap = CapabilityId::parse("builtins").expect("valid");
+        let json = serde_json::to_string(&cap).expect("serialize");
+        assert_eq!(json, "\"builtins\"");
+        let decoded: CapabilityId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, cap);
     }
 
     #[test]
-    fn test_identity_lineage_roundtrip() {
-        let lineage = SourceIdentityLineage {
-            event_id: "lineage-evt-1".to_string(),
-            recorded_at_unix_secs: 1_739_974_400,
-            required_from_skills: vec![
-                SkillName::parse("email-extractor").expect("valid skill slug"),
-                SkillName::parse("pdf-processing").expect("valid skill slug"),
-            ],
-            event: SourceIdentityLineageEvent::Split {
-                from: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
-                    .expect("valid source uuid"),
-                into: vec![
-                    SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
-                        .expect("valid source uuid"),
-                    SourceUuid::parse("e8df561d-d38f-4242-af55-3a6efb34c950")
-                        .expect("valid source uuid"),
-                ],
+    fn test_skill_ref_structured_only_serde() {
+        let key = test_key("email-extractor");
+        let r = SkillRef::Structured(key);
+        let json = serde_json::to_value(&r).expect("serialize");
+        // The tag must be "structured" and there must be no legacy variant.
+        assert_eq!(json["kind"], "structured");
+        let decoded: SkillRef = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn test_skill_ref_rejects_string_form() {
+        // Legacy slash-delimited string form is no longer a valid SkillRef.
+        let res: Result<SkillRef, _> = serde_json::from_str("\"extraction/email\"");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_derive_collections_groups_by_source() {
+        let a = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").expect("uuid a");
+        let b = SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7").expect("uuid b");
+        let skills = vec![
+            SkillDescriptor::new(
+                SkillKey::new(a.clone(), SkillName::parse("email").expect("slug")),
+                "email",
+                "Extract emails",
+            ),
+            SkillDescriptor::new(
+                SkillKey::new(a.clone(), SkillName::parse("pdf").expect("slug")),
+                "pdf",
+                "Process pdf",
+            ),
+            SkillDescriptor::new(
+                SkillKey::new(b.clone(), SkillName::parse("markdown").expect("slug")),
+                "markdown",
+                "Render markdown",
+            ),
+        ];
+        let collections = derive_collections(&skills);
+        assert_eq!(collections.len(), 2);
+        let a_coll = collections
+            .iter()
+            .find(|c| c.source_uuid == a)
+            .expect("a present");
+        assert_eq!(a_coll.count, 2);
+        let b_coll = collections
+            .iter()
+            .find(|c| c.source_uuid == b)
+            .expect("b present");
+        assert_eq!(b_coll.count, 1);
+    }
+
+    #[test]
+    fn test_apply_filter_by_source_uuid() {
+        let a = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").expect("uuid a");
+        let b = SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7").expect("uuid b");
+        let skills = vec![
+            SkillDescriptor::new(
+                SkillKey::new(a.clone(), SkillName::parse("email").expect("slug")),
+                "email",
+                "",
+            ),
+            SkillDescriptor::new(
+                SkillKey::new(b, SkillName::parse("pdf").expect("slug")),
+                "pdf",
+                "",
+            ),
+        ];
+        let filtered = apply_filter(
+            &skills,
+            &SkillFilter {
+                source_uuid: Some(a.clone()),
+                ..Default::default()
             },
-        };
-
-        let json = serde_json::to_string(&lineage).expect("lineage should serialize");
-        let decoded: SourceIdentityLineage =
-            serde_json::from_str(&json).expect("lineage should deserialize");
-        assert_eq!(decoded, lineage);
-    }
-
-    #[test]
-    fn test_skill_key_remap_roundtrip() {
-        let remap = SkillKeyRemap {
-            from: SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
-                    .expect("valid source uuid"),
-                skill_name: SkillName::parse("email-extractor").expect("valid skill slug"),
-            },
-            to: SkillKey {
-                source_uuid: SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
-                    .expect("valid source uuid"),
-                skill_name: SkillName::parse("mail-extractor").expect("valid skill slug"),
-            },
-            reason: Some("split source".to_string()),
-        };
-
-        let json = serde_json::to_string(&remap).expect("remap should serialize");
-        let decoded: SkillKeyRemap = serde_json::from_str(&json).expect("remap should deserialize");
-        assert_eq!(decoded, remap);
-    }
-
-    #[test]
-    fn test_source_health_state_default_thresholds() {
-        let thresholds = SourceHealthThresholds::default();
-        assert_eq!(
-            classify_source_health(0.0, 0, false, thresholds),
-            SourceHealthState::Healthy
         );
-        assert_eq!(
-            classify_source_health(0.05, 0, false, thresholds),
-            SourceHealthState::Degraded
-        );
-        assert_eq!(
-            classify_source_health(0.0, 3, false, thresholds),
-            SourceHealthState::Degraded
-        );
-        assert_eq!(
-            classify_source_health(0.40, 0, false, thresholds),
-            SourceHealthState::Unhealthy
-        );
-        assert_eq!(
-            classify_source_health(0.0, 0, true, thresholds),
-            SourceHealthState::Unhealthy
-        );
-    }
-
-    #[test]
-    fn test_source_health_state_overridden_thresholds() {
-        let thresholds = SourceHealthThresholds {
-            degraded_invalid_ratio: 0.10,
-            unhealthy_invalid_ratio: 0.60,
-            degraded_failure_streak: 4,
-            unhealthy_failure_streak: 8,
-        };
-        assert_eq!(
-            classify_source_health(0.09, 3, false, thresholds),
-            SourceHealthState::Healthy
-        );
-        assert_eq!(
-            classify_source_health(0.10, 0, false, thresholds),
-            SourceHealthState::Degraded
-        );
-        assert_eq!(
-            classify_source_health(0.0, 4, false, thresholds),
-            SourceHealthState::Degraded
-        );
-        assert_eq!(
-            classify_source_health(0.0, 8, false, thresholds),
-            SourceHealthState::Unhealthy
-        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key.source_uuid, a);
     }
 }

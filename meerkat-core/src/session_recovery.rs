@@ -9,7 +9,8 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, PeerMeta,
-    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef, skills::SkillId,
+    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
+    checkpoint::SessionCheckpointer, skills::SkillKey,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
@@ -32,7 +33,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
-    pub preload_skills: Option<Vec<SkillId>>,
+    pub preload_skills: Option<Vec<SkillKey>>,
     pub app_context: Option<serde_json::Value>,
     pub shell_env: Option<HashMap<String, String>>,
     pub recoverable_tool_defs: Option<Vec<ToolDef>>,
@@ -42,6 +43,7 @@ pub struct SurfaceSessionRecoveryOverrides {
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
     pub require_runtime_build_mode: bool,
     pub realm_id: Option<String>,
@@ -287,7 +289,7 @@ pub fn build_recovered_session(
         // the binding re-resolves through the same realm entry.
         connection_ref: metadata.connection_ref.clone(),
         keep_alive,
-        checkpointer: None,
+        checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
         max_inline_peer_notifications: build_state.max_inline_peer_notifications,
         app_context: overrides
@@ -330,6 +332,7 @@ pub fn build_recovered_session(
 mod tests {
     use super::*;
 
+    use crate::skills::{SkillName, SourceUuid};
     use crate::time_compat::Duration;
     use crate::{
         CallTimeoutOverride, HookEntryConfig, HookId, SessionBuildState, SessionDeferredTurnState,
@@ -337,10 +340,19 @@ mod tests {
     };
     use serde_json::json;
 
+    fn skill_key(name: &str) -> SkillKey {
+        SkillKey::new(
+            SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid source uuid fixture"),
+            SkillName::parse(name).expect("valid skill name fixture"),
+        )
+    }
+
     fn sample_session() -> Session {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,
@@ -353,7 +365,7 @@ mod tests {
                     comms: ToolCategoryOverride::Inherit,
                     mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
-                    active_skills: Some(vec![SkillId("persisted/skill".to_string())]),
+                    active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,
                 comms_name: Some("peer-a".to_string()),
@@ -547,7 +559,7 @@ mod tests {
                 override_shell: Some(false),
                 override_memory: Some(false),
                 override_mob: Some(true),
-                preload_skills: Some(vec![SkillId("override/skill".to_string())]),
+                preload_skills: Some(vec![skill_key("override-skill")]),
                 app_context: Some(json!({ "surface": "override" })),
                 shell_env: Some(HashMap::from([(
                     "MEERKAT_MODE".to_string(),
@@ -583,7 +595,7 @@ mod tests {
         assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
         assert_eq!(
             build.preload_skills,
-            Some(vec![SkillId("override/skill".to_string())])
+            Some(vec![skill_key("override-skill")])
         );
         assert_eq!(build.app_context, Some(json!({ "surface": "override" })));
         assert_eq!(

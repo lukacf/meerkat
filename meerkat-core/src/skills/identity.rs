@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     SkillError, SkillKey, SkillName, SkillRef, SourceIdentityLineage, SourceIdentityLineageEvent,
-    SourceIdentityRecord, SourceUuid,
+    SourceIdentityRecord, SourceIdentityStatus, SourceUuid,
 };
 
+/// Alias mapping a short user-facing string to a canonical `SkillKey`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillAlias {
@@ -14,10 +15,43 @@ pub struct SkillAlias {
     pub to: SkillKey,
 }
 
+/// Typed errors for `SourceIdentityRegistry::resolve`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ResolveError {
+    #[error("source unknown: {0}")]
+    SourceUnknown(SourceUuid),
+
+    #[error("source {source_uuid} is {status:?}; skills rooted here cannot resolve")]
+    SourceDisabled {
+        source_uuid: SourceUuid,
+        status: SourceIdentityStatus,
+    },
+
+    #[error("skill not found: {source_uuid}/{skill_name}")]
+    SkillNotFound {
+        source_uuid: SourceUuid,
+        skill_name: SkillName,
+    },
+
+    #[error("remap points from {from} to {to} but the target source is disabled")]
+    RemappedButTargetDisabled { from: SkillKey, to: SkillKey },
+}
+
+/// Source identity registry. Owns the mapping from `SkillRef`/`SkillKey` to
+/// the canonical, remapped key, and the source-lifecycle gate.
 #[derive(Debug, Clone, Default)]
 pub struct SourceIdentityRegistry {
+    sources: HashMap<SourceUuid, SourceIdentityRecord>,
     aliases: HashMap<String, SkillKey>,
     remaps: HashMap<SkillKey, SkillKey>,
+}
+
+/// A resolved skill's canonical key, along with a borrowed reference to the
+/// backing source record (for lifecycle + transport inspection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSkill<'a> {
+    pub key: SkillKey,
+    pub source: &'a SourceIdentityRecord,
 }
 
 impl SourceIdentityRegistry {
@@ -109,31 +143,74 @@ impl SourceIdentityRegistry {
             alias_index.insert(alias.alias, alias.to);
         }
 
+        let mut sources_index: HashMap<SourceUuid, SourceIdentityRecord> = HashMap::new();
+        for record in records {
+            sources_index.insert(record.source_uuid.clone(), record);
+        }
+
         Ok(Self {
+            sources: sources_index,
             aliases: alias_index,
             remaps: remap_index,
         })
     }
 
-    pub fn resolve_skill_ref(&self, reference: &SkillRef) -> Result<SkillKey, SkillError> {
-        match reference {
-            SkillRef::Structured(key) => self.apply_remaps(key.clone()),
-            SkillRef::Legacy(legacy) => {
-                let key = match parse_legacy_as_key(legacy) {
-                    Ok(parsed) => parsed,
-                    Err(_) => self.aliases.get(legacy).cloned().ok_or_else(|| {
-                        SkillError::UnknownSkillAlias {
-                            alias: legacy.clone(),
-                        }
-                    })?,
-                };
-                self.apply_remaps(key)
-            }
-        }
+    /// Look up a raw alias string and, if present, return the canonical
+    /// (remapped) `SkillKey`.
+    pub fn resolve_alias(&self, alias: &str) -> Option<SkillKey> {
+        self.aliases
+            .get(alias)
+            .cloned()
+            .and_then(|key| self.apply_remaps(key).ok())
     }
 
-    pub fn canonical_skill_id(key: &SkillKey) -> super::SkillId {
-        super::SkillId(format!("{}/{}", key.source_uuid, key.skill_name))
+    /// Produce the canonical (remapped) `SkillKey` for a `SkillRef`. Does NOT
+    /// enforce source lifecycle — callers should follow up with `resolve` to
+    /// refuse disabled or retired sources.
+    pub fn canonical_skill_key(&self, r: &SkillRef) -> Result<SkillKey, SkillError> {
+        let key = r.key().clone();
+        self.apply_remaps(key)
+    }
+
+    /// Resolve a typed `SkillKey` against the registry. Applies any remap
+    /// chain, then enforces the source lifecycle: only `Active` sources may
+    /// back a resolved skill.
+    pub fn resolve(&self, key: &SkillKey) -> Result<ResolvedSkill<'_>, ResolveError> {
+        let original = key.clone();
+        let canonical = self.apply_remaps(key.clone()).map_err(|_| {
+            // A remap cycle is a programmer/config error; surface it as
+            // `SkillNotFound` at the resolve boundary so the caller's error
+            // taxonomy stays narrow. The richer `SkillError::RemapCycle` is
+            // available via `canonical_skill_key`.
+            ResolveError::SkillNotFound {
+                source_uuid: key.source_uuid.clone(),
+                skill_name: key.skill_name.clone(),
+            }
+        })?;
+
+        let Some(record) = self.sources.get(&canonical.source_uuid) else {
+            return Err(ResolveError::SourceUnknown(canonical.source_uuid));
+        };
+
+        match record.status {
+            SourceIdentityStatus::Active => Ok(ResolvedSkill {
+                key: canonical,
+                source: record,
+            }),
+            status @ (SourceIdentityStatus::Disabled | SourceIdentityStatus::Retired) => {
+                if canonical == original {
+                    Err(ResolveError::SourceDisabled {
+                        source_uuid: canonical.source_uuid,
+                        status,
+                    })
+                } else {
+                    Err(ResolveError::RemappedButTargetDisabled {
+                        from: original,
+                        to: canonical,
+                    })
+                }
+            }
+        }
     }
 
     fn apply_remaps(&self, mut key: SkillKey) -> Result<SkillKey, SkillError> {
@@ -284,44 +361,11 @@ fn remaps_cover_required_sets(
     })
 }
 
-fn parse_legacy_as_key(reference: &str) -> Result<SkillKey, SkillError> {
-    let mut parts = reference.split('/');
-    let Some(source_uuid_raw) = parts.next() else {
-        return Err(SkillError::InvalidLegacySkillRefFormat {
-            reference: reference.to_string(),
-        });
-    };
-    let Some(skill_name_raw) = parts.next() else {
-        return Err(SkillError::InvalidLegacySkillRefFormat {
-            reference: reference.to_string(),
-        });
-    };
-    if parts.next().is_some() {
-        return Err(SkillError::InvalidLegacySkillRefFormat {
-            reference: reference.to_string(),
-        });
-    }
-
-    let source_uuid = SourceUuid::parse(source_uuid_raw).map_err(|_| {
-        SkillError::InvalidLegacySkillRefFormat {
-            reference: reference.to_string(),
-        }
-    })?;
-    let skill_name =
-        SkillName::parse(skill_name_raw).map_err(|_| SkillError::InvalidLegacySkillRefFormat {
-            reference: reference.to_string(),
-        })?;
-    Ok(SkillKey {
-        source_uuid,
-        skill_name,
-    })
-}
-
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::skills::{SkillKeyRemap, SourceIdentityStatus, SourceTransportKind};
+    use crate::skills::{SkillKeyRemap, SourceTransportKind};
 
     fn source_uuid(raw: &str) -> SourceUuid {
         SourceUuid::parse(raw).expect("valid source uuid")
@@ -345,6 +389,20 @@ mod tests {
             transport_kind: SourceTransportKind::Filesystem,
             fingerprint: fingerprint.to_string(),
             status: SourceIdentityStatus::Active,
+        }
+    }
+
+    fn record_with_status(
+        source_raw: &str,
+        fingerprint: &str,
+        status: SourceIdentityStatus,
+    ) -> SourceIdentityRecord {
+        SourceIdentityRecord {
+            source_uuid: source_uuid(source_raw),
+            display_name: "test".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: fingerprint.to_string(),
+            status,
         }
     }
 
@@ -413,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_resolves_alias_and_applies_remap() {
+    fn registry_alias_resolves_then_applies_remap() {
         let registry = SourceIdentityRegistry::build(
             vec![
                 record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-a"),
@@ -430,17 +488,130 @@ mod tests {
                 reason: None,
             }],
             vec![SkillAlias {
-                alias: "legacy/email".to_string(),
+                alias: "legacy-email".to_string(),
                 to: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
             }],
         )
         .expect("registry should build");
 
         let resolved = registry
-            .resolve_skill_ref(&SkillRef::Legacy("legacy/email".to_string()))
+            .resolve_alias("legacy-email")
             .expect("alias should resolve");
         assert_eq!(
             resolved,
+            key("a93d587d-8f44-438f-8189-6e8cf549f6e7", "mail-extractor")
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_disabled_source() {
+        let registry = SourceIdentityRegistry::build(
+            vec![record_with_status(
+                "dc256086-0d2f-4f61-a307-320d4148107f",
+                "fp-a",
+                SourceIdentityStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .expect("registry should build");
+
+        let err = registry
+            .resolve(&key("dc256086-0d2f-4f61-a307-320d4148107f", "email"))
+            .expect_err("disabled source must be rejected");
+        match err {
+            ResolveError::SourceDisabled { status, .. } => {
+                assert_eq!(status, SourceIdentityStatus::Disabled);
+            }
+            other => panic!("expected SourceDisabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_retired_source() {
+        let registry = SourceIdentityRegistry::build(
+            vec![record_with_status(
+                "dc256086-0d2f-4f61-a307-320d4148107f",
+                "fp-a",
+                SourceIdentityStatus::Retired,
+            )],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .expect("registry should build");
+
+        let err = registry
+            .resolve(&key("dc256086-0d2f-4f61-a307-320d4148107f", "email"))
+            .expect_err("retired source must be rejected");
+        match err {
+            ResolveError::SourceDisabled { status, .. } => {
+                assert_eq!(status, SourceIdentityStatus::Retired);
+            }
+            other => panic!("expected SourceDisabled (Retired), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_source() {
+        let registry = SourceIdentityRegistry::default();
+        let err = registry
+            .resolve(&key("dc256086-0d2f-4f61-a307-320d4148107f", "email"))
+            .expect_err("unknown source must be rejected");
+        assert!(matches!(err, ResolveError::SourceUnknown(_)));
+    }
+
+    #[test]
+    fn resolve_accepts_active_source() {
+        let registry = SourceIdentityRegistry::build(
+            vec![record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-a")],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .expect("registry should build");
+
+        let resolved = registry
+            .resolve(&key("dc256086-0d2f-4f61-a307-320d4148107f", "email"))
+            .expect("active source must resolve");
+        assert_eq!(
+            resolved.key,
+            key("dc256086-0d2f-4f61-a307-320d4148107f", "email")
+        );
+        assert_eq!(resolved.source.status, SourceIdentityStatus::Active);
+    }
+
+    #[test]
+    fn canonical_skill_key_applies_remap() {
+        let registry = SourceIdentityRegistry::build(
+            vec![
+                record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-a"),
+                record("a93d587d-8f44-438f-8189-6e8cf549f6e7", "fp-a"),
+            ],
+            vec![lineage_rotate(
+                "evt-rotate",
+                "dc256086-0d2f-4f61-a307-320d4148107f",
+                "a93d587d-8f44-438f-8189-6e8cf549f6e7",
+            )],
+            vec![SkillKeyRemap {
+                from: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+                to: key("a93d587d-8f44-438f-8189-6e8cf549f6e7", "mail-extractor"),
+                reason: None,
+            }],
+            vec![],
+        )
+        .expect("registry should build");
+
+        let original = SkillRef::Structured(key(
+            "dc256086-0d2f-4f61-a307-320d4148107f",
+            "email-extractor",
+        ));
+        let canonical = registry
+            .canonical_skill_key(&original)
+            .expect("should remap");
+        assert_eq!(
+            canonical,
             key("a93d587d-8f44-438f-8189-6e8cf549f6e7", "mail-extractor")
         );
     }

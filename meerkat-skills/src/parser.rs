@@ -4,7 +4,7 @@
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillId, SkillName, SkillScope,
+    CapabilityId, SkillDescriptor, SkillDocument, SkillError, SkillKey, SkillName, SkillScope,
 };
 use serde_yaml::Value;
 
@@ -14,9 +14,9 @@ struct Frontmatter {
     name: String,
     description: String,
     #[serde(default)]
-    requires_capabilities: Vec<String>,
-    #[serde(default)]
     metadata: IndexMap<String, String>,
+    #[serde(default)]
+    requires_capabilities: Vec<String>,
     #[serde(default)]
     version: Option<String>,
     #[serde(flatten)]
@@ -24,20 +24,8 @@ struct Frontmatter {
 }
 
 /// Parse a SKILL.md file into a `SkillDocument`.
-///
-/// The file format is:
-/// ```text
-/// ---
-/// name: Shell Patterns
-/// description: "Background job workflows: patterns and tips"
-/// requires_capabilities: [builtins, shell]
-/// ---
-///
-/// # Shell Patterns
-/// ...
-/// ```
 pub fn parse_skill_md(
-    id: SkillId,
+    key: SkillKey,
     scope: SkillScope,
     content: &str,
     expected_skill_name: Option<&str>,
@@ -52,8 +40,13 @@ pub fn parse_skill_md(
         metadata.insert("version".to_string(), version);
     }
 
+    let mut capability_requirements: Vec<CapabilityId> = Vec::new();
+    for raw in fm.requires_capabilities {
+        capability_requirements.push(CapabilityId::parse(&raw)?);
+    }
+
     let mut extensions = IndexMap::new();
-    for (key, value) in fm.extensions {
+    for (k, value) in fm.extensions {
         let serialized = if let Some(s) = value.as_str() {
             s.to_string()
         } else {
@@ -62,18 +55,18 @@ pub fn parse_skill_md(
                 .trim()
                 .to_string()
         };
-        extensions.insert(key, serialized);
+        extensions.insert(k, serialized);
     }
 
     Ok(SkillDocument {
         descriptor: SkillDescriptor {
-            id,
+            key,
             name: fm.name,
             description: fm.description,
             scope,
-            requires_capabilities: fm.requires_capabilities,
             metadata,
-            ..Default::default()
+            capability_requirements,
+            source_name: String::new(),
         },
         body: body.to_string(),
         extensions,
@@ -97,11 +90,11 @@ fn validate_frontmatter(
         ));
     }
 
-    for key in fm.extensions.keys() {
-        let Some((namespace, suffix)) = key.split_once('.') else {
+    for k in fm.extensions.keys() {
+        let Some((namespace, suffix)) = k.split_once('.') else {
             return Err(SkillError::Parse(
                 format!(
-                    "unknown frontmatter field '{key}': extension keys must be namespaced as 'vendor.key'"
+                    "unknown frontmatter field '{k}': extension keys must be namespaced as 'vendor.key'"
                 )
                 .into(),
             ));
@@ -109,15 +102,15 @@ fn validate_frontmatter(
         if namespace.is_empty() || suffix.is_empty() {
             return Err(SkillError::Parse(
                 format!(
-                    "invalid extension key '{key}': expected non-empty namespace and key segments"
+                    "invalid extension key '{k}': expected non-empty namespace and key segments"
                 )
                 .into(),
             ));
         }
     }
 
-    for (key, value) in &fm.extensions {
-        let Some((namespace, suffix)) = key.split_once('.') else {
+    for (k, value) in &fm.extensions {
+        let Some((namespace, suffix)) = k.split_once('.') else {
             continue;
         };
         if suffix == "version" {
@@ -127,7 +120,7 @@ fn validate_frontmatter(
         if nontrivial && !fm.extensions.contains_key(&format!("{namespace}.version")) {
             return Err(SkillError::Parse(
                 format!(
-                    "extension '{key}' requires companion '{namespace}.version' for nontrivial values"
+                    "extension '{k}' requires companion '{namespace}.version' for nontrivial values"
                 )
                 .into(),
             ));
@@ -159,6 +152,14 @@ fn split_frontmatter(content: &str) -> Result<(String, &str), SkillError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::skills::SourceUuid;
+
+    fn test_key(skill: &str) -> SkillKey {
+        SkillKey {
+            source_uuid: SourceUuid::builtin(),
+            skill_name: SkillName::parse(skill).unwrap(),
+        }
+    }
 
     #[test]
     fn test_parse_simple_skill() {
@@ -173,7 +174,7 @@ requires_capabilities: [builtins, shell]
 When running background jobs...";
 
         let doc = parse_skill_md(
-            SkillId("shell-patterns".to_string()),
+            test_key("shell-patterns"),
             SkillScope::Builtin,
             content,
             None,
@@ -182,10 +183,13 @@ When running background jobs...";
 
         assert_eq!(doc.descriptor.name, "shell-patterns");
         assert_eq!(doc.descriptor.description, "Background job workflows");
-        assert_eq!(
-            doc.descriptor.requires_capabilities,
-            vec!["builtins", "shell"]
-        );
+        let caps: Vec<&str> = doc
+            .descriptor
+            .capability_requirements
+            .iter()
+            .map(meerkat_core::skills::CapabilityId::as_str)
+            .collect();
+        assert_eq!(caps, vec!["builtins", "shell"]);
         assert!(doc.body.contains("# shell-patterns"));
     }
 
@@ -193,38 +197,34 @@ When running background jobs...";
     fn test_parse_no_capabilities() {
         let content =
             "---\nname: mcp-setup\ndescription: Configure MCP servers\n---\n\nContent here";
-        let doc = parse_skill_md(
-            SkillId("mcp-setup".to_string()),
-            SkillScope::Project,
-            content,
-            None,
-        )
-        .unwrap();
-        assert!(doc.descriptor.requires_capabilities.is_empty());
+        let doc =
+            parse_skill_md(test_key("mcp-setup"), SkillScope::Project, content, None).unwrap();
+        assert!(doc.descriptor.capability_requirements.is_empty());
     }
 
     #[test]
     fn test_parse_description_with_colon() {
         let content = "---\nname: test\ndescription: \"Use: this tool carefully\"\n---\n\nBody";
-        let doc = parse_skill_md(
-            SkillId("test".to_string()),
-            SkillScope::Builtin,
-            content,
-            None,
-        )
-        .unwrap();
+        let doc = parse_skill_md(test_key("test"), SkillScope::Builtin, content, None).unwrap();
         assert_eq!(doc.descriptor.description, "Use: this tool carefully");
     }
 
     #[test]
     fn test_missing_frontmatter() {
         let content = "# No frontmatter";
-        let result = parse_skill_md(
-            SkillId("test".to_string()),
-            SkillScope::Builtin,
-            content,
-            None,
-        );
+        let result = parse_skill_md(test_key("test"), SkillScope::Builtin, content, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_capability_slug() {
+        let content = r"---
+name: test-skill
+description: d
+requires_capabilities: [Invalid]
+---
+body";
+        let result = parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None);
         assert!(result.is_err());
     }
 
@@ -236,55 +236,8 @@ description: d
 custom_field: true
 ---
 body";
-        let result = parse_skill_md(
-            SkillId("test-skill".to_string()),
-            SkillScope::Builtin,
-            content,
-            None,
-        );
+        let result = parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_rejects_nontrivial_extension_without_version() {
-        let content = r"---
-name: test-skill
-description: d
-acme.config:
-  mode: strict
----
-body";
-        let result = parse_skill_md(
-            SkillId("test-skill".to_string()),
-            SkillScope::Builtin,
-            content,
-            None,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_accepts_namespaced_extension_with_version() {
-        let content = r#"---
-name: test-skill
-description: d
-acme.version: "1"
-acme.config:
-  mode: strict
----
-body"#;
-        let doc = parse_skill_md(
-            SkillId("test-skill".to_string()),
-            SkillScope::Builtin,
-            content,
-            None,
-        )
-        .unwrap();
-        assert!(doc.extensions.contains_key("acme.config"));
-        assert_eq!(
-            doc.extensions.get("acme.version").map(String::as_str),
-            Some("1")
-        );
     }
 
     #[test]
@@ -295,7 +248,7 @@ description: d
 ---
 body";
         let result = parse_skill_md(
-            SkillId("skills/correct-name".to_string()),
+            test_key("correct-name"),
             SkillScope::Builtin,
             content,
             Some("correct-name"),

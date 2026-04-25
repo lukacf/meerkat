@@ -136,6 +136,7 @@ impl MeerkatMachine {
             let mut driver = driver.lock().await;
             machine_stop_runtime(&mut driver).await?;
             drop(driver);
+            self.notify_runtime_executor_exited(session_id).await;
             let mut completions = completions.lock().await;
             completions.resolve_all_terminated("runtime stopped");
             drop(completions);
@@ -156,8 +157,8 @@ impl MeerkatMachine {
 
     /// Accept an input and execute it synchronously through the runtime driver.
     ///
-    /// This is useful for surfaces that need the legacy request/response shape
-    /// while still preserving v9 input lifecycle semantics.
+    /// Used by surfaces that need the request/response shape while still
+    /// preserving v9 input lifecycle semantics.
     pub async fn accept_input_and_run<T, F, Fut>(
         &self,
         session_id: &SessionId,
@@ -168,7 +169,7 @@ impl MeerkatMachine {
         F: FnOnce(RunId, meerkat_core::lifecycle::run_primitive::RunPrimitive) -> Fut,
         Fut: Future<Output = Result<(T, CoreApplyOutput), RuntimeDriverError>>,
     {
-        let MeerkatMachineLegacyRunPrepared {
+        let MeerkatMachineRunPrepared {
             input_id,
             run_id,
             primitive,
@@ -186,7 +187,7 @@ impl MeerkatMachine {
             MeerkatMachineCommandResult::Prepared(prepared) => prepared,
             other => {
                 return Err(RuntimeDriverError::Internal(format!(
-                    "unexpected command result preparing legacy Meerkat run: {other:?}"
+                    "unexpected command result preparing Meerkat run: {other:?}"
                 )));
             }
         };

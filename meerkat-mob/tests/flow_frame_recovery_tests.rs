@@ -2,10 +2,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use indexmap::IndexMap;
-use meerkat_mob::generated::{flow_frame, flow_run, loop_iteration};
 use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use meerkat_mob::run::{
-    FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
+    FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus, flow_frame,
+    flow_run, loop_iteration,
 };
 use meerkat_mob::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
 use std::collections::BTreeMap;

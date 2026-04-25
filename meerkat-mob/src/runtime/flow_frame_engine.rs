@@ -9,11 +9,11 @@
 
 use crate::definition::{FlowNodeSpec, FrameSpec};
 use crate::error::MobError;
-use crate::generated::{flow_frame, flow_run, loop_iteration};
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::{
     FlowContext, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun, StepRunStatus,
 };
+use crate::run::{flow_frame, flow_run, loop_iteration};
 use crate::runtime::MobHandle;
 use crate::runtime::conditions::evaluate_condition;
 use crate::store::MobRunStore;
@@ -142,11 +142,27 @@ pub enum FlowFrameLoopWork {
         step_id: StepId,
     },
     EvaluateUntil {
-        obligation: crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
+        obligation: FlowLoopUntilEvaluationObligation,
     },
     RevisitFrame {
         frame_id: FrameId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowLoopUntilEvaluationObligation {
+    pub loop_instance_id: LoopInstanceId,
+    pub iteration: u32,
+    pub parent_frame_id: FrameId,
+    pub parent_node_id: FlowNodeId,
+    pub loop_id: LoopId,
+}
+
+#[derive(Debug, Clone)]
+struct LoopUntilConditionFeedbackProjection {
+    loop_instance_id: LoopInstanceId,
+    iteration: u32,
+    until_met: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1255,7 +1271,6 @@ impl FlowFrameEngine {
             self.project_store_plan(run_id, root_frame_id, root_spec, plan)
                 .await?;
         }
-
         let mut workers = workers;
         for work in decision.follow_up {
             match work {
@@ -1537,14 +1552,45 @@ impl FlowFrameEngine {
                     ))
                     .await?;
             }
+            FlowFrameLoopStorePlan::CompleteBodyFrame {
+                loop_instance_id,
+                next_loop,
+                ..
+            } => {
+                projector
+                    .project_machine_input(
+                        crate::run::MobRun::record_loop_body_frame_completed_input(
+                            loop_instance_id,
+                            next_loop.kernel_state.last_completed_iteration,
+                        ),
+                    )
+                    .await?;
+            }
             FlowFrameLoopStorePlan::GrantNodeSlot { .. }
             | FlowFrameLoopStorePlan::RunStateOnly { .. }
             | FlowFrameLoopStorePlan::SealFrame { .. }
-            | FlowFrameLoopStorePlan::CompleteBodyFrame { .. }
             | FlowFrameLoopStorePlan::LoopRequestBodyFrame { .. }
             | FlowFrameLoopStorePlan::CompleteLoop { .. } => {}
         }
         Ok(())
+    }
+
+    async fn project_until_feedback(
+        &self,
+        feedback: Option<&LoopUntilConditionFeedbackProjection>,
+    ) -> Result<(), MobError> {
+        let (Some(projector), Some(feedback)) = (&self.projector, feedback) else {
+            return Ok(());
+        };
+        projector
+            .project_machine_input(
+                crate::run::MobRun::record_loop_until_condition_feedback_input(
+                    &feedback.loop_instance_id,
+                    feedback.iteration,
+                    feedback.until_met,
+                ),
+            )
+            .await
     }
 
     async fn resolve_until_feedback(
@@ -1553,7 +1599,7 @@ impl FlowFrameEngine {
         root_frame_id: &FrameId,
         root_spec: &FrameSpec,
         context: &FlowContext,
-        obligation: crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
+        obligation: FlowLoopUntilEvaluationObligation,
     ) -> Result<(), MobError> {
         for _ in 0..=5usize {
             let run = self.require_run(run_id).await?;
@@ -1587,7 +1633,7 @@ impl FlowFrameEngine {
                 context.activation_params.clone(),
             );
             let until_met = evaluate_condition(&loop_spec.until, &eval_context);
-            let decision = resolve_until_feedback_decision(
+            let (decision, until_feedback) = resolve_until_feedback_decision(
                 &run.flow_state,
                 loop_snapshot,
                 &parent_frame,
@@ -1598,6 +1644,7 @@ impl FlowFrameEngine {
                 .execute_decision(run_id, root_frame_id, root_spec, context, None, decision)
                 .await?
             {
+                self.project_until_feedback(Some(&until_feedback)).await?;
                 return Ok(());
             }
         }
@@ -2211,26 +2258,38 @@ fn seal_frame_if_ready(
 
 fn pending_until_obligation(
     loop_snapshot: &LoopSnapshot,
-) -> Result<
-    Option<
-        crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
-    >,
-    MobError,
-> {
+) -> Result<Option<FlowLoopUntilEvaluationObligation>, MobError> {
     if loop_snapshot.kernel_state.phase != loop_iteration::Phase::Running
         || loop_snapshot.kernel_state.stage.as_str() != "AwaitingUntil"
     {
         return Ok(None);
     }
-    Ok(Some(
-        crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation {
-            loop_instance_id: loop_snapshot.kernel_state.loop_instance_id.clone(),
-            iteration: loop_snapshot.kernel_state.last_completed_iteration,
-            parent_frame_id: loop_snapshot.kernel_state.parent_frame_id.clone(),
-            parent_node_id: loop_snapshot.kernel_state.parent_node_id.clone(),
-            loop_id: loop_snapshot.kernel_state.loop_id.clone(),
-        },
-    ))
+    Ok(Some(FlowLoopUntilEvaluationObligation {
+        loop_instance_id: loop_snapshot.kernel_state.loop_instance_id.clone(),
+        iteration: loop_snapshot.kernel_state.last_completed_iteration,
+        parent_frame_id: loop_snapshot.kernel_state.parent_frame_id.clone(),
+        parent_node_id: loop_snapshot.kernel_state.parent_node_id.clone(),
+        loop_id: loop_snapshot.kernel_state.loop_id.clone(),
+    }))
+}
+
+fn loop_until_evaluation_obligation_from_effect(
+    effect: &loop_iteration::Effect,
+) -> Result<FlowLoopUntilEvaluationObligation, MobError> {
+    match effect {
+        loop_iteration::Effect::EvaluateUntilCondition(payload) => {
+            Ok(FlowLoopUntilEvaluationObligation {
+                loop_instance_id: payload.loop_instance_id.clone(),
+                iteration: payload.iteration,
+                parent_frame_id: payload.parent_frame_id.clone(),
+                parent_node_id: payload.parent_node_id.clone(),
+                loop_id: payload.loop_id.clone(),
+            })
+        }
+        other => Err(MobError::Internal(format!(
+            "expected EvaluateUntilCondition effect, got '{other:?}'"
+        ))),
+    }
 }
 
 fn acknowledge_node_grant(
@@ -2282,12 +2341,11 @@ fn acknowledge_node_grant(
         };
         let body_depth = current_depth + 1;
         if max_frame_depth > 0 && body_depth > max_frame_depth {
-            return Err(MobError::NotYetImplemented(format!(
-                "loop '{}' would exceed max_frame_depth={} (current depth={}); nested loops require a higher limit in LimitsSpec.max_frame_depth",
-                loop_spec.loop_id,
+            return Err(MobError::FrameDepthLimitExceeded {
+                loop_id: loop_spec.loop_id,
                 max_frame_depth,
-                body_depth - 1
-            )));
+                current_depth: body_depth - 1,
+            });
         }
         let loop_instance_id = LoopInstanceId::from(format!("{frame_id}::{node_id}").as_str());
         let initial_loop = initial_loop_snapshot(
@@ -2489,9 +2547,7 @@ fn advance_body_frame_after_seal(
                         "loop '{loop_instance_id}' did not emit EvaluateUntilCondition after body-frame completion"
                     ))
                 })?;
-            let obligation = crate::generated::protocol_flow_loop_until_evaluation::accept_evaluate_until_condition(
-                crate::runtime::loop_iteration_authority::LoopUntilEvaluationRequested::from_effect(request)?,
-            );
+            let obligation = loop_until_evaluation_obligation_from_effect(request)?;
             Ok(Some(FlowFrameLoopDecision {
                 store_plan: Some(FlowFrameLoopStorePlan::CompleteBodyFrame {
                     loop_instance_id,
@@ -2541,30 +2597,33 @@ fn resolve_until_feedback_decision(
     run_state: &flow_run::State,
     loop_snapshot: &LoopSnapshot,
     parent_frame: &FrameSnapshot,
-    obligation: crate::generated::protocol_flow_loop_until_evaluation::FlowLoopUntilEvaluationObligation,
+    obligation: FlowLoopUntilEvaluationObligation,
     until_met: bool,
-) -> Result<FlowFrameLoopDecision, MobError> {
-    // Hydrate the generated `LoopIterationAuthority` from the snapshot's
-    // kernel state, invoke the ShellBridge submitter (which mutates the
-    // authority through `apply`), and materialize the next state back
-    // into a `LoopSnapshot`.
-    let mut authority =
-        crate::runtime::loop_iteration_authority::LoopIterationAuthority::from_state(
-            loop_snapshot.kernel_state.clone(),
-        );
-    let feedback = if until_met {
-        crate::generated::protocol_flow_loop_until_evaluation::submit_until_condition_met(
-            &mut authority,
-            obligation.clone(),
-        )?
+) -> Result<(FlowFrameLoopDecision, LoopUntilConditionFeedbackProjection), MobError> {
+    let feedback_input = if until_met {
+        loop_iteration::Input::UntilConditionMet(loop_iteration::inputs::UntilConditionMet {
+            loop_instance_id: obligation.loop_instance_id.clone(),
+            iteration: obligation.iteration,
+        })
     } else {
-        crate::generated::protocol_flow_loop_until_evaluation::submit_until_condition_failed(
-            &mut authority,
-            obligation.clone(),
-        )?
+        loop_iteration::Input::UntilConditionFailed(loop_iteration::inputs::UntilConditionFailed {
+            loop_instance_id: obligation.loop_instance_id.clone(),
+            iteration: obligation.iteration,
+        })
     };
+    let feedback = loop_iteration::transition(
+        &loop_snapshot.kernel_state,
+        feedback_input,
+        &loop_iteration::EmptyContext,
+    )
+    .map_err(|error| MobError::Internal(format!("loop_iteration transition refused: {error:?}")))?;
     let next_loop = LoopSnapshot {
         kernel_state: feedback.next_state.clone(),
+    };
+    let until_feedback = LoopUntilConditionFeedbackProjection {
+        loop_instance_id: obligation.loop_instance_id.clone(),
+        iteration: obligation.iteration,
+        until_met,
     };
 
     if let Some(depth) = maybe_effect_request_body_frame_start_depth(&feedback.effects) {
@@ -2586,16 +2645,19 @@ fn resolve_until_feedback_decision(
             .map_err(|error| MobError::Internal(format!("flow_run transition refused: {error:?}")))?
             .next_state;
         }
-        return Ok(FlowFrameLoopDecision {
-            store_plan: Some(FlowFrameLoopStorePlan::LoopRequestBodyFrame {
-                loop_instance_id: obligation.loop_instance_id,
-                expected_loop: loop_snapshot.clone(),
-                next_loop,
-                expected_run_state: run_state.clone(),
-                next_run_state,
-            }),
-            follow_up: Vec::new(),
-        });
+        return Ok((
+            FlowFrameLoopDecision {
+                store_plan: Some(FlowFrameLoopStorePlan::LoopRequestBodyFrame {
+                    loop_instance_id: obligation.loop_instance_id,
+                    expected_loop: loop_snapshot.clone(),
+                    next_loop,
+                    expected_run_state: run_state.clone(),
+                    next_run_state,
+                }),
+                follow_up: Vec::new(),
+            },
+            until_feedback,
+        ));
     }
 
     let loop_terminal = first_matching_loop_terminal_effect(&feedback.effects).ok_or_else(|| {
@@ -2604,7 +2666,7 @@ fn resolve_until_feedback_decision(
             obligation.loop_instance_id
         ))
     })?;
-    build_complete_loop_decision(CompleteLoopDecisionRequest {
+    let decision = build_complete_loop_decision(CompleteLoopDecisionRequest {
         loop_terminal,
         expected_run_state: run_state,
         next_run_state: run_state.clone(),
@@ -2614,7 +2676,8 @@ fn resolve_until_feedback_decision(
         parent_frame_id: &obligation.parent_frame_id,
         expected_parent_frame: parent_frame,
         parent_node_id: &obligation.parent_node_id,
-    })
+    })?;
+    Ok((decision, until_feedback))
 }
 
 fn recover_terminal_loop_projection(

@@ -187,6 +187,7 @@ async fn integration_real_uds_message_exchange() {
 
     let peer_a_keypair = make_keypair();
     let peer_b_keypair = make_keypair();
+    let peer_b_pubkey = peer_b_keypair.public_key();
 
     let (peer_a_trust, peer_b_trust) = setup_mutual_trust(
         "peer-a",
@@ -228,7 +229,7 @@ async fn integration_real_uds_message_exchange() {
     );
     router_a
         .send(
-            "peer-b",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_b_pubkey),
             MessageKind::Message {
                 body: "Hello from A!".to_string(),
                 blocks: None,
@@ -257,6 +258,7 @@ async fn integration_real_tcp_message_exchange() {
 
     let peer_a_keypair = make_keypair();
     let peer_b_keypair = make_keypair();
+    let peer_b_pubkey = peer_b_keypair.public_key();
 
     let (peer_a_trust, peer_b_trust) = setup_mutual_trust(
         "peer-a",
@@ -295,7 +297,7 @@ async fn integration_real_tcp_message_exchange() {
     );
     router_a
         .send(
-            "peer-b",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_b_pubkey),
             MessageKind::Message {
                 body: "Hello via TCP!".to_string(),
                 blocks: None,
@@ -369,11 +371,13 @@ async fn integration_real_request_response_flow() {
         true,
     );
     router_a
-        .send_request(
-            "peer-b",
-            "review-pr".to_string(),
-            json!({"pr": 42}),
-            meerkat_core::types::HandlingMode::Queue,
+        .send(
+            meerkat_comms::router::peer_id_from_pubkey(&peer_b_pubkey),
+            MessageKind::Request {
+                intent: "review-pr".to_string(),
+                params: json!({"pr": 42}),
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+            },
         )
         .await
         .unwrap();
@@ -398,6 +402,7 @@ async fn integration_real_untrusted_rejected() {
 
     let peer_a_keypair = make_keypair();
     let peer_b_keypair = make_keypair();
+    let peer_b_pubkey = peer_b_keypair.public_key();
     let _untrusted_keypair = make_keypair();
 
     // A trusts B, but B does NOT trust A (empty trust list)
@@ -444,7 +449,7 @@ async fn integration_real_untrusted_rejected() {
     );
     let send_result = router_a
         .send(
-            "peer-b",
+            meerkat_comms::router::peer_id_from_pubkey(&peer_b_pubkey),
             MessageKind::Message {
                 body: "Hello!".to_string(),
                 blocks: None,
@@ -469,7 +474,9 @@ async fn integration_real_concurrent_multi_peer() {
     // Three peers: A, B, C
     let peer_a_keypair = make_keypair();
     let peer_b_keypair = make_keypair();
+    let peer_b_pubkey = peer_b_keypair.public_key();
     let peer_c_keypair = make_keypair();
+    let peer_c_pubkey = peer_c_keypair.public_key();
 
     let sock_a = tmp.path().join("peer_a.sock");
     let sock_b = tmp.path().join("peer_b.sock");
@@ -567,7 +574,7 @@ async fn integration_real_concurrent_multi_peer() {
     );
 
     let send_b = router_a.send(
-        "peer-b",
+        meerkat_comms::router::peer_id_from_pubkey(&peer_b_pubkey),
         MessageKind::Message {
             body: "Hello B!".to_string(),
             blocks: None,
@@ -575,7 +582,7 @@ async fn integration_real_concurrent_multi_peer() {
         },
     );
     let send_c = router_a.send(
-        "peer-c",
+        meerkat_comms::router::peer_id_from_pubkey(&peer_c_pubkey),
         MessageKind::Message {
             body: "Hello C!".to_string(),
             blocks: None,

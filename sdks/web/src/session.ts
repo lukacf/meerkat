@@ -1,7 +1,6 @@
 import { EventSubscription } from './events.js';
 import type {
   ContentBlock,
-  TurnOptions,
   TurnResult,
   SessionEvent,
   SessionState,
@@ -10,7 +9,7 @@ import type {
 } from './types.js';
 
 // WASM function signatures (bound at construction)
-type StartTurnFn = (handle: number, prompt: string, options_json: string) => Promise<string>;
+type StartTurnFn = (handle: number, prompt: string) => Promise<string>;
 type GetSessionStateFn = (handle: number) => string;
 type DestroySessionFn = (handle: number) => void;
 type PollEventsFn = (handle: number) => string;
@@ -50,15 +49,10 @@ export class Session {
   }
 
   /** Run a turn through the agent loop. */
-  async turn(prompt: string | ContentBlock[], options?: TurnOptions): Promise<TurnResult> {
+  async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
     if (this.destroyed) throw new Error('Session has been destroyed');
-    const opts = options
-      ? JSON.stringify({
-          additional_instructions: options.additionalInstructions,
-        })
-      : '{}';
     const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
-    const json = await this.startTurnFn(this.handle, promptStr, opts);
+    const json = await this.startTurnFn(this.handle, promptStr);
     const parsed = JSON.parse(json) as Partial<TurnResult> & {
       text?: string;
       response?: string;

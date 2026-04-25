@@ -62,7 +62,6 @@ pub struct AgentBuilder {
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
-    pub(super) connection_ref_binding_key: Option<String>,
 }
 
 impl AgentBuilder {
@@ -99,7 +98,6 @@ impl AgentBuilder {
             external_tool_surface_handle: None,
             auth_lease_handle: None,
             mcp_server_lifecycle_handle: None,
-            connection_ref_binding_key: None,
         }
     }
 
@@ -333,13 +331,25 @@ impl AgentBuilder {
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
+            // Default classification: a runtime-backed agent constructed with
+            // an attached `turn_state_handle` is an ordinary external content
+            // turn unless the runtime surface explicitly restages a different
+            // kind via `set_runtime_execution_kind`. This prevents tests and
+            // direct-call paths (e.g. `agent.run_loop` without going through
+            // `run_inner`) from panicking at `runtime_turn_authority_snapshot`
+            // when the DSL-owned runtime kind has not been stamped yet. Agents
+            // built without a handle (legacy standalone paths, WASM) keep the
+            // field `None`; the snapshot accessor only panics when a handle
+            // *is* attached. See #32 Class W2.
+            runtime_execution_kind: if self.turn_state_handle.is_some() {
+                Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn)
+            } else {
+                None
+            },
             turn_state_handle: self.turn_state_handle,
-            turn_state: super::turn_state::LocalTurnExecutionState::new(),
-            runtime_execution_kind: None,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
-            connection_ref_binding_key: self.connection_ref_binding_key,
             cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
@@ -547,10 +557,6 @@ impl AgentBuilder {
     }
 
     /// Set the runtime-backed auth lease handle for this build (Phase 1.5-rev).
-    ///
-    /// When set together with [`with_connection_ref_binding_key`], the runner
-    /// drives `AuthLeaseHandle` transitions at each CallingLlm boundary and
-    /// emits reauth notices when a permanent refresh failure occurs.
     pub fn with_auth_lease_handle(
         mut self,
         handle: Arc<dyn crate::handles::AuthLeaseHandle>,
@@ -574,15 +580,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Identify the `connection_ref` this agent routes LLM calls through.
-    ///
-    /// Format: `"<realm_id>:<binding_id>"`. Used together with
-    /// [`with_auth_lease_handle`] to key lease lifecycle transitions.
-    pub fn with_connection_ref_binding_key(mut self, binding_key: String) -> Self {
-        self.connection_ref_binding_key = Some(binding_key);
-        self
-    }
-
     /// Set the explicit call-timeout override from the build/config composition seam.
     ///
     /// - `Inherit`: defer to profile-derived default via the resolver
@@ -602,9 +599,6 @@ mod tests {
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
-    use crate::lifecycle::RunId;
-    use crate::ops::{AsyncOpRef, OperationId};
-    use crate::turn_execution_authority::{ContentShape, TurnExecutionInput};
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;
@@ -790,6 +784,9 @@ mod tests {
         }
 
         let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
             .with_event_tap(tap)
             .build(client, tools, store)
             .await;
@@ -845,102 +842,5 @@ mod tests {
         let agent = AgentBuilder::new().build(client, tools, store).await;
 
         assert_eq!(agent.applied_cursor, 0);
-    }
-
-    #[tokio::test]
-    async fn test_execution_snapshot_reflects_turn_state() {
-        let client = Arc::new(MockClient);
-        let tools = Arc::new(MockTools);
-        let store = Arc::new(MockStore);
-
-        let mut agent = AgentBuilder::new().build(client, tools, store).await;
-        let run_id = RunId::new();
-        let barrier_id = OperationId::new();
-        let detached_id = OperationId::new();
-
-        let start_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::StartConversationRun {
-                run_id: run_id.clone(),
-            });
-        assert!(
-            start_result.is_ok(),
-            "start run should succeed: {start_result:?}"
-        );
-        let primitive_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::PrimitiveApplied {
-                run_id: run_id.clone(),
-                admitted_content_shape: ContentShape("prompt_text".into()),
-                vision_enabled: true,
-                image_tool_results_enabled: true,
-            });
-        assert!(
-            primitive_result.is_ok(),
-            "primitive applied should succeed: {primitive_result:?}"
-        );
-        let tool_call_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::LlmReturnedToolCalls {
-                run_id: run_id.clone(),
-                tool_count: 2,
-            });
-        assert!(
-            tool_call_result.is_ok(),
-            "tool call transition should succeed: {tool_call_result:?}"
-        );
-        let pending_ops_result = agent
-            .turn_state
-            .apply(TurnExecutionInput::RegisterPendingOps {
-                run_id: run_id.clone(),
-                op_refs: vec![
-                    AsyncOpRef::barrier(barrier_id.clone()),
-                    AsyncOpRef::detached(detached_id.clone()),
-                ],
-                barrier_operation_ids: vec![barrier_id.clone()],
-                has_barrier_ops: true,
-            });
-        assert!(
-            pending_ops_result.is_ok(),
-            "pending ops should register: {pending_ops_result:?}"
-        );
-        agent.state = crate::state::LoopState::WaitingForOps;
-        agent.applied_cursor = 42;
-
-        let snapshot = agent.execution_snapshot();
-
-        assert_eq!(snapshot.loop_state, crate::state::LoopState::WaitingForOps);
-        assert_eq!(
-            snapshot.turn_phase,
-            crate::turn_execution_authority::TurnPhase::WaitingForOps
-        );
-        assert_eq!(snapshot.active_run_id, Some(run_id));
-        assert_eq!(
-            snapshot.primitive_kind,
-            crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn
-        );
-        assert_eq!(
-            snapshot.admitted_content_shape,
-            Some(ContentShape("prompt_text".into()))
-        );
-        assert!(snapshot.vision_enabled);
-        assert!(snapshot.image_tool_results_enabled);
-        assert_eq!(snapshot.tool_calls_pending, 2);
-        assert_eq!(
-            snapshot.pending_operation_ids,
-            Some(vec![barrier_id.clone(), detached_id])
-        );
-        assert_eq!(snapshot.barrier_operation_ids, vec![barrier_id]);
-        assert!(snapshot.has_barrier_ops);
-        assert!(!snapshot.barrier_satisfied);
-        assert_eq!(snapshot.boundary_count, 0);
-        assert!(!snapshot.cancel_after_boundary);
-        assert_eq!(
-            snapshot.terminal_outcome,
-            crate::turn_execution_authority::TurnTerminalOutcome::None
-        );
-        assert_eq!(snapshot.extraction_attempts, 0);
-        assert_eq!(snapshot.max_extraction_retries, 0);
-        assert_eq!(snapshot.applied_cursor, 42);
     }
 }

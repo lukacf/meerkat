@@ -161,7 +161,7 @@ async fn run_pre_command(
     let key = format!(
         "{}::{}::{}",
         cwd.display(),
-        command_display(entry.command),
+        command_display_with_env(entry.command, env_overrides),
         env_signature
     );
     loop {
@@ -201,7 +201,7 @@ async fn run_command(
     env_overrides: &[(String, String)],
     timeout_secs: u64,
 ) -> Result<CompletedCommand, String> {
-    let argv = normalize_command(command);
+    let argv = normalize_command_with_env(command, env_overrides);
     let mut child = Command::new(&argv[0]);
     child
         .args(&argv[1..])
@@ -309,11 +309,21 @@ fn build_commands(
 }
 
 fn normalize_command(command: &[&str]) -> Vec<String> {
+    let cargo_target_dir = cargo_target_dir().unwrap_or_else(|_| workspace_root().join("target"));
+    normalize_command_with_target_dir(command, &cargo_target_dir)
+}
+
+fn normalize_command_with_env(command: &[&str], env_overrides: &[(String, String)]) -> Vec<String> {
+    let cargo_target_dir = env_value(env_overrides, "CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| cargo_target_dir().ok())
+        .unwrap_or_else(|| workspace_root().join("target"));
+    normalize_command_with_target_dir(command, &cargo_target_dir)
+}
+
+fn normalize_command_with_target_dir(command: &[&str], cargo_target_dir: &Path) -> Vec<String> {
     let repo_root = workspace_root().display().to_string();
-    let cargo_target_dir = cargo_target_dir()
-        .unwrap_or_else(|_| workspace_root().join("target"))
-        .display()
-        .to_string();
+    let cargo_target_dir = cargo_target_dir.display().to_string();
     let mut argv = command
         .iter()
         .map(|part| {
@@ -325,6 +335,12 @@ fn normalize_command(command: &[&str]) -> Vec<String> {
         argv[0] = repo_cargo().display().to_string();
     }
     argv
+}
+
+fn env_value<'a>(env_overrides: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env_overrides
+        .iter()
+        .find_map(|(env_key, value)| (env_key == key).then_some(value.as_str()))
 }
 
 fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -440,7 +456,21 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
 
 fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
-    let cargo_target_dir = cargo_target_dir()?;
+    let cargo_target_dir = scenario_cargo_target_dir(spec)?;
+    std::fs::create_dir_all(&cargo_target_dir).map_err(|error| {
+        format!(
+            "failed to create scenario cargo target dir {}: {error}",
+            cargo_target_dir.display()
+        )
+    })?;
+    env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        cargo_target_dir.display().to_string(),
+    );
+    env.insert(
+        "RUST_LANE_ID".to_string(),
+        format!("e2e-{}", scenario_artifact_key(spec)),
+    );
     // macOS 26.3.1+ `codeSigningMonitor=2` can SIGKILL adhoc/linker-signed
     // binaries whose signature is invalidated while dyld is loading them,
     // which happens when the outer `cargo test` or sibling scenarios
@@ -482,6 +512,54 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
         env.insert("MEERKAT_PYTHON_BIN".to_string(), python.to_string());
     }
     Ok(env.into_iter().collect())
+}
+
+fn scenario_cargo_target_dir(spec: &Spec) -> Result<PathBuf, String> {
+    Ok(cargo_target_dir()?
+        .join("e2e-lanes")
+        .join(source_revision_key())
+        .join(scenario_artifact_key(spec)))
+}
+
+fn source_revision_key() -> String {
+    static SOURCE_REVISION: OnceLock<String> = OnceLock::new();
+    SOURCE_REVISION
+        .get_or_init(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--short=12", "HEAD"])
+                .current_dir(workspace_root())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|revision| sanitize_artifact_key(revision.trim()))
+                .filter(|revision| !revision.is_empty())
+                .unwrap_or_else(|| "worktree".to_string())
+        })
+        .clone()
+}
+
+fn scenario_artifact_key(spec: &Spec) -> String {
+    let base = match spec.id {
+        Some(id) => format!("scenario-{id:02}"),
+        None => run_label(spec),
+    };
+    sanitize_artifact_key(&base)
+}
+
+fn sanitize_artifact_key(value: &str) -> String {
+    let mut key = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            key.push(character.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            key.push('-');
+            last_was_dash = true;
+        }
+    }
+    key.trim_matches('-').to_string()
 }
 
 fn expand_template(value: &str, cargo_target_dir: &Path) -> String {
@@ -675,6 +753,10 @@ fn command_display(command: &[&str]) -> String {
     normalize_command(command).join(" ")
 }
 
+fn command_display_with_env(command: &[&str], env_overrides: &[(String, String)]) -> String {
+    normalize_command_with_env(command, env_overrides).join(" ")
+}
+
 fn scenario_spec(id: u16) -> Option<&'static Spec> {
     match id {
         15 => Some(&Spec {
@@ -793,9 +875,9 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         }),
         21 => Some(&Spec {
             id: Some(21),
-            lane: Lane::Live,
-            title: "REST runtime accept input roundtrip",
-            timeout_secs: 900,
+            lane: Lane::Smoke,
+            title: "RPC mob deferred callback tools",
+            timeout_secs: 1500,
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
@@ -803,18 +885,18 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             cargo_bin_env: &[],
             pre_commands: &[],
             command: CommandSpec::CargoTest {
-                package: "meerkat-rest",
-                test_target: "live_rest_matrix",
-                test_name: "e2e_scenario_21_rest_runtime_accept_input_roundtrip",
-                features: &["integration-real-tests"],
+                package: "meerkat-rpc",
+                test_target: "live_smoke_rpc",
+                test_name: "e2e_scenario_21_mob_callback_tools",
+                features: &[],
                 all_features: false,
             },
         }),
         22 => Some(&Spec {
             id: Some(22),
-            lane: Lane::Live,
-            title: "REST runtime reset and retire semantics",
-            timeout_secs: 900,
+            lane: Lane::Smoke,
+            title: "RPC transport backpressure",
+            timeout_secs: 1500,
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
@@ -822,10 +904,10 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             cargo_bin_env: &[],
             pre_commands: &[],
             command: CommandSpec::CargoTest {
-                package: "meerkat-rest",
-                test_target: "live_rest_matrix",
-                test_name: "e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs",
-                features: &["integration-real-tests"],
+                package: "meerkat-rpc",
+                test_target: "live_smoke_rpc",
+                test_name: "e2e_scenario_22_transport_backpressure",
+                features: &[],
                 all_features: false,
             },
         }),
@@ -1209,7 +1291,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             ],
             command: CommandSpec::Pytest {
                 test_file: "tests/test_e2e_smoke.py",
-                test_name: "test_smoke_scenario_39_persistent_reconnect_and_runtime_accept",
+                test_name: "test_smoke_scenario_39_persistent_reconnect_and_session_submit",
             },
         }),
         40 => Some(&Spec {
@@ -3148,7 +3230,41 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lane, scenario_spec};
+    use super::{
+        Lane, normalize_command_with_env, repo_cargo, sanitize_artifact_key, scenario_spec,
+        source_revision_key,
+    };
+
+    #[test]
+    fn artifact_keys_are_stable_for_scenario_targets() {
+        assert_eq!(
+            sanitize_artifact_key("Surface smoke: rkat-rpc --help"),
+            "surface-smoke-rkat-rpc-help"
+        );
+        assert_eq!(sanitize_artifact_key("56 RPC/rest"), "56-rpc-rest");
+    }
+
+    #[test]
+    fn command_normalization_uses_scenario_target_dir_from_env() {
+        let env = vec![(
+            "CARGO_TARGET_DIR".to_string(),
+            "/tmp/meerkat-e2e-scenario-target".to_string(),
+        )];
+        let argv =
+            normalize_command_with_env(&["cargo", "run", "{cargo_target_dir}/debug/rkat"], &env);
+        assert_eq!(argv[0], repo_cargo().display().to_string());
+        assert_eq!(argv[2], "/tmp/meerkat-e2e-scenario-target/debug/rkat");
+    }
+
+    #[test]
+    fn source_revision_key_is_path_safe() {
+        let key = source_revision_key();
+        assert!(!key.is_empty());
+        assert!(
+            key.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        );
+    }
 
     #[test]
     fn numbered_catalog_covers_matrix_ids() {
@@ -3170,8 +3286,8 @@ mod tests {
         let system = (15..=56)
             .filter(|id| scenario_spec(*id).map(|spec| spec.lane) == Some(Lane::System))
             .count();
-        assert_eq!(live, 26);
-        assert_eq!(smoke, 15);
+        assert_eq!(live, 24);
+        assert_eq!(smoke, 17);
         assert_eq!(system, 1);
     }
 }

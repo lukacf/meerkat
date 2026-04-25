@@ -171,8 +171,7 @@ class MobUnwireParams:
 
 @dataclass
 class RuntimeStateParams:
-    """Request payload for `session/status`."""
-    session_id: str = ''
+    """Request payload for session/status."""
 
 
 @dataclass
@@ -205,34 +204,27 @@ class RealtimeCapabilitiesParams:
 
 @dataclass
 class RuntimeAcceptParams:
-    """Request payload for `session/submit`."""
-    input: Any = None
-    session_id: str = ''
+    """Request payload for session/submit."""
 
 
 @dataclass
 class RuntimeRetireParams:
-    """Request payload for `session/retire`."""
-    session_id: str = ''
+    """Request payload for session/retire."""
 
 
 @dataclass
 class RuntimeResetParams:
-    """Request payload for `session/reset`."""
-    session_id: str = ''
+    """Request payload for session/reset."""
 
 
 @dataclass
 class InputStateParams:
-    """Request payload for `session/submission`."""
-    input_id: str = ''
-    session_id: str = ''
+    """Request payload for session/submission."""
 
 
 @dataclass
 class InputListParams:
-    """Request payload for `session/submissions`."""
-    session_id: str = ''
+    """Request payload for session/submissions."""
 
 
 @dataclass
@@ -293,10 +285,19 @@ class WireRenderMetadata:
 
 @dataclass
 class WireTrustedPeerSpec:
-    """Minimal trusted peer spec for public mob wiring surfaces."""
+    """Minimal trusted peer spec for public mob wiring surfaces.
+
+`pubkey` is the Ed25519 signing public key (32 bytes) required so the
+receiver can verify envelope signatures after trust registration.
+Serialized as a 32-element JSON array of numbers (matching
+`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —
+the corresponding `TrustedPeerDescriptor::pubkey` will then be all
+zeros, which makes signature verification fail closed. Production
+clients MUST send the real pubkey."""
     address: str = ''
     name: str = ''
     peer_id: str = ''
+    pubkey: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -313,8 +314,8 @@ class MobUnwireResult:
 
 @dataclass
 class RuntimeStateResult:
-    """Response payload for `session/status`."""
-    state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed'] = None
+    """Response payload for session/status."""
+    state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped'] = None
 
 
 @dataclass
@@ -469,22 +470,19 @@ class RuntimeAcceptResult:
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
     outcome_type: Literal['accepted', 'deduplicated', 'rejected'] = None
-    policy: Any = None
+    policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reason: Optional[str] = None
     state: Optional[dict[str, Any]] = None
 
 
 @dataclass
 class RuntimeRetireResult:
-    """Response payload for `session/retire`."""
-    inputs_abandoned: int = 0
-    inputs_pending_drain: int = 0
+    """Response payload for session/retire."""
 
 
 @dataclass
 class RuntimeResetResult:
-    """Response payload for `session/reset`."""
-    inputs_abandoned: int = 0
+    """Response payload for session/reset."""
 
 
 @dataclass
@@ -498,28 +496,30 @@ class WireInputStateHistoryEntry:
 
 @dataclass
 class WireInputState:
-    """RPC-facing input state snapshot."""
+    """RPC-facing input state snapshot.
+
+All fields are typed. Wave B replaced six former `serde_json::Value`
+fields with typed projections so the wire carries no untyped carriers."""
     attempt_count: int = 0
     created_at: str = ''
     current_state: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
-    durability: Any = None
+    durability: Optional[Literal['durable', 'volatile', 'ephemeral']] = None
     history: list[dict[str, Any]] = field(default_factory=list)
     idempotency_key: Optional[str] = None
     input_id: str = ''
     last_boundary_sequence: Optional[int] = None
     last_run_id: Optional[str] = None
-    persisted_input: Any = None
-    policy: Any = None
-    reconstruction_source: Any = None
+    persisted_input: Optional[dict[str, Any]] = None
+    policy: Optional[Literal['stage', 'queue', 'immediate']] = None
+    reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
     recovery_count: int = 0
-    terminal_outcome: Any = None
+    terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
     updated_at: str = ''
 
 
 @dataclass
 class InputListResult:
-    """Response payload for `session/submissions`."""
-    input_ids: list[str] = field(default_factory=list)
+    """Response payload for session/submissions."""
 
 
 @dataclass
@@ -608,9 +608,14 @@ class WireModelProfile:
 
 @dataclass
 class WireConnectionRef:
-    """Wire projection of [`meerkat_core::ConnectionRef`]."""
-    binding_id: str = ''
-    realm_id: str = ''
+    """Wire projection of [`meerkat_core::ConnectionRef`].
+
+Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
+`parse` and `Display` on both the core type and the wire projection so
+the colon-joined form cannot travel across wire boundaries."""
+    binding: str = ''
+    profile: Optional[str] = None
+    realm: str = ''
 
 
 @dataclass
@@ -635,7 +640,6 @@ credential-source variant."""
     id: str = ''
     provider: str = ''
     source_kind: str = ''
-    storage_kind: str = ''
 
 
 @dataclass
@@ -719,11 +723,12 @@ WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', '
 #
 # - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 #   canonical anchor, and the server resolves the current bridge session
-#   on every tick from the MobMachine's `member_realtime_bindings` map.
+#   on every tick from the MobMachine's `member_session_bindings` map.
 #   Respawn atomically rotates the bound session via the
-#   `MemberRealtimeBindingRotated` effect; the channel survives without
-#   any SDK round-trip. A terminal `MemberRealtimeBindingReleased`
-#   closes the channel with `RealtimeErrorCode::BindingReleased`.
+#   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
+#   channel survives without any SDK round-trip. A terminal
+#   `MemberSessionBindingChanged { old: Some, new: None }` closes the
+#   channel with `RealtimeErrorCode::BindingReleased`.
 RealtimeChannelTarget = dict[str, Any]
 
 # Opening role for a realtime channel.

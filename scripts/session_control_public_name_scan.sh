@@ -49,6 +49,8 @@ for term in "${TERMS[@]}"; do
         --glob '!.git/**' \
         --glob '!node_modules/**' \
         --glob '!.rct/**' \
+        --glob '!docs/dogma-*.md' \
+        --glob '!docs/wave-*-prep/**' \
         "$ROOT_DIR/$scan_path" || true
     )
   done

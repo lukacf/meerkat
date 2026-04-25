@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 //! Integration tests for the RPC server.
 //!
 //! These tests exercise the full roundtrip: write JSONL requests to a stream,
@@ -950,8 +952,8 @@ async fn unknown_method_returns_error() {
 }
 
 /// Regression: mcp/add with persisted=true should NOT be rejected — the field
-/// is accepted for forward compatibility. The handler logs a warning and always
-/// responds with `persisted: false` since config persistence is not yet implemented.
+/// is accepted as a real persistence request. This fake session never reaches
+/// config mutation because session validation fails first.
 /// Without the `mcp` feature the method returns METHOD_NOT_FOUND.
 #[tokio::test]
 async fn test_mcp_add_persisted_true_not_rejected() {
@@ -993,8 +995,8 @@ async fn test_mcp_add_persisted_true_not_rejected() {
     server_handle.await.unwrap().unwrap();
 }
 
-/// Regression: mcp/add staged response must always have persisted: false
-/// since config persistence is not implemented.
+/// Regression: mcp/add staged response reports persisted: false when the caller
+/// requested a live-only mutation.
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn test_mcp_add_staged_response_has_persisted_false() {

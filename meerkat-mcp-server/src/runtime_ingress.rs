@@ -36,7 +36,7 @@ pub(crate) struct McpRuntimeIngressResources {
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub runtime_adapter: Arc<MeerkatMachine>,
     pub config_runtime: Arc<ConfigRuntime>,
-    pub realm_id: String,
+    pub realm_id: meerkat_core::connection::RealmId,
     pub instance_id: Option<String>,
     pub backend: String,
     pub mcp_adapters: SharedMcpAdapters,
@@ -48,7 +48,7 @@ pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
     config_runtime: Arc<ConfigRuntime>,
-    realm_id: String,
+    realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
     backend: String,
     mcp_adapters: SharedMcpAdapters,
@@ -271,7 +271,7 @@ impl McpRuntimeIngressContext {
     ) -> Result<SessionId, SessionError> {
         let session = self
             .service
-            .load_persisted(session_id)
+            .load_authoritative_session(session_id)
             .await?
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.clone(),
@@ -293,7 +293,7 @@ impl McpRuntimeIngressContext {
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
-                realm_id: Some(self.realm_id.clone()),
+                realm_id: Some(self.realm_id.to_string()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
@@ -520,10 +520,6 @@ async fn apply_runtime_turn(
         flow_tool_overlay: primitive
             .turn_metadata()
             .and_then(|meta| meta.flow_tool_overlay.clone()),
-        additional_instructions: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.additional_instructions.clone()),
-        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
     };
 
     match context
@@ -559,12 +555,6 @@ async fn apply_runtime_turn(
                         flow_tool_overlay: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
-                        additional_instructions: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.additional_instructions.clone()),
-                        execution_kind: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.execution_kind),
                     },
                     boundary,
                     contributing_input_ids,

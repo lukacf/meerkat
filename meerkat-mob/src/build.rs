@@ -131,8 +131,9 @@ pub async fn build_agent_config(
     // always available. Skills are appended as extra_sections in
     // prompt assembly, which survives per-request system_prompt
     // overrides.
-    config.preload_skills = Some(vec![meerkat_core::skills::SkillId::from(
-        "mob-communication",
+    config.preload_skills = Some(vec![meerkat_core::skills::SkillKey::builtin(
+        meerkat_core::skills::SkillName::parse("mob-communication")
+            .expect("mob-communication is a valid builtin skill slug"),
     )]);
 
     // Mob lifecycle notifications are typed at peer ingress. Do not rely on
@@ -682,6 +683,7 @@ mod tests {
         let mut resumed_session = Session::with_id(session_id.clone());
         resumed_session
             .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 2048,
                 structured_output_retries: 2,
@@ -834,7 +836,9 @@ mod tests {
             .as_ref()
             .expect("preload_skills should be set");
         assert!(
-            preload.iter().any(|id| id.0 == "mob-communication"),
+            preload
+                .iter()
+                .any(|id| id.skill_name.as_str() == "mob-communication"),
             "preload_skills should include mob-communication"
         );
     }

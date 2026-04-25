@@ -417,44 +417,12 @@ where
     }
 
     /// Snapshot the agent's live execution state for diagnostics and mapping.
-    pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
-        if let Some(handle) = self.turn_state_handle.as_deref() {
-            if let Some(snapshot) = runtime_execution_snapshot(handle, self.applied_cursor) {
-                return snapshot;
-            }
-            tracing::warn!(
-                "failed to convert runtime turn-state snapshot; falling back to standalone core snapshot"
-            );
-        }
-
-        crate::AgentExecutionSnapshot {
-            loop_state: self.state.clone(),
-            turn_phase: self.turn_state.phase(),
-            active_run_id: self.turn_state.active_run().cloned(),
-            primitive_kind: self.turn_state.primitive_kind(),
-            admitted_content_shape: self.turn_state.admitted_content_shape().cloned(),
-            vision_enabled: self.turn_state.vision_enabled(),
-            image_tool_results_enabled: self.turn_state.image_tool_results_enabled(),
-            tool_calls_pending: self.turn_state.tool_calls_pending(),
-            pending_operation_ids: self
-                .turn_state
-                .pending_op_ids()
-                .map(|ids| ids.into_iter().cloned().collect()),
-            barrier_operation_ids: self
-                .turn_state
-                .barrier_op_ids()
-                .into_iter()
-                .cloned()
-                .collect(),
-            has_barrier_ops: self.turn_state.has_barrier_ops(),
-            barrier_satisfied: self.turn_state.barrier_satisfied(),
-            boundary_count: self.turn_state.boundary_count(),
-            cancel_after_boundary: self.turn_state.cancel_after_boundary(),
-            terminal_outcome: self.turn_state.terminal_outcome(),
-            extraction_attempts: self.turn_state.extraction_attempts(),
-            max_extraction_retries: self.turn_state.max_extraction_retries(),
-            applied_cursor: self.applied_cursor,
-        }
+    ///
+    /// Returns `None` when the agent has no runtime-backed turn-state
+    /// handle attached (standalone/ephemeral execution paths).
+    pub fn execution_snapshot(&self) -> Option<crate::AgentExecutionSnapshot> {
+        let handle = self.turn_state_handle.as_deref()?;
+        runtime_execution_snapshot(handle, self.applied_cursor)
     }
 
     /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
@@ -579,7 +547,6 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    #[allow(dead_code)] // Used by persistent session service.
     #[doc(hidden)]
     pub async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
@@ -757,7 +724,7 @@ where
 
     fn apply_run_result_text_patch(&mut self, text: &str) {
         use super::state::rewrite_assistant_text;
-        let messages = self.session.messages_mut();
+        let messages = self.session.messages_mut_internal();
         if let Some(last_assistant) = messages
             .iter_mut()
             .rev()
@@ -863,10 +830,23 @@ where
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
-        // Reset state for new run (allows multi-turn on same agent)
+        // Reset state for new run (allows multi-turn on same agent).
+        //
+        // `run_inner` is the entry point for an ordinary content turn. Default
+        // the classification to `ContentTurn` unless the caller staged an
+        // explicit kind via `set_runtime_execution_kind` (e.g. a runtime-backed
+        // surface that propagates `RuntimeTurnMetadata.execution_kind` from a
+        // `StagedRunInput`). Preserving a previously-staged classification
+        // prevents the reset from silently wiping the caller's typed intent.
+        //
+        // `None` is no longer a valid post-reset state: `turn_state_handle`
+        // attaches pair `runtime_execution_kind` with every live-run path,
+        // and `runtime_turn_authority_snapshot` (state.rs) panics on an
+        // unclassified handle. See #32 W2 / PR #299 follow-up.
         self.state = LoopState::CallingLlm;
-        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
-        self.runtime_execution_kind = None;
+        if self.runtime_execution_kind.is_none() {
+            self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
+        }
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -919,6 +899,7 @@ where
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
+                self.checkpoint_current_session().await;
                 Ok(result)
             }
             Err(err) => {
@@ -953,10 +934,17 @@ where
             ));
         };
 
-        // Reset state for new run (allows multi-turn on same agent)
+        // Reset state for new run (allows multi-turn on same agent).
+        //
+        // `run_pending_inner` is the entry point for an explicit continuation
+        // that resumes pending work at a boundary. Default the classification
+        // to `ResumePending` unless the caller staged an explicit kind via
+        // `set_runtime_execution_kind`. See #32 W2 / PR #299 follow-up.
         self.state = LoopState::CallingLlm;
-        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
-        self.runtime_execution_kind = None;
+        if self.runtime_execution_kind.is_none() {
+            self.runtime_execution_kind =
+                Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
+        }
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -980,6 +968,7 @@ where
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
+                self.checkpoint_current_session().await;
                 Ok(result)
             }
             Err(err) => {
@@ -993,21 +982,13 @@ where
     pub fn cancel(&mut self) {
         use crate::turn_execution_authority::TurnExecutionInput;
 
-        // Route through the shared turn-input path so runtime-backed turn
-        // state stays aligned with the standalone local fallback.
-        let input = if let Some(run_id) = self
+        let snapshot = self
             .turn_state_handle
             .as_deref()
-            .and_then(|handle| {
-                self.runtime_execution_kind
-                    .as_ref()
-                    .map(|_| handle.snapshot())
-            })
-            .and_then(|snapshot| snapshot.active_run_id)
-        {
-            TurnExecutionInput::CancelNow { run_id }
-        } else {
-            TurnExecutionInput::ForceCancelNoRun
+            .map(crate::handles::TurnStateHandle::snapshot);
+        let input = match snapshot.and_then(|s| s.active_run_id) {
+            Some(run_id) => TurnExecutionInput::CancelNow { run_id },
+            None => TurnExecutionInput::ForceCancelNoRun,
         };
         let _ = self.apply_turn_input(input);
     }
@@ -1029,17 +1010,12 @@ where
         if let Some(refs) = self.pending_skill_references.take()
             && !refs.is_empty()
         {
-            let canonical_ids: Vec<crate::skills::SkillId> = refs
-                .into_iter()
-                .map(|key| {
-                    crate::skills::SkillId(format!("{}/{}", key.source_uuid, key.skill_name))
-                })
-                .collect();
-            match engine.resolve_and_render(&canonical_ids).await {
+            let canonical_keys: Vec<crate::skills::SkillKey> = refs.into_iter().collect();
+            match engine.resolve_and_render(&canonical_keys).await {
                 Ok(resolved) => {
                     for skill in &resolved {
                         tracing::info!(
-                            skill_id = %skill.id.0,
+                            skill_key = %skill.key,
                             "Per-turn skill activation via skill_references"
                         );
                         prefix_parts.push(skill.rendered_body.clone());

@@ -121,10 +121,12 @@ struct ClassifiedInboxQueue {
     /// Shared canonical trust set, owned by the comms `Router`.
     ///
     /// The inbox does NOT mirror trust into a local cache — it consults the
-    /// router's single source of truth. Per `IngressClassificationContext`
-    /// the same `Arc<RwLock<TrustedPeers>>` is also used at the classify
-    /// stage, so admission and classification can never disagree.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// router's single source of truth. The same `Arc<RwLock<TrustedPeers>>`
+    /// is used at the classify stage (`IngressClassificationContext`) and
+    /// at the admission stage under this queue's `Mutex`. Admission re-reads
+    /// the trust set atomically with the enqueue so a revoke between
+    /// classification (T0) and admission (T2) cannot admit an envelope
+    /// that was no longer trusted at T2 — see C-H3.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
@@ -157,19 +159,43 @@ impl ClassifiedInboxQueue {
     ///   `Dropped { reason: UntrustedSender }`; the trust snapshot still
     ///   records the decision for queue visibility.
     ///
+    /// C-H3 — the trust check is re-read from the canonical
+    /// `trusted_peers` store **inside** this queue's `Mutex` scope, not
+    /// inherited from `prepared.trusted_sender`. The prepared bool is
+    /// computed at classification time (T0); a trust revoke between T0
+    /// and this admission point (T2) must be observed, and it is — a
+    /// revoked sender is dropped here even when the classification
+    /// snapshot said trusted. The prepared bool is retained for
+    /// diagnostics only (TOCTOU observability).
+    ///
+    /// Auth-exempt items (bridge bootstrap / idempotency-ack) bypass the
+    /// peer-trust gate unconditionally so bootstrapping can complete
+    /// before trust edges exist. The `auth_exempt` argument flows from
+    /// the prepared item so this single admission seam can distinguish
+    /// "admit as trusted" from "admit as exempt" — no parallel outer
+    /// branch, no classification-time bool that can drift.
+    ///
     /// Updates `phase` to track the observable lifecycle:
     /// `Absent → Received` (admitted), `Received → Received` (more work),
     /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
     /// work keeps `Received`.
     fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> AdmissionDecision {
-        let InboxItem::External { .. } = &prepared.item else {
+        let InboxItem::External { envelope } = &prepared.item else {
             return AdmissionDecision {
                 outcome: AdmissionOutcome::Admitted,
                 trusted_snapshot: None,
             };
         };
-        let trusted = prepared.trusted_sender;
-        let admitted = trusted || !self.auth_required;
+        // Authoritative trust check at admission time. The read lock on
+        // `trusted_peers` runs while we hold the queue `Mutex`, so any
+        // concurrent `router.{add,remove}_trusted_peer` serializes with
+        // this check — classification's stale view is ignored.
+        let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
+        // Auth-exempt items always admit; otherwise admission is gated by
+        // the authoritative trust read against the require_peer_auth
+        // policy. The prepared classification snapshot is NOT consulted
+        // here — only the admission-time read is authoritative.
+        let admitted = prepared.auth_exempt || trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
 
         if admitted {
@@ -468,23 +494,78 @@ impl Inbox {
         })
     }
 
-    /// Test-only: ask the queue's shared trust set whether `peer_id` is
+    /// Test-only: ask the queue's shared trust set whether `pubkey` is
     /// currently trusted. The queue does not own a local copy — this
     /// reads from the same `Arc<RwLock<TrustedPeers>>` that the router
     /// mutates and that the classifier consults.
     #[cfg(test)]
-    pub(crate) fn peer_authority_trusts_peer_for_test(&self, peer_id: &str) -> Option<bool> {
-        let pubkey = match crate::identity::PubKey::from_peer_id(peer_id) {
-            Ok(pk) => pk,
-            Err(_) => return Some(false),
-        };
+    pub(crate) fn peer_authority_trusts_peer_for_test(
+        &self,
+        pubkey: &crate::identity::PubKey,
+    ) -> Option<bool> {
         self.classified_queue
             .as_ref()
-            .map(|queue| queue.lock().trusted_peers.read().is_trusted(&pubkey))
+            .map(|queue| queue.lock().trusted_peers.read().is_trusted(pubkey))
     }
 }
 
 impl InboxSender {
+    /// **Test-only seam for C-H3.** Simulate the classify-then-admit
+    /// ordering with an explicit pause between the two steps so a test
+    /// can mutate the trust set in the gap.
+    ///
+    /// Returns `None` on non-classified inboxes (there is no admission
+    /// step to exercise). Marked `#[doc(hidden)]` so it is callable from
+    /// integration tests without appearing on the public API surface.
+    #[doc(hidden)]
+    pub fn classified_admit_with_pause_for_test(
+        &self,
+        item: InboxItem,
+        pause: impl FnOnce(),
+    ) -> AdmissionOutcome {
+        let (Some(ctx), Some(classified_queue)) =
+            (&self.classification_context, &self.classified_queue)
+        else {
+            return self.record_drop(DropReason::SessionClosed);
+        };
+        let result = match ctx.prepare(item) {
+            Some(r) => r,
+            None => return self.record_drop(DropReason::ClassificationRejected),
+        };
+        // Classification done — hand control to the caller so it can
+        // flip trust state before admission runs. This is the critical
+        // T0→T1 window that the pre-C-H3 code would have leaked.
+        pause();
+        let kind = result.ingress_kind();
+        let decision = {
+            let mut queue = classified_queue.lock();
+            queue.admit_peer_receive(&result)
+        };
+        if let AdmissionOutcome::Dropped { reason } = decision.outcome {
+            return self.record_drop(reason);
+        }
+        let entry = ClassifiedInboxEntry {
+            raw_item_id: result.raw_item_id,
+            item: result.item,
+            class: result.class,
+            auth_exempt: result.auth_exempt,
+            kind,
+            from_peer: result.from_peer,
+            lifecycle_peer: result.lifecycle_peer,
+            request_id: result.request_id,
+            trusted_snapshot: decision.trusted_snapshot,
+            text_projection: result.text_projection,
+        };
+        match classified_queue.lock().try_push(entry) {
+            Ok(()) => {
+                self.notify.notify_waiters();
+                AdmissionOutcome::Admitted
+            }
+            Err(InboxError::Closed) => self.record_drop(DropReason::SessionClosed),
+            Err(InboxError::Full) => self.record_drop(DropReason::InboxFull),
+        }
+    }
+
     /// Admit one external envelope at the inbox seam.
     ///
     /// This keeps trust ownership inside `InboxSender` instead of the
@@ -606,19 +687,13 @@ impl InboxSender {
             }
         };
         let kind = result.ingress_kind();
+        // C-H3 — the admission decision (trust re-check, auth-exempt
+        // bypass, and phase update) happens inside a single queue-lock
+        // scope so classification's T0 trust snapshot cannot admit an
+        // envelope that was revoked at T2.
         let decision = {
             let mut queue = classified_queue.lock();
-            if result.auth_exempt && ctx.require_peer_auth && !result.trusted_sender {
-                // Auth-exempt bridge traffic (bootstrap / idempotency-ack)
-                // bypasses the peer-trust gate so bootstrapping can
-                // complete before trust edges exist.
-                AdmissionDecision {
-                    outcome: AdmissionOutcome::Admitted,
-                    trusted_snapshot: Some(false),
-                }
-            } else {
-                queue.admit_peer_receive(&result)
-            }
+            queue.admit_peer_receive(&result)
         };
         match decision.outcome {
             AdmissionOutcome::Admitted => {}

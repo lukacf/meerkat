@@ -1,0 +1,11 @@
+{
+    "persisted_input": {
+        "Prompt": {
+            "turn_metadata": {
+                "provider_params": {"temperature": 0.7},
+                "additional_instructions": ["foo", "bar"],
+                "model": "gpt-4o-mini"
+            }
+        }
+    }
+}

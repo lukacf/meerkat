@@ -6,8 +6,8 @@
 //! `RegisterReadyFrame` or `RegisterPendingBodyFrame` calls.
 
 use crate::error::MobError;
-use crate::generated::flow_run;
 use crate::ids::{FrameId, LoopInstanceId};
+use crate::run::flow_run;
 
 /// A scheduler grant produced by pumping.
 #[derive(Debug, Clone)]

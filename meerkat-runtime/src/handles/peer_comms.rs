@@ -46,6 +46,7 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
     }
 
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::SetPeerIngressContext { keep_alive },
             "PeerCommsHandle::set_peer_ingress_context",

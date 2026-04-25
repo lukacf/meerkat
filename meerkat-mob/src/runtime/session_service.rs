@@ -41,43 +41,6 @@ fn build_runtime_receipt(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool {
-    let Some(metadata) = session.session_metadata() else {
-        return false;
-    };
-
-    let Some(comms_name) = metadata.comms_name.as_deref() else {
-        return false;
-    };
-    let mut parts = comms_name.split('/');
-    let Some(name_mob_id) = parts.next().filter(|part| !part.is_empty()) else {
-        return false;
-    };
-    let Some(profile) = parts.next().filter(|part| !part.is_empty()) else {
-        return false;
-    };
-    let Some(meerkat_id) = parts.next().filter(|part| !part.is_empty()) else {
-        return false;
-    };
-    if parts.next().is_some() {
-        return false;
-    }
-    if name_mob_id != mob_id.as_str() {
-        return false;
-    }
-    if metadata.realm_id.as_deref() != Some(&format!("mob:{mob_id}")) {
-        return false;
-    }
-
-    let Some(peer_meta) = metadata.peer_meta.as_ref() else {
-        return false;
-    };
-    peer_meta.labels.get("mob_id").map(String::as_str) == Some(mob_id.as_str())
-        && peer_meta.labels.get("role").map(String::as_str) == Some(profile)
-        && peer_meta.labels.get("meerkat_id").map(String::as_str) == Some(meerkat_id)
-}
-
 #[cfg(feature = "runtime-adapter")]
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
@@ -173,11 +136,25 @@ pub trait MobSessionService:
     }
 
     /// Whether a listed session belongs to the given mob for reconciliation.
-    async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
+    ///
+    /// Default: `false`. The wave-a demolition removed the comms-name matching
+    /// probe; wave-c was intended to land a runtime-aware replacement but did
+    /// not, so this remains a no-op default. Persistent services may override
+    /// to implement real reconciliation; the ephemeral default treats no
+    /// listed session as "belongs to mob".
+    async fn session_belongs_to_mob(
+        &self,
+        _session_id: &SessionId,
+        _mob_id: &crate::ids::MobId,
+    ) -> bool {
         false
     }
 
     /// Load the persisted session snapshot when available.
+    ///
+    /// Default: `Ok(None)`. Matches the pre-demolition behavior where services
+    /// without durable persistence returned no snapshot, letting callers treat
+    /// the session as missing and fall through to recreate-from-roster paths.
     async fn load_persisted_session(
         &self,
         _session_id: &SessionId,
@@ -298,17 +275,6 @@ where
             .await
     }
 
-    async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
-        false
-    }
-
-    async fn load_persisted_session(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<Option<Session>, SessionError> {
-        Ok(None)
-    }
-
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         meerkat_session::EphemeralSessionService::<B>::discard_live_session(self, session_id).await
     }
@@ -384,6 +350,13 @@ where
         }
     }
 
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        self.load_authoritative_session(session_id).await
+    }
+
     async fn execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -428,21 +401,6 @@ where
     ) -> Result<EventStream, StreamError> {
         meerkat_session::PersistentSessionService::<B>::subscribe_session_events(self, session_id)
             .await
-    }
-
-    async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
-        self.load_persisted_session(_session_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|session| session_has_persisted_mob_binding(&session, _mob_id))
-    }
-
-    async fn load_persisted_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<Session>, SessionError> {
-        meerkat_session::PersistentSessionService::<B>::load_persisted(self, session_id).await
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {

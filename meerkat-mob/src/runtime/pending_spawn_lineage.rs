@@ -3,7 +3,7 @@ use crate::error::MobError;
 use crate::ids::MeerkatId;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::task::JoinHandle;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -33,22 +33,8 @@ impl PendingSpawnLineage {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) fn len(&self) -> usize {
-        self.metadata.len()
-    }
-
     pub(super) fn is_empty(&self) -> bool {
         self.metadata.is_empty()
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn tickets(&self) -> BTreeSet<u64> {
-        self.metadata
-            .keys()
-            .chain(self.tasks.keys())
-            .copied()
-            .collect()
     }
 
     pub(super) fn contains_member(&self, agent_identity: &MeerkatId) -> bool {
@@ -99,20 +85,6 @@ impl PendingSpawnLineage {
             spawn,
             task,
         })
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn complete_slot(&mut self, spawn_ticket: u64) -> Option<PendingSpawnSlot> {
-        let slot = self.take_slot(spawn_ticket)?;
-        self.debug_assert_alignment();
-        if let Some(message) = self.alignment_violation(None) {
-            warn!(
-                spawn_ticket,
-                message = %message,
-                "pending spawn alignment violated during completion"
-            );
-        }
-        Some(slot)
     }
 
     pub(super) fn take_for_member(&mut self, agent_identity: &MeerkatId) -> Vec<PendingSpawnSlot> {

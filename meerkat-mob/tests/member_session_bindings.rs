@@ -1,24 +1,31 @@
+#![allow(clippy::unwrap_or_default)]
+
 //! W3-H-1 / dogma #4: MobMachine canonical
 //! `member_session_bindings` map — transition coverage.
 //!
 //! These tests exercise the DSL authority directly (no actor, no
-//! session service) so the behavioural guarantees of the new typed
-//! effects (`MemberSessionBindingSet`, `MemberSessionBindingRotated`,
-//! `MemberSessionBindingReleased`) are pinned at the machine level
-//! where they are defined.
+//! session service) so the behavioural guarantees of the collapsed
+//! `MemberSessionBindingChanged { epoch, agent_identity, old_session_id,
+//! new_session_id }` effect are pinned at the machine level where it
+//! is defined. The four semantic cases are discriminated by the
+//! `(old_session_id, new_session_id)` Option pair:
+//!   * `(None, Some(new))`        — fresh bind  (was `Set`)
+//!   * `(Some(old), Some(new))`   — rotate      (was `Rotated`)
+//!   * `(Some(prior), None)`      — release     (was `Released`)
+//!   * `(None, None)`             — never emitted; DSL guards prevent it.
 //!
 //! The fixtures model three flows:
-//!   * Fresh spawn + retire — one identity lifecycle, binding Set then
-//!     Released.
+//!   * Fresh spawn + retire — one identity lifecycle, binding is set then
+//!     released.
 //!   * Spawn + respawn (spawn-over-existing) + retire — identity is
 //!     rotated atomically to a new bridge session id; final retire
-//!     emits Released for the new session id.
+//!     emits a (Some, None) Changed for the new session id.
 //!   * Guard enforcement — a caller that passes the wrong `replacing`
 //!     witness fails the transition (no silent self-heal).
 //!
 //! Paired with the TLC invariant `bindings_require_known_identity`
-//! these tests pin the contract that the realtime WS observer (wired
-//! in a follow-up PR) subscribes to.
+//! these tests pin the contract that the realtime WS observer subscribes
+//! to.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -61,15 +68,38 @@ fn retire_input(
     generation: u64,
     releasing: Option<SessionId>,
 ) -> MobMachineInput {
+    let session_id_for_route = releasing.clone().unwrap_or_else(SessionId::default);
     MobMachineInput::Retire {
         agent_runtime_id: runtime_id(identity_name, generation),
         agent_identity: identity(identity_name),
         releasing,
+        session_id: session_id_for_route,
     }
 }
 
+/// Pull the `MemberSessionBindingChanged` effect, matching on the
+/// four-tuple of `(epoch, agent_identity, old, new)`.
+fn find_binding_changed(
+    transition: &meerkat_mob::machines::mob_machine::MobMachineTransition,
+) -> Option<(u64, AgentIdentity, Option<SessionId>, Option<SessionId>)> {
+    transition.effects.iter().find_map(|e| match e {
+        MobMachineEffect::MemberSessionBindingChanged {
+            epoch,
+            agent_identity,
+            old_session_id,
+            new_session_id,
+        } => Some((
+            *epoch,
+            agent_identity.clone(),
+            old_session_id.clone(),
+            new_session_id.clone(),
+        )),
+        _ => None,
+    })
+}
+
 #[test]
-fn fresh_spawn_emits_member_session_binding_set() {
+fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
     let transition = MobMachineMutator::apply(
         &mut authority,
@@ -84,30 +114,21 @@ fn fresh_spawn_emits_member_session_binding_set() {
         "fresh spawn inserts the identity's bridge session id into the binding map",
     );
 
-    let set_effect = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingSet {
-            agent_identity,
-            bridge_session_id,
-        } => Some((agent_identity.clone(), bridge_session_id.clone())),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        set_effect,
-        Some((identity("alpha"), session_id("bridge-a-gen1"))),
-        "fresh spawn must emit MemberSessionBindingSet with the bound session id",
-    );
-    assert!(
-        transition.effects.iter().all(|e| !matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingRotated { .. }
-                | MobMachineEffect::MemberSessionBindingReleased { .. }
+        changed,
+        Some((
+            authority.state.topology_epoch,
+            identity("alpha"),
+            None,
+            Some(session_id("bridge-a-gen1")),
         )),
-        "fresh spawn must not emit Rotated or Released",
+        "fresh spawn must emit MemberSessionBindingChanged (None -> Some) with the bound session id",
     );
 }
 
 #[test]
-fn respawn_spawn_emits_member_session_binding_rotated() {
+fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     let mut authority = MobMachineAuthority::new();
     // Initial spawn — binds alpha to bridge-a-gen1.
     MobMachineMutator::apply(
@@ -148,39 +169,21 @@ fn respawn_spawn_emits_member_session_binding_rotated() {
         "respawn rotates the binding to the new bridge session id",
     );
 
-    let rotated = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingRotated {
-            agent_identity,
-            old_session_id,
-            new_session_id,
-        } => Some((
-            agent_identity.clone(),
-            old_session_id.clone(),
-            new_session_id.clone(),
-        )),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        rotated,
+        changed,
         Some((
+            authority.state.topology_epoch,
             identity("alpha"),
-            session_id("bridge-a-gen1"),
-            session_id("bridge-a-gen2"),
+            Some(session_id("bridge-a-gen1")),
+            Some(session_id("bridge-a-gen2")),
         )),
-        "respawn must emit Rotated with the old and new session ids",
-    );
-    assert!(
-        transition.effects.iter().all(|e| !matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingSet { .. }
-                | MobMachineEffect::MemberSessionBindingReleased { .. }
-        )),
-        "respawn must not emit Set or Released",
+        "respawn must emit MemberSessionBindingChanged (Some -> Some) with the old and new session ids",
     );
 }
 
 #[test]
-fn retire_after_spawn_emits_member_session_binding_released() {
+fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(
         &mut authority,
@@ -204,25 +207,16 @@ fn retire_after_spawn_emits_member_session_binding_released() {
         "retire clears the identity from the binding map",
     );
 
-    let released = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingReleased {
-            agent_identity,
-            session_id,
-        } => Some((agent_identity.clone(), session_id.clone())),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        released,
-        Some((identity("alpha"), session_id("bridge-a-gen1"))),
-        "retire emits Released with the session id that was bound",
-    );
-    assert!(
-        transition.effects.iter().all(|e| !matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingSet { .. }
-                | MobMachineEffect::MemberSessionBindingRotated { .. }
+        changed,
+        Some((
+            authority.state.topology_epoch,
+            identity("alpha"),
+            Some(session_id("bridge-a-gen1")),
+            None,
         )),
-        "retire must not emit Set or Rotated",
+        "retire emits MemberSessionBindingChanged (Some -> None) with the session id that was bound",
     );
 }
 
@@ -258,8 +252,8 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
     // `RetireRunningPreservingBinding` (not the Releasing variant).
     // This is the retire-half of a respawn: the binding map entry is
     // intentionally preserved so the replacement spawn can emit the
-    // atomic `MemberSessionBindingRotated` effect. No binding-release
-    // effect is emitted; the binding stays put.
+    // atomic rotation (Some -> Some) `MemberSessionBindingChanged`.
+    // No binding-change effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(
         &mut authority,
@@ -279,13 +273,8 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
         "PreservingBinding retire must leave the binding map untouched",
     );
     assert!(
-        transition.effects.iter().all(|e| !matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingSet { .. }
-                | MobMachineEffect::MemberSessionBindingRotated { .. }
-                | MobMachineEffect::MemberSessionBindingReleased { .. }
-        )),
-        "PreservingBinding retire must emit no binding-lifecycle effect",
+        find_binding_changed(&transition).is_none(),
+        "PreservingBinding retire must emit no MemberSessionBindingChanged effect",
     );
 }
 
@@ -294,13 +283,13 @@ fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     // W3-H: when the caller passes `releasing = Some(wrong_value)`, the
     // DSL still routes to `RetireRunningReleasing` (the guard only
     // checks presence/absence of the witness, not value equality), and
-    // the emitted `MemberSessionBindingReleased` carries whatever the
-    // caller passed. Value-level equality is the caller's contract with
-    // its own bookkeeping; the DSL enforces presence alignment and the
-    // shell actor always reads the current binding before calling, so a
-    // mismatched value cannot originate from the canonical respawn or
-    // terminal-retire flows. This test pins the DSL's presence-based
-    // guard semantics.
+    // the emitted `MemberSessionBindingChanged` carries whatever the
+    // caller passed as the `old_session_id`. Value-level equality is
+    // the caller's contract with its own bookkeeping; the DSL enforces
+    // presence alignment and the shell actor always reads the current
+    // binding before calling, so a mismatched value cannot originate
+    // from the canonical respawn or terminal-retire flows. This test
+    // pins the DSL's presence-based guard semantics.
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(
         &mut authority,
@@ -309,10 +298,9 @@ fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     .expect("spawn must be accepted");
 
     // Passing `Some(wrong_session)` matches the Releasing path's guards
-    // and clears the binding with a Released effect carrying the wrong
-    // value — the DSL trusts the caller's witness. The shell actor
-    // always reads the current binding first, so this case cannot
-    // originate in production.
+    // and clears the binding with a Changed effect carrying the wrong
+    // value. The shell actor always reads the current binding first, so
+    // this case cannot originate in production.
     let transition = MobMachineMutator::apply(
         &mut authority,
         retire_input("alpha", 1, Some(session_id("mismatch"))),
@@ -325,12 +313,10 @@ fn retire_with_some_releasing_but_wrong_value_is_rejected() {
             .contains_key(&identity("alpha")),
         "Releasing path must clear the binding",
     );
+    let changed = find_binding_changed(&transition);
     assert!(
-        transition
-            .effects
-            .iter()
-            .any(|e| matches!(e, MobMachineEffect::MemberSessionBindingReleased { .. })),
-        "Releasing path must emit MemberSessionBindingReleased",
+        matches!(changed, Some((_, _, Some(_), None))),
+        "Releasing path must emit MemberSessionBindingChanged (Some -> None)",
     );
 }
 
@@ -376,7 +362,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
 // `BindMemberSession`, `RotateMemberSession`, and `ReleaseMemberSession`
 // inputs plus the `topology_epoch` advancement + `WiringGraphChanged` /
 // `MemberSessionBindingChanged` effects the `RecomputeMobPeerOverlay`
-// composition driver consumes in Commit 4.
+// composition driver consumes.
 // ==========================================================================
 
 use meerkat_mob::machines::mob_machine::WiringEdge;
@@ -523,7 +509,7 @@ fn spawn_then_release(
 }
 
 #[test]
-fn bind_member_session_inserts_binding_and_emits_both_set_and_changed_effects() {
+fn bind_member_session_inserts_binding_and_emits_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
     spawn_then_release(&mut authority, "alpha", 1, "spawn-sid");
     let epoch_before_bind = authority.state.topology_epoch;
@@ -541,41 +527,16 @@ fn bind_member_session_inserts_binding_and_emits_both_set_and_changed_effects() 
     );
     assert_eq!(authority.state.topology_epoch, epoch_before_bind + 1);
 
-    let set_effect_present = transition.effects.iter().any(|e| {
-        matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingSet { agent_identity, bridge_session_id }
-                if *agent_identity == identity("alpha") && *bridge_session_id == session_id("session-1")
-        )
-    });
-    assert!(
-        set_effect_present,
-        "BindMemberSession must emit MemberSessionBindingSet"
-    );
-
-    let changed_effect = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingChanged {
-            epoch,
-            agent_identity,
-            old_session_id,
-            new_session_id,
-        } => Some((
-            *epoch,
-            agent_identity.clone(),
-            old_session_id.clone(),
-            new_session_id.clone(),
-        )),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        changed_effect,
+        changed,
         Some((
             authority.state.topology_epoch,
             identity("alpha"),
             None,
             Some(session_id("session-1")),
         )),
-        "MemberSessionBindingChanged must carry (epoch, identity, None, Some) for a fresh bind",
+        "BindMemberSession must emit MemberSessionBindingChanged (None -> Some)",
     );
 }
 
@@ -607,7 +568,7 @@ fn bind_member_session_rejects_prior_binding() {
 }
 
 #[test]
-fn rotate_member_session_updates_binding_and_emits_both_rotated_and_changed_effects() {
+fn rotate_member_session_updates_binding_and_emits_changed_some_to_some() {
     let mut authority = MobMachineAuthority::new();
     spawn_then_release(&mut authority, "alpha", 1, "spawn-sid");
     MobMachineMutator::apply(&mut authority, bind_session_input("alpha", "session-1"))
@@ -629,40 +590,16 @@ fn rotate_member_session_updates_binding_and_emits_both_rotated_and_changed_effe
     );
     assert_eq!(authority.state.topology_epoch, epoch_before_rotate + 1);
 
-    let rotated_present = transition.effects.iter().any(|e| {
-        matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingRotated {
-                agent_identity, old_session_id, new_session_id,
-            } if *agent_identity == identity("alpha")
-              && *old_session_id == session_id("session-1")
-              && *new_session_id == session_id("session-2")
-        )
-    });
-    assert!(rotated_present);
-
-    let changed_effect = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingChanged {
-            epoch,
-            agent_identity,
-            old_session_id,
-            new_session_id,
-        } => Some((
-            *epoch,
-            agent_identity.clone(),
-            old_session_id.clone(),
-            new_session_id.clone(),
-        )),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        changed_effect,
+        changed,
         Some((
             authority.state.topology_epoch,
             identity("alpha"),
             Some(session_id("session-1")),
             Some(session_id("session-2")),
         )),
+        "RotateMemberSession must emit MemberSessionBindingChanged (Some -> Some)",
     );
 }
 
@@ -746,7 +683,7 @@ fn release_member_session_rejects_wrong_session_id_witness() {
 }
 
 #[test]
-fn release_member_session_removes_binding_and_emits_both_released_and_changed_effects() {
+fn release_member_session_removes_binding_and_emits_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
     spawn_then_release(&mut authority, "alpha", 1, "spawn-sid");
     MobMachineMutator::apply(&mut authority, bind_session_input("alpha", "session-1"))
@@ -766,39 +703,16 @@ fn release_member_session_removes_binding_and_emits_both_released_and_changed_ef
     );
     assert_eq!(authority.state.topology_epoch, epoch_before_release + 1);
 
-    let released_present = transition.effects.iter().any(|e| {
-        matches!(
-            e,
-            MobMachineEffect::MemberSessionBindingReleased {
-                agent_identity,
-                session_id: s,
-            } if *agent_identity == identity("alpha") && *s == session_id("session-1")
-        )
-    });
-    assert!(released_present);
-
-    let changed_effect = transition.effects.iter().find_map(|e| match e {
-        MobMachineEffect::MemberSessionBindingChanged {
-            epoch,
-            agent_identity,
-            old_session_id,
-            new_session_id,
-        } => Some((
-            *epoch,
-            agent_identity.clone(),
-            old_session_id.clone(),
-            new_session_id.clone(),
-        )),
-        _ => None,
-    });
+    let changed = find_binding_changed(&transition);
     assert_eq!(
-        changed_effect,
+        changed,
         Some((
             authority.state.topology_epoch,
             identity("alpha"),
             Some(session_id("session-1")),
             None,
         )),
+        "ReleaseMemberSession must emit MemberSessionBindingChanged (Some -> None)",
     );
 }
 

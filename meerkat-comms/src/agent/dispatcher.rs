@@ -5,7 +5,10 @@ use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCatalogCapabilities;
+use meerkat_core::ToolCatalogEntry;
 use meerkat_core::ToolDispatchOutcome;
+use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use parking_lot::RwLock;
@@ -64,9 +67,7 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
             trusted_peers,
             runtime: None,
         };
-        let mut tools = comms_tool_defs();
-        tools.extend(inner.tools().iter().map(Arc::clone));
-        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
             tool_context,
             inner: Some(inner),
@@ -119,7 +120,13 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tool_defs)
+        if let Some(inner) = &self.inner {
+            let mut tools = self.tool_defs.iter().cloned().collect::<Vec<_>>();
+            tools.extend(inner.tools().iter().map(Arc::clone));
+            tools.into()
+        } else {
+            Arc::clone(&self.tool_defs)
+        }
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -137,6 +144,54 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
                 name: call.name.to_string(),
             })
         }
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        if let Some(inner) = &self.inner {
+            inner.poll_external_updates().await
+        } else {
+            ExternalToolUpdate::default()
+        }
+    }
+
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        let inner = self
+            .inner
+            .as_ref()
+            .map(|dispatcher| dispatcher.tool_catalog_capabilities());
+        ToolCatalogCapabilities {
+            exact_catalog: inner.is_none_or(|capabilities| capabilities.exact_catalog),
+            may_require_catalog_control_plane: inner
+                .is_some_and(|capabilities| capabilities.may_require_catalog_control_plane),
+        }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner
+            .as_ref()
+            .map(|dispatcher| dispatcher.pending_catalog_sources())
+            .unwrap_or_else(|| Arc::from([]))
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        let mut catalog = self
+            .tool_defs
+            .iter()
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .collect::<Vec<_>>();
+        if let Some(inner) = &self.inner {
+            if inner.tool_catalog_capabilities().exact_catalog {
+                catalog.extend(inner.tool_catalog().iter().cloned());
+            } else {
+                catalog.extend(
+                    inner
+                        .tools()
+                        .iter()
+                        .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true)),
+                );
+            }
+        }
+        catalog.into()
     }
 }
 
@@ -157,9 +212,7 @@ impl DynCommsToolDispatcher {
             trusted_peers,
             runtime: None,
         };
-        let mut tools = comms_tool_defs();
-        tools.extend(inner.tools().iter().map(Arc::clone));
-        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
             tool_context,
             inner,
@@ -178,9 +231,7 @@ impl DynCommsToolDispatcher {
             trusted_peers,
             runtime: Some(runtime),
         };
-        let mut tools = comms_tool_defs();
-        tools.extend(inner.tools().iter().map(Arc::clone));
-        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
             tool_context,
             inner,
@@ -193,7 +244,9 @@ impl DynCommsToolDispatcher {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tool_defs)
+        let mut tools = self.tool_defs.iter().cloned().collect::<Vec<_>>();
+        tools.extend(self.inner.tools().iter().map(Arc::clone));
+        tools.into()
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -207,6 +260,41 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         } else {
             self.inner.dispatch(call).await
         }
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        let inner = self.inner.tool_catalog_capabilities();
+        ToolCatalogCapabilities {
+            exact_catalog: inner.exact_catalog,
+            may_require_catalog_control_plane: inner.may_require_catalog_control_plane,
+        }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        let mut catalog = self
+            .tool_defs
+            .iter()
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .collect::<Vec<_>>();
+        if self.inner.tool_catalog_capabilities().exact_catalog {
+            catalog.extend(self.inner.tool_catalog().iter().cloned());
+        } else {
+            catalog.extend(
+                self.inner
+                    .tools()
+                    .iter()
+                    .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true)),
+            );
+        }
+        catalog.into()
     }
 }
 
@@ -227,6 +315,78 @@ pub fn wrap_with_comms(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbox::Inbox;
+    use crate::trust::TrustedPeers;
+    use meerkat_core::ToolCatalogDeferredEligibility;
+    use meerkat_core::ToolPlaneClass;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ExactDeferredDispatcher {
+        tool: Arc<ToolDef>,
+        polled: AtomicBool,
+    }
+
+    impl ExactDeferredDispatcher {
+        fn new() -> Self {
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: "secret_lookup".to_string(),
+                    description: "Look up a secret".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    provenance: None,
+                }),
+                polled: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ExactDeferredDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            vec![Arc::clone(&self.tool)].into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "secret".to_string(), false).into())
+        }
+
+        async fn poll_external_updates(&self) -> ExternalToolUpdate {
+            self.polled.store(true, Ordering::SeqCst);
+            ExternalToolUpdate::default()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: true,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            vec![ToolCatalogEntry {
+                tool: Arc::clone(&self.tool),
+                plane: ToolPlaneClass::Session,
+                currently_callable: true,
+                deferred_eligibility: ToolCatalogDeferredEligibility::DeferredEligible {
+                    stable_owner_key: "callback:secret_lookup".to_string(),
+                },
+            }]
+            .into()
+        }
+    }
+
+    fn test_router() -> (Arc<Router>, Arc<RwLock<TrustedPeers>>) {
+        let (_inbox, inbox_sender) = Inbox::new();
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::default()));
+        let router = Arc::new(Router::with_shared_peers(
+            crate::identity::Keypair::generate(),
+            Arc::clone(&trusted_peers),
+            crate::router::CommsConfig::default(),
+            inbox_sender,
+            false,
+        ));
+        (router, trusted_peers)
+    }
 
     #[test]
     fn comms_tool_defs_have_comms_provenance() {
@@ -245,5 +405,31 @@ mod tests {
             );
             assert_eq!(prov.source_id, "comms");
         }
+    }
+
+    #[tokio::test]
+    async fn comms_wrapper_preserves_exact_deferred_catalog_contract() {
+        let (router, trusted_peers) = test_router();
+        let inner = Arc::new(ExactDeferredDispatcher::new());
+        let dispatcher = CommsToolDispatcher::with_inner(router, trusted_peers, Arc::clone(&inner));
+
+        let capabilities = dispatcher.tool_catalog_capabilities();
+        assert!(capabilities.exact_catalog);
+        assert!(capabilities.may_require_catalog_control_plane);
+
+        let catalog = dispatcher.tool_catalog();
+        assert!(
+            catalog.iter().any(|entry| {
+                entry.tool.name == "secret_lookup"
+                    && matches!(
+                        entry.deferred_eligibility,
+                        ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                    )
+            }),
+            "wrapped exact deferred tools must stay deferred in the catalog"
+        );
+
+        dispatcher.poll_external_updates().await;
+        assert!(inner.polled.load(Ordering::SeqCst));
     }
 }

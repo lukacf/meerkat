@@ -82,6 +82,13 @@ machine! {
             Skipped,
             Misfired,
             Superseded,
+            // Reciprocal-ack effect (wave-d D-f): after the occurrence
+            // absorbs a Supersede it reports the superseding revision and
+            // its own occurrence_id back to the schedule authority so the
+            // schedule side observes which occurrences it actually
+            // superseded (instead of firing a one-way Supersede and
+            // hoping).
+            OccurrencesSuperseded { occurrence_id: OccurrenceId, superseding_revision: u64 },
             DeliveryFailed,
             LeaseExpired,
         }
@@ -109,6 +116,7 @@ machine! {
         disposition Skipped => external,
         disposition Misfired => external,
         disposition Superseded => external,
+        disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine],
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
 
@@ -234,6 +242,7 @@ machine! {
             }
             to Superseded
             emit Superseded
+            emit OccurrencesSuperseded { occurrence_id: self.occurrence_id, superseding_revision: superseded_by_revision }
         }
 
         // --- Delivery failed ---

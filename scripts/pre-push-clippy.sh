@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pre-push clippy gate: lint only changed crates instead of the full workspace.
 # Falls back to workspace clippy when root Cargo.toml/Cargo.lock changes.
+#
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"

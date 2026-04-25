@@ -434,7 +434,10 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
     let mut findings = Vec::new();
     let required = policy.required_route_keys();
 
-    for ((producer, effect), rules) in required {
+    // ---------------------------------------------------------------------
+    // Rule-existence + path-existence check (pre-wave-b legacy).
+    // ---------------------------------------------------------------------
+    for ((producer, effect), rules) in &required {
         if rules.is_empty() {
             findings.push(error_finding(
                 "CompositionRouteRealizationCoverage",
@@ -464,6 +467,167 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
                 "all configured realization sites are missing".to_string(),
                 false,
             ));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // B-10 semantic upgrade: for each routed effect, walk the canonical
+    // composition schema and verify there is a *typed* `Route` entry that
+    // resolves (producer_instance, effect_variant) to the consumer machine
+    // and input variant named in the policy rule. Rule-existence alone is
+    // not sufficient — wave-b's `CompositionDispatcher` is driven by the
+    // schema's `routes` table, not by the policy rules, so a rule without
+    // a matching schema route means the dispatcher will refuse at runtime.
+    // ---------------------------------------------------------------------
+    use meerkat_machine_schema::{canonical_composition_schemas, canonical_machine_schemas};
+    let machines = canonical_machine_schemas();
+    let compositions = canonical_composition_schemas();
+    for ((producer, effect), rules) in &required {
+        let Some(producer_schema) = machines.iter().find(|m| m.machine.as_str() == producer) else {
+            findings.push(error_finding(
+                "CompositionRouteSemanticCoverage",
+                "<schema>",
+                &format!("{producer}::{effect}"),
+                format!("producer machine `{producer}` is not in the canonical schema registry"),
+                false,
+            ));
+            continue;
+        };
+        let effect_present = producer_schema
+            .effect_dispositions
+            .iter()
+            .any(|d| d.effect_variant.as_str() == effect);
+        if !effect_present {
+            findings.push(error_finding(
+                "CompositionRouteSemanticCoverage",
+                "<schema>",
+                &format!("{producer}::{effect}"),
+                format!(
+                    "policy declares routed effect `{producer}::{effect}` but the machine schema does not carry that EffectDispositionRule"
+                ),
+                false,
+            ));
+            continue;
+        }
+        for rule in rules {
+            let mut route_found_somewhere = false;
+            for composition in &compositions {
+                let producer_instance = composition
+                    .machines
+                    .iter()
+                    .find(|inst| inst.machine_name.as_str() == rule.producer_machine.as_str());
+                let consumer_instance = composition
+                    .machines
+                    .iter()
+                    .find(|inst| inst.machine_name.as_str() == rule.consumer_machine.as_str());
+                let (Some(producer_instance), Some(consumer_instance)) =
+                    (producer_instance, consumer_instance)
+                else {
+                    continue;
+                };
+                let route = composition.routes.iter().find(|r| {
+                    r.from_machine == producer_instance.instance_id
+                        && r.effect_variant.as_str() == rule.effect_variant.as_str()
+                        && r.to.machine == consumer_instance.instance_id
+                });
+                if let Some(route) = route {
+                    // The route's target input variant must match the policy's
+                    // consumer_input. This is the teeth on the B-5 handoff:
+                    // the policy rule and the typed schema must agree about
+                    // which consumer input a given routed effect realizes.
+                    if route.to.input_variant.as_str() == rule.consumer_input.as_str() {
+                        route_found_somewhere = true;
+                        break;
+                    }
+                    findings.push(error_finding(
+                        "CompositionRouteSemanticCoverage",
+                        "<schema>",
+                        &format!("{}::{}", rule.producer_machine, rule.effect_variant),
+                        format!(
+                            "policy expects consumer_input=`{}` but composition `{}` typed Route targets input=`{}`",
+                            rule.consumer_input,
+                            composition.name,
+                            route.to.input_variant.as_str()
+                        ),
+                        false,
+                    ));
+                }
+            }
+            if !route_found_somewhere {
+                findings.push(error_finding(
+                    "CompositionRouteSemanticCoverage",
+                    "<schema>",
+                    &format!("{}::{}", rule.producer_machine, rule.effect_variant),
+                    format!(
+                        "no typed Route in any canonical composition resolves (producer=`{}`, effect=`{}`) to consumer=`{}` with input=`{}` — CompositionDispatcher will refuse this producer→consumer pair",
+                        rule.producer_machine,
+                        rule.effect_variant,
+                        rule.consumer_machine,
+                        rule.consumer_input,
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // B-10 semantic upgrade: byte-level scan under `meerkat-runtime/src/`
+    // and `meerkat-mob/src/` (excluding the composition module itself and
+    // tests) for re-introductions of the deleted wave-a helper names. This
+    // complements the crate-local grep canary shipped in B-5 by running as
+    // part of every CI `rmat-audit` invocation and covering the mob side
+    // too. Re-appearance of any banned name means the consumer-input
+    // application path has forked from `CompositionDispatcher::dispatch`
+    // and `ConsumerSurface::apply_routed_input`.
+    // ---------------------------------------------------------------------
+    // `comms_trust_reconcile` was in this list while the identically-named
+    // wave-a helper was the forbidden pre-composition shell shortcut.
+    // Wave-c (`b0e881535`) re-ported the module as the legitimate
+    // mechanical external-effect handler: `MeerkatMachine`'s DSL declares
+    // `disposition CommsTrustReconcileRequested => external`
+    // (meerkat-machine-schema `dsl/meerkat_machine.rs:732`), so the effect
+    // intentionally lands on shell observers rather than transiting
+    // `CompositionDispatcher`. The banned-name grep no longer applies —
+    // this rule's invariant ("routed-effect dispatch must go through
+    // CompositionDispatcher") only governs effects with a `routed`
+    // disposition. `composition_dispatch` + `recompute_mob_peer_overlay`
+    // remain banned because their dispositions *are* routed.
+    const BANNED_LEGACY_HELPERS: &[&str] = &["composition_dispatch", "recompute_mob_peer_overlay"];
+    let scan_roots: [&str; 2] = ["meerkat-runtime/src", "meerkat-mob/src"];
+    for root_rel in scan_roots {
+        let root_path = root.join(root_rel);
+        if !root_path.exists() {
+            continue;
+        }
+        let mut files: Vec<PathBuf> = Vec::new();
+        if collect_rs_files_recursive(root, &root_path, &mut files).is_err() {
+            continue;
+        }
+        for file in files {
+            let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
+            // Skip the wave-b composition module itself; banned tokens
+            // may appear there as the positive identity of the replacement
+            // path in module commentary / imports.
+            if rel.contains("/composition/") || rel.ends_with("/composition.rs") {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(&file) else {
+                continue;
+            };
+            for banned in BANNED_LEGACY_HELPERS {
+                if source.contains(banned) {
+                    findings.push(error_finding(
+                        "CompositionDispatchIsThePath",
+                        rel.as_ref(),
+                        banned,
+                        format!(
+                            "forbidden legacy helper `{banned}` reappeared; routed-effect dispatch must go through meerkat_runtime::composition::CompositionDispatcher + ConsumerSurface::apply_routed_input"
+                        ),
+                        false,
+                    ));
+                }
+            }
         }
     }
 
@@ -751,7 +915,8 @@ impl<'a> ForbiddenShellReadsVisitor<'a> {
         symbol: String,
         detail: String,
     ) {
-        let suppressed = has_rmat_allow(self.source, span, "ForbiddenShellAuthorityReads");
+        let suppressed =
+            forbidden_shell_authority_read_suppressed(self.relative, self.source, span);
         let hint = rule.hint;
         let relative = self.relative;
         self.findings.push(error_finding(
@@ -962,6 +1127,23 @@ fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     false
 }
 
+fn forbidden_shell_authority_read_suppressed(
+    relative: &str,
+    source: &str,
+    span: proc_macro2::Span,
+) -> bool {
+    is_test_fixture_path(relative) && has_rmat_allow(source, span, "ForbiddenShellAuthorityReads")
+}
+
+fn is_test_fixture_path(relative: &str) -> bool {
+    relative.starts_with("rmat-test-fixtures/")
+        || relative.starts_with("test-fixtures/")
+        || relative.starts_with("tests/fixtures/")
+        || relative.contains("/rmat-test-fixtures/")
+        || relative.contains("/test-fixtures/")
+        || relative.contains("/tests/fixtures/")
+}
+
 /// Structural seam rule: every effect with `handoff_protocol: Some(name)` must have
 /// a corresponding `EffectHandoffProtocol` declared in compositions that include
 /// the producing machine. This is validated at the composition schema level; the audit
@@ -979,15 +1161,15 @@ fn collect_handoff_protocol_coverage_findings(policy: &AuditPolicy) -> Vec<Findi
             let machine_present = composition
                 .machines
                 .iter()
-                .any(|m| m.machine_name == rule.machine);
+                .any(|m| m.machine_name.as_str() == rule.machine);
             if !machine_present {
                 continue;
             }
             found_in_any_composition = true;
-            let protocol_present = composition
-                .handoff_protocols
-                .iter()
-                .any(|p| p.name == rule.protocol_name && p.effect_variant == rule.effect_variant);
+            let protocol_present = composition.handoff_protocols.iter().any(|p| {
+                p.name.as_str() == rule.protocol_name
+                    && p.effect_variant.as_str() == rule.effect_variant
+            });
             if !protocol_present {
                 findings.push(error_finding(
                     "HandoffProtocolCoverage",
@@ -1083,6 +1265,18 @@ fn collect_protocol_feedback_constraint_findings(
             if relative.starts_with("xtask/") {
                 continue;
             }
+            // These files are the typed authority/owner adapter implementations
+            // for their respective feedback surfaces. They may destructure or
+            // construct the local authority input while generated helpers remain
+            // the public handoff entrypoint for non-owner shell code.
+            if is_feedback_authority_implementation_path(&relative) {
+                continue;
+            }
+            // Unit tests exercise authority inputs directly; the production
+            // bypass rule is scoped to non-test files.
+            if is_test_source_path(&relative) {
+                continue;
+            }
 
             let source = match fs::read_to_string(file) {
                 Ok(s) => s,
@@ -1103,6 +1297,9 @@ fn collect_protocol_feedback_constraint_findings(
                     return false;
                 }
                 if let Some(pos) = trimmed.find(&construction_pattern) {
+                    if trimmed.contains("=>") {
+                        return false;
+                    }
                     // Verify the variant name ends at a word boundary (not a substring
                     // of a longer identifier like `::VariantNameExtra`).
                     let end = pos + construction_pattern.len();
@@ -1127,6 +1324,24 @@ fn collect_protocol_feedback_constraint_findings(
         }
     }
     findings
+}
+
+fn is_feedback_authority_implementation_path(relative: &str) -> bool {
+    matches!(
+        relative,
+        "meerkat-core/src/agent/state.rs"
+            | "meerkat-runtime/src/handles/turn_state.rs"
+            | "meerkat-mcp/src/router.rs"
+            | "meerkat-mcp/src/external_tool_surface_authority.rs"
+    ) || relative.contains("/authority")
+        || relative.contains("/handles/")
+}
+
+fn is_test_source_path(relative: &str) -> bool {
+    relative.contains("/tests/")
+        || relative.ends_with("_tests.rs")
+        || relative.ends_with("/tests.rs")
+        || relative.contains("/test_")
 }
 
 /// Structural seam rule: terminal outcome classification for protocol-producing machines

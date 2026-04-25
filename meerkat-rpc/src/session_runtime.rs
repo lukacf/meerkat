@@ -20,11 +20,10 @@ use std::sync::{Arc, RwLock as StdRwLock};
 #[cfg(feature = "mcp")]
 use std::time::Duration;
 
-use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, ScheduleService, ScheduleToolDispatcher,
-    encode_llm_client_override_for_service,
+    PersistentSessionService, ScheduleService, ScheduleToolDispatcher, StagedPhase,
+    StagedSessionRegistry, StagedSlot, encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
 use meerkat_core::EventEnvelope;
@@ -301,13 +300,15 @@ impl SessionRuntimeLlmReconfigureHost {
                 })?
         };
 
-        let mut adapter = self
+        let adapter = self
             .factory
             .build_llm_adapter(raw_client, identity.model.clone())
             .await;
-        if let Some(params) = identity.provider_params.clone() {
-            adapter = adapter.with_provider_params(Some(params));
-        }
+        // Post-wave-a: `SessionLlmIdentity.provider_params` stays stringly
+        // typed (`serde_json::Value`) while the adapter seam expects a typed
+        // `ProviderTag`. The hot-swap path no longer carries provider_params
+        // overlay through this seam until the typed projector is plumbed.
+        let _ = identity.provider_params.clone();
         Ok(Arc::new(adapter))
     }
 
@@ -470,7 +471,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
     ) -> Result<(), RuntimeDriverError> {
         let adapter = self.build_adapter_for_llm_identity(identity).await?;
         self.service
-            .hot_swap_session_llm_identity(session_id, adapter, identity.clone())
+            .apply_runtime_session_llm_identity(session_id, adapter, identity.clone())
             .await
             .map_err(session_error_to_runtime_driver)
     }
@@ -552,20 +553,6 @@ pub struct SessionInfo {
     pub labels: BTreeMap<String, String>,
 }
 
-/// Staged session data: build config + metadata not yet materialized in the service.
-struct PendingSession {
-    phase: PendingSessionPhase,
-    effective_llm_identity: SessionLlmIdentity,
-    labels: Option<BTreeMap<String, String>>,
-    /// Prompt from `session/create` when `initial_turn` is deferred.
-    /// Prepended to the first `turn/start` prompt.
-    deferred_prompt: Option<ContentInput>,
-    /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
-    created_at_secs: u64,
-    /// Last-modified timestamp (Unix seconds), updated on mutations like append_system_context.
-    updated_at_secs: u64,
-}
-
 fn now_unix_secs() -> u64 {
     meerkat_core::time_compat::SystemTime::now()
         .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
@@ -587,17 +574,8 @@ fn merge_content_inputs(deferred: ContentInput, turn: ContentInput) -> ContentIn
     }
 }
 
-enum PendingSessionPhase {
-    Staged {
-        build_config: Box<AgentBuildConfig>,
-    },
-    Promoting {
-        starting_system_context_state: SessionSystemContextState,
-        current_system_context_state: SessionSystemContextState,
-    },
-}
-
 // FactoryAgent and FactoryAgentBuilder are imported from meerkat::service_factory.
+// Staged-session authority lives in meerkat::StagedSessionRegistry.
 
 // ---------------------------------------------------------------------------
 // SessionRuntime
@@ -612,13 +590,15 @@ pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
-    /// Sessions that have been "created" (ID returned to caller) but not yet
-    /// materialized in the service. The first `start_turn` call promotes them.
-    pending: RwLock<IndexMap<SessionId, PendingSession>>,
+    /// Canonical staged-session authority (facade-owned). Holds sessions
+    /// that have been created (ID returned to caller) but not yet materialized
+    /// in the service. The first `start_turn` call promotes them through
+    /// `staged_sessions.begin_promotion()`.
+    staged_sessions: Arc<StagedSessionRegistry>,
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
-    realm_id: Option<String>,
+    realm_id: Option<meerkat_core::connection::RealmId>,
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
@@ -669,6 +649,76 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
 }
 
 impl SessionRuntime {
+    fn turn_keep_alive_policy(
+        requested: Option<bool>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+        requested.and_then(|keep_alive| {
+            keep_alive.then(|| meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(30),
+                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+            })
+        })
+    }
+
+    fn turn_additional_instructions(
+        requested: Option<Vec<String>>,
+    ) -> Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>> {
+        requested.map(|instructions| {
+            instructions
+                .into_iter()
+                .map(
+                    |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                        body,
+                    },
+                )
+                .collect()
+        })
+    }
+
+    fn turn_metadata_from_overrides(
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            handling_mode: None,
+            keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions: Self::turn_additional_instructions(additional_instructions),
+            model: overrides
+                .and_then(|ov| ov.model.clone())
+                .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
+            provider: overrides
+                .and_then(|ov| ov.provider.as_ref())
+                .map(|provider| meerkat_core::Provider::from_name(provider)),
+            provider_params: None,
+            render_metadata: None,
+            execution_kind: None,
+            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
+        };
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    pub(crate) fn turn_overrides_from_metadata(
+        metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    ) -> Option<crate::handlers::turn::TurnOverrides> {
+        let metadata = metadata?;
+        let overrides = crate::handlers::turn::TurnOverrides {
+            keep_alive: metadata.keep_alive.as_ref().map(|_| true),
+            model: metadata.model.as_ref().map(ToString::to_string),
+            provider: metadata
+                .provider
+                .map(|provider| provider.as_str().to_string()),
+            provider_params: None,
+            connection_ref: metadata.connection_ref.clone(),
+            ..Default::default()
+        };
+        (!overrides.is_empty()).then_some(overrides)
+    }
+
     #[cfg(feature = "comms")]
     async fn preserve_existing_peer_ingress(
         &self,
@@ -731,7 +781,7 @@ impl SessionRuntime {
             service,
             schedule_service,
             schedule_host: Mutex::new(None),
-            pending: RwLock::new(IndexMap::new()),
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -800,7 +850,7 @@ impl SessionRuntime {
             service,
             schedule_service,
             schedule_host: Mutex::new(None),
-            pending: RwLock::new(IndexMap::new()),
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -832,7 +882,7 @@ impl SessionRuntime {
     /// Attach realm context defaults used for session metadata.
     pub fn set_realm_context(
         &mut self,
-        realm_id: Option<String>,
+        realm_id: Option<meerkat_core::connection::RealmId>,
         instance_id: Option<String>,
         backend: Option<String>,
     ) {
@@ -881,8 +931,8 @@ impl SessionRuntime {
     }
 
     /// Active realm id for this runtime, if configured.
-    pub fn realm_id(&self) -> Option<&str> {
-        self.realm_id.as_deref()
+    pub fn realm_id(&self) -> Option<&meerkat_core::connection::RealmId> {
+        self.realm_id.as_ref()
     }
 
     /// Attach config runtime for generation stamping.
@@ -1027,9 +1077,10 @@ impl SessionRuntime {
                     .default_llm_client()
                     .map(encode_llm_client_override_for_service),
                 external_tools: self.recovery_external_tools(),
+                checkpointer: None,
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
                 require_runtime_build_mode: true,
-                realm_id: self.realm_id.clone(),
+                realm_id: self.realm_id.as_ref().map(ToString::to_string),
                 instance_id: self.instance_id.clone(),
                 backend: self.backend.clone(),
                 config_generation: current_generation,
@@ -1287,12 +1338,10 @@ impl SessionRuntime {
         session_id: &SessionId,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
     ) -> Result<SessionLlmIdentity, RpcError> {
-        let pending_identity = {
-            let pending = self.pending.read().await;
-            pending
-                .get(session_id)
-                .map(|pending| pending.effective_llm_identity.clone())
-        };
+        let pending_identity = self
+            .staged_sessions
+            .effective_llm_identity(session_id)
+            .await;
         if let Some(pending_identity) = pending_identity {
             return match overrides {
                 Some(ov) => {
@@ -1713,7 +1762,7 @@ impl SessionRuntime {
         // have no RuntimeLoop — inputs would queue without being processed.
         if !self.runtime_adapter.session_has_executor(session_id).await {
             let session_exists = self.runtime_adapter.contains_session(session_id).await
-                || self.pending.read().await.contains_key(session_id)
+                || self.staged_sessions.contains(session_id).await
                 || self.service.read(session_id).await.is_ok()
                 || self
                     .load_persisted_session(session_id)
@@ -1728,10 +1777,36 @@ impl SessionRuntime {
                     data: None,
                 });
             }
-            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                Arc::clone(self),
-                session_id.clone(),
-            ));
+            #[cfg(feature = "mob")]
+            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
+                match self.mob_state().as_ref() {
+                    Some(mob_state)
+                        if mob_state.owns_live_bridge_session(session_id).await
+                            || mob_state.owns_persisted_bridge_session(session_id).await =>
+                    {
+                        let sink = self
+                            .notification_sink
+                            .read()
+                            .ok()
+                            .map(|slot| slot.clone())
+                            .unwrap_or_else(crate::router::NotificationSink::noop);
+                        Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                            mob_state.session_service(),
+                            session_id.clone(),
+                            sink,
+                        ))
+                    }
+                    _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                        Arc::clone(self),
+                        session_id.clone(),
+                    )),
+                };
+            #[cfg(not(feature = "mob"))]
+            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    Arc::clone(self),
+                    session_id.clone(),
+                ));
             self.runtime_adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
                 .await;
@@ -1869,21 +1944,11 @@ impl SessionRuntime {
             }
         }
 
-        // Build turn metadata from overrides
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: overrides.as_ref().and_then(|ov| ov.keep_alive),
-                skill_references,
-                flow_tool_overlay,
-                additional_instructions,
-                model: overrides.as_ref().and_then(|ov| ov.model.clone()),
-                provider: overrides.as_ref().and_then(|ov| ov.provider.clone()),
-                provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
-                render_metadata: None,
-                execution_kind: None,
-                connection_ref: overrides.as_ref().and_then(|ov| ov.connection_ref.clone()),
-            },
+        let turn_metadata = Self::turn_metadata_from_overrides(
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            overrides.as_ref(),
         );
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
@@ -1920,7 +1985,7 @@ impl SessionRuntime {
             // Persist explicit override so subsequent inheriting calls observe it.
             if keep_alive_override.is_some() {
                 self.service
-                    .update_session_keep_alive(session_id, keep_alive)
+                    .apply_runtime_session_keep_alive(session_id, keep_alive)
                     .await
                     .map_err(session_error_to_rpc)?;
             }
@@ -2136,7 +2201,7 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
+        _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
         // Context-only staged primitive (e.g. peer_response_terminal) must
@@ -2166,45 +2231,29 @@ impl SessionRuntime {
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
 
-        let pending_session = {
-            let mut pending = self.pending.write().await;
-            match pending.get_mut(session_id) {
-                Some(pending_session) => {
-                    let starting_system_context_state = match &pending_session.phase {
-                        PendingSessionPhase::Staged { build_config } => build_config
-                            .resume_session
-                            .as_ref()
-                            .and_then(Session::system_context_state)
-                            .unwrap_or_default(),
-                        PendingSessionPhase::Promoting { .. } => {
-                            return Err(RpcError {
-                                code: error::SESSION_BUSY,
-                                message: format!(
-                                    "session {session_id} is already being materialized"
-                                ),
-                                data: None,
-                            });
-                        }
-                    };
-                    let phase = std::mem::replace(
-                        &mut pending_session.phase,
-                        PendingSessionPhase::Promoting {
-                            starting_system_context_state: starting_system_context_state.clone(),
-                            current_system_context_state: starting_system_context_state,
-                        },
-                    );
-                    let PendingSessionPhase::Staged { build_config } = phase else {
-                        unreachable!("phase was checked before replacement");
-                    };
-                    Some((
-                        *build_config,
-                        pending_session.labels.clone(),
-                        pending_session.deferred_prompt.clone(),
-                        pending_session.created_at_secs,
-                        pending_session.updated_at_secs,
-                    ))
-                }
-                None => None,
+        let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
+            Ok(slot) => slot.map(|s| {
+                (
+                    *s.build_config,
+                    s.labels,
+                    s.deferred_prompt,
+                    s.created_at_secs,
+                    s.updated_at_secs,
+                )
+            }),
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                return Err(RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} is already being materialized"),
+                    data: None,
+                });
+            }
+            Err(e) => {
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("staged session lifecycle error: {e}"),
+                    data: None,
+                });
             }
         };
 
@@ -2246,8 +2295,6 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
-                additional_instructions: additional_instructions.clone(),
-                execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
             };
 
             match self
@@ -2354,7 +2401,9 @@ impl SessionRuntime {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
+            build.realm_id = build
+                .realm_id
+                .or_else(|| self.realm_id.as_ref().map(ToString::to_string));
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
@@ -2458,8 +2507,6 @@ impl SessionRuntime {
 
                         skill_references,
                         flow_tool_overlay,
-                        additional_instructions,
-                        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2518,8 +2565,6 @@ impl SessionRuntime {
 
                     skill_references,
                     flow_tool_overlay,
-                    additional_instructions,
-                    execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2547,9 +2592,8 @@ impl SessionRuntime {
     ) -> Result<SourceIdentityRegistry, SkillError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            config
-                .skills
-                .build_source_identity_registry_with_roots(context_root, user_root)
+            let _ = (context_root, user_root);
+            config.skills.build_source_identity_registry()
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -2577,14 +2621,14 @@ impl SessionRuntime {
 
         // Check combined capacity (pending + active).
         {
-            let pending = self.pending.read().await;
+            let staged = self.staged_sessions.len().await;
             let active = self
                 .service
                 .list(Default::default())
                 .await
                 .map_err(session_error_to_rpc)?
                 .len();
-            let total = pending.len() + active;
+            let total = staged + active;
             if total >= self.max_sessions {
                 return Err(RpcError {
                     code: error::INTERNAL_ERROR,
@@ -2622,22 +2666,27 @@ impl SessionRuntime {
             .attach_mcp_adapter_for_pending_session(session_id.clone(), build_config)
             .await?;
 
-        {
-            let mut pending = self.pending.write().await;
-            pending.insert(
+        let now = now_unix_secs();
+        self.staged_sessions
+            .stage(
                 session_id.clone(),
-                PendingSession {
+                StagedSlot {
                     effective_llm_identity,
-                    phase: PendingSessionPhase::Staged {
+                    phase: StagedPhase::Staged {
                         build_config: Box::new(build_config),
                     },
                     labels,
                     deferred_prompt,
-                    created_at_secs: now_unix_secs(),
-                    updated_at_secs: now_unix_secs(),
+                    created_at_secs: now,
+                    updated_at_secs: now,
                 },
-            );
-        }
+            )
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("failed to stage session {session_id}: {e}"),
+                data: None,
+            })?;
 
         Ok(session_id)
     }
@@ -2680,45 +2729,29 @@ impl SessionRuntime {
         }
 
         // Check if this is a pending (not-yet-materialized) session.
-        let pending_session = {
-            let mut pending = self.pending.write().await;
-            match pending.get_mut(session_id) {
-                Some(pending_session) => {
-                    let starting_system_context_state = match &pending_session.phase {
-                        PendingSessionPhase::Staged { build_config } => build_config
-                            .resume_session
-                            .as_ref()
-                            .and_then(Session::system_context_state)
-                            .unwrap_or_default(),
-                        PendingSessionPhase::Promoting { .. } => {
-                            return Err(RpcError {
-                                code: error::SESSION_BUSY,
-                                message: format!(
-                                    "session {session_id} is already being materialized"
-                                ),
-                                data: None,
-                            });
-                        }
-                    };
-                    let phase = std::mem::replace(
-                        &mut pending_session.phase,
-                        PendingSessionPhase::Promoting {
-                            starting_system_context_state: starting_system_context_state.clone(),
-                            current_system_context_state: starting_system_context_state,
-                        },
-                    );
-                    let PendingSessionPhase::Staged { build_config } = phase else {
-                        unreachable!("phase was checked before replacement");
-                    };
-                    Some((
-                        *build_config,
-                        pending_session.labels.clone(),
-                        pending_session.deferred_prompt.clone(),
-                        pending_session.created_at_secs,
-                        pending_session.updated_at_secs,
-                    ))
-                }
-                None => None,
+        let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
+            Ok(slot) => slot.map(|s| {
+                (
+                    *s.build_config,
+                    s.labels,
+                    s.deferred_prompt,
+                    s.created_at_secs,
+                    s.updated_at_secs,
+                )
+            }),
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                return Err(RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} is already being materialized"),
+                    data: None,
+                });
+            }
+            Err(e) => {
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("staged session lifecycle error: {e}"),
+                    data: None,
+                });
             }
         };
 
@@ -2810,7 +2843,9 @@ impl SessionRuntime {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
+            build.realm_id = build
+                .realm_id
+                .or_else(|| self.realm_id.as_ref().map(ToString::to_string));
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
@@ -2868,20 +2903,17 @@ impl SessionRuntime {
                             })?;
                         let effective_llm_identity =
                             self.llm_identity_from_pending_build(&build_config).await?;
-                        let mut pending = self.pending.write().await;
-                        pending.insert(
-                            session_id.clone(),
-                            PendingSession {
+                        self.staged_sessions
+                            .abandon_promotion(
+                                session_id.clone(),
+                                build_config,
                                 effective_llm_identity,
-                                phase: PendingSessionPhase::Staged {
-                                    build_config: Box::new(build_config),
-                                },
                                 labels,
-                                deferred_prompt: saved_deferred_prompt.clone(),
-                                created_at_secs: saved_created_at_secs,
-                                updated_at_secs: saved_updated_at_secs,
-                            },
-                        );
+                                saved_deferred_prompt.clone(),
+                                saved_created_at_secs,
+                                saved_updated_at_secs,
+                            )
+                            .await;
                     }
                     return Err(session_error_to_rpc(err));
                 }
@@ -2928,8 +2960,6 @@ impl SessionRuntime {
             event_tx: Some(event_tx.clone()),
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
-            additional_instructions: additional_instructions.clone(),
-            execution_kind: None,
         };
 
         if self.live_session_is_stale(session_id).await? {
@@ -2961,7 +2991,7 @@ impl SessionRuntime {
                 });
             }
             self.service
-                .update_session_keep_alive(session_id, keep_alive)
+                .apply_runtime_session_keep_alive(session_id, keep_alive)
                 .await
                 .map_err(session_error_to_rpc)?;
             // W2-G: never reconfigure a mob-owned drain from the
@@ -3021,20 +3051,17 @@ impl SessionRuntime {
             return;
         };
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
-        let mut pending = self.pending.write().await;
-        pending.insert(
-            session_id.clone(),
-            PendingSession {
+        self.staged_sessions
+            .abandon_promotion(
+                session_id.clone(),
+                build_config,
                 effective_llm_identity,
-                phase: PendingSessionPhase::Staged {
-                    build_config: Box::new(build_config),
-                },
                 labels,
                 deferred_prompt,
                 created_at_secs,
                 updated_at_secs,
-            },
-        );
+            )
+            .await;
     }
 
     /// Attempt to recover a persisted session that is no longer live.
@@ -3098,20 +3125,27 @@ impl SessionRuntime {
         {
             let effective_llm_identity =
                 self.llm_identity_from_pending_build(&build_config).await?;
-            let mut pending = self.pending.write().await;
-            pending.insert(
-                session_id.clone(),
-                PendingSession {
-                    effective_llm_identity,
-                    phase: PendingSessionPhase::Staged {
-                        build_config: Box::new(build_config),
+            let now = now_unix_secs();
+            self.staged_sessions
+                .stage(
+                    session_id.clone(),
+                    StagedSlot {
+                        effective_llm_identity,
+                        phase: StagedPhase::Staged {
+                            build_config: Box::new(build_config),
+                        },
+                        labels,
+                        deferred_prompt: None,
+                        created_at_secs: now,
+                        updated_at_secs: now,
                     },
-                    labels,
-                    deferred_prompt: None,
-                    created_at_secs: now_unix_secs(),
-                    updated_at_secs: now_unix_secs(),
-                },
-            );
+                )
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("failed to stage recovered session {session_id}: {e}"),
+                    data: None,
+                })?;
         }
 
         // Recursively call start_turn which will now find the pending session.
@@ -3132,28 +3166,9 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
-        let mut pending = self.pending.write().await;
-        let pending_session = pending.swap_remove(session_id)?;
-        match pending_session.phase {
-            PendingSessionPhase::Promoting {
-                starting_system_context_state,
-                current_system_context_state,
-            } => Some((starting_system_context_state, current_system_context_state)),
-            PendingSessionPhase::Staged { build_config } => {
-                pending.insert(
-                    session_id.clone(),
-                    PendingSession {
-                        phase: PendingSessionPhase::Staged { build_config },
-                        effective_llm_identity: pending_session.effective_llm_identity,
-                        labels: pending_session.labels,
-                        deferred_prompt: None,
-                        created_at_secs: pending_session.created_at_secs,
-                        updated_at_secs: pending_session.updated_at_secs,
-                    },
-                );
-                None
-            }
-        }
+        self.staged_sessions
+            .take_promoting_system_context_state(session_id)
+            .await
     }
 
     async fn replay_promoted_system_context(
@@ -3186,11 +3201,8 @@ impl SessionRuntime {
     /// If the session is idle, this is a no-op.
     pub async fn interrupt(&self, session_id: &SessionId) -> Result<(), RpcError> {
         // Pending sessions have no running turn.
-        {
-            let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Ok(());
-            }
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(());
         }
 
         match self.service.interrupt(session_id).await {
@@ -3207,42 +3219,19 @@ impl SessionRuntime {
         session_id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, RpcError> {
+        if let Some(result) = self
+            .staged_sessions
+            .append_system_context(
+                session_id,
+                &req,
+                meerkat_core::time_compat::SystemTime::now(),
+                now_unix_secs(),
+            )
+            .await
         {
-            let mut pending = self.pending.write().await;
-            if let Some(pending_session) = pending.get_mut(session_id) {
-                let status = match &mut pending_session.phase {
-                    PendingSessionPhase::Staged { build_config } => {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        let mut state = session.system_context_state().unwrap_or_default();
-                        let status = state
-                            .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                            .map_err(|err| {
-                                system_context_error_to_rpc(err.into_control_error(session_id))
-                            })?;
-                        session
-                            .set_system_context_state(state)
-                            .map_err(|err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!("failed to serialize system-context state: {err}"),
-                                data: None,
-                            })?;
-                        status
-                    }
-                    PendingSessionPhase::Promoting {
-                        current_system_context_state,
-                        ..
-                    } => current_system_context_state
-                        .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                        .map_err(|err| {
-                            system_context_error_to_rpc(err.into_control_error(session_id))
-                        })?,
-                };
-                // Bump updated_at on successful mutation.
-                pending_session.updated_at_secs = now_unix_secs();
-                return Ok(AppendSystemContextResult { status });
-            }
+            let status = result
+                .map_err(|err| system_context_error_to_rpc(err.into_control_error(session_id)))?;
+            return Ok(AppendSystemContextResult { status });
         }
 
         self.service
@@ -3255,15 +3244,15 @@ impl SessionRuntime {
     pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionInfo> {
         // Check pending sessions first.
         {
-            let pending = self.pending.read().await;
-            if let Some(ps) = pending.get(session_id) {
+            if let Some(info) = self.staged_sessions.info(session_id).await {
                 return Some(SessionInfo {
                     session_id: session_id.clone(),
-                    state: match &ps.phase {
-                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
-                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
+                    state: if info.is_promoting {
+                        SessionState::Running
+                    } else {
+                        SessionState::Idle
                     },
-                    labels: ps.labels.clone().unwrap_or_default(),
+                    labels: info.labels,
                 });
             }
         }
@@ -3291,7 +3280,7 @@ impl SessionRuntime {
     }
 
     pub async fn pending_session_exists(&self, session_id: &SessionId) -> bool {
-        self.pending.read().await.contains_key(session_id)
+        self.staged_sessions.contains(session_id).await
     }
 
     /// Read the authoritative session view from the owning session service.
@@ -3319,15 +3308,12 @@ impl SessionRuntime {
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         // Check pending sessions first.
-        {
-            let mut pending = self.pending.write().await;
-            if pending.swap_remove(session_id).is_some() {
-                #[cfg(feature = "mcp")]
-                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                    state.adapter.shutdown().await;
-                }
-                return Ok(());
+        if self.staged_sessions.abandon(session_id).await {
+            #[cfg(feature = "mcp")]
+            if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
+                state.adapter.shutdown().await;
             }
+            return Ok(());
         }
 
         let result = self
@@ -3352,26 +3338,16 @@ impl SessionRuntime {
         let mut result = Vec::new();
 
         // Include pending sessions as Idle, filtered by labels if requested.
-        {
-            let pending = self.pending.read().await;
-            for (session_id, ps) in pending.iter() {
-                let pending_labels = ps.labels.as_ref();
-                if let Some(ref filter) = query.labels {
-                    let matches = pending_labels
-                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
-                    if !matches {
-                        continue;
-                    }
-                }
-                result.push(SessionInfo {
-                    session_id: session_id.clone(),
-                    state: match &ps.phase {
-                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
-                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
-                    },
-                    labels: pending_labels.cloned().unwrap_or_default(),
-                });
-            }
+        for (session_id, info) in self.staged_sessions.list(query.labels.as_ref()).await {
+            result.push(SessionInfo {
+                session_id,
+                state: if info.is_promoting {
+                    SessionState::Running
+                } else {
+                    SessionState::Idle
+                },
+                labels: info.labels,
+            });
         }
 
         // Include active sessions from the service. The service's `list()`
@@ -3402,28 +3378,17 @@ impl SessionRuntime {
         let mut result = Vec::new();
 
         // Include pending sessions as synthetic entries.
-        {
-            let pending = self.pending.read().await;
-            for (session_id, ps) in pending.iter() {
-                let pending_labels = ps.labels.as_ref();
-                if let Some(ref filter) = query.labels {
-                    let matches = pending_labels
-                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
-                    if !matches {
-                        continue;
-                    }
-                }
-                result.push(meerkat_contracts::WireSessionSummary {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    created_at: ps.created_at_secs,
-                    updated_at: ps.updated_at_secs,
-                    message_count: 0,
-                    total_tokens: 0,
-                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
-                    labels: pending_labels.cloned().unwrap_or_default(),
-                });
-            }
+        for (session_id, info) in self.staged_sessions.list(query.labels.as_ref()).await {
+            result.push(meerkat_contracts::WireSessionSummary {
+                session_id,
+                session_ref: None,
+                created_at: info.created_at_secs,
+                updated_at: info.updated_at_secs,
+                message_count: 0,
+                total_tokens: 0,
+                is_active: info.is_promoting,
+                labels: info.labels,
+            });
         }
 
         // Include materialized sessions from the service.
@@ -3442,22 +3407,19 @@ impl SessionRuntime {
         session_id: &SessionId,
     ) -> Option<meerkat_contracts::WireSessionInfo> {
         // Check pending sessions first.
-        {
-            let pending = self.pending.read().await;
-            if let Some(ps) = pending.get(session_id) {
-                return Some(meerkat_contracts::WireSessionInfo {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    created_at: ps.created_at_secs,
-                    updated_at: ps.updated_at_secs,
-                    message_count: 0,
-                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
-                    model: ps.effective_llm_identity.model.clone(),
-                    provider: ps.effective_llm_identity.provider.as_str().to_string(),
-                    last_assistant_text: None,
-                    labels: ps.labels.clone().unwrap_or_default(),
-                });
-            }
+        if let Some(info) = self.staged_sessions.info(session_id).await {
+            return Some(meerkat_contracts::WireSessionInfo {
+                session_id: session_id.clone(),
+                session_ref: None,
+                created_at: info.created_at_secs,
+                updated_at: info.updated_at_secs,
+                message_count: 0,
+                is_active: info.is_promoting,
+                model: info.effective_llm_identity.model.clone(),
+                provider: info.effective_llm_identity.provider.as_str().to_string(),
+                last_assistant_text: None,
+                labels: info.labels,
+            });
         }
 
         // Try list() first — non-blocking (uses watch receivers).
@@ -3509,19 +3471,16 @@ impl SessionRuntime {
         session_id: &SessionId,
         query: SessionHistoryQuery,
     ) -> Option<meerkat_contracts::WireSessionHistory> {
-        {
-            let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Some(meerkat_contracts::WireSessionHistory {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    message_count: 0,
-                    offset: query.offset,
-                    limit: query.limit,
-                    has_more: false,
-                    messages: Vec::new(),
-                });
-            }
+        if self.staged_sessions.contains(session_id).await {
+            return Some(meerkat_contracts::WireSessionHistory {
+                session_id: session_id.clone(),
+                session_ref: None,
+                message_count: 0,
+                offset: query.offset,
+                limit: query.limit,
+                has_more: false,
+                messages: Vec::new(),
+            });
         }
 
         self.service
@@ -3569,10 +3528,7 @@ impl SessionRuntime {
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
         // Clear pending sessions.
-        {
-            let mut pending = self.pending.write().await;
-            pending.clear();
-        }
+        self.staged_sessions.clear().await;
 
         self.shutdown_schedule_host().await;
 
@@ -3602,8 +3558,21 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         server_name: String,
-        mut server_config: serde_json::Value,
+        server_config: serde_json::Value,
     ) -> Result<(), RpcError> {
+        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_stage_add_with_persistence(
+        &self,
+        session_id: &SessionId,
+        server_name: String,
+        mut server_config: serde_json::Value,
+        persisted: bool,
+    ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
         if server_name.trim().is_empty() {
             return Err(RpcError {
@@ -3628,12 +3597,38 @@ impl SessionRuntime {
             })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter.stage_add(config).await.map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: e,
-            data: None,
-        })?;
-        Ok(())
+        let rollback = if persisted {
+            let (context_root, user_root) = self.skill_identity_roots();
+            let authority =
+                meerkat::surface::mcp_config_mutation_authority(context_root, user_root);
+            match meerkat::surface::persist_mcp_add_if_requested(true, &authority, config.clone())
+                .await
+            {
+                Ok(rollback) => rollback,
+                Err(message) => {
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = adapter.stage_add(config).await {
+            let rollback_message =
+                match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                    Ok(()) => String::new(),
+                    Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+                };
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("{e}{rollback_message}"),
+                data: None,
+            });
+        }
+        Ok(rollback.is_some())
     }
 
     #[cfg(feature = "mcp")]
@@ -3642,6 +3637,18 @@ impl SessionRuntime {
         session_id: &SessionId,
         server_name: String,
     ) -> Result<(), RpcError> {
+        self.mcp_stage_remove_with_persistence(session_id, server_name, false)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_stage_remove_with_persistence(
+        &self,
+        session_id: &SessionId,
+        server_name: String,
+        persisted: bool,
+    ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
         if server_name.trim().is_empty() {
             return Err(RpcError {
@@ -3651,15 +3658,38 @@ impl SessionRuntime {
             });
         }
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter
-            .stage_remove(server_name)
-            .await
-            .map_err(|e| RpcError {
+        let rollback = if persisted {
+            let (context_root, user_root) = self.skill_identity_roots();
+            let authority =
+                meerkat::surface::mcp_config_mutation_authority(context_root, user_root);
+            match meerkat::surface::persist_mcp_remove_if_requested(true, &authority, &server_name)
+                .await
+            {
+                Ok(rollback) => rollback,
+                Err(message) => {
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = adapter.stage_remove(server_name).await {
+            let rollback_message =
+                match meerkat::surface::rollback_mcp_persisted_mutation(rollback).await {
+                    Ok(()) => String::new(),
+                    Err(rollback_err) => format!("; persisted rollback failed: {rollback_err}"),
+                };
+            return Err(RpcError {
                 code: error::INTERNAL_ERROR,
-                message: e,
+                message: format!("{e}{rollback_message}"),
                 data: None,
-            })?;
-        Ok(())
+            });
+        }
+        Ok(rollback.is_some())
     }
 
     #[cfg(feature = "mcp")]
@@ -3752,11 +3782,9 @@ impl SessionRuntime {
 
     #[cfg(feature = "mcp")]
     async fn ensure_session_exists(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let pending = self.pending.read().await;
-        if pending.contains_key(session_id) {
+        if self.staged_sessions.contains(session_id).await {
             return Ok(());
         }
-        drop(pending);
         if self.session_state(session_id).await.is_none() {
             return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
@@ -4880,7 +4908,7 @@ mod tests {
     async fn keep_alive_comms_drain_emits_run_completed_for_terminal_peer_response() {
         use futures::StreamExt;
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerSpec};
+        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerDescriptor};
         use meerkat_core::interaction::InteractionId;
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4925,24 +4953,37 @@ mod tests {
         let sender = Arc::new(
             meerkat::CommsRuntime::inproc_only("analyst-drain-test").expect("sender comms runtime"),
         );
-        let sender_peer_id = sender.public_key().to_peer_id();
+        let sender_public_key = sender.public_key();
+        let sender_peer_id = sender_public_key.to_peer_id().to_string();
         let sender_addr = sender.advertised_address();
         let operator_peer_id = operator_comms.public_key().expect("operator peer id");
         let operator_addr = operator_comms
             .advertised_address()
             .expect("operator advertised address");
+        let operator_pubkey =
+            meerkat_comms::PubKey::from_pubkey_string(&operator_peer_id).expect("operator pubkey");
 
         CoreCommsRuntime::add_trusted_peer(
             &*sender,
-            TrustedPeerSpec::new(operator_name, operator_peer_id, operator_addr)
-                .expect("operator trusted peer spec"),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                operator_name,
+                operator_pubkey.to_peer_id().to_string(),
+                *operator_pubkey.as_bytes(),
+                operator_addr,
+            )
+            .expect("operator trusted peer spec"),
         )
         .await
         .expect("sender trusts operator");
         CoreCommsRuntime::add_trusted_peer(
             operator_comms.as_ref(),
-            TrustedPeerSpec::new("analyst-drain-test", sender_peer_id, sender_addr)
-                .expect("sender trusted peer spec"),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                "analyst-drain-test",
+                sender_peer_id,
+                *sender_public_key.as_bytes(),
+                sender_addr,
+            )
+            .expect("sender trusted peer spec"),
         )
         .await
         .expect("operator trusts sender");
@@ -5370,13 +5411,13 @@ mod tests {
             .await
             .expect("config patch");
 
-        let pending = runtime.pending.read().await;
-        let staged = pending.get(&session_id).expect("pending session");
+        let staged = runtime
+            .staged_sessions
+            .effective_llm_identity(&session_id)
+            .await
+            .expect("pending session");
         assert_eq!(
-            staged
-                .effective_llm_identity
-                .self_hosted_server_id
-                .as_deref(),
+            staged.self_hosted_server_id.as_deref(),
             Some("local"),
             "pending sessions must remain pinned to the server selected at create time"
         );
@@ -5441,14 +5482,17 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             connection_ref: Some(meerkat_core::ConnectionRef {
-                realm_id: "tenant_a".into(),
-                binding_id: "anthropic_default".into(),
+                realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_default")
+                    .expect("valid binding"),
+                profile: None,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             connection_ref: Some(meerkat_core::ConnectionRef {
-                realm_id: "tenant_b".into(),
-                binding_id: "anthropic_vip".into(),
+                realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
+                profile: None,
             }),
             ..Default::default()
         };
@@ -5459,18 +5503,12 @@ mod tests {
             .expect("connection_ref override should resolve");
 
         assert_eq!(
-            resolved
-                .connection_ref
-                .as_ref()
-                .map(|c| c.realm_id.as_str()),
+            resolved.connection_ref.as_ref().map(|c| c.realm.as_str()),
             Some("tenant_b"),
             "explicit connection_ref override must win over the session's current binding"
         );
         assert_eq!(
-            resolved
-                .connection_ref
-                .as_ref()
-                .map(|c| c.binding_id.as_str()),
+            resolved.connection_ref.as_ref().map(|c| c.binding.as_str()),
             Some("anthropic_vip"),
         );
     }
@@ -5492,8 +5530,10 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             connection_ref: Some(meerkat_core::ConnectionRef {
-                realm_id: "tenant_a".into(),
-                binding_id: "anthropic_default".into(),
+                realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_default")
+                    .expect("valid binding"),
+                profile: None,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -5507,10 +5547,7 @@ mod tests {
             .expect("resolve must succeed");
 
         assert_eq!(
-            resolved
-                .connection_ref
-                .as_ref()
-                .map(|c| c.realm_id.as_str()),
+            resolved.connection_ref.as_ref().map(|c| c.realm.as_str()),
             Some("tenant_a"),
             "absent connection_ref override must inherit the session's current binding, not drop it"
         );
@@ -5601,13 +5638,12 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            let is_promoting = {
-                let pending = runtime.pending.read().await;
-                matches!(
-                    pending.get(&session_id).map(|ps| &ps.phase),
-                    Some(PendingSessionPhase::Promoting { .. })
-                )
-            };
+            let is_promoting = runtime
+                .staged_sessions
+                .info(&session_id)
+                .await
+                .map(|info| info.is_promoting)
+                .unwrap_or(false);
             if is_promoting {
                 break;
             }

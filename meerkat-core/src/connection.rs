@@ -21,32 +21,94 @@ use crate::provider::Provider;
 // Runtime shapes (what providers/surfaces consume at runtime)
 // ---------------------------------------------------------------------
 
+/// Error returned when a realm/binding/profile slug fails validation.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IdentityError {
+    #[error("identity slug is empty")]
+    Empty,
+    #[error(
+        "identity slug contains invalid character {0:?}; must be ASCII alphanumeric or one of '-', '_', '.'"
+    )]
+    InvalidChar(char),
+}
+
+fn validate_slug(raw: &str) -> Result<(), IdentityError> {
+    if raw.is_empty() {
+        return Err(IdentityError::Empty);
+    }
+    for ch in raw.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.') {
+            return Err(IdentityError::InvalidChar(ch));
+        }
+    }
+    Ok(())
+}
+
+macro_rules! slug_newtype {
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+        #[serde(try_from = "String", into = "String")]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn parse(raw: impl Into<String>) -> Result<Self, IdentityError> {
+                let raw = raw.into();
+                validate_slug(&raw)?;
+                Ok(Self(raw))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = IdentityError;
+            fn try_from(s: String) -> Result<Self, Self::Error> {
+                Self::parse(s)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(v: $name) -> String {
+                v.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+slug_newtype!(RealmId, "Opaque slug identifying a realm.");
+slug_newtype!(
+    BindingId,
+    "Opaque slug identifying a binding inside a realm."
+);
+slug_newtype!(
+    ProfileId,
+    "Opaque slug identifying an auth profile override on a connection."
+);
+
 /// Session-facing reference to a binding inside a realm.
+///
+/// `ConnectionRef` is purely structural — it does NOT carry a `"realm:binding"`
+/// string form. Wave-b deleted `parse` and `Display` so that no code path
+/// accidentally ferries the opaque join through the runtime. CLI input that
+/// arrives as `"realm:binding[:profile]"` must be split at the CLI boundary
+/// and constructed field-by-field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ConnectionRef {
-    pub realm_id: String,
-    pub binding_id: String,
-}
-
-impl ConnectionRef {
-    /// Parse a `"<realm>:<binding>"` form. Returns `None` for malformed input.
-    pub fn parse(raw: &str) -> Option<Self> {
-        let (realm, binding) = raw.split_once(':')?;
-        if realm.is_empty() || binding.is_empty() {
-            return None;
-        }
-        Some(Self {
-            realm_id: realm.to_string(),
-            binding_id: binding.to_string(),
-        })
-    }
-}
-
-impl std::fmt::Display for ConnectionRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.realm_id, self.binding_id)
-    }
+    pub realm: RealmId,
+    pub binding: BindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileId>,
 }
 
 /// Backend profile: where requests go and which backend contract applies.
@@ -62,7 +124,7 @@ pub struct BackendProfile {
     pub options: serde_json::Value,
 }
 
-/// Auth profile: how credentials are obtained, stored, refreshed, constrained.
+/// Auth profile: how credentials are obtained, refreshed, constrained.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AuthProfile {
@@ -70,8 +132,6 @@ pub struct AuthProfile {
     pub provider: Provider,
     pub auth_method: String,
     pub source: CredentialSourceSpec,
-    #[serde(default)]
-    pub storage: CredentialStorageSpec,
     #[serde(default)]
     pub constraints: AuthConstraints,
     #[serde(default)]
@@ -95,9 +155,6 @@ pub enum CredentialSourceSpec {
         /// precedence applies to each name in turn.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fallback: Vec<String>,
-    },
-    ManagedStore {
-        profile: String,
     },
     ExternalResolver {
         handle: String,
@@ -132,21 +189,6 @@ pub enum CredentialSourceSpec {
 
 fn default_command_timeout_ms() -> u64 {
     30_000
-}
-
-/// How credentials are stored by the host.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CredentialStorageSpec {
-    Keyring,
-    File {
-        path: PathBuf,
-    },
-    #[default]
-    Auto,
-    Ephemeral,
-    HostManaged,
 }
 
 /// Policy overrides carried on a binding.
@@ -224,7 +266,6 @@ impl RealmConnectionSet {
                 provider,
                 auth_method: cfg.auth_method.clone(),
                 source: cfg.source.clone(),
-                storage: cfg.storage.clone().unwrap_or_default(),
                 constraints: cfg.constraints.clone(),
                 metadata_defaults: cfg.metadata_defaults.clone(),
             };
@@ -278,7 +319,7 @@ impl RealmConnectionSet {
     /// - BackendProfile `"default"` with the provider's default
     ///   backend_kind and base_url=None (provider client uses its default).
     /// - AuthProfile `"default"` with `source = Env { env: <ENV_VAR> }`,
-    ///   `auth_method = "api_key"`, storage = Ephemeral.
+    ///   `auth_method = "api_key"`.
     ///
     /// The ENV_VAR name is per-provider:
     /// - Anthropic: `ANTHROPIC_API_KEY`
@@ -330,7 +371,6 @@ impl RealmConnectionSet {
             provider,
             auth_method: "api_key".to_string(),
             source,
-            storage: CredentialStorageSpec::Ephemeral,
             constraints: AuthConstraints::default(),
             metadata_defaults: AuthMetadataDefaults::default(),
         };
@@ -476,7 +516,6 @@ impl RealmConfigSection {
                     source: CredentialSourceSpec::InlineSecret {
                         secret: (*secret).to_string(),
                     },
-                    storage: Some(CredentialStorageSpec::Ephemeral),
                     constraints: AuthConstraints::default(),
                     metadata_defaults: AuthMetadataDefaults::default(),
                 },
@@ -523,8 +562,6 @@ pub struct AuthProfileConfig {
     pub provider: String,
     pub auth_method: String,
     pub source: CredentialSourceSpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<CredentialStorageSpec>,
     #[serde(default)]
     pub constraints: AuthConstraints,
     #[serde(default)]
@@ -549,19 +586,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connection_ref_parse_display_roundtrip() {
-        let c = ConnectionRef::parse("dev:default_openai").expect("valid");
-        assert_eq!(c.realm_id, "dev");
-        assert_eq!(c.binding_id, "default_openai");
-        assert_eq!(c.to_string(), "dev:default_openai");
+    fn connection_ref_is_purely_structural() {
+        let c = ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        assert_eq!(c.realm.as_str(), "dev");
+        assert_eq!(c.binding.as_str(), "default_openai");
+        assert!(c.profile.is_none());
     }
 
     #[test]
-    fn connection_ref_parse_rejects_malformed() {
-        assert!(ConnectionRef::parse("no_colon").is_none());
-        assert!(ConnectionRef::parse(":foo").is_none());
-        assert!(ConnectionRef::parse("dev:").is_none());
-        assert!(ConnectionRef::parse("").is_none());
+    fn connection_ref_serde_roundtrip_with_profile() {
+        let c = ConnectionRef {
+            realm: RealmId::parse("prod").unwrap(),
+            binding: BindingId::parse("gpt5").unwrap(),
+            profile: Some(ProfileId::parse("override").unwrap()),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"realm\":\"prod\""));
+        assert!(s.contains("\"binding\":\"gpt5\""));
+        assert!(s.contains("\"profile\":\"override\""));
+        let back: ConnectionRef = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn identity_slugs_reject_invalid_characters() {
+        assert!(RealmId::parse("").is_err());
+        assert!(BindingId::parse("bad space").is_err());
+        assert!(ProfileId::parse("bad:colon").is_err());
+        assert!(RealmId::parse("dev").is_ok());
+        assert!(BindingId::parse("openai_default.v1").is_ok());
     }
 
     #[test]
@@ -573,9 +630,6 @@ mod tests {
             CredentialSourceSpec::Env {
                 env: "OPENAI_API_KEY".into(),
                 fallback: Vec::new(),
-            },
-            CredentialSourceSpec::ManagedStore {
-                profile: "default".into(),
             },
             CredentialSourceSpec::ExternalResolver {
                 handle: "desktop".into(),
@@ -595,27 +649,6 @@ mod tests {
         assert!(
             err.to_string().contains("nonexistent") || err.to_string().contains("unknown variant"),
             "serde error should mention unknown variant: {err}",
-        );
-    }
-
-    #[test]
-    fn credential_storage_spec_serde_roundtrip_all_variants() {
-        for storage in [
-            CredentialStorageSpec::Keyring,
-            CredentialStorageSpec::File {
-                path: std::path::PathBuf::from("/tmp/meerkat-secret.json"),
-            },
-            CredentialStorageSpec::Auto,
-            CredentialStorageSpec::Ephemeral,
-            CredentialStorageSpec::HostManaged,
-        ] {
-            let s = serde_json::to_string(&storage).unwrap();
-            let back: CredentialStorageSpec = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, storage);
-        }
-        assert_eq!(
-            CredentialStorageSpec::default(),
-            CredentialStorageSpec::Auto
         );
     }
 

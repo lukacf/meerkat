@@ -29,8 +29,6 @@ live_scenario!(e2e_live_s17_rpc_multi_turn_event_streaming, 17);
 live_scenario!(e2e_live_s18_rpc_config_capabilities_and_errors, 18);
 live_scenario!(e2e_live_s19_rpc_context_injection_recall, 19);
 live_scenario!(e2e_live_s20_rpc_dedicated_event_stream_roundtrip, 20);
-live_scenario!(e2e_live_s21_rest_runtime_accept_input_roundtrip, 21);
-live_scenario!(e2e_live_s22_rest_runtime_reset_and_retire_semantics, 22);
 live_scenario!(e2e_live_s23_rest_sse_follow_up_event_stream, 23);
 live_scenario!(e2e_live_s24_rest_config_capabilities_health_and_skills, 24);
 live_scenario!(e2e_live_s25_rest_reload_and_resume_same_realm_root, 25);

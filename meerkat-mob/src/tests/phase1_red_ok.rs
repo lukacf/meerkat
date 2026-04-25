@@ -89,7 +89,7 @@ max_flow_duration_ms = 30000
 max_step_retries = 1
 max_orphaned_turns = 8
 "#;
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
     OperationStatus, OperationTerminalOutcome, OpsLifecycleRegistry,
@@ -122,7 +122,6 @@ fn background_spec(name: &str) -> OperationSpec {
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok mob decomposition suite"]
 async fn mob_decomposition_red_ok_builder_mode_guards_keep_create_and_resume_paths_distinct() {
     let definition = MobDefinition::from_toml(PIPELINE_TOML).expect("pipeline toml");
 
@@ -152,7 +151,6 @@ async fn mob_decomposition_red_ok_builder_mode_guards_keep_create_and_resume_pat
 }
 
 #[test]
-#[ignore = "Phase 1 red-ok mob decomposition suite"]
 fn mob_decomposition_red_ok_flow_run_config_carries_orchestrator_and_flow_truth() {
     let definition = MobDefinition::from_toml(PIPELINE_TOML).expect("pipeline toml");
     let flow_id = definition
@@ -179,7 +177,6 @@ fn mob_decomposition_red_ok_flow_run_config_carries_orchestrator_and_flow_truth(
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok shared lifecycle integration suite"]
 async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_completion() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = mob_spec("member-alpha");
@@ -205,10 +202,11 @@ async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_comple
         .peer_ready(
             &op_id,
             OperationPeerHandle {
-                peer_name: "member-alpha".into(),
-                trusted_peer: TrustedPeerSpec::new(
+                peer_name: meerkat_core::comms::PeerName::new("member-alpha")
+                    .expect("valid peer name"),
+                trusted_peer: TrustedPeerDescriptor::test_only_unsigned(
                     "member-alpha",
-                    "member-alpha-id",
+                    "00000000-0000-4000-8000-000000000001",
                     "inproc://member-alpha",
                 )
                 .expect("trusted peer"),
@@ -246,7 +244,6 @@ async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_comple
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok shared lifecycle integration suite"]
 async fn ops_registry_integration_red_ok_background_ops_retire_without_peer_handoff() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let spec = background_spec("shell-job");
@@ -279,7 +276,6 @@ async fn ops_registry_integration_red_ok_background_ops_retire_without_peer_hand
 }
 
 #[test]
-#[ignore = "Phase 1 red-ok shared lifecycle integration suite"]
 fn ops_registry_integration_red_ok_existing_session_attach_reuses_spawn_control_plane() {
     let session_id = SessionId::new();
     let spec = SpawnMemberSpec::new("orchestrator", "member-alpha")

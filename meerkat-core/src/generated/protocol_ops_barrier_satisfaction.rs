@@ -1,5 +1,5 @@
 // @generated — protocol helpers for `ops_barrier_satisfaction`
-// Composition: mob_bundle, Producer: ops_barrier_bridge, Effect: WaitAllSatisfied
+// Composition: meerkat_mob_seam, Producer: meerkat, Effect: WaitAllSatisfied
 // Closure policy: AckRequired
 // Liveness: eventual feedback under task-scheduling fairness
 

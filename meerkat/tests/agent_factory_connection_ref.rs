@@ -84,7 +84,6 @@ fn config_with_realm() -> Config {
                 source: CredentialSourceSpec::InlineSecret {
                     secret: secret.into(),
                 },
-                storage: None,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
             },
@@ -122,8 +121,9 @@ fn config_with_realm() -> Config {
 
 fn conn_ref(binding: &str) -> ConnectionRef {
     ConnectionRef {
-        realm_id: "dev".into(),
-        binding_id: binding.into(),
+        realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::BindingId::parse(binding).expect("valid binding"),
+        profile: None,
     }
 }
 
@@ -335,15 +335,15 @@ async fn llm_client_override_beats_connection_ref() {
 }
 
 // ---------------------------------------------------------------------
-// Coexistence: absent connection_ref still runs the legacy flat path
+// Coexistence: absent connection_ref still resolves the configured default
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn build_agent_without_connection_ref_uses_flat_path() {
-    // Plan §6.9 deleted the legacy per-provider config block. The flat path now relies on the
-    // `[realm.default]` inline-secret binding or env vars. This
-    // test asserts the shared-map path: no connection_ref, api_key
-    // resolved from the map, agent builds successfully.
+async fn build_agent_without_connection_ref_uses_default_realm_binding() {
+    // A missing connection_ref is not an ambient-credential bypass. It resolves
+    // through the same typed realm binding machinery as explicit connection_ref
+    // builds, choosing config.realm["default"].default_binding when present and
+    // persisting the resolved ref into SessionMetadata.
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = config_with_realm();
@@ -351,18 +351,26 @@ async fn build_agent_without_connection_ref_uses_flat_path() {
     config.realm.insert("default".to_string(), section);
 
     let build = AgentBuildConfig::new("gpt-5.2");
-    // No connection_ref — flat path must run unchanged.
     assert!(build.connection_ref.is_none());
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("flat path builds client when api_key is configured");
+        .expect("default realm binding should resolve without explicit connection_ref");
     let metadata = agent
         .session()
         .session_metadata()
         .expect("session metadata written");
     assert_eq!(metadata.provider, Provider::OpenAI);
+    assert_eq!(
+        metadata.connection_ref.as_ref().map(|conn_ref| {
+            (
+                conn_ref.realm.as_str().to_string(),
+                conn_ref.binding.as_str().to_string(),
+            )
+        }),
+        Some(("default".to_string(), "default_openai".to_string()))
+    );
 }
 
 // ---------------------------------------------------------------------

@@ -383,22 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_board_ignores_non_task_events() {
-        let events = vec![
-            make_event(1, MobEventKind::MobCompleted),
-            make_event(
-                2,
-                MobEventKind::MembersWired {
-                    a: MeerkatId::from("a"),
-                    b: MeerkatId::from("b"),
-                },
-            ),
-        ];
-        let board = TaskBoard::project(&events);
-        assert!(board.is_empty());
-    }
-
-    #[test]
     fn test_task_board_update_nonexistent_task_is_noop() {
         let events = vec![make_event(
             1,

@@ -15,6 +15,18 @@
 //! For the runtime-backed entry point, see [`meerkat_rpc::SessionRuntime`] or
 //! the REST/MCP server crates.
 
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        clippy::expect_used,
+        clippy::large_futures,
+        clippy::panic,
+        clippy::too_many_arguments,
+        clippy::unwrap_used
+    )
+)]
+
 // On wasm32, provide tokio alias backed by tokio_with_wasm.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -180,7 +192,6 @@ mod factory;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
-    resolve_provider_api_key,
 };
 
 mod persistence;
@@ -199,6 +210,14 @@ pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_ser
 #[cfg(feature = "session-store")]
 pub use service_factory::{
     build_persistent_service, build_persistent_service_with_runtime_adapter,
+};
+
+// Canonical staged-session lifecycle authority. See
+// `docs/wave-d-prep/d-j-staged-session-design.md`.
+mod staged_sessions;
+pub use staged_sessions::{
+    PromotingSlot, StagedLifecycleError, StagedPhase, StagedSessionInfo, StagedSessionRegistry,
+    StagedSlot,
 };
 
 // Session service
@@ -286,7 +305,7 @@ pub use meerkat_mcp::{
 
 // Skill types re-exports
 pub use meerkat_core::skills::{
-    SkillCollection, SkillDescriptor, SkillDocument, SkillFilter, SkillId, SkillIntrospectionEntry,
+    SkillCollection, SkillDescriptor, SkillDocument, SkillFilter, SkillIntrospectionEntry,
     SkillRuntime, SkillScope,
 };
 
@@ -374,42 +393,6 @@ pub use meerkat_llm_core::provider_runtime::{
     ExternalAuthResolverHandle, ProviderAuthError, ProviderBindingError, ProviderClientError,
     ProviderRuntime, ProviderRuntimeRegistry, ResolverEnvironment,
 };
-
-/// Construct a [`meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry`] populated with the
-/// feature-gated provider runtimes from the per-provider crates.
-///
-/// Replaces `meerkat_llm_core::ProviderRuntimeRegistry::default_registry()`,
-/// which is empty post-B2-split because `meerkat-llm-core` cannot reach the
-/// per-provider crates (cycle).
-pub fn default_provider_registry() -> meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry {
-    #[allow(unused_mut)]
-    let mut r = meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty();
-    // Per-provider runtimes compile on wasm32: the resolver arms the
-    // browser path exercises (`CredentialSourceSpec::InlineSecret` from
-    // `populate_realm_from_api_keys`, `ExternalResolver` from the WASM
-    // host's JS-registered auth callback) are target-neutral. OAuth /
-    // IAM / filesystem arms inside `meerkat-auth-core::resolver` and
-    // inside each provider's `resolve_binding` stay behind
-    // `#[cfg(not(target_arch = "wasm32"))]`. Registering the runtimes
-    // on all targets is what lets `build_agent` resolve provider
-    // credentials in the browser (closes the smoke-lane Cluster C
-    // "API key not set for provider 'anthropic'" failure for s47/s48).
-    #[cfg(feature = "anthropic")]
-    {
-        r = r.with_runtime(std::sync::Arc::new(
-            meerkat_anthropic::AnthropicProviderRuntime,
-        ));
-    }
-    #[cfg(feature = "openai")]
-    {
-        r = r.with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    }
-    #[cfg(feature = "gemini")]
-    {
-        r = r.with_runtime(std::sync::Arc::new(meerkat_gemini::GoogleProviderRuntime));
-    }
-    r
-}
 
 /// Prelude module for convenient imports
 pub mod prelude {

@@ -84,7 +84,10 @@ async fn e2e_auth_refresh_coordinator_inproc_dedup() {
 
     let coord = Arc::new(InMemoryCoordinator::new());
     let call_count = Arc::new(AtomicU32::new(0));
-    let key = TokenKey::new("test-realm", "test-binding");
+    let key = TokenKey::new(
+        meerkat_core::connection::RealmId::parse("test-realm").expect("valid realm"),
+        meerkat_core::connection::BindingId::parse("test-binding").expect("valid binding"),
+    );
 
     // Spawn 5 concurrent `with_refresh` calls. The coordinator should
     // collapse them to a single underlying refresh future.

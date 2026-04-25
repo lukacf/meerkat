@@ -20,6 +20,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `revision_supersede_enters_occurrence_authority`
   - anchors: `schedule_service`, `schedule_store`, `schedule_bundle_schema`
   - scenarios: `revision-supersede-route`, `pause-resume-without-revision`
+- `occurrence_supersede_ack_returns_to_schedule`
+  - anchors: `schedule_service`, `schedule_store`, `schedule_bundle_schema`
+  - scenarios: `revision-supersede-route`, `pause-resume-without-revision`
 
 ### Scheduler Rules
 - `(none)`
@@ -29,6 +32,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
   - anchors: `schedule_service`, `schedule_store`, `schedule_bundle_schema`
   - scenarios: `revision-supersede-route`, `pause-resume-without-revision`
 - `superseded_occurrence_originates_from_schedule_revision`
+  - anchors: `schedule_service`, `schedule_store`, `schedule_bundle_schema`
+  - scenarios: `revision-supersede-route`, `pause-resume-without-revision`
+- `occurrence_supersede_ack_route_present`
   - anchors: `schedule_service`, `schedule_store`, `schedule_bundle_schema`
   - scenarios: `revision-supersede-route`, `pause-resume-without-revision`
 

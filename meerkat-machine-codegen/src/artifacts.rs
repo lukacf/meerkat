@@ -49,8 +49,14 @@ fn route_target_variant<'a>(
     target: &RouteTarget,
 ) -> Option<&'a VariantSchema> {
     match target.kind {
-        RouteTargetKind::Input => machine.inputs.variant_named(&target.input_variant).ok(),
-        RouteTargetKind::Signal => machine.signals.variant_named(&target.input_variant).ok(),
+        RouteTargetKind::Input => machine
+            .inputs
+            .variant_named(target.input_variant.as_str())
+            .ok(),
+        RouteTargetKind::Signal => machine
+            .signals
+            .variant_named(target.input_variant.as_str())
+            .ok(),
     }
 }
 
@@ -58,12 +64,12 @@ fn transition_trigger_variant<'a>(
     schema: &'a MachineSchema,
     transition: &TransitionSchema,
 ) -> Option<&'a VariantSchema> {
-    match transition.on.kind {
-        meerkat_machine_schema::TriggerKind::Input => {
-            schema.inputs.variant_named(&transition.on.variant).ok()
+    match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => {
+            schema.inputs.variant_named(variant.as_str()).ok()
         }
-        meerkat_machine_schema::TriggerKind::Signal => {
-            schema.signals.variant_named(&transition.on.variant).ok()
+        meerkat_machine_schema::TriggerMatch::Signal { variant, .. } => {
+            schema.signals.variant_named(variant.as_str()).ok()
         }
     }
 }
@@ -276,8 +282,14 @@ pub fn render_machine_contract_markdown(
         writeln!(
             &mut out,
             "- On: `{}`({})",
-            transition.on.variant,
-            transition.on.bindings.join(", ")
+            transition.on.variant_str(),
+            transition
+                .on
+                .bindings()
+                .iter()
+                .map(meerkat_machine_schema::identity::FieldId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
         .expect("write to string");
         if !transition.guards.is_empty() {
@@ -489,6 +501,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let mut out = String::new();
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
+    let named_bindings = collect_machine_named_bindings(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() {
@@ -508,6 +521,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
                     &ty,
                     default_sample_cardinality(deep),
                     &named_samples,
+                    &named_bindings,
                     false,
                 )
             )
@@ -554,6 +568,7 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         .collect::<BTreeMap<_, _>>();
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples = collect_composition_named_type_samples(schema, &machine_by_instance);
+    let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
@@ -595,7 +610,13 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
                 &mut out,
                 "  {} = {}",
                 name,
-                render_default_domain_assignment(&ty, cardinality, &named_samples, false)
+                render_default_domain_assignment(
+                    &ty,
+                    cardinality,
+                    &named_samples,
+                    &named_bindings,
+                    false,
+                )
             )
             .expect("write to string");
         }
@@ -655,6 +676,7 @@ pub fn render_composition_witness_cfg(
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples =
         collect_composition_witness_named_type_samples(schema, witness, &machine_by_instance);
+    let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
     let witness_sample_cardinality = schema
         .witness_domain_cardinality
         .max(max_named_sample_cardinality(&named_samples));
@@ -699,6 +721,7 @@ pub fn render_composition_witness_cfg(
                     &ty,
                     witness_sample_cardinality,
                     &named_samples,
+                    &named_bindings,
                     true,
                 )
             )
@@ -766,11 +789,11 @@ pub fn render_composition_witness_cfg(
     out
 }
 
-pub fn composition_route_observed_operator_name(route_name: &str) -> String {
+pub fn composition_route_observed_operator_name(route_name: impl AsRef<str>) -> String {
     format!("RouteObserved_{}", tla_ident(route_name))
 }
 
-pub fn composition_route_coverage_operator_name(route_name: &str) -> String {
+pub fn composition_route_coverage_operator_name(route_name: impl AsRef<str>) -> String {
     format!("RouteCoverage_{}", tla_ident(route_name))
 }
 
@@ -802,7 +825,7 @@ pub fn composition_witness_cfg_name(name: &str) -> String {
     format!("witness-{}.cfg", tla_ident(name))
 }
 
-fn composition_witness_route_property_name(witness: &str, route_name: &str) -> String {
+fn composition_witness_route_property_name(witness: &str, route_name: impl AsRef<str>) -> String {
     format!(
         "WitnessRouteObserved_{}_{}",
         tla_ident(witness),
@@ -814,7 +837,7 @@ fn composition_witness_scheduler_property_name(witness: &str, rule: &SchedulerRu
     format!(
         "WitnessSchedulerTriggered_{}_{}",
         tla_ident(witness),
-        tla_ident(&witness_scheduler_rule_label(rule))
+        tla_ident(witness_scheduler_rule_label(rule))
     )
 }
 
@@ -824,8 +847,8 @@ fn composition_witness_state_property_name(witness: &str, index: usize) -> Strin
 
 fn composition_witness_transition_property_name(
     witness: &str,
-    machine: &str,
-    transition: &str,
+    machine: impl AsRef<str>,
+    transition: impl AsRef<str>,
 ) -> String {
     format!(
         "WitnessTransitionObserved_{}_{}_{}",
@@ -875,142 +898,389 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
     }
 }
 
-/// Renders the generated composition driver module.
+/// Renders the generated per-composition Rust module (Track-B wave-b V2).
 ///
-/// This is a declarative-framework emission: any composition that declares a
-/// `CompositionDriver` descriptor gets a generated Rust module listing the
-/// watched effects and dispatch routes as typed constants, plus a marker
-/// trait reference the implementer consumes.
+/// The emitted module is the typed seam between the composition's route
+/// schema and the runtime composition dispatcher. It declares:
 ///
-/// The generated module intentionally stays thin — it is the schema-to-code
-/// surface the runtime dispatcher
-/// (`meerkat-runtime::composition_dispatch`) and the composition
-/// implementer use to stay in lockstep with the declarative schema.
+/// * a top-level seam-effect enum wrapping each participant machine's
+///   generated `Effect` type (one variant per distinct producer instance),
+/// * the `TypedRoutedInput` descriptor re-exported from the schema
+///   identity layer, and
+/// * a `route_to_input(&SeamEffect) -> Option<TypedRoutedInput>` function
+///   that resolves routed effects to their typed target input using the
+///   composition's `RouteId → (MachineInstanceId, InputVariantId, Vec<(FieldId, FieldId)>)`
+///   table, and
+/// * a `route_to_signal(&SeamEffect) -> Option<TypedRoutedSignal>` function
+///   for signal-kind routes using the same producer-field binding shape.
 ///
-/// Returns `None` when the composition has no driver descriptor.
+/// Returns `None` when the composition declares no driver descriptor; the
+/// driver descriptor continues to carry the Rust emission path for xtask
+/// consumers.
 pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
     let driver = schema.driver.as_ref()?;
+
+    let machine_catalog = canonical_machine_schemas();
+    let machine_by_name = machine_catalog
+        .iter()
+        .map(|machine| (machine.machine.as_str(), machine))
+        .collect::<BTreeMap<_, _>>();
+
+    // Distinct producer instances, preserving declaration order from the
+    // composition schema so generated variants stay deterministic.
+    let mut producers: Vec<(&str, &MachineSchema)> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for instance in &schema.machines {
+        if !seen.insert(instance.instance_id.as_str()) {
+            continue;
+        }
+        let Some(machine) = machine_by_name.get(instance.machine_name.as_str()).copied() else {
+            continue;
+        };
+        producers.push((instance.instance_id.as_str(), machine));
+    }
+
+    let composition_name = schema.name.as_str();
+    let seam_effect_enum = format!("{}Effect", to_pascal_case(composition_name));
 
     let mut out = String::new();
     pushln!(
         &mut out,
-        "// @generated — composition driver descriptor for `{}`",
-        schema.name
+        "// @generated — composition module for `{composition_name}`"
     );
     pushln!(
         &mut out,
-        "// DO NOT EDIT. Emitted by meerkat-machine-codegen::render_composition_driver."
+        "// DO NOT EDIT. Emitted by meerkat_machine_codegen::render_composition_driver."
     );
     pushln!(
         &mut out,
-        "// Source of truth: catalog::compositions::{}",
-        schema.name
+        "// Source of truth: catalog::compositions::{composition_name}"
+    );
+    pushln!(
+        &mut out,
+        "// Driver: `{}` (rust path: `{}`).",
+        driver.name,
+        driver.rust.module_path
     );
     out.push('\n');
 
+    pushln!(
+        &mut out,
+        "use meerkat_machine_schema::identity::{{FieldId, InputVariantId, MachineInstanceId, SignalVariantId}};"
+    );
     for import in &driver.rust.required_imports {
         pushln!(&mut out, "{import}");
     }
-    if !driver.rust.required_imports.is_empty() {
-        out.push('\n');
-    }
-
-    pushln!(
-        &mut out,
-        "/// Logical name of this composition driver. Used at runtime for"
-    );
-    pushln!(&mut out, "/// registration and diagnostics.");
-    pushln!(
-        &mut out,
-        "pub const DRIVER_NAME: &str = \"{}\";",
-        driver.name
-    );
     out.push('\n');
 
-    pushln!(&mut out, "/// Effect variants this driver observes.");
+    // TypedRoutedInput — the route descriptor returned by `route_to_input`.
     pushln!(
         &mut out,
-        "/// Each entry is `(producer_instance, effect_variant)`."
+        "/// Typed route descriptor resolved for a producer effect."
     );
-    pushln!(&mut out, "pub const WATCHED_EFFECTS: &[(&str, &str)] = &[");
-    for watched in &driver.watched_effects {
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// `bindings` lists producer-field → consumer-field pairs in the"
+    );
+    pushln!(
+        &mut out,
+        "/// order declared by the composition schema. The composition"
+    );
+    pushln!(
+        &mut out,
+        "/// dispatcher uses these to construct the typed consumer input."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedRoutedInput {{");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub variant: InputVariantId,");
+    pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    // TypedRoutedSignal — the signal-route descriptor returned by `route_to_signal`.
+    pushln!(
+        &mut out,
+        "/// Typed signal-route descriptor resolved for a producer effect."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// `bindings` lists producer-field → consumer-field pairs in the"
+    );
+    pushln!(
+        &mut out,
+        "/// order declared by the composition schema. The signal dispatcher"
+    );
+    pushln!(
+        &mut out,
+        "/// uses these to construct the typed consumer signal."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedRoutedSignal {{");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub variant: SignalVariantId,");
+    pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    // Seam effect enum: one variant per distinct producer instance.
+    pushln!(
+        &mut out,
+        "/// Sum of every participant-machine effect type that can be routed"
+    );
+    pushln!(
+        &mut out,
+        "/// through this composition. One variant per producer instance."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum {seam_effect_enum} {{");
+    if producers.is_empty() {
         pushln!(
             &mut out,
-            "    (\"{}\", \"{}\"),",
-            watched.producer_instance,
-            watched.effect_variant
+            "    // (composition declares no participant machines)"
         );
     }
-    pushln!(&mut out, "];");
+    for (instance_id, machine) in &producers {
+        let variant = to_pascal_case(instance_id);
+        let machine_path = producer_effect_path(machine);
+        pushln!(&mut out, "    {variant}({machine_path}),");
+    }
+    pushln!(&mut out, "}}");
     out.push('\n');
 
+    // route_to_input — match arms per input-kind route.
     pushln!(
         &mut out,
-        "/// Dispatch routes this driver may emit. Each entry is"
+        "/// Resolve a routed producer effect to its typed consumer input."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// Returns `None` when the effect variant has no declared input"
     );
     pushln!(
         &mut out,
-        "/// `(route_name, target_instance, target_kind, input_variant)`."
+        "/// route in this composition (including signal-kind routes, which"
     );
+    pushln!(&mut out, "/// are handled by `route_to_signal`).");
     pushln!(
         &mut out,
-        "pub const DISPATCH_ROUTES: &[(&str, &str, &str, &str)] = &["
+        "pub fn route_to_input(effect: &{seam_effect_enum}) -> Option<TypedRoutedInput> {{"
     );
-    for dispatch in &driver.dispatch_routes {
-        let kind_name = match dispatch.target_kind {
-            RouteTargetKind::Input => "Input",
-            RouteTargetKind::Signal => "Signal",
-        };
+    pushln!(&mut out, "    match effect {{");
+    for (instance_id, machine) in &producers {
+        let variant = to_pascal_case(instance_id);
+        let machine_path = producer_effect_path(machine);
+        let input_routes: Vec<&Route> = schema
+            .routes
+            .iter()
+            .filter(|route| {
+                route.from_machine.as_str() == *instance_id
+                    && route.to.kind == RouteTargetKind::Input
+            })
+            .collect();
+        if input_routes.is_empty() {
+            pushln!(
+                &mut out,
+                "        {seam_effect_enum}::{variant}(_) => None,"
+            );
+            continue;
+        }
         pushln!(
             &mut out,
-            "    (\"{}\", \"{}\", \"{}\", \"{}\"),",
-            dispatch.name,
-            dispatch.target_instance,
-            kind_name,
-            dispatch.input_variant
+            "        {seam_effect_enum}::{variant}(inner) => match inner {{"
         );
+        for route in input_routes {
+            let effect_variant = route.effect_variant.as_str();
+            let target_machine = route.to.machine.as_str();
+            let target_variant = route.to.input_variant.as_str();
+            pushln!(
+                &mut out,
+                "            {machine_path}::{effect_variant}(_) => Some(TypedRoutedInput {{"
+            );
+            pushln!(
+                &mut out,
+                "                instance_id: MachineInstanceId::parse(\"{target_machine}\").expect(\"composition instance slug\"),"
+            );
+            pushln!(
+                &mut out,
+                "                variant: InputVariantId::parse(\"{target_variant}\").expect(\"composition input slug\"),"
+            );
+            if route.bindings.is_empty() {
+                pushln!(&mut out, "                bindings: Vec::new(),");
+            } else {
+                pushln!(&mut out, "                bindings: vec![");
+                for binding in &route.bindings {
+                    let from_field = match &binding.source {
+                        RouteBindingSource::Field { from_field, .. } => from_field.as_str(),
+                        RouteBindingSource::Literal(_) | RouteBindingSource::OwnerProvided => {
+                            continue;
+                        }
+                    };
+                    let to_field = binding.to_field.as_str();
+                    pushln!(
+                        &mut out,
+                        "                    (FieldId::parse(\"{from_field}\").expect(\"route producer field slug\"), FieldId::parse(\"{to_field}\").expect(\"route consumer field slug\")),"
+                    );
+                }
+                pushln!(&mut out, "                ],");
+            }
+            pushln!(&mut out, "            }}),");
+        }
+        pushln!(&mut out, "            _ => None,");
+        pushln!(&mut out, "        }},");
     }
-    pushln!(&mut out, "];");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
     out.push('\n');
 
+    // route_to_signal — match arms per signal-kind route.
     pushln!(
         &mut out,
-        "/// Generated marker: the driver type name declared in the schema."
+        "/// Resolve a routed producer effect to its typed consumer signal."
     );
-    pushln!(&mut out, "/// The application-side driver must satisfy the");
+    pushln!(&mut out, "///");
     pushln!(
         &mut out,
-        "/// `meerkat_runtime::composition_dispatch::CompositionDriverTrait`"
+        "/// Returns `None` when the effect variant has no declared signal"
     );
-    pushln!(&mut out, "/// contract under this name.");
+    pushln!(&mut out, "/// route in this composition.");
     pushln!(
         &mut out,
-        "pub const DRIVER_TYPE: &str = \"{}\";",
-        driver.rust.driver_type
+        "pub fn route_to_signal(effect: &{seam_effect_enum}) -> Option<TypedRoutedSignal> {{"
     );
-    pushln!(
-        &mut out,
-        "pub const STORE_PLAN_TYPE: &str = \"{}\";",
-        driver.rust.store_plan_type
-    );
-    pushln!(
-        &mut out,
-        "pub const WORK_TYPE: &str = \"{}\";",
-        driver.rust.work_type
-    );
-    pushln!(
-        &mut out,
-        "pub const DECISION_TYPE: &str = \"{}\";",
-        driver.rust.decision_type
-    );
+    pushln!(&mut out, "    match effect {{");
+    for (instance_id, machine) in &producers {
+        let variant = to_pascal_case(instance_id);
+        let machine_path = producer_effect_path(machine);
+        let signal_routes: Vec<&Route> = schema
+            .routes
+            .iter()
+            .filter(|route| {
+                route.from_machine.as_str() == *instance_id
+                    && route.to.kind == RouteTargetKind::Signal
+            })
+            .collect();
+        if signal_routes.is_empty() {
+            pushln!(
+                &mut out,
+                "        {seam_effect_enum}::{variant}(_) => None,"
+            );
+            continue;
+        }
+        pushln!(
+            &mut out,
+            "        {seam_effect_enum}::{variant}(inner) => match inner {{"
+        );
+        for route in signal_routes {
+            let effect_variant = route.effect_variant.as_str();
+            let target_machine = route.to.machine.as_str();
+            let target_variant = route.to.input_variant.as_str();
+            pushln!(
+                &mut out,
+                "            {machine_path}::{effect_variant}(_) => Some(TypedRoutedSignal {{"
+            );
+            pushln!(
+                &mut out,
+                "                instance_id: MachineInstanceId::parse(\"{target_machine}\").expect(\"composition instance slug\"),"
+            );
+            pushln!(
+                &mut out,
+                "                variant: SignalVariantId::parse(\"{target_variant}\").expect(\"composition signal slug\"),"
+            );
+            if route.bindings.is_empty() {
+                pushln!(&mut out, "                bindings: Vec::new(),");
+            } else {
+                pushln!(&mut out, "                bindings: vec![");
+                for binding in &route.bindings {
+                    let from_field = match &binding.source {
+                        RouteBindingSource::Field { from_field, .. } => from_field.as_str(),
+                        RouteBindingSource::Literal(_) | RouteBindingSource::OwnerProvided => {
+                            continue;
+                        }
+                    };
+                    let to_field = binding.to_field.as_str();
+                    pushln!(
+                        &mut out,
+                        "                    (FieldId::parse(\"{from_field}\").expect(\"route producer field slug\"), FieldId::parse(\"{to_field}\").expect(\"route consumer field slug\")),"
+                    );
+                }
+                pushln!(&mut out, "                ],");
+            }
+            pushln!(&mut out, "            }}),");
+        }
+        pushln!(&mut out, "            _ => None,");
+        pushln!(&mut out, "        }},");
+    }
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
 
     Some(out)
 }
 
-// Keep the legacy module import alive so existing consumers that reference
-// `meerkat_machine_codegen::templates` continue to resolve during the
-// transition. The hand-crafted `flow_frame_loop_driver.rs.tmpl` template
-// has been deleted — the generic emission above replaces it.
+/// Return the fully-qualified path to a producer machine's generated
+/// `Effect` enum. Consumed by the per-composition emission above.
+fn producer_effect_path(machine: &MachineSchema) -> String {
+    format!(
+        "crate::generated::{}::Effect",
+        machine_module_slug(machine.machine.as_str())
+    )
+}
+
+/// Slug a machine name into its generated-kernel submodule (mirror of the
+/// `machine_slug` helper in the render module — copied here so the
+/// artifacts layer doesn't depend on render-internal visibility).
+fn machine_module_slug(machine_name: &str) -> String {
+    let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
+    to_snake_case_local(trimmed)
+}
+
+fn to_snake_case_local(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_is_sep = true;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            if !previous_is_sep {
+                out.push('_');
+                previous_is_sep = true;
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() && !previous_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        }
+    }
+    out.trim_matches('_').to_owned()
+}
+
+/// PascalCase a slug-identifier (letters, digits, `_`, `-`). Used to
+/// derive Rust enum names from composition and instance slugs.
+fn to_pascal_case(value: &str) -> String {
+    let mut out = String::new();
+    let mut capitalize = true;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            capitalize = true;
+            continue;
+        }
+        if capitalize {
+            out.extend(ch.to_uppercase());
+            capitalize = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {
     let mut compiler = MachineTlaCompiler::new(schema);
@@ -1073,7 +1343,7 @@ fn collect_binding_domains(schema: &MachineSchema) -> BTreeMap<String, TypeRef> 
 
     for transition in &schema.transitions {
         if let Some(variant) = transition_trigger_variant(schema, transition) {
-            for binding in &transition.on.bindings {
+            for binding in transition.on.bindings() {
                 if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
                     collect_type_domains(&field.ty, &mut domains);
                 }
@@ -1141,18 +1411,18 @@ fn collect_machine_named_type_samples(
         .state
         .fields
         .iter()
-        .map(|field| (field.name.clone(), field.ty.clone()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
     let helper_returns = schema
         .helpers
         .iter()
         .chain(schema.derived.iter())
         .map(|helper| (helper.name.clone(), helper.returns.clone()))
-        .collect::<BTreeMap<_, _>>();
+        .collect::<BTreeMap<String, _>>();
     let mut samples = BTreeMap::new();
 
     for init in &schema.state.init.fields {
-        if let Some(field_ty) = field_types.get(&init.field) {
+        if let Some(field_ty) = field_types.get(init.field.as_str()) {
             collect_named_literals_from_expr(
                 &mut samples,
                 &init.expr,
@@ -1168,8 +1438,8 @@ fn collect_machine_named_type_samples(
         let bindings = helper
             .params
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
         collect_named_literals_from_expr(
             &mut samples,
             &helper.body,
@@ -1200,11 +1470,11 @@ fn collect_machine_named_type_samples(
                     .filter(|field| {
                         transition
                             .on
-                            .bindings
+                            .bindings()
                             .iter()
                             .any(|binding| binding == &field.name)
                     })
-                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
@@ -1229,7 +1499,7 @@ fn collect_machine_named_type_samples(
             );
         }
         for effect in &transition.emit {
-            let Ok(effect_variant) = schema.effects.variant_named(&effect.variant) else {
+            let Ok(effect_variant) = schema.effects.variant_named(effect.variant.as_str()) else {
                 continue;
             };
             for field in &effect_variant.fields {
@@ -1282,8 +1552,8 @@ fn collect_composition_named_type_samples(
         let source_field_types = source_variant
             .fields
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
         let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied()
         else {
             continue;
@@ -1294,12 +1564,12 @@ fn collect_composition_named_type_samples(
         let field_types = target_variant
             .fields
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
 
         for binding in &route.bindings {
             if let RouteBindingSource::Literal(expr) = &binding.source
-                && let Some(field_ty) = field_types.get(&binding.to_field)
+                && let Some(field_ty) = field_types.get(binding.to_field.as_str())
             {
                 collect_named_literals_from_expr(
                     &mut samples,
@@ -1312,8 +1582,8 @@ fn collect_composition_named_type_samples(
             }
             if let RouteBindingSource::Field { from_field, .. } = &binding.source
                 && let (Some(source_ty), Some(target_ty)) = (
-                    source_field_types.get(from_field),
-                    field_types.get(&binding.to_field),
+                    source_field_types.get(from_field.as_str()),
+                    field_types.get(binding.to_field.as_str()),
                 )
             {
                 propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
@@ -1332,11 +1602,11 @@ fn collect_composition_named_type_samples(
             let field_types = variant
                 .fields
                 .iter()
-                .map(|field| (field.name.clone(), field.ty.clone()))
-                .collect::<BTreeMap<_, _>>();
+                .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+                .collect::<BTreeMap<String, _>>();
 
             for field in &preload.fields {
-                if let Some(field_ty) = field_types.get(&field.field) {
+                if let Some(field_ty) = field_types.get(field.field.as_str()) {
                     collect_named_literals_from_expr(
                         &mut samples,
                         &field.expr,
@@ -1370,11 +1640,11 @@ fn collect_composition_witness_named_type_samples(
         let field_types = variant
             .fields
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
 
         for field in &preload.fields {
-            if let Some(field_ty) = field_types.get(&field.field) {
+            if let Some(field_ty) = field_types.get(field.field.as_str()) {
                 collect_named_literals_from_expr(
                     &mut samples,
                     &field.expr,
@@ -1449,8 +1719,8 @@ fn collect_route_binding_named_type_samples(
     let source_field_types = source_variant
         .fields
         .iter()
-        .map(|field| (field.name.clone(), field.ty.clone()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
     let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied() else {
         return false;
     };
@@ -1460,13 +1730,13 @@ fn collect_route_binding_named_type_samples(
     let target_field_types = target_variant
         .fields
         .iter()
-        .map(|field| (field.name.clone(), field.ty.clone()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
 
     let mut changed = false;
     for binding in &route.bindings {
         if let RouteBindingSource::Literal(expr) = &binding.source
-            && let Some(field_ty) = target_field_types.get(&binding.to_field)
+            && let Some(field_ty) = target_field_types.get(binding.to_field.as_str())
         {
             let before = samples.clone();
             collect_named_literals_from_expr(
@@ -1481,8 +1751,8 @@ fn collect_route_binding_named_type_samples(
         }
         if let RouteBindingSource::Field { from_field, .. } = &binding.source
             && let (Some(source_ty), Some(target_ty)) = (
-                source_field_types.get(from_field),
-                target_field_types.get(&binding.to_field),
+                source_field_types.get(from_field.as_str()),
+                target_field_types.get(binding.to_field.as_str()),
             )
         {
             changed |= propagate_named_samples_between_types(samples, source_ty, target_ty);
@@ -1533,14 +1803,14 @@ fn collect_named_literals_from_update(
             collect_named_literals_from_expr(
                 samples,
                 expr,
-                field_types.get(field),
+                field_types.get(field.as_str()),
                 field_types,
                 helper_returns,
                 binding_types,
             );
         }
         Update::MapInsert { field, key, value } => {
-            if let Some(TypeRef::Map(key_ty, value_ty)) = field_types.get(field) {
+            if let Some(TypeRef::Map(key_ty, value_ty)) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     key,
@@ -1560,7 +1830,7 @@ fn collect_named_literals_from_update(
             }
         }
         Update::MapRemove { field, key } => {
-            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field) {
+            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     key,
@@ -1572,7 +1842,7 @@ fn collect_named_literals_from_update(
             }
         }
         Update::MapIncrement { field, key, .. } | Update::MapDecrement { field, key, .. } => {
-            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field) {
+            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     key,
@@ -1584,7 +1854,7 @@ fn collect_named_literals_from_update(
             }
         }
         Update::SetInsert { field, value } | Update::SetRemove { field, value } => {
-            if let Some(TypeRef::Set(inner_ty)) = field_types.get(field) {
+            if let Some(TypeRef::Set(inner_ty)) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     value,
@@ -1596,7 +1866,7 @@ fn collect_named_literals_from_update(
             }
         }
         Update::SeqAppend { field, value } | Update::SeqRemoveValue { field, value } => {
-            if let Some(TypeRef::Seq(inner_ty)) = field_types.get(field) {
+            if let Some(TypeRef::Seq(inner_ty)) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     value,
@@ -1608,7 +1878,7 @@ fn collect_named_literals_from_update(
             }
         }
         Update::SeqPrepend { field, values } | Update::SeqRemoveAll { field, values } => {
-            if let Some(field_ty) = field_types.get(field) {
+            if let Some(field_ty) = field_types.get(field.as_str()) {
                 collect_named_literals_from_expr(
                     samples,
                     values,
@@ -1708,7 +1978,10 @@ fn collect_named_literals_from_expr(
     if let (Expr::NamedVariant { variant, .. }, Some(expected_ty)) = (expr, expected_ty)
         && let Some(bucket) = type_sample_bucket(expected_ty)
     {
-        samples.entry(bucket).or_default().insert(variant.clone());
+        samples
+            .entry(bucket)
+            .or_default()
+            .insert(variant.as_str().to_owned());
     }
 
     match expr {
@@ -1728,12 +2001,18 @@ fn collect_named_literals_from_expr(
             if let (Some(left_ty), Expr::NamedVariant { variant, .. }) = (&left_ty, right.as_ref())
                 && let Some(bucket) = type_sample_bucket(left_ty)
             {
-                samples.entry(bucket).or_default().insert(variant.clone());
+                samples
+                    .entry(bucket)
+                    .or_default()
+                    .insert(variant.as_str().to_owned());
             }
             if let (Some(right_ty), Expr::NamedVariant { variant, .. }) = (&right_ty, left.as_ref())
                 && let Some(bucket) = type_sample_bucket(right_ty)
             {
-                samples.entry(bucket).or_default().insert(variant.clone());
+                samples
+                    .entry(bucket)
+                    .or_default()
+                    .insert(variant.as_str().to_owned());
             }
             collect_named_literals_from_expr(
                 samples,
@@ -1996,8 +2275,8 @@ fn infer_expr_type(
         Expr::String(_) | Expr::CurrentPhase | Expr::Phase(_) | Expr::Variant(_) => {
             Some(TypeRef::String)
         }
-        Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Named(enum_name.clone())),
-        Expr::Field(name) => field_types.get(name).cloned(),
+        Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
+        Expr::Field(name) => field_types.get(name.as_str()).cloned(),
         Expr::Binding(name) => binding_types.get(name).cloned(),
         Expr::None => None,
         Expr::IfElse {
@@ -2070,7 +2349,8 @@ fn default_sample_cardinality(deep: bool) -> usize {
 fn type_sample_bucket(ty: &TypeRef) -> Option<String> {
     match ty {
         TypeRef::String => Some("String".into()),
-        TypeRef::Named(name) | TypeRef::Enum(name) => Some(name.clone()),
+        TypeRef::Named(name) => Some(name.as_str().to_owned()),
+        TypeRef::Enum(name) => Some(name.as_str().to_owned()),
         _ => None,
     }
 }
@@ -2085,7 +2365,7 @@ fn collected_sample_literals(
     let rendered = samples
         .iter()
         .take(limit)
-        .map(|sample| tla_string(sample))
+        .map(tla_string)
         .collect::<Vec<_>>();
     (!rendered.is_empty()).then_some(rendered)
 }
@@ -2118,6 +2398,7 @@ fn render_default_domain_assignment(
     ty: &TypeRef,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     include_string_samples: bool,
 ) -> String {
     match ty {
@@ -2141,14 +2422,24 @@ fn render_default_domain_assignment(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeRef::Named(name) | TypeRef::Enum(name) => {
-            render_named_domain_assignment(name, sample_cardinality, named_samples)
-        }
+        TypeRef::Named(name) => render_named_domain_assignment(
+            name.as_str(),
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
+        TypeRef::Enum(name) => render_named_domain_assignment(
+            name.as_str(),
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
         TypeRef::Seq(inner) => {
             let samples = sample_values(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             );
             if samples.len() >= 2 {
@@ -2167,6 +2458,7 @@ fn render_default_domain_assignment(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             );
             if samples.len() >= 2 {
@@ -2185,6 +2477,7 @@ fn render_default_domain_assignment(
                 inner,
                 sample_cardinality,
                 named_samples,
+                named_bindings,
                 include_string_samples,
             )
             .into_iter()
@@ -2210,11 +2503,13 @@ fn render_default_domain_assignment(
 }
 
 fn render_named_domain_assignment(
-    name: &str,
+    name: impl AsRef<str>,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> String {
-    if named_type_uses_nat_domain(name) {
+    let name = name.as_ref();
+    if named_type_uses_nat_domain(named_bindings, name) {
         return if sample_cardinality > 1 {
             "{1, 2}".into()
         } else {
@@ -2247,7 +2542,7 @@ fn render_named_domain_assignment(
     }
 
     let values = (1..=sample_cardinality.max(1))
-        .map(|idx| tla_string(&format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+        .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{{values}}}")
@@ -2257,6 +2552,7 @@ fn sample_values(
     ty: &TypeRef,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     include_string_samples: bool,
 ) -> Vec<String> {
     match ty {
@@ -2274,27 +2570,52 @@ fn sample_values(
                 .map(|sample| tla_string(&sample))
                 .collect()
         }
-        TypeRef::Named(name) | TypeRef::Enum(name) if named_type_uses_nat_domain(name) => {
+        TypeRef::Named(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
             if sample_cardinality > 1 {
                 vec!["1".into(), "2".into()]
             } else {
                 vec!["1".into()]
             }
         }
-        TypeRef::Named(name) | TypeRef::Enum(name) => {
+        TypeRef::Enum(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
+        }
+        TypeRef::Named(name) => {
+            let name = name.as_str();
             if let Some(samples) = named_samples.get(name) {
                 let limit = sample_cardinality.max(1);
                 let rendered = samples
                     .iter()
                     .take(limit)
-                    .map(|sample| tla_string(sample))
+                    .map(tla_string)
                     .collect::<Vec<_>>();
                 if !rendered.is_empty() {
                     return rendered;
                 }
             }
             (1..=sample_cardinality.max(1))
-                .map(|idx| tla_string(&format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect()
+        }
+        TypeRef::Enum(name) => {
+            let name = name.as_str();
+            if let Some(samples) = named_samples.get(name) {
+                let limit = sample_cardinality.max(1);
+                let rendered = samples
+                    .iter()
+                    .take(limit)
+                    .map(tla_string)
+                    .collect::<Vec<_>>();
+                if !rendered.is_empty() {
+                    return rendered;
+                }
+            }
+            (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
                 .collect()
         }
         TypeRef::Option(inner) => {
@@ -2308,6 +2629,7 @@ fn sample_values(
                     inner,
                     sample_cardinality,
                     named_samples,
+                    named_bindings,
                     include_string_samples,
                 )
                 .into_iter()
@@ -2319,23 +2641,64 @@ fn sample_values(
             inner,
             sample_cardinality,
             named_samples,
+            named_bindings,
             include_string_samples,
         ),
         TypeRef::Set(inner) => sample_values(
             inner,
             sample_cardinality,
             named_samples,
+            named_bindings,
             include_string_samples,
         ),
         TypeRef::Map(_, _) => vec![],
     }
 }
 
-fn named_type_uses_nat_domain(name: &str) -> bool {
+/// Consult the schema's named-type binding table to decide whether a
+/// named type's TLA domain is `Nat` (numeric) rather than string-like.
+///
+/// A named type resolves to a `Nat` TLA domain when its Rust atom lowers
+/// to an unsigned integer width — the TLA projection mirrors the Rust
+/// atom. Schemas reach codegen only after validation, so every
+/// referenced named type has a binding; an unbound name here is a
+/// codegen invariant violation.
+fn named_type_uses_nat_domain(
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> bool {
+    use meerkat_machine_schema::RustTypeAtom;
     matches!(
-        name,
-        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+        bindings.get(name),
+        Some(RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8)
     )
+}
+
+/// Collect the `NamedTypeId → RustTypeAtom` map for a single machine.
+fn collect_machine_named_bindings(
+    schema: &MachineSchema,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    schema
+        .named_types
+        .iter()
+        .map(|binding| (binding.name.as_str().to_owned(), binding.rust.clone()))
+        .collect()
+}
+
+/// Merge every machine's named-type bindings into one map for
+/// composition-level TLA rendering. Duplicate names must agree on Rust
+/// atom across machines (validation enforces this by construction).
+fn collect_composition_named_bindings<'a>(
+    machines_by_instance: impl IntoIterator<Item = &'a MachineSchema>,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    let mut merged = BTreeMap::new();
+    for machine in machines_by_instance {
+        for binding in &machine.named_types {
+            let slug = binding.name.as_str().to_owned();
+            merged.entry(slug).or_insert_with(|| binding.rust.clone());
+        }
+    }
+    merged
 }
 
 fn render_sequence_domain_definition(inner: &TypeRef) -> String {
@@ -2375,18 +2738,19 @@ fn render_type_domain_expr(ty: &TypeRef) -> String {
 
 fn domain_constant_name(ty: &TypeRef) -> String {
     match ty {
-        TypeRef::Named(name) | TypeRef::Enum(name) => format!("{}Values", tla_ident(name)),
-        TypeRef::Seq(inner) => format!("SeqOf{}Values", tla_ident(&type_ref_name(inner))),
-        TypeRef::Set(inner) => format!("SetOf{}Values", tla_ident(&type_ref_name(inner))),
+        TypeRef::Named(name) => format!("{}Values", tla_ident(name)),
+        TypeRef::Enum(name) => format!("{}Values", tla_ident(name)),
+        TypeRef::Seq(inner) => format!("SeqOf{}Values", tla_ident(type_ref_name(inner))),
+        TypeRef::Set(inner) => format!("SetOf{}Values", tla_ident(type_ref_name(inner))),
         TypeRef::String => "StringValues".into(),
         TypeRef::Bool => "BooleanValues".into(),
         TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
-        TypeRef::Option(inner) => format!("Option{}Values", tla_ident(&type_ref_name(inner))),
+        TypeRef::Option(inner) => format!("Option{}Values", tla_ident(type_ref_name(inner))),
         TypeRef::Map(key, value) => {
             format!(
                 "Map{}{}Values",
-                tla_ident(&type_ref_name(key)),
-                tla_ident(&type_ref_name(value))
+                tla_ident(type_ref_name(key)),
+                tla_ident(type_ref_name(value))
             )
         }
     }
@@ -2398,7 +2762,8 @@ fn type_ref_name(ty: &TypeRef) -> String {
         TypeRef::U32 => "U32".into(),
         TypeRef::U64 => "U64".into(),
         TypeRef::String => "String".into(),
-        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
         TypeRef::Option(inner) => format!("Option{}", type_ref_name(inner)),
         TypeRef::Set(inner) => format!("Set{}", type_ref_name(inner)),
         TypeRef::Seq(inner) => format!("Seq{}", type_ref_name(inner)),
@@ -2960,40 +3325,49 @@ impl<'a> CompositionTlaCompiler<'a> {
         collect_composition_binding_domains(self.schema, &self.machine_by_instance)
     }
 
-    fn machine(&self, instance_id: &str) -> &MachineSchema {
+    fn machine(&self, instance_id: impl AsRef<str>) -> &MachineSchema {
         self.machine_by_instance
-            .get(instance_id)
+            .get(instance_id.as_ref())
             .copied()
             .unwrap_or(self.fallback_machine)
     }
 
-    fn actor(&self, instance_id: &str) -> &str {
+    fn actor(&self, instance_id: impl AsRef<str>) -> &str {
+        let instance_id = instance_id.as_ref();
         self.schema
             .machines
             .iter()
-            .find(|machine| machine.instance_id == instance_id)
+            .find(|machine| machine.instance_id.as_str() == instance_id)
             .map(|machine| machine.actor.as_str())
             .unwrap_or("")
     }
 
-    fn phase_var(&self, instance_id: &str) -> String {
+    fn phase_var(&self, instance_id: impl AsRef<str>) -> String {
         format!("{}_phase", tla_ident(instance_id))
     }
 
-    fn field_var(&self, instance_id: &str, field: &str) -> String {
+    fn field_var(&self, instance_id: impl AsRef<str>, field: impl AsRef<str>) -> String {
         format!("{}_{}", tla_ident(instance_id), tla_ident(field))
     }
 
-    fn machine_invariant_name(&self, instance_id: &str, invariant: &str) -> String {
+    fn machine_invariant_name(
+        &self,
+        instance_id: impl AsRef<str>,
+        invariant: impl AsRef<str>,
+    ) -> String {
         format!("{}_{}", tla_ident(instance_id), tla_ident(invariant))
     }
 
-    fn machine_transition_name(&self, instance_id: &str, transition: &TransitionSchema) -> String {
+    fn machine_transition_name(
+        &self,
+        instance_id: impl AsRef<str>,
+        transition: &TransitionSchema,
+    ) -> String {
         format!("{}_{}", tla_ident(instance_id), tla_ident(&transition.name))
     }
 
     fn machine_transition_call(&self, instance_id: &str, transition: &TransitionSchema) -> String {
-        if transition.on.bindings.is_empty() {
+        if transition.on.bindings().is_empty() {
             self.machine_transition_name(instance_id, transition)
         } else {
             let binding_types = transition_trigger_variant(self.machine(instance_id), transition)
@@ -3004,18 +3378,18 @@ impl<'a> CompositionTlaCompiler<'a> {
                         .filter(|field| {
                             transition
                                 .on
-                                .bindings
+                                .bindings()
                                 .iter()
                                 .any(|binding| binding == &field.name)
                         })
-                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
             let mut prefix = String::new();
-            for binding in &transition.on.bindings {
-                let local = format!("arg_{}", tla_ident(binding));
-                let Some(ty) = binding_types.get(binding) else {
+            for binding in transition.on.bindings() {
+                let local = format!("arg_{}", tla_ident(binding.as_str()));
+                let Some(ty) = binding_types.get(binding.as_str()) else {
                     return self.machine_transition_name(instance_id, transition);
                 };
                 let domain = self.binding_domain_for_type(ty);
@@ -3023,9 +3397,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             let args = transition
                 .on
-                .bindings
+                .bindings()
                 .iter()
-                .map(|binding| format!("arg_{}", tla_ident(binding)))
+                .map(|binding| format!("arg_{}", tla_ident(binding.as_str())))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -3069,7 +3443,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             .iter()
             .map(|field| {
                 (
-                    field.name.clone(),
+                    field.name.as_str().to_owned(),
                     self.field_var(instance_id, field.name.as_str()),
                 )
             })
@@ -3207,7 +3581,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .state
                 .terminal_phases
                 .iter()
-                .map(String::as_str)
+                .map(meerkat_machine_schema::identity::PhaseId::as_str)
                 .collect();
 
             // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
@@ -3608,11 +3982,11 @@ impl<'a> CompositionTlaCompiler<'a> {
                     .iter()
                     .map(|field| {
                         (
-                            field.name.clone(),
+                            field.name.as_str().to_owned(),
                             format!("arg_{}", tla_ident(&field.name)),
                         )
                     })
-                    .collect::<BTreeMap<_, _>>(),
+                    .collect::<BTreeMap<String, _>>(),
                 "entry",
                 &entry_input.name,
                 "external_entry",
@@ -3753,7 +4127,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             let branches = machine
                 .transitions
                 .iter()
-                .filter(|transition| transition.on.kind == TriggerKind::Input)
+                .filter(|transition| transition.on.kind() == TriggerKind::Input)
                 .map(|transition| {
                     self.render_machine_packet_admissibility_branch(
                         &mut compiler,
@@ -3822,11 +4196,11 @@ impl<'a> CompositionTlaCompiler<'a> {
         let binding_types = compiler.binding_type_map(transition);
         let binding_env = transition
             .on
-            .bindings
+            .bindings()
             .iter()
             .map(|binding| {
                 (
-                    binding.clone(),
+                    binding.as_str().to_owned(),
                     format!("packet.payload.{}", tla_ident(binding)),
                 )
             })
@@ -3834,7 +4208,10 @@ impl<'a> CompositionTlaCompiler<'a> {
         let field_env = self.machine_field_env(instance_id);
 
         let mut clauses = vec![
-            format!("packet.variant = {}", tla_string(&transition.on.variant)),
+            format!(
+                "packet.variant = {}",
+                tla_string(transition.on.variant_str())
+            ),
             from_guard,
         ];
         clauses.extend(
@@ -3948,14 +4325,14 @@ impl<'a> CompositionTlaCompiler<'a> {
 
     fn input_packet_expr(
         &self,
-        machine_id: &str,
-        input_variant: &str,
+        machine_id: impl AsRef<str>,
+        input_variant: impl AsRef<str>,
         payload_fields: &BTreeMap<String, String>,
-        source_kind: &str,
-        source_route: &str,
-        source_machine: &str,
-        source_effect: &str,
-        effect_id: &str,
+        source_kind: impl AsRef<str>,
+        source_route: impl AsRef<str>,
+        source_machine: impl AsRef<str>,
+        source_effect: impl AsRef<str>,
+        effect_id: impl AsRef<str>,
     ) -> String {
         format!(
             "[machine |-> {}, variant |-> {}, payload |-> {}, source_kind |-> {}, source_route |-> {}, source_machine |-> {}, source_effect |-> {}, effect_id |-> {}]",
@@ -3966,20 +4343,20 @@ impl<'a> CompositionTlaCompiler<'a> {
             tla_string(source_route),
             tla_string(source_machine),
             tla_string(source_effect),
-            effect_id
+            effect_id.as_ref()
         )
     }
 
     fn input_packet_expr_from_payload_expr(
         &self,
-        machine_id: &str,
-        input_variant: &str,
+        machine_id: impl AsRef<str>,
+        input_variant: impl AsRef<str>,
         payload_expr: &str,
-        source_kind: &str,
-        source_route: &str,
-        source_machine: &str,
-        source_effect: &str,
-        effect_id: &str,
+        source_kind: impl AsRef<str>,
+        source_route: impl AsRef<str>,
+        source_machine: impl AsRef<str>,
+        source_effect: impl AsRef<str>,
+        effect_id: impl AsRef<str>,
     ) -> String {
         format!(
             "[machine |-> {}, variant |-> {}, payload |-> {}, source_kind |-> {}, source_route |-> {}, source_machine |-> {}, source_effect |-> {}, effect_id |-> {}]",
@@ -3990,7 +4367,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             tla_string(source_route),
             tla_string(source_machine),
             tla_string(source_effect),
-            effect_id
+            effect_id.as_ref()
         )
     }
 
@@ -4018,14 +4395,19 @@ impl<'a> CompositionTlaCompiler<'a> {
                 let payload_fields = packet
                     .fields
                     .iter()
-                    .map(|field| (field.field.clone(), self.render_literal_expr(&field.expr)))
-                    .collect::<BTreeMap<_, _>>();
+                    .map(|field| {
+                        (
+                            field.field.as_str().to_owned(),
+                            self.render_literal_expr(&field.expr),
+                        )
+                    })
+                    .collect::<BTreeMap<String, _>>();
                 self.input_packet_expr(
                     packet.machine.as_str(),
                     packet.input_variant.as_str(),
                     &payload_fields,
                     "entry",
-                    &format!("witness:{}:{}", witness.name, idx + 1),
+                    format!("witness:{}:{}", witness.name, idx + 1),
                     "external_entry",
                     &packet.input_variant,
                     "0",
@@ -4242,15 +4624,16 @@ impl<'a> CompositionTlaCompiler<'a> {
 
     fn route_packet_expr(
         &self,
-        route_name: &str,
-        from_machine: &str,
-        effect_variant: &str,
-        to_machine: &str,
-        to_input_variant: &str,
+        route_name: impl AsRef<str>,
+        from_machine: impl AsRef<str>,
+        effect_variant: impl AsRef<str>,
+        to_machine: impl AsRef<str>,
+        to_input_variant: impl AsRef<str>,
         payload_expr: &str,
         effect_id_expr: &str,
-        source_transition: &str,
+        source_transition: impl AsRef<str>,
     ) -> String {
+        let to_machine = to_machine.as_ref();
         format!(
             "[route |-> {}, source_machine |-> {}, effect |-> {}, target_machine |-> {}, target_input |-> {}, payload |-> {}, actor |-> {}, effect_id |-> {}, source_transition |-> {}]",
             tla_string(route_name),
@@ -4277,18 +4660,18 @@ impl<'a> CompositionTlaCompiler<'a> {
         let binding_types = compiler.binding_type_map(transition);
         let binding_env = transition
             .on
-            .bindings
+            .bindings()
             .iter()
             .map(|binding| {
                 (
-                    binding.clone(),
+                    binding.as_str().to_owned(),
                     format!("packet.payload.{}", tla_ident(binding)),
                 )
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<String, _>>();
         let params = transition
             .on
-            .bindings
+            .bindings()
             .iter()
             .map(|binding| format!("arg_{}", tla_ident(binding)))
             .collect::<Vec<_>>();
@@ -4321,10 +4704,10 @@ impl<'a> CompositionTlaCompiler<'a> {
         writeln!(
             out,
             "       /\\ packet.variant = {}",
-            tla_string(&transition.on.variant)
+            tla_string(transition.on.variant_str())
         )
         .expect("write to string");
-        for binding in &transition.on.bindings {
+        for binding in transition.on.bindings() {
             let arg_name = format!("arg_{}", tla_ident(binding));
             writeln!(
                 out,
@@ -4369,7 +4752,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                     .iter()
                     .map(|(field, expr)| {
                         (
-                            field.clone(),
+                            field.as_str().to_owned(),
                             compiler.render_expr_with_types(
                                 expr,
                                 &next_env,
@@ -4378,9 +4761,9 @@ impl<'a> CompositionTlaCompiler<'a> {
                             ),
                         )
                     })
-                    .collect::<BTreeMap<_, _>>();
+                    .collect::<BTreeMap<String, _>>();
                 (
-                    effect.variant.clone(),
+                    effect.variant.as_str().to_owned(),
                     format!(
                         "[machine |-> {}, variant |-> {}, payload |-> {}, effect_id |-> {}, source_transition |-> {}]",
                         tla_string(instance_id),
@@ -4399,7 +4782,8 @@ impl<'a> CompositionTlaCompiler<'a> {
         let mut owner_route_quantifiers = Vec::new();
         for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
             for route in self.schema.routes.iter().filter(|route| {
-                route.from_machine == instance_id && route.effect_variant == *effect_variant
+                route.from_machine.as_str() == instance_id
+                    && route.effect_variant.as_str() == effect_variant.as_str()
             }) {
                 let (target_payload, route_owner_quantifiers) = self.target_payload_for_route(
                     machine,
@@ -4459,9 +4843,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             .fields
             .iter()
             .filter_map(|field| {
-                let next = next_env.get(&field.name)?;
+                let next = next_env.get(field.name.as_str())?;
                 if field_env
-                    .get(&field.name)
+                    .get(field.name.as_str())
                     .is_some_and(|current| next != current)
                 {
                     Some((field.name.as_str(), next.as_str()))
@@ -4482,9 +4866,9 @@ impl<'a> CompositionTlaCompiler<'a> {
 
         let mut unchanged_machine_vars = Vec::new();
         for instance in &self.schema.machines {
-            if instance.instance_id == instance_id {
+            if instance.instance_id.as_str() == instance_id {
                 for field in &machine.state.fields {
-                    if !touched.iter().any(|(name, _)| *name == field.name) {
+                    if !touched.iter().any(|(name, _)| *name == field.name.as_str()) {
                         unchanged_machine_vars
                             .push(self.field_var(instance_id, field.name.as_str()));
                     }
@@ -4572,8 +4956,8 @@ impl<'a> CompositionTlaCompiler<'a> {
         let mut obligation_updates: BTreeMap<String, String> = BTreeMap::new();
         for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
             for protocol in &self.schema.handoff_protocols {
-                if protocol.producer_instance == instance_id
-                    && protocol.effect_variant == *effect_variant
+                if protocol.producer_instance.as_str() == instance_id
+                    && protocol.effect_variant.as_str() == effect_variant.as_str()
                 {
                     let var = format!("obligation_{}", tla_ident(&protocol.name));
                     let record_fields: Vec<String> = protocol
@@ -4582,7 +4966,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                         .map(|field| {
                             let tla_field = tla_ident(field);
                             let value = payload_fields
-                                .get(field)
+                                .get(field.as_str())
                                 .cloned()
                                 .unwrap_or_else(|| format!("\"unknown_{}\"", field));
                             format!("{} |-> {}", tla_field, value)
@@ -4693,7 +5077,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                         from_field,
                         allow_named_alias: _,
                     } => effect_payload_fields
-                        .get(from_field)
+                        .get(from_field.as_str())
                         .cloned()
                         .or_else(|| {
                             source_effect_variant
@@ -4727,20 +5111,20 @@ impl<'a> CompositionTlaCompiler<'a> {
                         }
                     }
                 };
-                (binding.to_field.clone(), expr)
+                (binding.to_field.as_str().to_owned(), expr)
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<String, _>>();
         let payload_fields = target_variant
             .fields
             .iter()
             .map(|field| {
                 let expr = bindings
-                    .get(&field.name)
+                    .get(field.name.as_str())
                     .cloned()
                     .unwrap_or_else(|| default_state_init_expr(&field.ty));
-                (field.name.clone(), expr)
+                (field.name.as_str().to_owned(), expr)
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<String, _>>();
         (
             self.payload_record_expr(&payload_fields),
             owner_context_quantifiers,
@@ -4935,8 +5319,7 @@ impl<'a> MachineTlaCompiler<'a> {
                     .state
                     .fields
                     .iter()
-                    .map(|field| &field.name)
-                    .cloned(),
+                    .map(|field| field.name.as_str().to_owned()),
             )
             .collect::<Vec<_>>()
             .join(", ");
@@ -4949,8 +5332,7 @@ impl<'a> MachineTlaCompiler<'a> {
                     .state
                     .fields
                     .iter()
-                    .map(|field| &field.name)
-                    .cloned(),
+                    .map(|field| field.name.as_str().to_owned()),
             )
             .collect::<Vec<_>>();
         pushln!(&mut out, "vars == << {} >>", vars.join(", "));
@@ -5027,37 +5409,42 @@ impl<'a> MachineTlaCompiler<'a> {
 
         pushln!(&mut out, "Next ==");
         for transition in &self.schema.transitions {
-            let call = if transition.on.bindings.is_empty() {
-                transition.name.clone()
+            let call = if transition.on.bindings().is_empty() {
+                transition.name.as_str().to_owned()
             } else {
                 let binding_types = self.binding_type_map(transition);
                 let binding_env = transition
                     .on
-                    .bindings
+                    .bindings()
                     .iter()
-                    .map(|binding| (binding.clone(), self.local_binding_name(binding)))
+                    .map(|binding| {
+                        (
+                            binding.as_str().to_owned(),
+                            self.local_binding_name(binding.as_str()),
+                        )
+                    })
                     .collect::<BTreeMap<_, _>>();
                 let mut prefix = String::new();
-                for binding in &transition.on.bindings {
-                    let Some(ty) = binding_types.get(binding) else {
+                for binding in transition.on.bindings() {
+                    let Some(ty) = binding_types.get(binding.as_str()) else {
                         return String::new();
                     };
                     let domain = self.binding_domain_for_type(ty);
                     let local = binding_env
-                        .get(binding)
+                        .get(binding.as_str())
                         .cloned()
-                        .unwrap_or_else(|| binding.clone());
+                        .unwrap_or_else(|| binding.as_str().to_owned());
                     prefix.push_str(&format!("\\E {local} \\in {domain} : "));
                 }
                 let args = transition
                     .on
-                    .bindings
+                    .bindings()
                     .iter()
                     .map(|binding| {
                         binding_env
-                            .get(binding)
+                            .get(binding.as_str())
                             .cloned()
-                            .unwrap_or_else(|| binding.clone())
+                            .unwrap_or_else(|| binding.as_str().to_owned())
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -5114,27 +5501,37 @@ impl<'a> MachineTlaCompiler<'a> {
         let params = helper
             .params
             .iter()
-            .map(|field| self.local_binding_name(&field.name))
+            .map(|field| self.local_binding_name(field.name.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
         let binding_env = helper
             .params
             .iter()
-            .map(|field| (field.name.clone(), self.local_binding_name(&field.name)))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| {
+                (
+                    field.name.as_str().to_owned(),
+                    self.local_binding_name(field.name.as_str()),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
         let field_env = self.field_env_override.clone().unwrap_or_else(|| {
             self.schema
                 .state
                 .fields
                 .iter()
-                .map(|field| (field.name.clone(), field.name.clone()))
-                .collect::<BTreeMap<_, _>>()
+                .map(|field| {
+                    (
+                        field.name.as_str().to_owned(),
+                        field.name.as_str().to_owned(),
+                    )
+                })
+                .collect::<BTreeMap<String, _>>()
         });
         let binding_types = helper
             .params
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
         if helper.params.is_empty() {
             writeln!(
                 out,
@@ -5159,19 +5556,24 @@ impl<'a> MachineTlaCompiler<'a> {
         let binding_types = self.binding_type_map(transition);
         let binding_env = transition
             .on
-            .bindings
+            .bindings()
             .iter()
-            .map(|binding| (binding.clone(), self.local_binding_name(binding)))
-            .collect::<BTreeMap<_, _>>();
+            .map(|binding| {
+                (
+                    binding.as_str().to_owned(),
+                    self.local_binding_name(binding.as_str()),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
         let params = transition
             .on
-            .bindings
+            .bindings()
             .iter()
             .map(|binding| {
                 binding_env
-                    .get(binding)
+                    .get(binding.as_str())
                     .cloned()
-                    .unwrap_or_else(|| binding.clone())
+                    .unwrap_or_else(|| binding.as_str().to_owned())
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -5198,8 +5600,13 @@ impl<'a> MachineTlaCompiler<'a> {
             .state
             .fields
             .iter()
-            .map(|field| (field.name.clone(), field.name.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|field| {
+                (
+                    field.name.as_str().to_owned(),
+                    field.name.as_str().to_owned(),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
 
         for guard in &transition.guards {
             writeln!(
@@ -5211,7 +5618,7 @@ impl<'a> MachineTlaCompiler<'a> {
         }
 
         env = self.compile_updates(
-            &transition.name,
+            transition.name.as_str(),
             &env,
             &binding_env,
             &binding_types,
@@ -5226,8 +5633,8 @@ impl<'a> MachineTlaCompiler<'a> {
             .fields
             .iter()
             .filter_map(|field| {
-                let next = env.get(&field.name)?;
-                if next != &field.name {
+                let next = env.get(field.name.as_str())?;
+                if next != field.name.as_str() {
                     Some((field.name.as_str(), next.as_str()))
                 } else {
                     None
@@ -5244,9 +5651,8 @@ impl<'a> MachineTlaCompiler<'a> {
             .state
             .fields
             .iter()
-            .filter(|field| !touched.iter().any(|(name, _)| *name == field.name))
-            .map(|field| &field.name)
-            .cloned()
+            .filter(|field| !touched.iter().any(|(name, _)| *name == field.name.as_str()))
+            .map(|field| field.name.as_str().to_owned())
             .collect::<Vec<_>>();
         if !unchanged.is_empty() {
             pushln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "));
@@ -5266,16 +5672,17 @@ impl<'a> MachineTlaCompiler<'a> {
     fn binding_type_map(&self, transition: &TransitionSchema) -> BTreeMap<String, TypeRef> {
         let mut map = BTreeMap::new();
         if let Some(variant) = transition_trigger_variant(self.schema, transition) {
-            for binding in &transition.on.bindings {
+            for binding in transition.on.bindings() {
                 if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
-                    map.insert(binding.clone(), field.ty.clone());
+                    map.insert(binding.as_str().to_owned(), field.ty.clone());
                 }
             }
         }
         map
     }
 
-    fn local_binding_name(&self, name: &str) -> String {
+    fn local_binding_name(&self, name: impl AsRef<str>) -> String {
+        let name = name.as_ref();
         let candidate = tla_ident(name);
         if candidate == "phase"
             || self
@@ -5283,7 +5690,7 @@ impl<'a> MachineTlaCompiler<'a> {
                 .state
                 .fields
                 .iter()
-                .any(|field| field.name == name)
+                .any(|field| field.name.as_str() == name)
         {
             format!("arg_{candidate}")
         } else {
@@ -5337,87 +5744,144 @@ impl<'a> MachineTlaCompiler<'a> {
         match update {
             Update::Assign { field, expr } => {
                 let value = self.render_expr_with_types(expr, env, binding_env, binding_types);
-                env.insert(field.clone(), value);
+                env.insert(field.as_str().to_owned(), value);
             }
             Update::Increment { field, amount } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                env.insert(field.clone(), format!("({current}) + {amount}"));
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("({current}) + {amount}"));
             }
             Update::Decrement { field, amount } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                env.insert(field.clone(), format!("({current}) - {amount}"));
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("({current}) - {amount}"));
             }
             Update::MapInsert { field, key, value } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
                 env.insert(
-                    field.clone(),
+                    field.as_str().to_owned(),
                     format!("MapSet({current}, {key_expr}, {value_expr})"),
                 );
             }
             Update::MapRemove { field, key } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("MapRemove({current}, {key_expr})"));
-            }
-            Update::MapIncrement { field, key, amount } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
                 env.insert(
-                    field.clone(),
+                    field.as_str().to_owned(),
+                    format!("MapRemove({current}, {key_expr})"),
+                );
+            }
+            Update::MapIncrement { field, key, amount } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
                     format!("MapIncrement({current}, {key_expr}, {amount})"),
                 );
             }
             Update::MapDecrement { field, key, amount } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
                 env.insert(
-                    field.clone(),
+                    field.as_str().to_owned(),
                     format!("MapDecrement({current}, {key_expr}, {amount})"),
                 );
             }
             Update::SetInsert { field, value } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("({current} \\cup {{{value_expr}}})"));
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("({current} \\cup {{{value_expr}}})"),
+                );
             }
             Update::SetRemove { field, value } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("({current} \\ {{{value_expr}}})"));
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("({current} \\ {{{value_expr}}})"),
+                );
             }
             Update::SeqAppend { field, value } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("Append({current}, {value_expr})"));
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("Append({current}, {value_expr})"),
+                );
             }
             Update::SeqPrepend { field, values } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                let value_expr =
-                    self.render_expr_with_types(values, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("({value_expr} \\o {current})"));
-            }
-            Update::SeqPopFront { field } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                env.insert(field.clone(), format!("Tail({current})"));
-            }
-            Update::SeqRemoveValue { field, value } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
-                let value_expr =
-                    self.render_expr_with_types(value, env, binding_env, binding_types);
-                env.insert(field.clone(), format!("SeqRemove({current}, {value_expr})"));
-            }
-            Update::SeqRemoveAll { field, values } => {
-                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(values, env, binding_env, binding_types);
                 env.insert(
-                    field.clone(),
+                    field.as_str().to_owned(),
+                    format!("({value_expr} \\o {current})"),
+                );
+            }
+            Update::SeqPopFront { field } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("Tail({current})"));
+            }
+            Update::SeqRemoveValue { field, value } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("SeqRemove({current}, {value_expr})"),
+                );
+            }
+            Update::SeqRemoveAll { field, values } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(values, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
                     format!("SeqRemoveAll({current}, {value_expr})"),
                 );
             }
@@ -5504,8 +5968,8 @@ impl<'a> MachineTlaCompiler<'a> {
                         .state
                         .fields
                         .iter()
-                        .map(|item| (item.name.clone(), item.name.clone()))
-                        .collect::<BTreeMap<_, _>>();
+                        .map(|item| (item.name.as_str().to_owned(), item.name.as_str().to_owned()))
+                        .collect::<BTreeMap<String, _>>();
                     helper_field_env.insert(field.clone(), "acc".into());
 
                     for outer_binding in &referenced_bindings {
@@ -5761,7 +6225,10 @@ impl<'a> MachineTlaCompiler<'a> {
             ),
             Expr::CurrentPhase => self.phase_symbol.clone().unwrap_or_else(|| "phase".into()),
             Expr::Phase(value) => tla_string(value),
-            Expr::Field(name) => env.get(name).cloned().unwrap_or_else(|| name.clone()),
+            Expr::Field(name) => env
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.as_str().to_owned()),
             Expr::Binding(name) => binding_env
                 .get(name)
                 .cloned()
@@ -5983,7 +6450,7 @@ impl<'a> MachineTlaCompiler<'a> {
             Expr::Bool(_) => Some(TypeRef::Bool),
             Expr::U64(_) => Some(TypeRef::U64),
             Expr::String(_) | Expr::Phase(_) | Expr::Variant(_) => Some(TypeRef::String),
-            Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Named(enum_name.clone())),
+            Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
             Expr::Field(name) => self
                 .schema
                 .state
@@ -6147,7 +6614,7 @@ fn collect_update_fields(updates: &[Update]) -> BTreeSet<String> {
             | Update::SeqPopFront { field }
             | Update::SeqRemoveValue { field, .. }
             | Update::SeqRemoveAll { field, .. } => {
-                fields.insert(field.clone());
+                fields.insert(field.as_str().to_owned());
             }
             Update::Conditional {
                 then_updates,
@@ -6338,7 +6805,7 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
 fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
     match expr {
         Expr::Field(name) => {
-            fields.insert(name.clone());
+            fields.insert(name.as_str().to_owned());
         }
         Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
             for item in items {
@@ -6439,9 +6906,8 @@ fn default_state_init_expr(ty: &TypeRef) -> String {
         TypeRef::Bool => "FALSE".into(),
         TypeRef::U32 | TypeRef::U64 => "0".into(),
         TypeRef::String => tla_string(""),
-        TypeRef::Named(name) | TypeRef::Enum(name) => {
-            tla_string(&format!("{}_default", tla_ident(name).to_lowercase()))
-        }
+        TypeRef::Named(name) => tla_string(format!("{}_default", tla_ident(name).to_lowercase())),
+        TypeRef::Enum(name) => tla_string(format!("{}_default", tla_ident(name).to_lowercase())),
         TypeRef::Option(_) => "None".into(),
         TypeRef::Set(_) => "{}".into(),
         TypeRef::Seq(_) => "<<>>".into(),
@@ -6467,7 +6933,8 @@ fn render_type_ref(ty: &TypeRef) -> String {
         TypeRef::U32 => "u32".into(),
         TypeRef::U64 => "u64".into(),
         TypeRef::String => "String".into(),
-        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
         TypeRef::Option(inner) => format!("Option<{}>", render_type_ref(inner)),
         TypeRef::Set(inner) => format!("Set<{}>", render_type_ref(inner)),
         TypeRef::Seq(inner) => format!("Seq<{}>", render_type_ref(inner)),
@@ -6761,15 +7228,16 @@ fn render_composition_case_fn(
     pushln!(out);
 }
 
-fn tla_ident(value: &str) -> String {
+fn tla_ident(value: impl AsRef<str>) -> String {
     value
+        .as_ref()
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
 }
 
-fn tla_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\\\""))
+fn tla_string(value: impl AsRef<str>) -> String {
+    format!("\"{}\"", value.as_ref().replace('"', "\\\""))
 }
 
 #[cfg(test)]

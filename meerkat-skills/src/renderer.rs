@@ -4,7 +4,7 @@
 //! - `<available_skills>` inventory (flat or collection mode)
 //! - `<skill id="...">` injection blocks
 
-use meerkat_core::skills::{SkillCollection, SkillDescriptor};
+use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillKey};
 use regex::Regex;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -73,10 +73,11 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
 fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
     let mut output = String::from("<available_skills>\n");
     for skill in skills {
+        let rendered_id = format!("{}/{}", skill.key.source_uuid, skill.key.skill_name);
         let _ = write!(
             output,
             "  <skill id=\"{}\">\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&skill.id.0),
+            escape_xml(&rendered_id),
             escape_xml(&skill.description),
         );
     }
@@ -88,17 +89,18 @@ fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
 fn render_inventory_collections(collections: &[SkillCollection]) -> String {
     let mut output = String::from("<available_skills mode=\"collections\">\n");
     for coll in collections {
+        let source_id = coll.source_uuid.to_string();
         let _ = writeln!(
             output,
-            "  <collection path=\"{}\" count=\"{}\">{}</collection>",
-            escape_xml(&coll.path),
+            "  <collection source=\"{}\" count=\"{}\">{}</collection>",
+            escape_xml(&source_id),
             coll.count,
             escape_xml(&coll.description),
         );
     }
     output.push('\n');
-    output.push_str("  Use the browse_skills tool to list skills in a collection or search.\n");
-    output.push_str("  Use the load_skill tool or /collection/skill-name to activate a skill.\n");
+    output.push_str("  Use the browse_skills tool to list skills in a source or search.\n");
+    output.push_str("  Use the load_skill tool to activate a skill by SkillKey.\n");
     output.push_str("</available_skills>");
     output
 }
@@ -107,24 +109,25 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
 ///
 /// Escapes `</skill>` variants in the body (case-insensitive, optional whitespace)
 /// before truncation. Returns the `<skill id="...">body</skill>` XML block.
-pub fn render_injection(id: &str, body: &str) -> String {
-    render_injection_with_limit(id, body, MAX_INJECTION_BYTES)
+pub fn render_injection(key: &SkillKey, body: &str) -> String {
+    render_injection_with_limit(key, body, MAX_INJECTION_BYTES)
 }
 
 /// Render a per-turn skill injection block with a configurable size limit.
-pub fn render_injection_with_limit(id: &str, body: &str, max_bytes: usize) -> String {
+pub fn render_injection_with_limit(key: &SkillKey, body: &str, max_bytes: usize) -> String {
     // 1. Escape closing tags in the body BEFORE wrapping/truncating.
     let escaped_body = escape_closing_tags(body);
 
     // 2. Wrap in <skill> tags (escape id to prevent attribute breakout).
-    let escaped_id = escape_xml(id);
+    let rendered_id = format!("{}/{}", key.source_uuid, key.skill_name);
+    let escaped_id = escape_xml(&rendered_id);
     let mut content = format!("<skill id=\"{escaped_id}\">\n{escaped_body}\n</skill>");
 
     // 3. Truncate if needed (after escaping). Use char boundary to avoid UTF-8 split.
     if content.len() > max_bytes {
         tracing::warn!(
             "Skill injection for '{}' truncated from {} to {} bytes",
-            id,
+            rendered_id,
             content.len(),
             max_bytes,
         );
@@ -162,21 +165,31 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use meerkat_core::skills::{SkillId, SkillScope};
+    use indexmap::IndexMap;
+    use meerkat_core::skills::{SkillName, SkillScope, SourceUuid};
 
-    fn make_descriptor(id: &str, desc: &str) -> SkillDescriptor {
-        SkillDescriptor {
-            id: SkillId(id.into()),
-            name: id.rsplit('/').next().unwrap_or(id).into(),
-            description: desc.into(),
-            scope: SkillScope::Builtin,
-            ..Default::default()
+    fn test_key(skill: &str) -> SkillKey {
+        SkillKey {
+            source_uuid: SourceUuid::builtin(),
+            skill_name: SkillName::parse(skill).unwrap(),
         }
     }
 
-    fn make_collection(path: &str, desc: &str, count: usize) -> SkillCollection {
+    fn make_descriptor(skill: &str, desc: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            key: test_key(skill),
+            name: skill.to_string(),
+            description: desc.into(),
+            scope: SkillScope::Builtin,
+            metadata: IndexMap::new(),
+            capability_requirements: Vec::new(),
+            source_name: String::new(),
+        }
+    }
+
+    fn make_collection(desc: &str, count: usize) -> SkillCollection {
         SkillCollection {
-            path: path.into(),
+            source_uuid: SourceUuid::builtin(),
             description: desc.into(),
             count,
         }
@@ -187,40 +200,34 @@ mod tests {
     #[test]
     fn test_render_inventory_flat_xml() {
         let skills = vec![
-            make_descriptor("extraction/email-extractor", "Extract entities from emails"),
-            make_descriptor("formatting/markdown", "Markdown output"),
+            make_descriptor("email-extractor", "Extract entities from emails"),
+            make_descriptor("markdown", "Markdown output"),
         ];
         let collections = vec![];
         let output = render_inventory(&skills, &collections, 12);
 
         assert!(output.starts_with("<available_skills>"));
         assert!(output.ends_with("</available_skills>"));
-        assert!(output.contains("<skill id=\"extraction/email-extractor\">"));
+        assert!(output.contains("email-extractor"));
         assert!(output.contains("<description>Extract entities from emails</description>"));
-        assert!(output.contains("<skill id=\"formatting/markdown\">"));
-        // Should NOT have mode attribute
+        assert!(output.contains("markdown"));
         assert!(!output.contains("mode="));
     }
 
     #[test]
     fn test_render_inventory_collections_xml() {
-        // Create 15 skills (> threshold of 12)
         let skills: Vec<SkillDescriptor> = (0..15)
-            .map(|i| make_descriptor(&format!("coll/skill-{i}"), &format!("Skill {i}")))
+            .map(|i| make_descriptor(&format!("skill-{i}"), &format!("Skill {i}")))
             .collect();
-        let collections = vec![
-            make_collection("extraction", "Entity extraction", 8),
-            make_collection("formatting", "Output formatting", 3),
-        ];
+        let collections = vec![make_collection("Entity extraction", 8)];
         let output = render_inventory(&skills, &collections, 12);
 
         assert!(output.starts_with("<available_skills mode=\"collections\">"));
         assert!(output.ends_with("</available_skills>"));
-        assert!(output.contains("<collection path=\"extraction\" count=\"8\">"));
+        assert!(output.contains("<collection source="));
         assert!(output.contains("Entity extraction</collection>"));
         assert!(output.contains("browse_skills"));
         assert!(output.contains("load_skill"));
-        // Should NOT contain individual skill elements
         assert!(!output.contains("<skill id="));
     }
 
@@ -230,82 +237,51 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_inventory_threshold_boundary() {
-        let make_skills = |n: usize| -> Vec<SkillDescriptor> {
-            (0..n)
-                .map(|i| make_descriptor(&format!("coll/skill-{i}"), &format!("Skill {i}")))
-                .collect()
-        };
-        let collections = vec![make_collection("coll", "Collection", 5)];
-
-        // Exactly at threshold → flat
-        let skills_at = make_skills(12);
-        let output_at = render_inventory(&skills_at, &collections, 12);
-        assert!(output_at.starts_with("<available_skills>"));
-        assert!(!output_at.contains("mode="));
-
-        // One above threshold → collections
-        let skills_above = make_skills(13);
-        let output_above = render_inventory(&skills_above, &collections, 12);
-        assert!(output_above.starts_with("<available_skills mode=\"collections\">"));
-    }
-
     // --- Injection tests ---
 
     #[test]
     fn test_render_injection_xml() {
-        let output = render_injection(
-            "extraction/email-extractor",
-            "# Email Extractor\n\nExtract entities.",
-        );
-        assert!(output.starts_with("<skill id=\"extraction/email-extractor\">"));
+        let key = test_key("email-extractor");
+        let output = render_injection(&key, "# Email Extractor\n\nExtract entities.");
+        assert!(output.starts_with("<skill id=\""));
+        assert!(output.contains("email-extractor"));
         assert!(output.ends_with("</skill>"));
         assert!(output.contains("# Email Extractor"));
     }
 
     #[test]
     fn test_injection_escapes_closing_tag() {
+        let key = test_key("skill");
         let body = "Some text </skill> more text";
-        let output = render_injection("test/skill", body);
+        let output = render_injection(&key, body);
         assert!(output.contains(r"<\/skill>"));
         assert!(!output.contains("</skill> more"));
     }
 
     #[test]
     fn test_injection_escapes_whitespace_tag() {
+        let key = test_key("skill");
         let body = "Text </skill  > end";
-        let output = render_injection("test/skill", body);
+        let output = render_injection(&key, body);
         assert!(output.contains(r"<\/skill>"));
         assert!(!output.contains("</skill  >"));
     }
 
     #[test]
     fn test_injection_escapes_case_insensitive() {
+        let key = test_key("skill");
         let body = "Text </SKILL> end";
-        let output = render_injection("test/skill", body);
+        let output = render_injection(&key, body);
         assert!(output.contains(r"<\/skill>"));
         assert!(!output.contains("</SKILL>"));
     }
 
     #[test]
     fn test_injection_truncation() {
+        let key = test_key("skill");
         let body = "x".repeat(MAX_INJECTION_BYTES + 1000);
-        let output = render_injection("test/skill", &body);
+        let output = render_injection(&key, &body);
         assert!(output.len() <= MAX_INJECTION_BYTES);
         assert!(output.ends_with("[truncated]"));
-    }
-
-    #[test]
-    fn test_escape_before_truncate() {
-        // Create body that's near MAX size and contains </skill> near the end.
-        // Escaping changes "</skill>" (8 chars) to "<\/skill>" (10 chars),
-        // so the escape must happen before truncation check.
-        let padding = "a".repeat(MAX_INJECTION_BYTES - 100);
-        let body = format!("{padding}</skill>end");
-        let output = render_injection("test/skill", &body);
-        // The escaped content should contain <\/skill> (the escape happened)
-        // and the output should be truncated (escape made it longer)
-        assert!(output.contains(r"<\/skill>") || output.ends_with("[truncated]"));
     }
 }

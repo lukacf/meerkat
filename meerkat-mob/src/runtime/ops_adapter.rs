@@ -1,7 +1,7 @@
 #[cfg(feature = "runtime-adapter")]
 use super::*;
 #[cfg(feature = "runtime-adapter")]
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::TrustedPeerDescriptor;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::ops_lifecycle::{
     OperationId, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
@@ -439,7 +439,7 @@ impl MobOpsAdapter {
         &self,
         member_ref: &MemberRef,
         peer_name: &str,
-        trusted_peer: TrustedPeerSpec,
+        trusted_peer: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
         let member_key = Self::require_member_key(member_ref, "mark peer ready for")?;
         let operation_id = self
@@ -454,7 +454,8 @@ impl MobOpsAdapter {
         match registry.peer_ready(
             &operation_id,
             OperationPeerHandle {
-                peer_name: peer_name.to_string(),
+                peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                    .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
                 trusted_peer,
             },
         ) {
@@ -590,11 +591,10 @@ impl MobOpsAdapter {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::TrustedPeerSpec;
+    use meerkat_core::comms::TrustedPeerDescriptor;
     use meerkat_core::ops_lifecycle::OperationStatus;
 
     #[tokio::test]
-    #[ignore = "Phase 4 shared lifecycle suite"]
     async fn ops_registry_integration_red_ok_member_adapter_tracks_peer_ready_and_retire() {
         let adapter = MobOpsAdapter::new();
         let session_id = SessionId::new();
@@ -612,9 +612,9 @@ mod tests {
             .mark_member_peer_ready(
                 &member_ref,
                 "mob-a/orchestrator/member-alpha",
-                TrustedPeerSpec::new(
+                TrustedPeerDescriptor::test_only_unsigned(
                     "mob-a/orchestrator/member-alpha",
-                    "peer-member-alpha",
+                    "00000000-0000-4000-8000-000000000002",
                     "inproc://member-alpha",
                 )
                 .expect("trusted peer"),

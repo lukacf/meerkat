@@ -8,10 +8,9 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
     let rendered = render_machine_semantic_model(&meerkat_machine());
 
     assert!(rendered.contains("SessionIdValues"));
-    assert!(
-        rendered
-            .contains("PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==")
-    );
+    assert!(rendered.contains(
+        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, arg_session_id) =="
+    ));
     assert!(!rendered.contains("MeerkatIdValues"));
 }
 

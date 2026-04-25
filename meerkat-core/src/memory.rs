@@ -34,7 +34,7 @@ pub trait MemoryStore: Send + Sync {
     /// Index text content with associated metadata.
     async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError>;
 
-    /// Search for memories matching the query.
+    /// Semantic search: return up to `limit` results ordered by relevance.
     async fn search(
         &self,
         query: &str,

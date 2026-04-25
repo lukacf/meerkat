@@ -52,8 +52,18 @@ pub async fn handle_external_event(
             payload,
             blocks,
         } => {
+            let payload_value: serde_json::Value = match serde_json::from_str(payload.get()) {
+                Ok(v) => v,
+                Err(err) => {
+                    return RpcResponse::error(
+                        id,
+                        crate::error::INVALID_PARAMS,
+                        format!("invalid event payload JSON: {err}"),
+                    );
+                }
+            };
             runtime
-                .accept_external_event_via_runtime(&session_id, event_type, payload, blocks)
+                .accept_external_event_via_runtime(&session_id, event_type, payload_value, blocks)
                 .await
         }
         SessionExternalEventEnvelope::PeerResponseTerminal { .. } => {
@@ -131,7 +141,9 @@ mod tests {
         } = params.event
         {
             assert_eq!(event_type, "github");
-            assert_eq!(payload["event"], "email");
+            let payload_value: serde_json::Value =
+                serde_json::from_str(payload.get()).expect("payload parses");
+            assert_eq!(payload_value["event"], "email");
         }
     }
 
@@ -153,7 +165,9 @@ mod tests {
             assert_eq!(peer_name.as_str(), "analyst");
             assert_eq!(request_id, "req-1");
             assert_eq!(status, PeerResponseTerminalStatusWire::Completed);
-            assert_eq!(result["token"], "amber");
+            let result_value: serde_json::Value =
+                serde_json::from_str(result.get()).expect("result parses");
+            assert_eq!(result_value["token"], "amber");
         }
     }
 

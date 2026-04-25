@@ -264,6 +264,9 @@ async fn build_agent(
     let store = Arc::new(NoopStore);
 
     AgentBuilder::new()
+        .with_turn_state_handle(Arc::new(
+            meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
         .with_hook_engine(Arc::new(hooks))
         .build(client, tools, store)
         .await

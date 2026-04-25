@@ -3,6 +3,8 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
+#![allow(dead_code, unused_imports, clippy::expect_used, clippy::large_futures)]
+
 mod runtime_ingress;
 mod schedule_host;
 
@@ -13,7 +15,7 @@ use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
 };
-use meerkat_contracts::SkillsParams;
+use meerkat_contracts::{RealtimeOpenRequest, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -31,6 +33,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
@@ -138,9 +142,10 @@ pub struct MeerkatRunInput {
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt.
+    /// Skills to preload into the system prompt — typed `SkillKey`s
+    /// (source_uuid + skill_name).
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -160,13 +165,16 @@ pub struct MeerkatRunInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Route this session's LLM calls through a realm-scoped provider
-    /// binding. Format: `"<realm_id>:<binding_id>"` referencing a
-    /// `[realm.<realm_id>.binding.<binding_id>]` entry in the active
-    /// Config. When set, the provider runtime registry resolves the
-    /// binding's auth profile and backend profile through the standard
+    /// binding. Typed `WireConnectionRef` referencing a
+    /// `[realm.<realm>.binding.<binding>]` entry in the active Config.
+    /// Pre-wave-c this was `Option<String>` parsed as `"realm:binding"`
+    /// — the string form is now rejected at the deserialization
+    /// boundary (dogma #5: no untyped joins on the ingress seam).
+    /// When set, the provider runtime registry resolves the binding's
+    /// auth profile and backend profile through the standard
     /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<String>,
+    pub connection_ref: Option<meerkat_contracts::WireConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -283,7 +291,7 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
 }
 
 async fn load_config_async(
-    realm_id: &str,
+    realm_id: &meerkat_core::connection::RealmId,
     realms_root: &std::path::Path,
     backend_hint: Option<meerkat_store::RealmBackend>,
     origin_hint: Option<meerkat_store::RealmOrigin>,
@@ -329,11 +337,11 @@ fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Resu
 
 fn tagged_realm_config_store(
     realms_root: &std::path::Path,
-    realm_id: &str,
+    realm_id: &meerkat_core::connection::RealmId,
     backend: meerkat_store::RealmBackend,
     instance_id: Option<&str>,
 ) -> Arc<dyn ConfigStore> {
-    let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
+    let paths = meerkat_store::realm_paths_in(realms_root, realm_id.as_str());
     let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(paths.config_path.clone()));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base,
@@ -354,16 +362,20 @@ fn tagged_realm_config_store(
 }
 
 async fn realm_config_store(
-    realm_id: &str,
+    realm_id: &meerkat_core::connection::RealmId,
     realms_root: &std::path::Path,
     backend_hint: Option<meerkat_store::RealmBackend>,
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
 ) -> Result<Arc<dyn ConfigStore>, String> {
-    let manifest =
-        meerkat_store::ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint)
-            .await
-            .map_err(|e| e.to_string())?;
+    let manifest = meerkat_store::ensure_realm_manifest_in(
+        realms_root,
+        realm_id.as_str(),
+        backend_hint,
+        origin_hint,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(tagged_realm_config_store(
         realms_root,
         realm_id,
@@ -374,10 +386,10 @@ async fn realm_config_store(
 
 fn realm_store_path(
     realms_root: &std::path::Path,
-    realm_id: &str,
+    realm_id: &meerkat_core::connection::RealmId,
     backend: meerkat_store::RealmBackend,
 ) -> PathBuf {
-    let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
+    let paths = meerkat_store::realm_paths_in(realms_root, realm_id.as_str());
     match backend {
         meerkat_store::RealmBackend::Jsonl => paths.sessions_jsonl_dir,
         meerkat_store::RealmBackend::Sqlite => paths.root,
@@ -392,7 +404,7 @@ fn realm_store_path(
 pub struct MeerkatMcpState {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
-    realm_id: String,
+    realm_id: meerkat_core::connection::RealmId,
     backend: String,
     instance_id: Option<String>,
     expose_paths: bool,
@@ -484,7 +496,10 @@ impl MeerkatMcpState {
         default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let locator = bootstrap.realm.resolve_locator()?;
-        let realm_id = locator.realm_id;
+        // Locator now carries the typed `RealmId` directly; no need to
+        // reparse at the mcp-server boundary. Downstream `meerkat_store::*_in`
+        // call sites obtain `&str` via `RealmId::as_str`.
+        let realm_id = locator.realm;
         let realms_root = locator.state_root;
         let backend_hint = bootstrap
             .realm
@@ -500,9 +515,13 @@ impl MeerkatMcpState {
             bootstrap.realm.instance_id.as_deref(),
         )
         .await;
-        let (manifest, persistence) =
-            meerkat::open_realm_persistence_in(&realms_root, &realm_id, backend_hint, origin_hint)
-                .await?;
+        let (manifest, persistence) = meerkat::open_realm_persistence_in(
+            &realms_root,
+            realm_id.as_str(),
+            backend_hint,
+            origin_hint,
+        )
+        .await?;
         let store_path = persistence
             .store_path()
             .map(std::path::Path::to_path_buf)
@@ -511,7 +530,7 @@ impl MeerkatMcpState {
         let session_store = persistence.session_store();
         let blob_store = persistence.blob_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm_id.as_str());
         let conventions_context_root = bootstrap.context.context_root.clone();
         let project_root = conventions_context_root
             .clone()
@@ -528,7 +547,7 @@ impl MeerkatMcpState {
         ));
         let _lease = meerkat_store::start_realm_lease_in(
             &realms_root,
-            &realm_id,
+            realm_id.as_str(),
             bootstrap.realm.instance_id.as_deref(),
             "rkat-mcp",
         )
@@ -621,10 +640,11 @@ impl MeerkatMcpState {
             Ok(locator) => locator,
             Err(_) => meerkat_core::RealmLocator {
                 state_root: meerkat_core::default_state_root(),
-                realm_id: meerkat_core::generate_realm_id(),
+                realm: meerkat_core::connection::RealmId::parse(meerkat_core::generate_realm_id())
+                    .expect("generate_realm_id emits a valid slug by construction"),
             },
         };
-        let realm_id = locator.realm_id;
+        let realm_id = locator.realm.clone();
         let realms_root = locator.state_root;
         let config = load_config_async(
             &realm_id,
@@ -636,7 +656,7 @@ impl MeerkatMcpState {
         .await;
         let store_path =
             realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Sqlite);
-        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm_id.as_str());
         let project_root = realm_paths.root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
@@ -706,7 +726,7 @@ impl MeerkatMcpState {
         state
     }
 
-    pub fn realm_id(&self) -> &str {
+    pub fn realm_id(&self) -> &meerkat_core::connection::RealmId {
         &self.realm_id
     }
 
@@ -738,7 +758,13 @@ impl MeerkatMcpState {
         &self,
         session_id: &meerkat::SessionId,
     ) -> Result<Arc<meerkat_mcp::McpRouterAdapter>, String> {
-        if self.service.read(session_id).await.is_err() {
+        if self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(|error| format!("Failed to load session: {error}"))?
+            .is_none()
+        {
             return Err(format!("Session not found: {session_id}"));
         }
         self.mcp_adapters
@@ -835,9 +861,10 @@ pub struct MeerkatResumeInput {
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt.
+    /// Skills to preload into the system prompt — typed `SkillKey`s
+    /// (source_uuid + skill_name).
     #[serde(default)]
-    pub preload_skills: Option<Vec<String>>,
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -911,8 +938,9 @@ pub struct MeerkatMcpReloadInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatSkillsInput {
     pub action: String,
+    /// Typed skill identity for the `inspect` action.
     #[serde(default)]
-    pub skill_id: Option<String>,
+    pub skill_key: Option<meerkat_core::skills::SkillKey>,
     /// Optional source selector for inspect action.
     #[serde(default)]
     pub source: Option<String>,
@@ -1258,6 +1286,11 @@ fn base_tools_list() -> Vec<Value> {
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
         }),
         json!({
+            "name": "meerkat_realtime_open_info",
+            "description": "Issue realtime websocket bootstrap information through the configured RPC realtime host.",
+            "inputSchema": meerkat_tools::schema_for::<RealtimeOpenRequest>()
+        }),
+        json!({
             "name": "meerkat_event_stream_read",
             "description": "Read the next item from an open session-level event stream.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
@@ -1474,6 +1507,13 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        "meerkat_realtime_open_info" => {
+            let input: RealtimeOpenRequest = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_realtime_open_info(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
         "meerkat_event_stream_read" => {
             let input: MeerkatSessionEventStreamReadInput =
                 serde_json::from_value(arguments.clone()).map_err(|e| {
@@ -1567,7 +1607,13 @@ async fn handle_meerkat_skills(
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
                 .map(|e| meerkat_contracts::SkillEntry {
-                    id: e.descriptor.id.0.clone(),
+                    // Project the typed `SkillKey` to the wire's
+                    // stringified `<source_uuid>/<skill_name>` form.
+                    // `SkillEntry.id` is owned by `meerkat-contracts`;
+                    // retyping it to `SkillKey` is a wire-type change
+                    // that belongs to the contracts cleanup track, not
+                    // mcp-server. This projection preserves wire shape.
+                    id: e.descriptor.key.to_string(),
                     name: e.descriptor.name.clone(),
                     description: e.descriptor.description.clone(),
                     scope: e.descriptor.scope.to_string(),
@@ -1580,19 +1626,24 @@ async fn handle_meerkat_skills(
                 .map_err(|e| format!("serialization failed: {e}"))
         }
         "inspect" => {
-            let skill_id = input
-                .skill_id
-                .as_deref()
-                .ok_or_else(|| "missing 'skill_id' for inspect action".to_string())?;
+            let skill_key = input
+                .skill_key
+                .as_ref()
+                .ok_or_else(|| "missing 'skill_key' for inspect action".to_string())?;
+            // Apply the identity registry remap chain before dispatch
+            // so legacy source_uuids still resolve to the canonical
+            // backing skill (C-4 invariant — registry-backed engines
+            // apply remaps; others identity-project).
+            let canonical = runtime
+                .canonical_skill_key(skill_key)
+                .await
+                .map_err(|e| format!("skill canonicalization failed: {e}"))?;
             let doc = runtime
-                .load_from_source(
-                    &meerkat_core::skills::SkillId::from(skill_id),
-                    input.source.as_deref(),
-                )
+                .load_from_source(&canonical, input.source.as_deref())
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
-                id: doc.descriptor.id.0.clone(),
+                id: doc.descriptor.key.to_string(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
                 scope: doc.descriptor.scope.to_string(),
@@ -1731,28 +1782,29 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCall
 }
 
 fn canonical_skill_keys(
-    config: &Config,
+    _config: &Config,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
-    let registry = config
-        .skills
-        .build_source_identity_registry()
-        .map_err(|e| format!("Invalid skills config: {e}"))?;
+    // Wave-b retypes removed the legacy stringly `skill_references` path:
+    // `SkillsParams` now flattens only typed `skill_refs` into `SkillKey`
+    // via `canonical_skill_keys()` (no registry lookup at wire boundary).
+    // Reject any caller still supplying the legacy string form.
+    if skill_references
+        .as_ref()
+        .is_some_and(|refs| !refs.is_empty())
+    {
+        return Err(
+            "legacy `skill_references` string form is no longer supported; \
+             pass typed `skill_refs` (source_uuid + skill_name) instead"
+                .to_string(),
+        );
+    }
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
-        skill_references,
     };
-    params
-        .canonical_skill_keys_with_registry(&registry)
-        .map_err(|e| format!("Invalid skill refs: {e}"))
-}
-
-fn preload_skill_ids(
-    preload_skills: Option<Vec<String>>,
-) -> Option<Vec<meerkat_core::skills::SkillId>> {
-    preload_skills.map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect())
+    Ok(params.canonical_skill_keys())
 }
 
 async fn handle_meerkat_read(
@@ -1978,6 +2030,65 @@ async fn handle_meerkat_mcp_reload(
         "status": "staged",
         "persisted": false
     })))
+}
+
+async fn handle_meerkat_realtime_open_info(
+    state: &MeerkatMcpState,
+    input: RealtimeOpenRequest,
+) -> Result<Value, String> {
+    #[cfg(not(feature = "mob"))]
+    {
+        let _ = (state, input);
+        Err("realtime/open_info delegation requires the mob-enabled MCP server build".to_string())
+    }
+    #[cfg(feature = "mob")]
+    {
+        let addr = state.mob_state.realtime_rpc_tcp_addr().ok_or_else(|| {
+            "realtime/open_info delegation requires --realtime-rpc-tcp".to_string()
+        })?;
+        let result = rpc_tcp_call(&addr, "realtime/open_info", json!(input)).await?;
+        Ok(wrap_tool_payload(result))
+    }
+}
+
+async fn rpc_tcp_call(addr: &str, method: &str, params: Value) -> Result<Value, String> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|err| format!("failed to connect to RPC host {addr}: {err}"))?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half).lines();
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    write_half
+        .write_all(request.to_string().as_bytes())
+        .await
+        .map_err(|err| format!("failed to write RPC request: {err}"))?;
+    write_half
+        .write_all(b"\n")
+        .await
+        .map_err(|err| format!("failed to terminate RPC request: {err}"))?;
+    write_half
+        .flush()
+        .await
+        .map_err(|err| format!("failed to flush RPC request: {err}"))?;
+    let line = reader
+        .next_line()
+        .await
+        .map_err(|err| format!("failed to read RPC response: {err}"))?
+        .ok_or_else(|| "RPC host closed without a response".to_string())?;
+    let response: Value =
+        serde_json::from_str(&line).map_err(|err| format!("invalid RPC response JSON: {err}"))?;
+    if let Some(error) = response.get("error") {
+        return Err(format!("RPC {method} failed: {error}"));
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| format!("RPC {method} response missing result"))
 }
 
 async fn handle_meerkat_event_stream_open(
@@ -2316,11 +2427,14 @@ async fn handle_meerkat_comms_send(
                 })),
             )
         })?;
-    let peer_name = match &input.command {
-        meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_string()),
+    let peer_name: Option<String> = match &input.command {
         meerkat_core::comms::CommsCommandRequest::Input { .. } => None,
+        meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
+        | meerkat_core::comms::CommsCommandRequest::PeerLifecycle { to, .. }
+        | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
+        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => {
+            Some(to.as_str().to_string())
+        }
     };
     let cmd = input.command.into_command(&session_id).map_err(|err| {
         ToolCallError::new(
@@ -2474,7 +2588,7 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
-    let preload_skills = preload_skill_ids(input.preload_skills.clone());
+    let preload_skills = input.preload_skills.clone();
     let skill_references = canonical_skill_keys(
         &config,
         input.skill_refs.clone(),
@@ -2576,18 +2690,14 @@ async fn handle_meerkat_run(
         schedule_tools: None,
         mob_tool_authority_context: None,
         preload_skills,
-        realm_id: Some(state.realm_id.clone()),
+        realm_id: Some(state.realm_id.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         connection_ref: input
             .connection_ref
-            .as_deref()
-            .and_then(|raw| raw.split_once(':'))
-            .map(|(realm_id, binding_id)| meerkat_core::ConnectionRef {
-                realm_id: realm_id.to_string(),
-                binding_id: binding_id.to_string(),
-            }),
+            .clone()
+            .map(meerkat_core::ConnectionRef::from),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -2706,7 +2816,7 @@ async fn handle_meerkat_resume(
 
     let mut session = state
         .service
-        .load_persisted(&session_id)
+        .load_authoritative_session(&session_id)
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to load session: {e}")))?
         .ok_or_else(|| {
@@ -2796,7 +2906,7 @@ async fn handle_meerkat_resume(
     } else {
         input.prompt
     };
-    let preload_skills = preload_skill_ids(input.preload_skills.clone());
+    let preload_skills = input.preload_skills.clone();
     let skill_references = canonical_skill_keys(
         &config,
         input.skill_refs.clone(),
@@ -2869,7 +2979,7 @@ async fn handle_meerkat_resume(
         realm_id: stored_metadata
             .as_ref()
             .and_then(|m| m.realm_id.clone())
-            .or_else(|| Some(state.realm_id.clone())),
+            .or_else(|| Some(state.realm_id.to_string())),
         instance_id: stored_metadata
             .as_ref()
             .and_then(|m| m.instance_id.clone())
@@ -2954,8 +3064,6 @@ async fn handle_meerkat_resume(
 
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
-            additional_instructions: input.additional_instructions.clone(),
-            execution_kind: None,
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),
@@ -3405,6 +3513,11 @@ mod tests {
         assert_eq!(mcp_reload_tool["name"], "meerkat_mcp_reload");
         let event_stream_open_tool = find_tool("meerkat_event_stream_open");
         assert_eq!(event_stream_open_tool["name"], "meerkat_event_stream_open");
+        let realtime_open_info_tool = find_tool("meerkat_realtime_open_info");
+        assert_eq!(
+            realtime_open_info_tool["name"],
+            "meerkat_realtime_open_info"
+        );
         let event_stream_read_tool = find_tool("meerkat_event_stream_read");
         assert_eq!(event_stream_read_tool["name"], "meerkat_event_stream_read");
         let event_stream_close_tool = find_tool("meerkat_event_stream_close");
@@ -4548,33 +4661,6 @@ mod tests {
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);
         assert_eq!(close_payload["closed"], false);
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_comms_send_input_threads_typed_handling_mode() {
-        use meerkat_core::comms::CommsCommandRequest;
-        use meerkat_core::types::HandlingMode;
-
-        let input: MeerkatCommsSendInput = serde_json::from_value(json!({
-            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "kind": "peer_message",
-            "to": "alice",
-            "body": "hi",
-            "handling_mode": "steer"
-        }))
-        .unwrap();
-        match input.command {
-            CommsCommandRequest::PeerMessage {
-                ref to,
-                handling_mode,
-                ..
-            } => {
-                assert_eq!(to.as_str(), "alice");
-                assert_eq!(handling_mode, Some(HandlingMode::Steer));
-            }
-            other => panic!("expected peer_message, got {other:?}"),
-        }
     }
 
     #[cfg(feature = "comms")]

@@ -35,6 +35,7 @@ impl RuntimeMcpServerLifecycleHandle {
 
 impl McpServerLifecycleHandle for RuntimeMcpServerLifecycleHandle {
     fn apply_connect_pending(&self, server_id: &str) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::McpServerConnectPending {
                 server_id: mm_dsl::McpServerId::from(server_id.to_string()),
@@ -44,6 +45,7 @@ impl McpServerLifecycleHandle for RuntimeMcpServerLifecycleHandle {
     }
 
     fn apply_connected(&self, server_id: &str) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::McpServerConnected {
                 server_id: mm_dsl::McpServerId::from(server_id.to_string()),
@@ -53,6 +55,7 @@ impl McpServerLifecycleHandle for RuntimeMcpServerLifecycleHandle {
     }
 
     fn apply_failed(&self, server_id: &str, error: &str) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::McpServerFailed {
                 server_id: mm_dsl::McpServerId::from(server_id.to_string()),
@@ -63,6 +66,7 @@ impl McpServerLifecycleHandle for RuntimeMcpServerLifecycleHandle {
     }
 
     fn apply_disconnected(&self, server_id: &str) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::McpServerDisconnected {
                 server_id: mm_dsl::McpServerId::from(server_id.to_string()),
@@ -72,6 +76,7 @@ impl McpServerLifecycleHandle for RuntimeMcpServerLifecycleHandle {
     }
 
     fn apply_reload(&self, server_id: &str) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::McpServerReload {
                 server_id: mm_dsl::McpServerId::from(server_id.to_string()),

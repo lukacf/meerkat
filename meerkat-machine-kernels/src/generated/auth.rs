@@ -1,5 +1,5 @@
 mod source {
-    #![allow(clippy::expect_used, clippy::assign_op_pattern)]
+    #![allow(dead_code, clippy::expect_used, clippy::assign_op_pattern)]
     use meerkat_machine_dsl::machine;
 
     // AuthMachine — per-binding auth lease lifecycle (Phase 1.5-rev,

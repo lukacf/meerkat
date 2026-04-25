@@ -1109,7 +1109,14 @@ impl MethodRouter {
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "skills/inspect" => {
-                handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
+                // Post-wave-a dogma: the shell-side skill inspection path was
+                // retired; callers consult canonical skill registry surfaces.
+                let _ = params;
+                RpcResponse::error(
+                    id,
+                    error::METHOD_NOT_FOUND,
+                    "skills/inspect is no longer served; resolve skills through the typed registry surface".to_string(),
+                )
             }
             "capabilities/get" => {
                 let config = self.config_store.get().await.unwrap_or_default();
@@ -1133,7 +1140,14 @@ impl MethodRouter {
                 handlers::auth::handle_auth_profile_delete(id, params, &self.runtime).await
             }
             "auth/profile/test" => {
-                handlers::auth::handle_auth_profile_test(id, params, &self.runtime).await
+                // Post-wave-a dogma: the auth probe seam was retired; use
+                // `auth/profile/get` + `capabilities/get` to verify profile state.
+                let _ = params;
+                RpcResponse::error(
+                    id,
+                    error::METHOD_NOT_FOUND,
+                    "auth/profile/test is no longer served; use auth/profile/get".to_string(),
+                )
             }
             "auth/login/start" => handlers::auth::handle_auth_login_start(id, params).await,
             "auth/login/complete" => {
@@ -1179,6 +1193,114 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
+            "session/status" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: session/status",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_status(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/submit" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: session/submit",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_submit(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/submission" => {
+                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
+                    return Some(response.with_id(id));
+                }
+                handlers::runtime::handle_runtime_submission(
+                    id,
+                    params,
+                    self.runtime_adapter.as_ref(),
+                )
+                .await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/submissions" => {
+                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
+                    return Some(response.with_id(id));
+                }
+                handlers::runtime::handle_runtime_submissions(
+                    id,
+                    params,
+                    self.runtime_adapter.as_ref(),
+                )
+                .await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/retire" => {
+                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
+                    return Some(response.with_id(id));
+                }
+                handlers::runtime::handle_runtime_retire(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "session/reset" => {
+                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
+                    return Some(response.with_id(id));
+                }
+                handlers::runtime::handle_runtime_reset(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            #[cfg(not(feature = "mini-surface"))]
             "realtime/open_info" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -1207,39 +1329,6 @@ impl MethodRouter {
                         self.runtime_adapter.as_ref(),
                         self.realtime_ws_host.as_deref(),
                         self.runtime.realm_id(),
-                        #[cfg(feature = "mob")]
-                        &self.mob_state,
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "realtime/status" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: realtime/status",
-                    )
-                } else {
-                    let maybe_session_id = match self
-                        .resolve_realtime_target_session_id(id.clone(), params)
-                        .await
-                    {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Some(session_id) = maybe_session_id
-                        && let Err(response) =
-                            self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::realtime::handle_realtime_status(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
                         #[cfg(feature = "mob")]
                         &self.mob_state,
                     )
@@ -1281,33 +1370,44 @@ impl MethodRouter {
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
-            "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
-            #[cfg(not(feature = "mini-surface"))]
-            "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
-            #[cfg(not(feature = "mini-surface"))]
-            "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
-            #[cfg(not(feature = "mini-surface"))]
-            "session/status" => {
+            "realtime/status" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/status",
+                        "Method not found: realtime/status",
                     )
                 } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    let maybe_session_id = match self
+                        .resolve_realtime_target_session_id(id.clone(), params)
+                        .await
+                    {
                         Ok(session_id) => session_id,
                         Err(response) => return Some(response),
                     };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    if let Some(session_id) = maybe_session_id
+                        && let Err(response) =
+                            self.ensure_runtime_session_registered(&session_id).await
                     {
                         return Some(response.with_id(id));
                     }
-                    handlers::runtime::handle_status(id, params, self.runtime_adapter.as_ref())
-                        .await
+                    handlers::realtime::handle_realtime_status(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                        #[cfg(feature = "mob")]
+                        &self.mob_state,
+                    )
+                    .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
+            "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "session/realtime_attachment_status" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
@@ -1332,137 +1432,6 @@ impl MethodRouter {
                         self.runtime_adapter.as_ref(),
                     )
                     .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/realtime_attachment_statuses" => {
-                // Batch variant (D2): one round-trip for N mob members.
-                // Per-session failures surface in the entry's `error` field
-                // rather than as an RPC error, so we don't pre-register
-                // sessions here — each entry is resolved independently.
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/realtime_attachment_statuses",
-                    )
-                } else {
-                    handlers::runtime::handle_runtime_realtime_attachment_statuses(
-                        id,
-                        params,
-                        self.runtime_adapter.as_ref(),
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/submit" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/submit",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_submit(id, params, self.runtime_adapter.as_ref())
-                        .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/retire" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/retire",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_retire(id, params, self.runtime_adapter.as_ref())
-                        .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/reset" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/reset",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_reset(id, params, self.runtime_adapter.as_ref()).await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/submission" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/submission",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_submission(id, params, self.runtime_adapter.as_ref())
-                        .await
-                }
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "session/submissions" => {
-                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
-                {
-                    RpcResponse::error(
-                        id,
-                        error::METHOD_NOT_FOUND,
-                        "Method not found: session/submissions",
-                    )
-                } else {
-                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                        Ok(session_id) => session_id,
-                        Err(response) => return Some(response),
-                    };
-                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
-                    {
-                        return Some(response.with_id(id));
-                    }
-                    handlers::runtime::handle_submissions(id, params, self.runtime_adapter.as_ref())
-                        .await
                 }
             }
             _ => RpcResponse::error(
@@ -3313,6 +3282,115 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn mob_member_status_projects_runtime_identity_fields() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-member-status-runtime-identity",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let status_resp = router
+            .dispatch(make_request(
+                "mob/member_status",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": "worker-1"
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = result_value(&status_resp);
+        assert_eq!(status["agent_runtime_id"]["identity"], "worker-1");
+        assert!(
+            status["agent_runtime_id"]["generation"].is_number(),
+            "mob/member_status must include runtime incarnation generation"
+        );
+        assert!(
+            status["fence_token"].is_number(),
+            "mob/member_status must include runtime fence token"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawn_rejects_unknown_fields() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-spawn-unknown-field",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let error = spawn_resp.error.expect("unknown field should be rejected");
+        assert!(
+            error.message.contains("unknown field") && error.message.contains("initial_turn"),
+            "unexpected error for unknown mob/spawn field: {error:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn mob_member_send_host_route_preserves_steer_mode_rejection() {
         let (router, _notif_rx) = test_router().await;
 
@@ -3620,7 +3698,7 @@ mod tests {
     #[tokio::test]
     async fn mob_member_stream_surfaces_run_completed_for_late_terminal_peer_response() {
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerSpec};
+        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerDescriptor};
         use meerkat_core::interaction::InteractionId;
 
         let (router, mut notif_rx) = test_router().await;
@@ -3711,18 +3789,21 @@ mod tests {
             meerkat::CommsRuntime::inproc_only("router-peer-response-sender")
                 .expect("sender comms runtime"),
         );
-        let sender_peer_id = sender.public_key().to_peer_id();
+        let sender_peer_id = sender.public_key().to_peer_id().to_string();
         let sender_addr = sender.advertised_address();
         let operator_peer_id = operator_comms.public_key().expect("worker peer id");
         let operator_addr = operator_comms
             .advertised_address()
             .expect("worker advertised address");
 
+        let operator_pubkey =
+            meerkat_comms::PubKey::from_pubkey_string(&operator_peer_id).expect("operator pubkey");
         CoreCommsRuntime::add_trusted_peer(
             &*sender,
-            TrustedPeerSpec::new(
+            TrustedPeerDescriptor::unsigned_with_pubkey(
                 format!("{mob_id}/worker/worker-1"),
-                operator_peer_id,
+                operator_pubkey.to_peer_id().to_string(),
+                *operator_pubkey.as_bytes(),
                 operator_addr,
             )
             .expect("worker trusted peer spec"),
@@ -3731,8 +3812,13 @@ mod tests {
         .expect("sender trusts worker");
         CoreCommsRuntime::add_trusted_peer(
             operator_comms.as_ref(),
-            TrustedPeerSpec::new("router-peer-response-sender", sender_peer_id, sender_addr)
-                .expect("sender trusted peer spec"),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                "router-peer-response-sender",
+                sender_peer_id,
+                *sender.public_key().as_bytes(),
+                sender_addr,
+            )
+            .expect("sender trusted peer spec"),
         )
         .await
         .expect("worker trusts sender");
@@ -5088,6 +5174,94 @@ mod tests {
         assert_eq!(result["status"]["state"], "opening");
     }
 
+    /// Wave-c C-9c R4 catching assertion: after the reconnect overlay
+    /// projects its progress into DSL state via
+    /// `project_realtime_reconnect_progress`, a `realtime/status` RPC
+    /// response must surface the overlay-tracked `attempt_count` —
+    /// not the pre-R4 hard-coded `0`/`1` default.
+    #[tokio::test]
+    async fn realtime_status_surfaces_real_reconnect_attempt_count_not_hard_coded_default() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime reconnect progress",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        let session_status = router
+            .dispatch(make_request(
+                "session/status",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let status = result_value(&session_status);
+        assert_eq!(status["state"].as_str(), Some("attached"));
+
+        // Drive the session into a reconnecting state. `intent=true`
+        // plus `RequireRealtimeReattach` puts the DSL into
+        // `ReattachRequired`, which `project_realtime_attachment_status`
+        // projects to `RealtimeAttachmentStatus::ReattachRequired`
+        // (surface state = `Reconnecting`).
+        let adapter = router.runtime_adapter();
+        adapter
+            .project_realtime_attachment_intent(&parsed_session_id, true)
+            .await
+            .expect("intent projection should succeed");
+        adapter
+            .require_realtime_attachment_reattach(&parsed_session_id)
+            .await
+            .expect("RequireRealtimeReattach should succeed");
+
+        // Simulate the realtime-WS overlay projecting its 5th-attempt
+        // state into the DSL. Without R4 wiring, the RPC responder
+        // reads `attempt_count = 1`; with R4 wiring, it must read 5.
+        adapter
+            .project_realtime_reconnect_progress(
+                &parsed_session_id,
+                5,
+                Some(1_700_000_000_000),
+                Some(1_700_000_030_000),
+            )
+            .await
+            .expect("reconnect-progress projection should succeed");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/status",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = &result_value(&response)["status"];
+        assert_eq!(status["state"], "reconnecting");
+        assert_eq!(
+            status["attempt_count"], 5,
+            "realtime/status must surface the overlay-projected attempt_count, \
+             not the pre-C-9c `1` hard-coded default — got {status:?}"
+        );
+        assert!(
+            status["next_retry_at"].is_string(),
+            "realtime/status must surface next_retry_at from the overlay projection, \
+             got {status:?}"
+        );
+    }
+
     #[tokio::test]
     async fn realtime_capabilities_returns_conservative_phase_one_metadata() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
@@ -5882,6 +6056,7 @@ mod tests {
                 "prompt": "Say hello",
                 "skill_refs": [
                     {
+                        "kind": "structured",
                         "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
                         "skill_name": "email-extractor"
                     }
@@ -5929,6 +6104,7 @@ mod tests {
                 "session_id": session_id,
                 "prompt": "Follow up",
                 "skill_refs": [{
+                    "kind": "structured",
                     "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
                     "skill_name": "email-extractor"
                 }],
@@ -5956,6 +6132,7 @@ mod tests {
                 "prompt": "Say hello",
                 "skill_refs": [
                     {
+                        "kind": "structured",
                         "source_uuid": "not-a-uuid",
                         "skill_name": "email-extractor"
                     }
@@ -5967,9 +6144,9 @@ mod tests {
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
     }
 
-    /// 8e. Unknown aliases fail deterministically with configured registry.
+    /// 8e. Retired legacy alias ingress is ignored even when a registry exists.
     #[tokio::test]
-    async fn session_create_rejects_unknown_alias_with_registry() {
+    async fn session_create_ignores_legacy_skill_references_with_registry() {
         let (router, _notif_rx) = test_router_with_registry(alias_registry()).await;
         let req = make_request(
             "session/create",
@@ -5980,7 +6157,8 @@ mod tests {
         );
 
         let resp = router.dispatch(req).await.unwrap();
-        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        let result = result_value(&resp);
+        assert!(result["session_id"].as_str().is_some());
     }
 
     /// 9. `turn/interrupt` on an idle session returns ok.
@@ -6132,20 +6310,24 @@ mod tests {
         assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
     }
 
-    /// 12b. `config/patch` refreshes runtime identity registry used by session handlers.
+    /// 12b. `config/patch` does not re-enable retired legacy skill alias ingress.
     #[tokio::test]
-    async fn config_patch_refreshes_identity_registry_for_alias_resolution() {
+    async fn config_patch_keeps_legacy_skill_references_ignored() {
         let (router, _notif_rx) = test_router().await;
 
-        let fail_before = make_request(
+        let ignored_before = make_request(
             "session/create",
             serde_json::json!({
                 "prompt": "hello",
                 "skill_references": ["legacy/email"]
             }),
         );
-        let fail_before_resp = router.dispatch(fail_before).await.unwrap();
-        assert_eq!(error_code(&fail_before_resp), error::INVALID_PARAMS);
+        let ignored_before_resp = router.dispatch(ignored_before).await.unwrap();
+        assert!(
+            result_value(&ignored_before_resp)["session_id"]
+                .as_str()
+                .is_some()
+        );
 
         let set_req = make_request(
             "config/patch",
@@ -6186,15 +6368,15 @@ mod tests {
             set_resp.error
         );
 
-        let success_after = make_request(
+        let ignored_after = make_request(
             "session/create",
             serde_json::json!({
                 "prompt": "hello",
                 "skill_references": ["legacy/email"]
             }),
         );
-        let success_after_resp = router.dispatch(success_after).await.unwrap();
-        let result = result_value(&success_after_resp);
+        let ignored_after_resp = router.dispatch(ignored_after).await.unwrap();
+        let result = result_value(&ignored_after_resp);
         assert!(result["session_id"].as_str().is_some());
     }
 

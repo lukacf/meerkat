@@ -1,3 +1,10 @@
+#![allow(
+    unused_imports,
+    clippy::clone_on_copy,
+    clippy::implicit_clone,
+    clippy::redundant_clone
+)]
+
 mod agent_tools;
 mod public_definition;
 mod public_mcp;
@@ -23,7 +30,7 @@ use meerkat_contracts::{MobDefinitionInput, MobPeerTarget};
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
-use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
+use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
 use meerkat_core::service::{
@@ -966,6 +973,25 @@ impl MobMcpState {
             .map_err(|err| SessionError::Unsupported(err.to_string()))
     }
 
+    /// Wave-c C-9c R4: fully-projected public channel status for MCP
+    /// `meerkat_realtime_status`. Reads DSL state (attachment +
+    /// reconnect-progress) through the runtime adapter.
+    pub async fn realtime_session_realtime_channel_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_contracts::RealtimeChannelStatus, SessionError> {
+        self.realtime_validate_session_target(session_id).await?;
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            SessionError::Unsupported(
+                "runtime adapter unavailable for realtime channel status inspection".to_string(),
+            )
+        })?;
+        adapter
+            .realtime_channel_status(session_id)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))
+    }
+
     pub async fn mob_wait_kickoff(
         &self,
         mob_id: &MobId,
@@ -1486,8 +1512,9 @@ struct LocalCommsRuntime {
 
 impl LocalCommsRuntime {
     fn new(name: &str) -> Self {
+        let _ = name;
         Self {
-            key: format!("ed25519:{name}"),
+            key: meerkat_core::comms::PeerId::new().to_string(),
             trusted: RwLock::new(HashSet::new()),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -1501,8 +1528,18 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Some(self.key.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
-        self.trusted.write().await.insert(peer.peer_id);
+    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        self.trusted
+            .write()
+            .await
+            .insert(peer.peer_id.as_str().to_string());
+        Ok(())
+    }
+
+    async fn add_private_trusted_peer(
+        &self,
+        _peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
         Ok(())
     }
 
@@ -2229,16 +2266,35 @@ impl WireActionArgs {
             match self.peer {
                 MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
                 MobPeerTarget::External(spec) => {
-                    meerkat_mob::PeerTarget::External(TrustedPeerSpec {
-                        name: spec.name,
-                        peer_id: spec.peer_id,
-                        address: spec.address,
+                    let name = meerkat_core::comms::PeerName::new(spec.name.clone())
+                        .map_err(|e| format!("invalid peer name '{}': {e}", spec.name))?;
+                    let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
+                        .map_err(|e| format!("invalid peer_id '{}': {e}", spec.peer_id))?;
+                    let address = parse_wire_peer_address(&spec.address)?;
+                    meerkat_mob::PeerTarget::External(TrustedPeerDescriptor {
+                        name,
+                        peer_id,
+                        address,
+                        pubkey: spec.pubkey,
                     })
                 }
             },
             self.action,
         ))
     }
+}
+
+fn parse_wire_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+    let (scheme, endpoint) = raw
+        .split_once("://")
+        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
+    let transport = match scheme {
+        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
+        "uds" => meerkat_core::comms::PeerTransport::Uds,
+        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
+        other => return Err(format!("unknown peer address transport: {other}")),
+    };
+    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 #[derive(Deserialize)]
 struct RunFlowArgs {
@@ -2484,8 +2540,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         json!({
                             "ok": true,
                             "agent_identity": spawn_result.agent_identity,
-                            "agent_runtime_id": spawn_result.agent_runtime_id,
-                            "fence_token": spawn_result.fence_token,
                         }),
                     )
                 } else {
@@ -2502,8 +2556,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     Ok(spawn_result) => json!({
                                         "ok": true,
                                         "agent_identity": spawn_result.agent_identity,
-                                        "agent_runtime_id": spawn_result.agent_runtime_id,
-                                        "fence_token": spawn_result.fence_token,
                                     }),
                                     Err(error) => json!({
                                         "ok": false,
@@ -2864,8 +2916,9 @@ mod tests {
 
     impl MockComms {
         fn new(name: &str) -> Self {
+            let _ = name;
             Self {
-                key: format!("ed25519:{name}"),
+                key: meerkat_core::comms::PeerId::new().to_string(),
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(Notify::new()),
             }
@@ -2880,9 +2933,19 @@ mod tests {
 
         async fn add_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerSpec,
+            peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            self.trusted.write().await.insert(peer.peer_id);
+            self.trusted
+                .write()
+                .await
+                .insert(peer.peer_id.as_str().to_string());
+            Ok(())
+        }
+
+        async fn add_private_trusted_peer(
+            &self,
+            _peer: meerkat_core::comms::TrustedPeerDescriptor,
+        ) -> Result<(), SendError> {
             Ok(())
         }
 
@@ -3292,8 +3355,6 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    additional_instructions: None,
-                    execution_kind: None,
                 },
             )
             .await
@@ -3478,8 +3539,6 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    additional_instructions: None,
-                    execution_kind: None,
                 },
             )
             .await;
@@ -3579,6 +3638,7 @@ mod tests {
         let mut spoofed = Session::new();
         let spoofed_id = spoofed.id().clone();
         let _ = spoofed.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -3615,6 +3675,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -3656,6 +3717,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             structured_output_retries: 2,
@@ -4919,8 +4981,6 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
-                additional_instructions: None,
-                execution_kind: None,
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
             vec![],

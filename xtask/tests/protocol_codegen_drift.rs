@@ -59,21 +59,13 @@ fn normalize(s: &str) -> String {
 fn every_declared_protocol_file_matches_codegen_output() {
     use meerkat_machine_schema::{
         MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
-        compat_composition_schemas, external_tool_surface_bridge_machine, flow_frame_machine,
-        flow_run_machine, loop_iteration_machine, ops_barrier_bridge_machine,
+        compat_composition_schemas,
     };
 
     let root = repo_root();
     let mut compositions = canonical_composition_schemas();
     compositions.extend(compat_composition_schemas());
-    let mut machines = canonical_machine_schemas();
-    machines.extend([
-        flow_frame_machine(),
-        flow_run_machine(),
-        loop_iteration_machine(),
-        ops_barrier_bridge_machine(),
-        external_tool_surface_bridge_machine(),
-    ]);
+    let machines = canonical_machine_schemas();
     let machine_by_name: std::collections::BTreeMap<&str, &MachineSchema> =
         machines.iter().map(|m| (m.machine.as_str(), m)).collect();
 
@@ -135,7 +127,7 @@ fn terminal_surface_mapping_matches_codegen_output() {
     let machines: Vec<MachineSchema> = canonical_machine_schemas();
     let meerkat_machine = machines
         .iter()
-        .find(|m| m.machine == "MeerkatMachine")
+        .find(|m| m.machine.as_str() == "MeerkatMachine")
         .expect("MeerkatMachine must be a canonical schema");
 
     let rendered = xtask::protocol_codegen::render_terminal_surface_mapping(meerkat_machine)
@@ -150,5 +142,56 @@ fn terminal_surface_mapping_matches_codegen_output() {
         normalize(&committed),
         normalize(&rendered),
         "terminal_surface_mapping.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
+    );
+}
+
+/// Compile canary for generated protocol helper ownership: every helper
+/// emitted by protocol-codegen must land in an owning crate's checked
+/// `src/generated/` module tree, not in an ad-hoc bridge path outside a
+/// package. This does not invoke cargo; it verifies the ownership boundary
+/// that cargo will later compile.
+#[test]
+fn every_protocol_helper_lands_under_an_owning_crate_generated_module() {
+    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+
+    let root = repo_root();
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+
+    let mut checked = 0;
+    for composition in &compositions {
+        for protocol in &composition.handoff_protocols {
+            let module_path = std::path::Path::new(&protocol.rust.module_path);
+            let components: Vec<_> = module_path
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect();
+
+            assert!(
+                components.len() >= 4
+                    && components[1] == "src"
+                    && components[2] == "generated"
+                    && components
+                        .last()
+                        .is_some_and(|file| file.starts_with("protocol_") && file.ends_with(".rs")),
+                "protocol `{}` helper path `{}` must be <owning-crate>/src/generated/protocol_*.rs",
+                protocol.name,
+                protocol.rust.module_path
+            );
+
+            let crate_manifest = root.join(&components[0]).join("Cargo.toml");
+            assert!(
+                crate_manifest.exists(),
+                "protocol `{}` helper path `{}` must belong to a crate with Cargo.toml",
+                protocol.name,
+                protocol.rust.module_path
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no protocols declared in canonical + compat catalogs — test is vacuous"
     );
 }

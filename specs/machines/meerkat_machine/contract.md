@@ -18,6 +18,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_binding_authority_epoch`: `Option<u64>`
 - `realtime_reattach_required`: `Bool`
 - `realtime_next_authority_epoch`: `u64`
+- `realtime_reconnect_attempt_count`: `u64`
+- `realtime_reconnect_next_retry_at_ms`: `Option<u64>`
+- `realtime_reconnect_deadline_at_ms`: `Option<u64>`
 - `live_topology_phase`: `LiveTopologyPhase`
 - `mcp_server_states`: `Map<McpServerId, McpServerState>`
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
@@ -47,7 +50,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
-- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
 - `InterruptCurrentRun`
@@ -56,10 +59,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
-- `Retire`
+- `Retire`(session_id: SessionId)
 - `Reset`
 - `StopRuntimeExecutor`
-- `Destroy`
+- `Destroy`(session_id: SessionId)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -88,6 +91,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DetachRealtimeBinding`
 - `RequireRealtimeReattach`
 - `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: RealtimeBindingState)
+- `ProjectRealtimeReconnectProgress`(attempt_count: u64, next_retry_at_ms: Option<u64>, deadline_at_ms: Option<u64>)
+- `ClearRealtimeReconnectProgress`
 - `OpsBarrierSatisfied`(operation_ids: Set<OperationId>)
 - `McpServerConnectPending`(server_id: McpServerId)
 - `McpServerConnected`(server_id: McpServerId)
@@ -130,11 +135,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BindSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
 - `RevokeSupervisor`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgePublished`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgePublishFailed`(peer_id: String, epoch: u64, reason: String)
+- `SupervisorTrustEdgeRevoked`(peer_id: String, epoch: u64)
+- `SupervisorTrustEdgeRevokeFailed`(peer_id: String, epoch: u64, reason: String)
 - `PublishLocalEndpoint`(endpoint: PeerEndpoint)
 - `ClearLocalEndpoint`
 - `AddDirectPeerEndpoint`(endpoint: PeerEndpoint)
 - `RemoveDirectPeerEndpoint`(endpoint: PeerEndpoint)
 - `ApplyMobPeerOverlay`(epoch: u64, endpoints: Set<PeerEndpoint>)
+- `PendingSucceeded`(surface_id: SurfaceId, pending_task_sequence: u64, staged_intent_sequence: u64)
+- `PendingFailed`(surface_id: SurfaceId, pending_task_sequence: u64, reason: String)
+- `SnapshotAligned`(snapshot_epoch: u64)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -161,14 +173,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StageAdd`
 - `StageRemove`
 - `StageReload`
-- `ApplySurfaceBoundary`
-- `PendingSucceeded`
-- `PendingFailed`
+- `ApplySurfaceBoundary`(surface_id: SurfaceId, operation: SurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: TurnNumber)
 - `CallStarted`
 - `CallFinished`
 - `FinalizeRemovalClean`
 - `FinalizeRemovalForced`
-- `SnapshotAligned`
 - `ShutdownSurface`
 
 ## Effects
@@ -186,7 +195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
-- `PostAdmissionSignal`(signal: String)
+- `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
 - `CompletionResolved`
@@ -202,17 +211,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetainTerminalRecord`
 - `EvictCompletedRecord`
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
-- `WaitAllSatisfied`
+- `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Set<OperationId>)
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
 - `SpawnDrainTask`
-- `ScheduleSurfaceCompletion`
-- `RefreshVisibleSurfaceSet`
+- `ScheduleSurfaceCompletion`(surface_id: SurfaceId, operation: SurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: TurnNumber)
+- `RefreshVisibleSurfaceSet`(snapshot_epoch: u64)
 - `EmitExternalToolDelta`
 - `CloseSurfaceConnection`
 - `RejectSurfaceCall`
 - `RealtimeIntentProjected`(present: Bool)
 - `RealtimeBindingRotated`(authority_epoch: u64)
+- `RealtimeReconnectProgressProjected`(attempt_count: u64, next_retry_at_ms: Option<u64>, deadline_at_ms: Option<u64>)
 - `McpServerStateChanged`(server_id: McpServerId, new_state: McpServerState)
 - `McpServerReloadRequested`(server_id: McpServerId)
 - `PeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: OutboundPeerRequestState)
@@ -228,6 +238,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `PeerProjectionChanged`(peer_projection_epoch: u64)
 - `CommsTrustReconcileRequested`(peer_projection_epoch: u64)
+- `PublishSupervisorTrustEdge`(peer_id: PeerId, name: String, address: String, signing_public_key: Option<String>, epoch: u64)
+- `RevokeSupervisorTrustEdge`(peer_id: PeerId, epoch: u64)
 
 ## Invariants
 - `fence_requires_bound_runtime`
@@ -391,37 +403,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsInitializing`
 - From: `Initializing`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Initializing`
 
 ### `PrepareBindingsIdle`
 - From: `Idle`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Attached`
 
 ### `PrepareBindingsAttached`
 - From: `Attached`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Attached`
 
 ### `PrepareBindingsRunning`
 - From: `Running`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Running`
 
 ### `PrepareBindingsRetired`
 - From: `Retired`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Retired`
 
 ### `PrepareBindingsStopped`
 - From: `Stopped`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
 - Emits: `RuntimeBound`
 - To: `Stopped`
 
@@ -587,7 +599,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RetireRequestedFromIdle`
 - From: `Idle`, `Attached`, `Running`
-- On: `Retire`()
+- On: `Retire`(session_id)
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
@@ -617,7 +629,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `Destroy`
 - From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
-- On: `Destroy`()
+- On: `Destroy`(session_id)
 - Guards:
   - `runtime_is_bound`
 - Emits: `RuntimeDestroyed`
@@ -1143,7 +1155,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplySurfaceBoundaryAttached`
 - From: `Attached`
-- On: `ApplySurfaceBoundary`()
+- On: `ApplySurfaceBoundary`(surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn)
 - Guards:
   - `session_registered`
 - Emits: `ScheduleSurfaceCompletion`
@@ -1151,7 +1163,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplySurfaceBoundaryRunning`
 - From: `Running`
-- On: `ApplySurfaceBoundary`()
+- On: `ApplySurfaceBoundary`(surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn)
 - Guards:
   - `session_registered`
 - Emits: `ScheduleSurfaceCompletion`
@@ -1159,7 +1171,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PendingSucceededAttached`
 - From: `Attached`
-- On: `PendingSucceeded`()
+- On: `PendingSucceeded`(surface_id, pending_task_sequence, staged_intent_sequence)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1167,7 +1179,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PendingSucceededRunning`
 - From: `Running`
-- On: `PendingSucceeded`()
+- On: `PendingSucceeded`(surface_id, pending_task_sequence, staged_intent_sequence)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1175,7 +1187,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PendingFailedAttached`
 - From: `Attached`
-- On: `PendingFailed`()
+- On: `PendingFailed`(surface_id, pending_task_sequence, reason)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1183,7 +1195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PendingFailedRunning`
 - From: `Running`
-- On: `PendingFailed`()
+- On: `PendingFailed`(surface_id, pending_task_sequence, reason)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1251,7 +1263,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SnapshotAlignedAttached`
 - From: `Attached`
-- On: `SnapshotAligned`()
+- On: `SnapshotAligned`(snapshot_epoch)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1259,7 +1271,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SnapshotAlignedRunning`
 - From: `Running`
-- On: `SnapshotAligned`()
+- On: `SnapshotAligned`(snapshot_epoch)
 - Guards:
   - `session_registered`
 - Emits: `EmitExternalToolDelta`
@@ -1540,6 +1552,86 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `authority_matches_current`
   - `no_topology_reconfigure_in_progress`
   - `valid_next_state`
+- To: `Stopped`
+
+### `ProjectRealtimeReconnectProgressIdle`
+- From: `Idle`
+- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Idle`
+
+### `ProjectRealtimeReconnectProgressAttached`
+- From: `Attached`
+- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Attached`
+
+### `ProjectRealtimeReconnectProgressRunning`
+- From: `Running`
+- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Running`
+
+### `ProjectRealtimeReconnectProgressRetired`
+- From: `Retired`
+- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Retired`
+
+### `ProjectRealtimeReconnectProgressStopped`
+- From: `Stopped`
+- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Stopped`
+
+### `ClearRealtimeReconnectProgressIdle`
+- From: `Idle`
+- On: `ClearRealtimeReconnectProgress`()
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Idle`
+
+### `ClearRealtimeReconnectProgressAttached`
+- From: `Attached`
+- On: `ClearRealtimeReconnectProgress`()
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Attached`
+
+### `ClearRealtimeReconnectProgressRunning`
+- From: `Running`
+- On: `ClearRealtimeReconnectProgress`()
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Running`
+
+### `ClearRealtimeReconnectProgressRetired`
+- From: `Retired`
+- On: `ClearRealtimeReconnectProgress`()
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Retired`
+
+### `ClearRealtimeReconnectProgressStopped`
+- From: `Stopped`
+- On: `ClearRealtimeReconnectProgress`()
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeReconnectProgressProjected`
 - To: `Stopped`
 
 ### `McpServerConnectPendingIdle`
@@ -3569,6 +3661,186 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RevokeSupervisorStopped`
 - From: `Stopped`
 - On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgePublishedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgePublishedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgePublishedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgePublishedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgePublishedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgePublishFailedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgePublishFailedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgePublishFailedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgePublishFailedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgePublishFailedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgeRevokedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgeRevokedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgeRevokedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgeRevokedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgeRevokedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Stopped`
+
+### `SupervisorTrustEdgeRevokeFailedIdle`
+- From: `Idle`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Idle`
+
+### `SupervisorTrustEdgeRevokeFailedAttached`
+- From: `Attached`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Attached`
+
+### `SupervisorTrustEdgeRevokeFailedRunning`
+- From: `Running`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Running`
+
+### `SupervisorTrustEdgeRevokeFailedRetired`
+- From: `Retired`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- To: `Retired`
+
+### `SupervisorTrustEdgeRevokeFailedStopped`
+- From: `Stopped`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
   - `supervisor_bound`
   - `peer_id_matches_current`

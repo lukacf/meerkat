@@ -110,11 +110,23 @@ impl HandleDslAuthority {
     }
 
     /// Apply a DSL input under the shared authority's mutex.
+    ///
+    /// This is the shared authority entrypoint used by every intra-machine
+    /// handle in `meerkat-runtime/src/handles/*`. Handles target the
+    /// meerkat DSL directly — there is no route to resolve, so a
+    /// `CompositionDispatcher` (the cross-machine seam closed by
+    /// wave-c C-6c) is not applicable here. Routed inputs delivered by
+    /// the `meerkat_mob_seam` dispatcher enter through
+    /// [`crate::meerkat_machine::composition::MeerkatConsumerSurface::apply_routed_input`],
+    /// not through this method.
     pub fn apply_input(
         &self,
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable
+        // (shared authority entrypoint; routed-effect delivery goes through
+        // `MeerkatConsumerSurface`, not through this `apply_input`).
         self.apply_input_with_effects(input, context).map(|_| ())
     }
 

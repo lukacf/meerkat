@@ -26,9 +26,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordPlanningWindowActive`
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_pause_resume_delete`
-- `RecordPlanningWindowPaused`
-  - anchors: `schedule_lifecycle`
-  - scenarios: `schedule_pause_resume_delete`
 - `PauseActiveOrPaused`
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_pause_resume_delete`
@@ -39,6 +36,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_pause_resume_delete`
 - `DeletePaused`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_pause_resume_delete`
+- `DeleteDeleted`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_pause_resume_delete`
+- `ConfirmOccurrencesSupersededActive`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_pause_resume_delete`
+- `ConfirmOccurrencesSupersededPaused`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_pause_resume_delete`
+- `ConfirmOccurrencesSupersededDeleted`
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_pause_resume_delete`
 

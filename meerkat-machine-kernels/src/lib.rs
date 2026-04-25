@@ -32,6 +32,7 @@ pub(crate) mod ids {
 
     string_id!(AgentIdentity);
     string_id!(AgentRuntimeId);
+    string_id!(MobId);
     string_id!(SessionId);
     string_id!(WorkRef);
     string_id!(RunId);

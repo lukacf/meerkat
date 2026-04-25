@@ -77,16 +77,16 @@ pub(crate) fn parse_session_id_for_runtime(
             ));
         }
     };
-    if let Some(realm) = locator.realm_id.as_deref()
-        && runtime.realm_id() != Some(realm)
+    if let Some(locator_realm) = locator.realm_id.as_ref()
+        && runtime.realm_id() != Some(locator_realm)
     {
         return Err(RpcResponse::error(
             id,
             error::INVALID_PARAMS,
             format!(
                 "Session locator realm '{}' does not match active runtime realm '{}'",
-                realm,
-                runtime.realm_id().unwrap_or("<none>")
+                locator_realm.as_str(),
+                runtime.realm_id().map(|r| r.as_str()).unwrap_or("<none>")
             ),
         ));
     }

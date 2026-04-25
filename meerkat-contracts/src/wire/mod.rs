@@ -9,7 +9,7 @@ mod models;
 mod params;
 mod realtime;
 mod result;
-mod runtime;
+pub mod runtime;
 mod schedule;
 mod session;
 pub mod skills;
@@ -22,8 +22,10 @@ pub use comms::{
     PeerName as WireCommsPeerName, ResponseStatus as WireCommsResponseStatus,
 };
 pub use connection::{
-    WireAuthError, WireAuthProfile, WireAuthStatus, WireBackendProfile, WireConnectionRef,
-    WireProviderBinding, WireRealmConnectionSet,
+    WireAuthError, WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated,
+    WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus, WireAuthStatusDetail,
+    WireBackendProfile, WireBindingIdentity, WireConnectionRef, WireDeviceStart, WireLoginReady,
+    WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 
 pub use event::WireEvent;
@@ -57,7 +59,7 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    AudioFormatMismatchContext, RealtimeAudioChunk, RealtimeAudioFormat,
+    AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioChunk, RealtimeAudioFormat,
     RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeCapabilitiesParams,
     RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelConfig,
     RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,
@@ -71,15 +73,21 @@ pub use realtime::{
 };
 pub use result::WireRunResult;
 pub use runtime::{
-    InputListParams, InputListResult, InputStateParams, InputStateResult,
-    PeerResponseTerminalStatusWire, RuntimeAcceptOutcomeType, RuntimeAcceptParams,
-    RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusEntry,
-    RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
-    RuntimeRealtimeAttachmentStatusesParams, RuntimeRealtimeAttachmentStatusesResult,
-    RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams, RuntimeRetireResult,
-    RuntimeStateParams, RuntimeStateResult, SessionExternalEventEnvelope,
-    SessionPeerResponseTerminalParams, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
+    PeerResponseTerminalStatusWire,
+    RuntimeAcceptOutcomeType,
+    RuntimeAcceptResult,
+    RuntimeRealtimeAttachmentStatusParams,
+    RuntimeRealtimeAttachmentStatusResult,
+    SessionExternalEventEnvelope,
+    SessionPeerResponseTerminalParams,
+    // Re-export of the `StructuredProviderExtension` core relocation
+    // from C-1 — external callers can still import via the wire path.
+    StructuredProviderExtension,
+    WireInputLifecycleState,
+    WireInputState,
+    WireInputStateHistoryEntry,
+    WireRealtimeAttachmentStatus,
+    WireRuntimeState,
 };
 pub use schedule::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,

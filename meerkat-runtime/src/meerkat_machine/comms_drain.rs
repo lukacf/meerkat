@@ -392,33 +392,32 @@ impl MeerkatMachine {
             None => return false,
         };
 
-        let sessions = self.sessions.read().await;
-        if !sessions.contains_key(session_id) {
-            tracing::warn!(
-                %session_id,
-                "refusing to spawn comms drain for unregistered session"
-            );
-            return false;
-        }
-        // Keep the session read guard while mutating drain slots so unregister
-        // cannot race between registration check and slot publication.
-        let mut slots = self.comms_drain_slots.write().await;
-        let slot = slots
-            .entry(session_id.clone())
-            .or_insert_with(CommsDrainSlot::new);
-
-        let needs_rebind = slot.begin_rebind(mode, comms.clone());
-        let needs_spawn = if needs_rebind {
-            false
-        } else {
-            slot.begin_running(mode, comms.clone())
+        // Wave-c C-H2: drain slot now lives on `RuntimeSessionEntry`, so
+        // one `sessions.write()` lock suffices for the "session exists +
+        // start the slot" gate. No separate drain-slots map to keep in
+        // sync with `sessions`.
+        let (needs_rebind, needs_spawn) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                tracing::warn!(
+                    %session_id,
+                    "refusing to spawn comms drain for unregistered session"
+                );
+                return false;
+            };
+            let slot = &mut entry.drain_slot;
+            let needs_rebind = slot.begin_rebind(mode, comms.clone());
+            let needs_spawn = if needs_rebind {
+                false
+            } else {
+                slot.begin_running(mode, comms.clone())
+            };
+            (needs_rebind, needs_spawn)
         };
 
         if !needs_rebind && !needs_spawn {
             return false;
         }
-        drop(slots);
-        drop(sessions);
 
         if needs_spawn {
             // Stage DSL SpawnDrain only when the machine is transitioning from
@@ -444,11 +443,8 @@ impl MeerkatMachine {
                         error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
                         "DSL rejected SpawnDrain; skipping drain spawn"
                     );
-                    let mut slots = self.comms_drain_slots.write().await;
-                    if let Some(slot) = slots.get_mut(session_id) {
-                        slot.phase = CommsDrainPhase::Stopped;
-                        slot.bound_runtime = None;
-                    }
+                    entry.drain_slot.phase = CommsDrainPhase::Stopped;
+                    entry.drain_slot.bound_runtime = None;
                     return false;
                 }
             } else {
@@ -456,11 +452,6 @@ impl MeerkatMachine {
                     %session_id,
                     "refusing to spawn comms drain for unregistered session"
                 );
-                let mut slots = self.comms_drain_slots.write().await;
-                if let Some(slot) = slots.get_mut(session_id) {
-                    slot.phase = CommsDrainPhase::Stopped;
-                    slot.bound_runtime = None;
-                }
                 return false;
             }
         } else if needs_rebind {
@@ -480,12 +471,11 @@ impl MeerkatMachine {
             comms.clone(),
             idle_timeout,
         );
-        let mut slots = self.comms_drain_slots.write().await;
-        let slot = slots
-            .entry(session_id.clone())
-            .or_insert_with(CommsDrainSlot::new);
-        slot.handle = Some(handle);
-        slot.mark_task_spawned();
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.drain_slot.handle = Some(handle);
+            entry.drain_slot.mark_task_spawned();
+        }
 
         true
     }
@@ -520,9 +510,10 @@ impl MeerkatMachine {
         // Determine whether this is a clean exit or a respawnable exit
         // based on the slot's current mode and the exit reason.
         let is_respawnable = {
-            let slots = self.comms_drain_slots.read().await;
-            slots.get(session_id).is_some_and(|s| {
-                s.mode == Some(CommsDrainMode::PersistentHost) && reason == DrainExitReason::Failed
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).is_some_and(|entry| {
+                entry.drain_slot.mode == Some(CommsDrainMode::PersistentHost)
+                    && reason == DrainExitReason::Failed
             })
         };
         {
@@ -538,19 +529,30 @@ impl MeerkatMachine {
             };
             let mut sessions = self.sessions.write().await;
             if let Some(entry) = sessions.get_mut(session_id) {
-                let mut authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *authority,
-                    dsl_input,
-                ) {
-                    tracing::warn!(
-                        %session_id,
-                        error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                        "DSL rejected drain exit notification; proceeding with slot cleanup"
-                    );
+                let dsl_accepted = {
+                    let mut authority = entry
+                        .dsl_authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                        &mut *authority,
+                        dsl_input,
+                    )
+                    .is_ok()
+                };
+                let _ = context;
+                // Shell-side drain slot cleanup: project the accepted DSL
+                // transition into the shell's mechanical slot state (clear
+                // the finished JoinHandle, set `slot.phase` to match the
+                // DSL's `Stopped` or `ExitedRespawnable`). Gated on DSL
+                // acceptance per the bdd460951 dogma ("no shell mutation
+                // after DSL rejection"). Pre-bdd460951 this call was
+                // unconditional; the over-delete stripped it entirely
+                // and shell readers like `current_phase` / spine_snapshot
+                // stopped observing drain exits.
+                if dsl_accepted {
+                    entry.drain_slot.handle.take();
+                    entry.drain_slot.mark_task_exited(reason);
                 }
             }
         }
@@ -561,12 +563,6 @@ impl MeerkatMachine {
                 respawnable = is_respawnable,
                 "comms drain exited"
             );
-        }
-
-        let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id) {
-            slot.handle.take(); // clean up finished handle
-            slot.mark_task_exited(reason);
         }
     }
 
@@ -749,6 +745,138 @@ impl MeerkatMachine {
         .map_err(SupervisorBindingStageError::Dsl)?;
         Ok(())
     }
+
+    /// Stage a DSL `SupervisorTrustEdgePublished` feedback input (C-F2 /
+    /// wave-d D-d).
+    ///
+    /// Invoked by `try_handle_supervisor_bridge_command` after a
+    /// successful `Router::add_trusted_peer` call. The `epoch` passed
+    /// through is the one observed on the originating
+    /// `PublishSupervisorTrustEdge` effect (i.e. the epoch of the
+    /// `BindSupervisor` / `AuthorizeSupervisor` commit that triggered
+    /// the publication). The DSL guard rejects the ack if the binding
+    /// has since rotated forward — a stale ack cannot close the
+    /// outstanding obligation for the newer epoch.
+    pub async fn stage_supervisor_trust_published(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublished {
+                peer_id,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgePublishFailed` feedback input
+    /// (C-F2 / wave-d D-d).
+    ///
+    /// Invoked when `Router::add_trusted_peer` returns an error. The
+    /// `epoch` comes from the originating producer effect; the DSL
+    /// guard rejects a stale-epoch ack arriving after the binding has
+    /// rotated forward.
+    pub async fn stage_supervisor_trust_publish_failed(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+        reason: String,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublishFailed {
+                peer_id,
+                epoch,
+                reason,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgeRevoked` feedback input (C-F2 /
+    /// wave-d D-d).
+    ///
+    /// Invoked after a successful `Router::remove_trusted_peer` call.
+    /// Epoch guard semantics mirror `stage_supervisor_trust_published`.
+    pub async fn stage_supervisor_trust_revoked(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevoked {
+                peer_id,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
+    /// Stage a DSL `SupervisorTrustEdgeRevokeFailed` feedback input
+    /// (C-F2 / wave-d D-d).
+    ///
+    /// Invoked when `Router::remove_trusted_peer` returns an error.
+    /// Epoch guard semantics mirror `stage_supervisor_trust_published`.
+    pub async fn stage_supervisor_trust_revoke_failed(
+        &self,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+        reason: String,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevokeFailed {
+                peer_id,
+                epoch,
+                reason,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
 }
 
 /// Errors raised when staging a supervisor-binding input against the DSL
@@ -774,3 +902,207 @@ impl std::fmt::Display for SupervisorBindingStageError {
 }
 
 impl std::error::Error for SupervisorBindingStageError {}
+
+impl MeerkatMachine {
+    /// D-track-b: stage an `AddDirectPeerEndpoint` DSL input and drive
+    /// the session-scoped trust reconciler.
+    ///
+    /// Closes the emitter→consumer gap documented in
+    /// `docs/wave-d-prep/track-b-producer-wiring.md`: the DSL owns the
+    /// declarative peer set (`direct_peer_endpoints` +
+    /// `mob_overlay_peer_endpoints`) and emits
+    /// `CommsTrustReconcileRequested`; the reconciler consumes that
+    /// effect and mechanically reconciles the underlying
+    /// [`meerkat_core::agent::CommsRuntime`] trust store.
+    ///
+    /// The caller supplies the session's `CommsRuntime` because the
+    /// reconciler's lifetime is rooted in it; when the session's first
+    /// stager call runs, the machine installs a
+    /// [`crate::comms_trust_reconcile::CommsTrustReconciler`] on the
+    /// `RuntimeSessionEntry` bound to this runtime. Subsequent stager
+    /// calls on the same session re-use that reconciler so the applied
+    /// view watermark is monotonically advanced across calls.
+    pub async fn stage_add_direct_peer_endpoint(
+        &self,
+        session_id: &SessionId,
+        endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                    endpoint,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// D-track-b: stage a `RemoveDirectPeerEndpoint` DSL input and
+    /// drive the session-scoped trust reconciler. See
+    /// [`Self::stage_add_direct_peer_endpoint`] for the architectural
+    /// contract.
+    pub async fn stage_remove_direct_peer_endpoint(
+        &self,
+        session_id: &SessionId,
+        endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
+                    endpoint,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// D-track-b: stage an `ApplyMobPeerOverlay` DSL input and drive
+    /// the session-scoped trust reconciler. Used by composition drivers
+    /// that recompute the mob-overlay peer set from the MobMachine
+    /// wiring graph.
+    pub async fn stage_apply_mob_peer_overlay(
+        &self,
+        session_id: &SessionId,
+        epoch: u64,
+        endpoints: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), PeerEndpointStageError> {
+        let (reconciler, reconcile_epoch, effective_peers) = self
+            .stage_peer_projection_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch,
+                    endpoints,
+                },
+                comms_runtime,
+            )
+            .await?;
+        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+    }
+
+    /// Apply a peer-projection DSL input, sample the emitted
+    /// `CommsTrustReconcileRequested` effect under the same DSL lock,
+    /// and return the session-scoped reconciler with the post-transition
+    /// effective peer set `direct ∪ overlay`.
+    ///
+    /// The reconciler is driven OUTSIDE the `sessions` RwLock to avoid
+    /// blocking other adapter operations behind trust-store I/O; the
+    /// reconciler's own async mutex serializes concurrent reconcile
+    /// calls on the same session, so correctness holds without the
+    /// outer lock.
+    async fn stage_peer_projection_input(
+        &self,
+        session_id: &SessionId,
+        input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<
+        (
+            Arc<crate::comms_trust_reconcile::CommsTrustReconciler>,
+            u64,
+            BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+        ),
+        PeerEndpointStageError,
+    > {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
+
+        let (reconcile_epoch, effective_peers) = {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transition =
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                    .map_err(PeerEndpointStageError::Dsl)?;
+            let epoch = transition
+                .effects
+                .iter()
+                .find_map(|e| match e {
+                    crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+                        peer_projection_epoch,
+                    } => Some(*peer_projection_epoch),
+                    _ => None,
+                })
+                .ok_or(PeerEndpointStageError::MissingReconcileEffect)?;
+            // Effective peer set is the union of direct + overlay
+            // sampled inside the same DSL-lock critical section that
+            // just committed the transition. No interleaved mutation
+            // can slip between the commit and this read.
+            let effective: BTreeSet<_> = authority
+                .state
+                .direct_peer_endpoints
+                .iter()
+                .chain(authority.state.mob_overlay_peer_endpoints.iter())
+                .cloned()
+                .collect();
+            (epoch, effective)
+        };
+
+        let reconciler = entry
+            .trust_reconciler
+            .get_or_insert_with(|| {
+                Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
+                    comms_runtime,
+                ))
+            })
+            .clone();
+
+        Ok((reconciler, reconcile_epoch, effective_peers))
+    }
+}
+
+async fn drive_reconciler(
+    reconciler: &crate::comms_trust_reconcile::CommsTrustReconciler,
+    reconcile_epoch: u64,
+    effective_peers: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
+) -> Result<(), PeerEndpointStageError> {
+    reconciler
+        .reconcile(reconcile_epoch, effective_peers)
+        .await
+        .map(|_report| ())
+        .map_err(PeerEndpointStageError::Reconcile)
+}
+
+/// Errors raised when staging a peer-projection input against the DSL
+/// and driving the session-scoped trust reconciler (D-track-b).
+#[derive(Debug)]
+pub enum PeerEndpointStageError {
+    /// The session is not registered with the runtime.
+    SessionNotRegistered,
+    /// The DSL mutator rejected the transition (e.g. duplicate endpoint,
+    /// stale overlay epoch, or per-phase guard failure).
+    Dsl(crate::meerkat_machine::dsl::MeerkatMachineTransitionError),
+    /// The DSL transition committed but did not emit
+    /// `CommsTrustReconcileRequested`. This indicates a contract
+    /// violation between the schema and the runtime — the three
+    /// peer-projection transitions are specified to emit the effect
+    /// unconditionally.
+    MissingReconcileEffect,
+    /// The reconciler failed to mechanically reconcile the trust
+    /// store.
+    Reconcile(crate::comms_trust_reconcile::CommsTrustReconcileError),
+}
+
+impl std::fmt::Display for PeerEndpointStageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotRegistered => write!(f, "session not registered with runtime"),
+            Self::Dsl(err) => write!(f, "DSL rejected peer-projection input: {err}"),
+            Self::MissingReconcileEffect => write!(
+                f,
+                "peer-projection DSL transition committed without emitting CommsTrustReconcileRequested"
+            ),
+            Self::Reconcile(err) => write!(f, "trust reconciliation failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerEndpointStageError {}

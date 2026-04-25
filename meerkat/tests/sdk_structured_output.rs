@@ -246,6 +246,9 @@ async fn sdk_structured_output_extraction_succeeds() -> Result<(), Box<dyn std::
         .model("mock-model")
         .max_tokens_per_turn(64)
         .output_schema(OutputSchema::new(person_schema())?)
+        .with_turn_state_handle(std::sync::Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
         .build(llm_adapter, tools, store_adapter)
         .await;
 
@@ -292,6 +295,9 @@ async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std
         .max_tokens_per_turn(64)
         .output_schema(OutputSchema::new(person_schema())?)
         .structured_output_retries(2) // Allow retries
+        .with_turn_state_handle(std::sync::Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
         .build(llm_adapter, tools, store_adapter)
         .await;
 
@@ -329,6 +335,9 @@ async fn sdk_no_structured_output_without_schema() {
     let mut agent = AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
+        .with_turn_state_handle(std::sync::Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
         .build(llm_adapter, tools, store_adapter)
         .await;
 
@@ -378,6 +387,9 @@ async fn sdk_structured_output_unwraps_named_envelope() -> Result<(), Box<dyn st
         .model("mock-model")
         .max_tokens_per_turn(64)
         .output_schema(OutputSchema::new(person_schema())?.with_name("advisor"))
+        .with_turn_state_handle(std::sync::Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
         .build(llm_adapter, tools, store_adapter)
         .await;
 

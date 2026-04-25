@@ -165,6 +165,88 @@ jobs:
       - name: Audit @generated header truthfulness
         run: cargo xtask audit-generated-headers
 
+  rmat-audit:
+    name: RMAT audit + ownership ledger
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rmat-audit
+
+      - name: Ownership ledger drift
+        run: cargo run -p xtask -- ownership-ledger --check-drift
+
+      - name: RMAT audit (strict)
+        run: cargo run -p xtask -- rmat-audit --strict
+
+  seam-inventory:
+    name: Seam inventory (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: seam-inventory
+
+      - name: Seam inventory (strict)
+        run: cargo run -p xtask -- seam-inventory --strict
+
+  wasm-contract-tests:
+    name: WASM contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm-contract-tests
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Build browser-contract tests
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
+
+      - name: Build release-targets tests
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run
+
+      - name: Run browser-contract tests under headless chrome
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract
+
+      - name: Run release-targets tests under headless chrome
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets
+
   test-unit:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -387,7 +469,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, sdk-suites, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
+    needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -396,27 +478,33 @@ jobs:
           for job in \
             fmt-lint \
             sdk-suites \
+            machine-authority \
             test-unit \
             integration-fast \
             e2e-fast \
-            e2e-system \
             test-minimal \
             test-feature-matrix-lib \
             test-feature-matrix-surface-checks \
             wasm-check \
+            wasm-contract-tests \
+            rmat-audit \
+            seam-inventory \
             audit
           do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
               sdk-suites) result="${{ needs.sdk-suites.result }}" ;;
+              machine-authority) result="${{ needs.machine-authority.result }}" ;;
               test-unit) result="${{ needs.test-unit.result }}" ;;
               integration-fast) result="${{ needs.integration-fast.result }}" ;;
               e2e-fast) result="${{ needs.e2e-fast.result }}" ;;
-              e2e-system) result="${{ needs.e2e-system.result }}" ;;
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
               test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
               wasm-check) result="${{ needs.wasm-check.result }}" ;;
+              wasm-contract-tests) result="${{ needs.wasm-contract-tests.result }}" ;;
+              rmat-audit) result="${{ needs.rmat-audit.result }}" ;;
+              seam-inventory) result="${{ needs.seam-inventory.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac
             if [[ "$result" != "success" ]]; then

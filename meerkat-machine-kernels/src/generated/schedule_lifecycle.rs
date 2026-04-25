@@ -1,5 +1,5 @@
 mod source {
-    #![allow(clippy::expect_used, clippy::assign_op_pattern)]
+    #![allow(dead_code, clippy::expect_used, clippy::assign_op_pattern)]
     use meerkat_machine_dsl::machine;
 
     machine! {
@@ -150,17 +150,11 @@ mod source {
                 emit PlanningWindowRecorded { planning_cursor_utc_ms: planning_cursor_utc_ms, next_occurrence_ordinal: next_occurrence_ordinal }
             }
 
-            transition RecordPlanningWindowPaused {
-                on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
-                guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Paused && next_occurrence_ordinal > 0 }
-                update {
-                    self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
-                    self.next_occurrence_ordinal = next_occurrence_ordinal;
-                }
-                to Paused
-                emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-                emit PlanningWindowRecorded { planning_cursor_utc_ms: planning_cursor_utc_ms, next_occurrence_ordinal: next_occurrence_ordinal }
-            }
+            // NB: no `RecordPlanningWindowPaused` — planning only advances while
+            // the schedule is Active. Paused schedules MUST reject
+            // `RecordPlanningWindow` as an invalid transition; this closes the
+            // race where a driver tick could race with `Pause` and silently
+            // advance the planning cursor against a paused schedule.
 
             // --- Pause / Resume (from Active or Paused) ---
 

@@ -63,12 +63,13 @@ pub(crate) fn flow_system_member_id() -> MeerkatId {
     MeerkatId::from(FLOW_SYSTEM_MEMBER_ID_RAW)
 }
 
-mod actor;
+pub(crate) mod actor;
 mod actor_turn_executor;
 pub mod bridge;
 mod bridge_fallback;
 pub mod bridge_protocol;
 mod builder;
+pub mod composition;
 pub mod conditions;
 mod disposal;
 mod edge_locks;
@@ -79,10 +80,8 @@ pub mod flow_frame_engine;
 mod handle;
 #[cfg(feature = "runtime-adapter")]
 pub mod local_bridge;
-pub mod loop_iteration_authority;
 mod mob_member_lifecycle_authority;
 mod mob_runtime_bridge_authority;
-mod mob_wiring_authority;
 mod ops_adapter;
 pub mod path;
 mod pending_spawn_lineage;

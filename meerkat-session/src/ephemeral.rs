@@ -1648,27 +1648,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     ) -> Result<RunResult, SessionError> {
         let (result_tx, result_rx) = oneshot::channel();
 
-        // Prepend additional instructions as system notices to the prompt.
-        let prompt: meerkat_core::types::ContentInput = match &req.additional_instructions {
-            Some(instructions) if !instructions.is_empty() => {
-                let mut prefix = String::new();
-                for instruction in instructions {
-                    prefix.push_str("[SYSTEM NOTICE: ");
-                    prefix.push_str(instruction);
-                    prefix.push_str("]\n\n");
-                }
-                if req.prompt.has_non_text_content() {
-                    // Preserve original block ordering; prepend instructions as a leading text block.
-                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
-                    blocks.extend(req.prompt.clone().into_blocks());
-                    meerkat_core::types::ContentInput::Blocks(blocks)
-                } else {
-                    prefix.push_str(&req.prompt.text_content());
-                    meerkat_core::types::ContentInput::Text(prefix)
-                }
-            }
-            _ => req.prompt.clone(),
-        };
+        let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
 
         {
             let sessions = self.sessions.read().await;
@@ -1730,7 +1710,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     result_tx,
                     skill_references: req.skill_references,
                     flow_tool_overlay: req.flow_tool_overlay,
-                    execution_kind: req.execution_kind,
+                    execution_kind: None,
                 })
                 .await
                 .map_err(|_| {

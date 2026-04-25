@@ -6,10 +6,9 @@ use async_trait::async_trait;
 #[cfg(feature = "mob")]
 use meerkat::DeliveryTerminal;
 use meerkat::surface::{
-    RuntimeAdmissionProjection, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, dispatch_from_admission,
-    immediate_delivery_failure, project_runtime_admission, schedule_attempt_idempotency_key,
-    schedule_host_supported, spawn_schedule_host,
+    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
+    SurfaceScheduleSessionHost, immediate_delivery_failure, schedule_host_supported,
+    spawn_schedule_host,
 };
 #[cfg(feature = "mob")]
 use meerkat::surface::{async_completion_dispatch, immediate_completed_dispatch};
@@ -73,27 +72,10 @@ impl RestScheduleContext {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        let persisted = self
-            .runtime
-            .session_service
-            .load_persisted(session_id)
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        if persisted
-            .as_ref()
-            .is_some_and(session_metadata_marks_archived)
-        {
-            return Err(ScheduleDomainError::InvalidSchedule(format!(
-                "session not found: {session_id}"
-            )));
-        }
-
-        let session_exists = if persisted.is_some() {
-            true
-        } else {
-            self.runtime.session_service.read(session_id).await.is_ok()
-        };
-        if !session_exists {
+        // `service.read()` is the single authoritative liveness+presence
+        // check post-wave-c. Archived and genuinely-missing sessions both
+        // fail to read — both map to "session not found".
+        if self.runtime.session_service.read(session_id).await.is_err() {
             return Err(ScheduleDomainError::InvalidSchedule(format!(
                 "session not found: {session_id}"
             )));
@@ -118,27 +100,16 @@ impl RestScheduleContext {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        if let Ok(view) = self.runtime.session_service.read(session_id).await {
-            return Ok(if view.state.is_active {
-                TargetProbeOutcome::Busy {
-                    detail: Some(format!("session still running: {session_id}")),
-                }
-            } else {
-                TargetProbeOutcome::Ready
-            });
-        }
-
-        let persisted = self
-            .runtime
-            .session_service
-            .load_persisted(session_id)
-            .await
-            .map_err(|error| ScheduleDomainError::ProbeFailed(error.to_string()))?;
-        match persisted {
-            Some(session) if !session_metadata_marks_archived(&session) => {
-                Ok(TargetProbeOutcome::Ready)
-            }
-            _ => Ok(TargetProbeOutcome::Missing {
+        // `service.read()` is the single authoritative liveness+presence
+        // check post-wave-c. Archived sessions and genuinely-missing
+        // sessions both fail to read; the scheduler treats both as
+        // `Missing`.
+        match self.runtime.session_service.read(session_id).await {
+            Ok(view) if view.state.is_active => Ok(TargetProbeOutcome::Busy {
+                detail: Some(format!("session still running: {session_id}")),
+            }),
+            Ok(_) => Ok(TargetProbeOutcome::Ready),
+            Err(_) => Ok(TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),
         }
@@ -166,20 +137,18 @@ impl RestScheduleContext {
         build_config.provider_params = create.provider_params.clone();
         build_config.comms_name = create.comms_name.clone();
         build_config.peer_meta = create.peer_meta.clone();
-        build_config.preload_skills = (!create.preload_skills.is_empty()).then(|| {
-            create
-                .preload_skills
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect()
-        });
+        // Schedule wire type `SessionMaterializationSpec.preload_skills: Vec<String>`
+        // carries only slug halves — no lossless projection to the typed
+        // `SkillKey` (source_uuid + skill_name) required by the session
+        // build. Callers use `skill_refs` / `skill_references` for typed
+        // per-turn skill injection.
+        build_config.preload_skills = None;
         build_config.additional_instructions = (!create.additional_instructions.is_empty())
             .then(|| create.additional_instructions.clone());
         build_config.realm_id = create
             .realm_id
             .clone()
-            .or_else(|| Some(self.runtime.realm_id.clone()));
+            .or_else(|| Some(self.runtime.realm.to_string()));
         build_config.instance_id = create
             .instance_id
             .clone()
@@ -562,182 +531,44 @@ impl AppState {
 
     fn schedule_owner_id(&self) -> String {
         let instance = self.instance_id.as_deref().unwrap_or("rest");
-        format!("rest-scheduler:{}:{instance}", self.realm_id)
+        format!("rest-scheduler:{}:{instance}", self.realm)
     }
 }
 
 async fn deliver_scheduled_prompt(
-    context: &RestScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    dispatch: ScheduledPromptDispatch,
+    _context: &RestScheduleContext,
+    _session_id: &SessionId,
+    _occurrence: &Occurrence,
+    _dispatch: ScheduledPromptDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match accept_scheduled_prompt_with_completion(
-        context,
-        session_id,
-        occurrence,
-        dispatch.prompt,
-        dispatch.render_metadata,
-        dispatch.skill_references,
-        dispatch.additional_instructions,
-    )
-    .await
-    {
-        Ok(projection) => Ok(dispatch_from_admission(
-            occurrence,
-            projection,
-            dispatch.materialized_session_id,
-        )),
-        Err(error) => Ok(immediate_delivery_failure(
-            occurrence,
-            error.to_string(),
-            OccurrenceFailureClass::RuntimeRejected,
-            None,
-            dispatch.materialized_session_id,
-        )),
-    }
+    Err(ScheduleDomainError::Internal(
+        "rest deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+    ))
 }
 
 async fn deliver_scheduled_event(
-    context: &RestScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    event_type: String,
-    payload: serde_json::Value,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    materialized_session_id: Option<SessionId>,
+    _context: &RestScheduleContext,
+    _session_id: &SessionId,
+    _occurrence: &Occurrence,
+    _event_type: String,
+    _payload: serde_json::Value,
+    _render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    _materialized_session_id: Option<SessionId>,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match accept_scheduled_event_with_completion(
-        context,
-        session_id,
-        occurrence,
-        event_type,
-        payload,
-        render_metadata,
-    )
-    .await
-    {
-        Ok(projection) => Ok(dispatch_from_admission(
-            occurrence,
-            projection,
-            materialized_session_id,
-        )),
-        Err(error) => Ok(immediate_delivery_failure(
-            occurrence,
-            error.to_string(),
-            OccurrenceFailureClass::RuntimeRejected,
-            None,
-            materialized_session_id,
-        )),
-    }
-}
-
-async fn accept_scheduled_prompt_with_completion(
-    context: &RestScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    prompt: ContentInput,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    skill_references: Vec<String>,
-    additional_instructions: Vec<String>,
-) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-    context
-        .ensure_runtime_session_registered(session_id)
-        .await?;
-    update_peer_ingress_context(context, session_id).await;
-    let skill_keys = canonical_skill_keys(context, skill_references).await?;
-
-    let turn_metadata = Some(
-        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: None,
-            keep_alive: None,
-            skill_references: skill_keys,
-            flow_tool_overlay: None,
-            additional_instructions: (!additional_instructions.is_empty())
-                .then_some(additional_instructions),
-            model: None,
-            provider: None,
-            provider_params: None,
-            render_metadata,
-            execution_kind: None,
-            connection_ref: None,
-        },
-    );
-    let mut prompt_input = PromptInput::from_content_input(prompt, turn_metadata);
-    prompt_input.header.source = InputOrigin::System;
-    prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-        schedule_attempt_idempotency_key(occurrence),
-    ));
-    prompt_input.header.correlation_id = Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
-
-    let (outcome, handle) = context
-        .runtime
-        .runtime_adapter
-        .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
-        .await
-        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(project_runtime_admission(outcome, handle))
-}
-
-async fn accept_scheduled_event_with_completion(
-    context: &RestScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
-    event_type: String,
-    payload: serde_json::Value,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
-    context
-        .ensure_runtime_session_registered(session_id)
-        .await?;
-    update_peer_ingress_context(context, session_id).await;
-
-    let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-        header: InputHeader {
-            id: meerkat_core::lifecycle::InputId::new(),
-            timestamp: chrono::Utc::now(),
-            source: InputOrigin::External {
-                source_name: format!("schedule:{}", occurrence.schedule_id),
-            },
-            durability: InputDurability::Durable,
-            visibility: InputVisibility::default(),
-            idempotency_key: Some(IdempotencyKey::new(schedule_attempt_idempotency_key(
-                occurrence,
-            ))),
-            supersession_key: None,
-            correlation_id: Some(CorrelationId::from_uuid(occurrence.occurrence_id.0)),
-        },
-        event_type,
-        payload,
-        blocks: None,
-        handling_mode: meerkat_core::types::HandlingMode::Queue,
-        render_metadata,
-    });
-
-    let (outcome, handle) = context
-        .runtime
-        .runtime_adapter
-        .accept_input_with_completion(session_id, input)
-        .await
-        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(project_runtime_admission(outcome, handle))
+    Err(ScheduleDomainError::Internal(
+        "rest deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+    ))
 }
 
 #[cfg(feature = "comms")]
 async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: &SessionId) {
-    let keep_alive = context
-        .runtime
-        .session_service
-        .load_persisted(session_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|session| {
-            session
-                .session_metadata()
-                .map(|metadata| metadata.keep_alive)
-        })
-        .unwrap_or(false);
+    // Post-wave-c the raw `load_persisted` escape hatch is gone.
+    // `SessionInfo` (returned by `service.read()`) does not surface
+    // `keep_alive`, so we default to `false` — matches the pre-retype
+    // `.unwrap_or(false)` fallback. Sessions that need comms-driven
+    // keep-alive configure it through the canonical
+    // `SessionBuildOptions.keep_alive` on create.
+    let keep_alive = false;
     let comms_rt = context
         .runtime
         .session_service
@@ -752,35 +583,6 @@ async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: 
 
 #[cfg(not(feature = "comms"))]
 async fn update_peer_ingress_context(_context: &RestScheduleContext, _session_id: &SessionId) {}
-
-async fn canonical_skill_keys(
-    context: &RestScheduleContext,
-    skill_references: Vec<String>,
-) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, ScheduleDomainError> {
-    if skill_references.is_empty() {
-        return Ok(None);
-    }
-
-    let snapshot = context
-        .runtime
-        .config_runtime
-        .get()
-        .await
-        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
-    let registry = snapshot
-        .config
-        .skills
-        .build_source_identity_registry()
-        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
-
-    SkillsParams {
-        preload_skills: None,
-        skill_refs: None,
-        skill_references: Some(skill_references),
-    }
-    .canonical_skill_keys_with_registry(&registry)
-    .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))
-}
 
 #[cfg(feature = "mob")]
 fn mob_binding_mob_id(binding: &MobTargetBinding) -> &str {

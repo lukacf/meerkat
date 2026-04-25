@@ -6,9 +6,8 @@
     clippy::uninlined_format_args
 )]
 
-use meerkat_mob::generated::{flow_frame, flow_run};
 use meerkat_mob::ids::FrameId;
-use meerkat_mob::run::{FrameSnapshot, MobRun};
+use meerkat_mob::run::{FrameSnapshot, MobRun, flow_frame, flow_run};
 use meerkat_mob::store::MobRunStore;
 use meerkat_mob::{FlowFrameMutator, FlowId, InMemoryMobRunStore, MobId};
 use std::sync::Arc;
@@ -101,7 +100,7 @@ async fn test_cas_node_slot_grant_is_atomic() {
 fn test_pump_to_exhaustion_after_frame_terminated() {
     use meerkat_mob::runtime::pump_schedulers_to_exhaustion;
 
-    // Build a FlowRunMachine state with 3 frames in ready_frames but NOT yet pumped
+    // Build a MobMachine-owned run projection with 3 frames in ready_frames but NOT yet pumped
     let run_state = build_run_state_with_three_ready_frames();
 
     let (final_state, grants) = pump_schedulers_to_exhaustion(&run_state, 20).expect("pump");
@@ -231,7 +230,7 @@ async fn test_execute_two_node_frame_through_cas_chain() {
     );
 }
 
-/// Helper: build a FlowRunMachine in Running state with 3 frames in ready_frames
+/// Helper: build a MobMachine-owned run projection in Running state with 3 frames in ready_frames
 fn build_run_state_with_three_ready_frames() -> flow_run::State {
     use meerkat_mob::FrameId;
     flow_run::State {

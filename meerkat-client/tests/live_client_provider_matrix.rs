@@ -1,4 +1,5 @@
 #![cfg(feature = "integration-real-tests")]
+#![allow(clippy::expect_used)]
 
 //! Live integration tests for LLM clients.
 //!
@@ -723,9 +724,15 @@ async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Err
             "Generate a person named Alice who is 30 years old.".to_string(),
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({"schema": person_schema()}),
+    .with_provider_params(
+        meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+            meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                structured_output: Some(
+                    meerkat_core::OutputSchema::new(person_schema()).expect("valid schema"),
+                ),
+                ..Default::default()
+            },
+        ),
     );
 
     let text = collect_stream_text(&client, &request).await?;
@@ -752,10 +759,14 @@ async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>
             "Generate a person named Bob who is 25 years old.".to_string(),
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({"schema": person_schema()}),
-    );
+    .with_provider_params(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+        meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+            structured_output: Some(
+                meerkat_core::OutputSchema::new(person_schema()).expect("valid schema"),
+            ),
+            ..Default::default()
+        },
+    ));
 
     let text = collect_stream_text(&client, &request).await?;
 
@@ -781,10 +792,14 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
             "Generate a person named Carol who is 35 years old.".to_string(),
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({"schema": person_schema()}),
-    );
+    .with_provider_params(meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+        meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+            structured_output: Some(
+                meerkat_core::OutputSchema::new(person_schema()).expect("valid schema"),
+            ),
+            ..Default::default()
+        },
+    ));
 
     let text = collect_stream_text(&client, &request).await?;
 
@@ -811,13 +826,18 @@ async fn e2e_openai_structured_output_strict_nested_schema()
             "Return JSON with person={name:'Dina',age:41} and tags=[{label:'runner'}].",
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({
-            "schema": nested_profile_schema_without_additional_properties(),
-            "strict": true
-        }),
-    );
+    .with_provider_params(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+        meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+            structured_output: Some(
+                meerkat_core::OutputSchema::new(
+                    nested_profile_schema_without_additional_properties(),
+                )
+                .expect("valid schema")
+                .strict(),
+            ),
+            ..Default::default()
+        },
+    ));
 
     let text = collect_stream_text(&client, &request).await?;
     let parsed: Value = serde_json::from_str(&text)?;
@@ -848,12 +868,19 @@ async fn e2e_anthropic_structured_output_strict_nested_schema()
             "Return JSON with person={name:'Evan',age:29} and tags=[{label:'designer'}].",
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({
-            "schema": nested_profile_schema_without_additional_properties(),
-            "strict": true
-        }),
+    .with_provider_params(
+        meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(
+            meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                structured_output: Some(
+                    meerkat_core::OutputSchema::new(
+                        nested_profile_schema_without_additional_properties(),
+                    )
+                    .expect("valid schema")
+                    .strict(),
+                ),
+                ..Default::default()
+            },
+        ),
     );
 
     let text = collect_stream_text(&client, &request).await?;
@@ -885,13 +912,16 @@ async fn e2e_gemini_structured_output_rich_schema_keywords()
             "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
         ))],
     )
-    .with_provider_param(
-        "structured_output",
-        serde_json::json!({
-            "schema": gemini_supported_rich_schema(),
-            "strict": true
-        }),
-    );
+    .with_provider_params(meerkat_core::lifecycle::run_primitive::ProviderTag::Gemini(
+        meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+            structured_output: Some(
+                meerkat_core::OutputSchema::new(gemini_supported_rich_schema())
+                    .expect("valid schema")
+                    .strict(),
+            ),
+            ..Default::default()
+        },
+    ));
 
     let text = collect_stream_text(&client, &request).await?;
     let parsed: Value = serde_json::from_str(&text)?;

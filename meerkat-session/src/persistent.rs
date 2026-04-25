@@ -6,8 +6,10 @@
 //! and events are appended to the `EventStore`. On `read` and `list`, persisted
 //! sessions are merged with live (ephemeral) sessions.
 
+#![cfg_attr(test, allow(dead_code))]
+
 use async_trait::async_trait;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use meerkat_core::BlobStore;
 use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
@@ -15,7 +17,7 @@ use meerkat_core::Session;
 use meerkat_core::SessionDeferredTurnState;
 use meerkat_core::SessionSystemContextState;
 use meerkat_core::error::AgentError;
-use meerkat_core::image_content::{externalize_deferred_turn_state, externalize_messages_from};
+use meerkat_core::image_content::externalize_deferred_turn_state;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -28,14 +30,11 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{InputId, RunId};
-use meerkat_core::{
-    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
-};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
-use meerkat_store::SessionStore;
+use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -43,6 +42,11 @@ use tokio::sync::Mutex;
 
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
+
+/// Re-export of the crate-root `migrations` module so the canonical
+/// path `meerkat_session::persistent::migrations` (as named in the
+/// wave-c plan) resolves unchanged.
+pub use crate::migrations;
 
 const SESSION_ARCHIVED_KEY: &str = "session_archived";
 
@@ -122,17 +126,6 @@ fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError
     Ok(())
 }
 
-type OpsLifecycleRegistryArc = Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>;
-type OpsLifecycleProviderFuture<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Option<OpsLifecycleRegistryArc>> + Send + 'a>,
->;
-type OpsLifecycleProvider = dyn Fn(&SessionId) -> OpsLifecycleProviderFuture<'_> + Send + Sync;
-
-type RuntimeBindingsProviderFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Option<meerkat_core::SessionRuntimeBindings>> + Send>,
->;
-type RuntimeBindingsProvider = dyn Fn(SessionId) -> RuntimeBindingsProviderFuture + Send + Sync;
-
 /// Shared gate between the checkpointer and archive.
 ///
 /// The `Mutex` provides mutual exclusion so that `checkpoint()` cannot
@@ -177,8 +170,9 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
             return;
         }
         let mut persisted = session.clone();
-        if let Err(e) =
-            externalize_messages_from(self.blob_store.as_ref(), persisted.messages_mut(), 0).await
+        if let Err(e) = persisted
+            .externalize_media(self.blob_store.as_ref(), 0)
+            .await
         {
             tracing::warn!("Host-mode checkpoint blob externalization failed: {e}");
             return;
@@ -228,14 +222,6 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// stored-only session is rebuilt at most once and archived snapshots
     /// cannot become writable again through rehydration races.
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
-    /// Optional provider for ops lifecycle registries used during lazy session
-    /// rebuilds. When set, lazy-rebuilt sessions bind to the canonical registry
-    /// instead of allocating an orphaned fallback.
-    ops_lifecycle_provider: Option<Arc<OpsLifecycleProvider>>,
-    /// Optional provider for runtime bindings used during lazy session rebuilds.
-    /// When set, preferred over `ops_lifecycle_provider` — supplies both the
-    /// canonical ops lifecycle registry and the runtime build mode in one shot.
-    runtime_bindings_provider: Option<Arc<RuntimeBindingsProvider>>,
 }
 
 /// Extract session labels from a metadata map.
@@ -243,6 +229,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
 /// Looks for `SESSION_LABELS_KEY` and deserializes the value as
 /// `BTreeMap<String, String>`. Returns an empty map on missing or
 /// malformed data.
+#[allow(dead_code)]
 fn extract_labels_from_metadata(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> BTreeMap<String, String> {
@@ -259,6 +246,45 @@ fn extract_labels_from_metadata(
             }
         },
         None => BTreeMap::new(),
+    }
+}
+
+fn summary_from_meta(meta: meerkat_core::SessionMeta) -> SessionSummary {
+    SessionSummary {
+        session_id: meta.id,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+        message_count: meta.message_count,
+        total_tokens: meta.total_tokens,
+        is_active: false,
+        labels: extract_labels_from_metadata(&meta.metadata),
+    }
+}
+
+fn view_from_authoritative_session(session: &Session) -> SessionView {
+    let metadata = session.session_metadata();
+    SessionView {
+        state: SessionInfo {
+            session_id: session.id().clone(),
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            is_active: false,
+            model: metadata
+                .as_ref()
+                .map(|metadata| metadata.model.clone())
+                .unwrap_or_default(),
+            provider: metadata
+                .as_ref()
+                .map(|metadata| metadata.provider)
+                .unwrap_or(meerkat_core::Provider::Other),
+            last_assistant_text: session.last_assistant_text(),
+            labels: extract_labels_from_metadata(session.metadata()),
+        },
+        billing: SessionUsage {
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+        },
     }
 }
 
@@ -393,6 +419,50 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(session)
     }
 
+    /// Apply a runtime-turn metadata LLM identity update to a live session.
+    ///
+    /// This is intentionally not exposed through the public
+    /// `SessionService::hot_swap_session_llm_identity` trait method: callers
+    /// must arrive here through the runtime-owned turn/reconfigure path, after
+    /// the runtime has resolved the typed metadata and built the client.
+    pub async fn apply_runtime_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .hot_swap_session_llm_identity(id, client, identity)
+            .await?;
+        self.persist_full_session(id).await.map(|_| ())
+    }
+
+    /// Apply a runtime-turn metadata keep-alive update to a live session.
+    ///
+    /// The public trait method remains blocked so keep-alive changes do not
+    /// bypass the runtime turn metadata seam.
+    pub async fn apply_runtime_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        let previous = self
+            .export_session_with_labels(id)
+            .await
+            .ok()
+            .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive));
+        self.inner.update_session_keep_alive(id, keep_alive).await?;
+        match self.persist_full_session(id).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if let Some(previous) = previous {
+                    let _ = self.inner.update_session_keep_alive(id, previous).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
     async fn load_authoritative_session_base(
         &self,
         id: &SessionId,
@@ -414,11 +484,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?
                 .map(|bytes| {
-                    serde_json::from_slice::<Session>(&bytes).map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("failed to deserialize runtime session snapshot: {err}"),
-                        ))
-                    })
+                    meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
+                        |err| {
+                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                                format!("failed to deserialize runtime session snapshot: {err}"),
+                            ))
+                        },
+                    )
                 })
                 .transpose()?
         } else {
@@ -426,7 +498,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         Ok(match (store_snapshot, runtime_snapshot) {
-            (Some(store_session), Some(runtime_session)) => {
+            (Some(store_session), Some(mut runtime_session)) => {
+                if runtime_session.session_metadata().is_none()
+                    && let Some(metadata) = store_session.session_metadata()
+                    && let Err(err) = runtime_session.set_session_metadata(metadata)
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %err,
+                        "failed to restore session metadata from durable session-store snapshot onto newer runtime snapshot"
+                    );
+                }
                 if runtime_session.updated_at() >= store_session.updated_at() {
                     Some(runtime_session)
                 } else {
@@ -498,82 +580,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .map_err(control_error_into_session_error)?;
 
-        let runtime_build_mode = if let Some(provider) = &self.runtime_bindings_provider {
-            (provider)(id.clone())
-                .await
-                .map(meerkat_core::RuntimeBuildMode::SessionOwned)
-        } else if let Some(provider) = &self.ops_lifecycle_provider {
-            (provider)(id).await.map(|ops_lifecycle| {
-                meerkat_core::RuntimeBuildMode::SessionOwned(
-                    meerkat_core::SessionRuntimeBindings {
-                        session_id: id.clone(),
-                        epoch_id: meerkat_core::RuntimeEpochId::new(),
-                        ops_lifecycle,
-                        cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-                        tool_visibility_owner: Arc::new(
-                            meerkat_core::LocalToolVisibilityOwner::new(),
-                        ),
-                        turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
-                        comms_drain: Arc::new(
-                            meerkat_runtime::RuntimeCommsDrainHandle::ephemeral(),
-                        ),
-                        external_tool_surface: Arc::new(
-                            meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-                        ),
-                        peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
-                        session_admission: Arc::new(
-                            meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral(),
-                        ),
-                        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
-                        mcp_server_lifecycle: Arc::new(
-                            meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
-                        ),
-                        peer_interaction: None,
-                        session_context: Arc::new(
-                            meerkat_runtime::RuntimeSessionContextHandle::ephemeral(),
-                        ),
-                        session_claim_handle:
-                            meerkat_core::handles::DefaultSessionClaimRegistry::global()
-                                as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
-                        interaction_stream: None,
-                        realtime_product_turn: Arc::new(
-                            meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
-                        ),
-                    },
-                )
-            })
-        } else {
-            None
-        };
-
-        let recovered = build_recovered_session(
-            stored,
-            &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                runtime_build_mode,
-                require_runtime_build_mode: true,
-                ..Default::default()
-            },
-        )
-        .map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to recover stored-only session for start_turn: {error}"
-            )))
-        })?;
-
-        match self
-            .create_session(recovered.into_deferred_create_request())
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(SessionError::Agent(AgentError::InternalError(message)))
-                if message.starts_with("Duplicate session ID generated:")
-                    && self.inner.has_live_session(id).await? =>
-            {
-                Ok(false)
-            }
-            Err(error) => Err(error),
-        }
+        let _ = stored;
+        Err(SessionError::Agent(AgentError::InternalError(
+            "stored-session recovery via non-canonical runtime-binding providers has been deleted; callers must materialize sessions through the canonical runtime-binding seam".to_string(),
+        )))
     }
 
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
@@ -693,30 +703,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
-            ops_lifecycle_provider: None,
-            runtime_bindings_provider: None,
         }
-    }
-
-    /// Set an ops lifecycle provider for lazy session rebuilds.
-    ///
-    /// When a persisted session is rehydrated lazily (e.g., runtime context
-    /// appends for a session not currently live), this provider supplies the
-    /// canonical ops lifecycle registry so the rebuilt agent's async ops are
-    /// visible to the runtime adapter.
-    pub fn set_ops_lifecycle_provider(&mut self, provider: Arc<OpsLifecycleProvider>) {
-        self.ops_lifecycle_provider = Some(provider);
-    }
-
-    /// Set a runtime bindings provider for lazy session rebuilds.
-    ///
-    /// When set, this is preferred over `ops_lifecycle_provider`. On lazy
-    /// rebuild the callback is invoked with the session ID; if it returns
-    /// `Some(bindings)`, the rebuild sets `runtime_build_mode` to
-    /// `SessionOwned(bindings)` and skips the legacy `ops_lifecycle_override`
-    /// path.
-    pub fn set_runtime_bindings_provider(&mut self, provider: Arc<RuntimeBindingsProvider>) {
-        self.runtime_bindings_provider = Some(provider);
     }
 
     pub fn runtime_mode(&self) -> RuntimeMode {
@@ -735,7 +722,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut session: Session,
     ) -> Result<Session, SessionError> {
-        externalize_messages_from(self.blob_store.as_ref(), session.messages_mut(), 0)
+        session
+            .externalize_media(self.blob_store.as_ref(), 0)
             .await
             .map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -1017,109 +1005,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        if let Err(SessionError::NotFound { .. }) = self
-            .inner
+        self.inner
             .apply_runtime_system_context(id, appends.clone())
-            .await
-        {
-            let stored = self
-                .load_persisted(id)
-                .await?
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let runtime_build_mode = if let Some(provider) = &self.runtime_bindings_provider {
-                (provider)(id.clone())
-                    .await
-                    .map(meerkat_core::RuntimeBuildMode::SessionOwned)
-            } else if let Some(provider) = &self.ops_lifecycle_provider {
-                (provider)(id).await.map(|ops_lifecycle| {
-                    meerkat_core::RuntimeBuildMode::SessionOwned(
-                        meerkat_core::SessionRuntimeBindings {
-                            session_id: id.clone(),
-                            epoch_id: meerkat_core::RuntimeEpochId::new(),
-                            ops_lifecycle,
-                            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-                            tool_visibility_owner: Arc::new(
-                                meerkat_core::LocalToolVisibilityOwner::new(),
-                            ),
-                            turn_state: Arc::new(
-                                meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-                            ),
-                            comms_drain: Arc::new(
-                                meerkat_runtime::RuntimeCommsDrainHandle::ephemeral(),
-                            ),
-                            external_tool_surface: Arc::new(
-                                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-                            ),
-                            peer_comms: Arc::new(
-                                meerkat_runtime::RuntimePeerCommsHandle::ephemeral(),
-                            ),
-                            session_admission: Arc::new(
-                                meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral(),
-                            ),
-                            auth_lease: Arc::new(
-                                meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral(),
-                            ),
-                            mcp_server_lifecycle: Arc::new(
-                                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
-                            ),
-                            // W1-A (#264): recovery path leaves the peer-interaction
-                            // handle unset. An ephemeral handle here would start in
-                            // `Initializing` without receiving `Initialize` /
-                            // `RegisterSession`, so every `request_sent` would fail
-                            // the phase guard and silently break PeerRequest sends on
-                            // recovered sessions. The factory still treats the handle
-                            // as optional — once the runtime epoch rebinds through
-                            // normal `prepare_bindings`, a properly-initialized handle
-                            // replaces this `None` via the ordinary install path.
-                            peer_interaction: None,
-                            // W2-E (#264): recovery path uses an ephemeral session
-                            // context handle. `AdvanceSessionContext` is per_phase and
-                            // survives the `Initializing` phase, so this path does
-                            // not have the same phase-guard issue as peer-interaction.
-                            session_context: Arc::new(
-                                meerkat_runtime::RuntimeSessionContextHandle::ephemeral(),
-                            ),
-                            // Recovery path: same rationale as `peer_interaction`
-                            // above — until the runtime epoch rebinds via
-                            // `prepare_bindings`, fall back to the process-global
-                            // default registry so bare comms paths still hit a
-                            // canonical owner (dogma #2).
-                            session_claim_handle:
-                                meerkat_core::handles::DefaultSessionClaimRegistry::global()
-                                    as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
-                            // U6 (dogma #5): same rationale as `peer_interaction`.
-                            interaction_stream: None,
-                            realtime_product_turn: Arc::new(
-                                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
-                            ),
-                        },
-                    )
-                })
-            } else {
-                None
-            };
-            let recovered = build_recovered_session(
-                stored,
-                &SurfaceSessionRecoveryOverrides::default(),
-                SurfaceSessionRecoveryContext {
-                    runtime_build_mode,
-                    require_runtime_build_mode: true,
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to recover stored-only session for runtime context append: {error}"
-                )))
-            })?;
-
-            self.create_session(recovered.into_deferred_create_request())
-                .await?;
-
-            self.inner
-                .apply_runtime_system_context(id, appends.clone())
-                .await?;
-        }
+            .await?;
 
         let session = self.export_session_with_labels(id).await?;
         let persisted_session = self
@@ -1250,13 +1138,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn hot_swap_session_llm_identity(
         &self,
-        id: &SessionId,
-        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
-        identity: meerkat_core::SessionLlmIdentity,
+        _id: &SessionId,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
     ) -> Result<(), SessionError> {
-        self.inner
-            .hot_swap_session_llm_identity(id, client, identity)
-            .await
+        Err(SessionError::Unsupported(
+            "hot_swap_session_llm_identity is a bespoke metadata seam that bypasses the canonical RuntimeTurnMetadata carrier; model/provider/provider_params must travel through the single runtime-backed turn seam instead".to_string(),
+        ))
     }
 
     async fn set_session_tool_visibility_state(
@@ -1293,73 +1181,41 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let _ = self.discard_stale_live_session_if_needed(id).await?;
-        // Try live session first
         match self.inner.read(id).await {
             Ok(view) => Ok(view),
             Err(SessionError::NotFound { .. }) => {
-                // Fall back to persisted session
-                let session = self
-                    .store
-                    .load(id)
+                let Some(session) = self.load_authoritative_session_base(id).await? else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                };
+                self.reject_if_archived_session(id, &session)
                     .await
-                    .map_err(|e| SessionError::Store(Box::new(e)))?
-                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-
-                let labels = extract_labels_from_metadata(session.metadata());
-                Ok(SessionView {
-                    state: SessionInfo {
-                        session_id: session.id().clone(),
-                        created_at: session.created_at(),
-                        updated_at: session.updated_at(),
-                        message_count: session.messages().len(),
-                        is_active: false,
-                        model: session
-                            .session_metadata()
-                            .map(|meta| meta.model)
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        provider: session
-                            .session_metadata()
-                            .map(|meta| meta.provider)
-                            .unwrap_or(meerkat_core::Provider::Other),
-                        last_assistant_text: session.last_assistant_text(),
-                        labels,
-                    },
-                    billing: SessionUsage {
-                        total_tokens: session.total_tokens(),
-                        usage: session.total_usage(),
-                    },
-                })
+                    .map_err(control_error_into_session_error)?;
+                Ok(view_from_authoritative_session(&session))
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
     async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        // Get live sessions
-        let mut summaries = self.inner.list(SessionQuery::default()).await?;
-        let live_ids: IndexSet<_> = summaries.iter().map(|s| s.session_id.clone()).collect();
-
-        // Merge persisted sessions not currently live
         let stored = self
             .store
-            .list(meerkat_store::SessionFilter::default())
+            .list(SessionFilter::default())
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
+        let mut summaries_by_id: IndexMap<SessionId, SessionSummary> = stored
+            .into_iter()
+            .filter(|meta| !metadata_marks_archived(&meta.metadata))
+            .map(|meta| {
+                let summary = summary_from_meta(meta);
+                (summary.session_id.clone(), summary)
+            })
+            .collect();
 
-        for meta in stored {
-            if !live_ids.contains(&meta.id) && !metadata_marks_archived(&meta.metadata) {
-                let labels = extract_labels_from_metadata(&meta.metadata);
-                summaries.push(SessionSummary {
-                    session_id: meta.id,
-                    created_at: meta.created_at,
-                    updated_at: meta.updated_at,
-                    message_count: meta.message_count,
-                    total_tokens: meta.total_tokens,
-                    is_active: false,
-                    labels,
-                });
-            }
+        for summary in self.inner.list(SessionQuery::default()).await? {
+            summaries_by_id.insert(summary.session_id.clone(), summary);
         }
+
+        let mut summaries: Vec<SessionSummary> = summaries_by_id.into_values().collect();
 
         // Filter by labels if specified (all k/v pairs must match).
         if let Some(ref filter_labels) = query.labels {
@@ -1447,28 +1303,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn update_session_keep_alive(
         &self,
-        id: &SessionId,
-        keep_alive: bool,
+        _id: &SessionId,
+        _keep_alive: bool,
     ) -> Result<(), SessionError> {
-        // Snapshot the previous value so we can roll back on store failure.
-        let previous = self
-            .export_session_with_labels(id)
-            .await?
-            .session_metadata()
-            .map(|m| m.keep_alive)
-            .unwrap_or(false);
-
-        // Update the live in-memory session metadata (persist_full_session
-        // reads from live state, so the mutation must happen before the write).
-        self.inner.update_session_keep_alive(id, keep_alive).await?;
-
-        // Persist to store so recovery/resume inherits the updated intent.
-        // If the store write fails, roll back to the previous value.
-        if let Err(e) = self.persist_full_session(id).await {
-            let _ = self.inner.update_session_keep_alive(id, previous).await;
-            return Err(e);
-        }
-        Ok(())
+        Err(SessionError::Unsupported(
+            "update_session_keep_alive is a bespoke metadata seam that bypasses the canonical RuntimeTurnMetadata carrier; keep_alive intent must travel through the single runtime-backed turn seam instead".to_string(),
+        ))
     }
 
     async fn update_session_mob_authority_context(
@@ -1571,11 +1411,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 Some(gate) => gate,
                 None => self.gate_for_session(id).await,
             };
-            let gate_guard = gate.cancelled.lock().await;
-            if *gate_guard {
-                return Err(SessionControlError::Session(SessionError::NotFound {
-                    id: id.clone(),
-                }));
+            {
+                let gate_guard = gate.cancelled.lock().await;
+                if *gate_guard {
+                    return Err(SessionControlError::Session(SessionError::NotFound {
+                        id: id.clone(),
+                    }));
+                }
             }
 
             let accepted_at = meerkat_core::time_compat::SystemTime::now();
@@ -1604,7 +1446,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     Some(session) => session,
                     None => {
                         if created_gate {
-                            drop(gate_guard);
                             self.checkpointer_gates.lock().await.remove(id);
                         }
                         return Err(SessionControlError::Session(SessionError::Agent(
@@ -1620,13 +1461,47 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     Ok(session) => session,
                     Err(err) => {
                         if created_gate && matches!(err, SessionError::NotFound { .. }) {
-                            drop(gate_guard);
                             self.checkpointer_gates.lock().await.remove(id);
                         }
                         return Err(SessionControlError::Session(err));
                     }
                 }
             };
+
+            let gate_guard = gate.cancelled.lock().await;
+            if *gate_guard {
+                let rollback_result = {
+                    let mut guard = match state_arc.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!(
+                                session_id = %id,
+                                "system-context state lock poisoned while rolling back cancelled live append"
+                            );
+                            poisoned.into_inner()
+                        }
+                    };
+                    if *guard == persisted_state {
+                        *guard = snapshot_state;
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                };
+                drop(gate_guard);
+                if rollback_result.is_ok() {
+                    let _ = self.inner.sync_system_context_state(id).await;
+                } else {
+                    tracing::warn!(
+                        session_id = %id,
+                        "live system-context state diverged after archive cancelled append; discarding live session"
+                    );
+                    let _ = self.discard_live_session(id).await;
+                }
+                return Err(SessionControlError::Session(SessionError::NotFound {
+                    id: id.clone(),
+                }));
+            }
 
             let persist_result = async {
                 self.reject_if_archived_session(id, &session).await?;
@@ -1976,17 +1851,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.subscribe_session_events(id).await
     }
 
-    /// Load a full session from the persistent store.
-    ///
-    /// Used by surfaces to resume sessions that aren't currently live.
-    /// Returns the complete `Session` including message history.
-    pub async fn load_persisted(&self, id: &SessionId) -> Result<Option<Session>, SessionError> {
-        self.store
-            .load(id)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))
-    }
-
     /// Load the authoritative durable session view.
     ///
     /// In runtime-backed mode, the runtime store can hold a newer canonical
@@ -2025,11 +1889,12 @@ mod tests {
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
         SessionServiceControlExt,
     };
+    use meerkat_core::session::SESSION_METADATA_KEY;
     use meerkat_core::types::{
         ContentBlock, ContentInput, ImageData, Message, ToolCall, ToolResult, UserMessage,
     };
     use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
-    use meerkat_runtime::InMemoryRuntimeStore;
+    use meerkat_runtime::{InMemoryRuntimeStore, RuntimeStore};
     use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2064,14 +1929,6 @@ mod tests {
                 meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
             ),
         }
-    }
-
-    fn install_test_runtime_bindings_provider<B: SessionAgentBuilder + 'static>(
-        service: &mut PersistentSessionService<B>,
-    ) {
-        service.set_runtime_bindings_provider(Arc::new(|session_id| {
-            Box::pin(async move { Some(test_runtime_bindings(session_id)) })
-        }));
     }
 
     struct FailSaveStore {
@@ -2183,6 +2040,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -2454,6 +2312,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -2682,6 +2541,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
                         structured_output_retries: 2,
@@ -2860,8 +2720,6 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
-            additional_instructions: None,
-            execution_kind: None,
         }
     }
 
@@ -2877,8 +2735,6 @@ mod tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
-            additional_instructions: None,
-            execution_kind: None,
         }
     }
 
@@ -3859,6 +3715,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_authoritative_runtime_snapshot_preserves_store_owned_session_metadata() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let store_session = store
+            .load(&result.session_id)
+            .await
+            .expect("store load should succeed")
+            .expect("store snapshot should exist");
+        let expected_metadata = store_session
+            .session_metadata()
+            .expect("store snapshot should carry durable session metadata");
+
+        let mut runtime_session = store_session.clone();
+        runtime_session.push(Message::User(UserMessage::text_with_render_metadata(
+            "runtime-only turn",
+            None,
+        )));
+        runtime_session.remove_metadata(SESSION_METADATA_KEY);
+        let session_snapshot =
+            serde_json::to_vec(&runtime_session).expect("runtime snapshot should serialize");
+        runtime_store
+            .commit_session_boundary(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &result.session_id,
+                ),
+                meerkat_runtime::SessionDelta { session_snapshot },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("authoritative session should exist");
+
+        assert_eq!(
+            authoritative.messages().len(),
+            runtime_session.messages().len(),
+            "newer runtime snapshot still owns committed conversation state"
+        );
+        let actual_metadata = authoritative
+            .session_metadata()
+            .expect("authoritative session should preserve durable metadata");
+        assert_eq!(actual_metadata.model, expected_metadata.model);
+        assert_eq!(actual_metadata.provider, expected_metadata.provider);
+        assert_eq!(actual_metadata.max_tokens, expected_metadata.max_tokens);
+    }
+
+    #[tokio::test]
     async fn test_runtime_backed_append_system_context_prefers_newer_store_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -3919,167 +3844,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_runtime_context_appends_recovers_stored_only_session() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let mut service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        install_test_runtime_bindings_provider(&mut service);
-
-        let mut session = Session::new();
-        let id = session.id().clone();
-        session
-            .set_session_metadata(meerkat_core::SessionMetadata {
-                model: "test-model".to_string(),
-                max_tokens: 1024,
-                structured_output_retries: 2,
-                provider: meerkat_core::Provider::Anthropic,
-                self_hosted_server_id: None,
-                provider_params: None,
-                tooling: meerkat_core::SessionTooling {
-                    builtins: meerkat_core::ToolCategoryOverride::Enable,
-                    shell: meerkat_core::ToolCategoryOverride::Disable,
-                    comms: meerkat_core::ToolCategoryOverride::Disable,
-                    mob: meerkat_core::ToolCategoryOverride::Disable,
-                    memory: meerkat_core::ToolCategoryOverride::Enable,
-                    active_skills: None,
-                },
-                keep_alive: false,
-                comms_name: None,
-                peer_meta: None,
-                realm_id: Some("realm-test".to_string()),
-                instance_id: Some("instance-test".to_string()),
-                backend: Some("sqlite".to_string()),
-                config_generation: Some(7),
-                connection_ref: None,
-            })
-            .expect("session metadata should serialize");
-        session
-            .set_build_state(meerkat_core::SessionBuildState {
-                system_prompt: Some("persisted system prompt".to_string()),
-                output_schema: None,
-                hooks_override: meerkat_core::HookRunOverrides::default(),
-                budget_limits: Some(meerkat_core::BudgetLimits {
-                    max_tokens: Some(32),
-                    max_duration: Some(meerkat_core::time_compat::Duration::from_secs(12)),
-                    max_tool_calls: Some(3),
-                }),
-                recoverable_tool_defs: vec![meerkat_core::ToolDef {
-                    name: "persisted_tool".to_string(),
-                    description: "persisted callback tool".to_string(),
-                    input_schema: serde_json::json!({"type":"object"}),
-                    provenance: None,
-                }],
-                silent_comms_intents: vec!["peer-b".to_string()],
-                max_inline_peer_notifications: Some(2),
-                app_context: Some(serde_json::json!({ "surface": "persisted" })),
-                additional_instructions: Some(vec!["persisted instruction".to_string()]),
-                shell_env: Some(std::collections::HashMap::from([(
-                    "MEERKAT_MODE".to_string(),
-                    "persisted".to_string(),
-                )])),
-                mob_tool_authority_context: None,
-                call_timeout_override: meerkat_core::CallTimeoutOverride::Value(
-                    meerkat_core::time_compat::Duration::from_secs(21),
-                ),
-            })
-            .expect("session build state should serialize");
-        store
-            .save(&session)
-            .await
-            .expect("persisted session should save");
-
-        let output = service
-            .apply_runtime_context_appends(
-                &id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    text: "recover me".to_string(),
-                    source: Some("system-generated:test".to_string()),
-                    idempotency_key: None,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                }],
-                vec![InputId::new()],
-            )
-            .await
-            .expect("stored-only runtime append should recover the live session");
-
-        assert_eq!(output.receipt.contributing_input_ids.len(), 1);
-
-        let restored = service
-            .export_live_session(&id)
-            .await
-            .expect("runtime append should recreate a live session");
-        let restored_build = restored
-            .build_state()
-            .expect("recovered live session should preserve build state");
-        let system_prompt = restored
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .expect("restored session should contain a system prompt");
-        assert!(system_prompt.contains("recover me"));
-        assert_eq!(
-            restored_build.system_prompt.as_deref(),
-            Some("persisted system prompt")
-        );
-        assert_eq!(
-            restored_build.app_context,
-            Some(serde_json::json!({ "surface": "persisted" }))
-        );
-        assert_eq!(
-            restored_build.shell_env,
-            Some(std::collections::HashMap::from([(
-                "MEERKAT_MODE".to_string(),
-                "persisted".to_string(),
-            )]))
-        );
-        assert_eq!(restored_build.recoverable_tool_defs.len(), 1);
-        assert_eq!(
-            restored_build.recoverable_tool_defs[0].name,
-            "persisted_tool"
-        );
-        assert_eq!(restored_build.max_inline_peer_notifications, Some(2));
-
-        let persisted = store
-            .load(&id)
-            .await
-            .expect("load should succeed")
-            .expect("runtime append should repersist the session");
-        let persisted_build = persisted
-            .build_state()
-            .expect("persisted session should keep recovered build state");
-        let persisted_prompt = persisted
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .expect("persisted session should contain a system prompt");
-        assert!(persisted_prompt.contains("recover me"));
-        assert_eq!(
-            persisted_build.system_prompt.as_deref(),
-            Some("persisted system prompt")
-        );
-        assert_eq!(
-            persisted_build.app_context,
-            Some(serde_json::json!({ "surface": "persisted" }))
-        );
-        assert_eq!(
-            persisted_build.recoverable_tool_defs[0].name,
-            "persisted_tool"
-        );
-    }
-
-    #[tokio::test]
     async fn test_apply_runtime_context_appends_rejects_missing_runtime_bindings() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
@@ -4094,6 +3858,7 @@ mod tests {
         let id = session.id().clone();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 structured_output_retries: 2,
@@ -4132,57 +3897,9 @@ mod tests {
             .expect_err("runtime-backed recovery should reject missing bindings");
 
         assert!(
-            error
-                .to_string()
-                .contains("refusing StandaloneEphemeral fallback"),
+            error.to_string().contains("session not found"),
             "unexpected error: {error}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_start_turn_recovers_after_discarding_stale_live_session() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let mut service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        install_test_runtime_bindings_provider(&mut service);
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create deferred session");
-        let id = created.session_id;
-
-        let mut stored = store
-            .load(&id)
-            .await
-            .expect("load should succeed")
-            .expect("persisted session should exist");
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        stored.touch();
-        store
-            .save(&stored)
-            .await
-            .expect("save updated stored session");
-
-        let result = service
-            .start_turn(&id, start_turn_request("follow up"))
-            .await
-            .expect("start_turn should recover after stale live discard");
-        assert_eq!(result.session_id, id);
-
-        let live = service
-            .export_live_session(&id)
-            .await
-            .expect("recovered session should be live again");
-        assert_eq!(live.id(), &id);
     }
 
     #[tokio::test]
@@ -4218,7 +3935,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("refusing StandaloneEphemeral fallback"),
+                .contains("stored-session recovery via non-canonical runtime-binding providers has been deleted"),
             "unexpected error: {error}"
         );
     }
@@ -4304,257 +4021,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_apply_runtime_context_appends_reinjects_generated_create_only_mob_authority() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = CapturingBuildBuilder::new();
-        let captured_builds = Arc::clone(&builder.captured_builds);
-        let mut service = PersistentSessionService::new(
-            builder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        install_test_runtime_bindings_provider(&mut service);
-
-        let mut session = Session::new();
-        let id = session.id().clone();
-        session
-            .set_session_metadata(meerkat_core::SessionMetadata {
-                model: "test-model".to_string(),
-                max_tokens: 1024,
-                structured_output_retries: 2,
-                provider: meerkat_core::Provider::Anthropic,
-                self_hosted_server_id: None,
-                provider_params: None,
-                tooling: meerkat_core::SessionTooling {
-                    builtins: meerkat_core::ToolCategoryOverride::Enable,
-                    shell: meerkat_core::ToolCategoryOverride::Disable,
-                    comms: meerkat_core::ToolCategoryOverride::Disable,
-                    mob: meerkat_core::ToolCategoryOverride::Enable,
-                    memory: meerkat_core::ToolCategoryOverride::Enable,
-                    active_skills: None,
-                },
-                keep_alive: false,
-                comms_name: None,
-                peer_meta: None,
-                realm_id: Some("realm-test".to_string()),
-                instance_id: Some("instance-test".to_string()),
-                backend: Some("sqlite".to_string()),
-                config_generation: Some(7),
-                connection_ref: None,
-            })
-            .expect("session metadata should serialize");
-        store
-            .save(&session)
-            .await
-            .expect("persisted session should save");
-
-        service
-            .apply_runtime_context_appends(
-                &id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    text: "recover me".to_string(),
-                    source: Some("system-generated:test".to_string()),
-                    idempotency_key: None,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                }],
-                vec![InputId::new()],
-            )
-            .await
-            .expect("stored-only runtime append should recover the live session");
-
-        let captured_builds = captured_builds.lock().await;
-        let build = captured_builds
-            .last()
-            .expect("recovery builder should capture a build");
-        assert_eq!(
-            build.override_mob,
-            meerkat_core::ToolCategoryOverride::Enable
-        );
-        let authority = build
-            .mob_tool_authority_context
-            .as_ref()
-            .expect("explicit mob enable should rehydrate generated create-only authority");
-        assert!(
-            authority.can_create_mobs(),
-            "recovered runtime build should keep create authority"
-        );
-        assert!(
-            authority.managed_mob_scope().is_empty(),
-            "stored-only recovery must not widen exact scope from bookkeeping state"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_apply_runtime_context_appends_rehydrates_persisted_typed_mob_authority() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = CapturingBuildBuilder::new();
-        let captured_builds = Arc::clone(&builder.captured_builds);
-        let mut service = PersistentSessionService::new(
-            builder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        install_test_runtime_bindings_provider(&mut service);
-
-        let mut session = Session::new();
-        let id = session.id().clone();
-        session
-            .set_session_metadata(meerkat_core::SessionMetadata {
-                model: "test-model".to_string(),
-                max_tokens: 1024,
-                structured_output_retries: 2,
-                provider: meerkat_core::Provider::Anthropic,
-                self_hosted_server_id: None,
-                provider_params: None,
-                tooling: meerkat_core::SessionTooling {
-                    builtins: meerkat_core::ToolCategoryOverride::Enable,
-                    shell: meerkat_core::ToolCategoryOverride::Disable,
-                    comms: meerkat_core::ToolCategoryOverride::Disable,
-                    mob: meerkat_core::ToolCategoryOverride::Inherit,
-                    memory: meerkat_core::ToolCategoryOverride::Enable,
-                    active_skills: None,
-                },
-                keep_alive: false,
-                comms_name: None,
-                peer_meta: None,
-                realm_id: Some("realm-test".to_string()),
-                instance_id: Some("instance-test".to_string()),
-                backend: Some("sqlite".to_string()),
-                config_generation: Some(7),
-                connection_ref: None,
-            })
-            .expect("session metadata should serialize");
-        let expected_authority = meerkat_core::service::MobToolAuthorityContext::new(
-            meerkat_core::service::OpaquePrincipalToken::new("persisted-typed"),
-            false,
-        )
-        .with_managed_mob_scope(["mob-a", "mob-b"])
-        .with_caller_provenance(
-            meerkat_core::service::MobToolCallerProvenance::new()
-                .with_session_id(SessionId::new())
-                .with_member_id("lead-1"),
-        )
-        .with_audit_invocation_id("audit-persisted");
-        session
-            .set_mob_tool_authority_context(Some(expected_authority.clone()))
-            .expect("typed mob authority should serialize");
-        store
-            .save(&session)
-            .await
-            .expect("persisted session should save");
-
-        service
-            .apply_runtime_context_appends(
-                &id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    text: "recover scoped authority".to_string(),
-                    source: Some("system-generated:test".to_string()),
-                    idempotency_key: None,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                }],
-                vec![InputId::new()],
-            )
-            .await
-            .expect("stored-only runtime append should recover the live session");
-
-        let captured_builds = captured_builds.lock().await;
-        let build = captured_builds
-            .last()
-            .expect("recovery builder should capture a build");
-        assert_eq!(
-            build.override_mob,
-            meerkat_core::ToolCategoryOverride::Enable
-        );
-        assert_eq!(
-            build.mob_tool_authority_context,
-            Some(expected_authority),
-            "stored-only recovery must preserve exact managed scope and provenance"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_session_mob_authority_context_persists_for_stored_only_recovery() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let seed_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let run = seed_service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create session");
-        let id = run.session_id;
-
-        let expected_authority = meerkat_core::service::MobToolAuthorityContext::new(
-            meerkat_core::service::OpaquePrincipalToken::new("granted-scope"),
-            true,
-        )
-        .grant_manage_mob("mob-created");
-        seed_service
-            .update_session_mob_authority_context(&id, Some(expected_authority.clone()))
-            .await
-            .expect("persist exact mob authority");
-
-        let persisted = store
-            .load(&id)
-            .await
-            .expect("load persisted session")
-            .expect("persisted session should exist");
-        assert_eq!(
-            persisted.mob_tool_authority_context(),
-            Some(expected_authority.clone()),
-            "store snapshot should carry the canonical authority update"
-        );
-
-        let recovering_builder = CapturingBuildBuilder::new();
-        let captured_builds = Arc::clone(&recovering_builder.captured_builds);
-        let mut recovering_service = PersistentSessionService::new(
-            recovering_builder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        install_test_runtime_bindings_provider(&mut recovering_service);
-        recovering_service
-            .apply_runtime_context_appends(
-                &id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    text: "recover exact scope".to_string(),
-                    source: Some("system-generated:test".to_string()),
-                    idempotency_key: None,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                }],
-                vec![InputId::new()],
-            )
-            .await
-            .expect("stored-only runtime append should recover the live session");
-
-        let captured_builds = captured_builds.lock().await;
-        let build = captured_builds
-            .last()
-            .expect("recovery builder should capture a build");
-        assert_eq!(
-            build.override_mob,
-            meerkat_core::ToolCategoryOverride::Enable
-        );
-        assert_eq!(build.mob_tool_authority_context, Some(expected_authority));
-    }
-
     /// Create a session request that seeds initial SessionMetadata so
     /// update_keep_alive has something to mutate (mirrors what the real factory does).
     fn create_request_with_metadata(
@@ -4563,6 +4029,7 @@ mod tests {
     ) -> CreateSessionRequest {
         let mut session = Session::new();
         let metadata = meerkat_core::SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "test".to_string(),
             max_tokens: 1024,
             structured_output_retries: 2,
@@ -4615,9 +4082,9 @@ mod tests {
 
         // Update keep_alive to true on the live session.
         service
-            .update_session_keep_alive(&id, true)
+            .apply_runtime_session_keep_alive(&id, true)
             .await
-            .expect("update_session_keep_alive should succeed");
+            .expect("runtime keep_alive update should succeed");
 
         // Verify the store reflects the update.
         let persisted = store.load(&id).await.unwrap().unwrap();
@@ -4646,7 +4113,7 @@ mod tests {
 
         // --- Transition: false → true with store failure ---
         fail_store.set_fail_save(true);
-        let result = service.update_session_keep_alive(&id, true).await;
+        let result = service.apply_runtime_session_keep_alive(&id, true).await;
         assert!(result.is_err(), "false→true should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -4656,13 +4123,16 @@ mod tests {
         );
 
         // --- Bring live state to true successfully ---
-        service.update_session_keep_alive(&id, true).await.unwrap();
+        service
+            .apply_runtime_session_keep_alive(&id, true)
+            .await
+            .unwrap();
         let exported = service.export_session_with_labels(&id).await.unwrap();
         assert!(exported.session_metadata().unwrap().keep_alive);
 
         // --- Transition: true → true with store failure (idempotent retry) ---
         fail_store.set_fail_save(true);
-        let result = service.update_session_keep_alive(&id, true).await;
+        let result = service.apply_runtime_session_keep_alive(&id, true).await;
         assert!(result.is_err(), "true→true should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -4673,7 +4143,7 @@ mod tests {
 
         // --- Transition: true → false with store failure ---
         fail_store.set_fail_save(true);
-        let result = service.update_session_keep_alive(&id, false).await;
+        let result = service.apply_runtime_session_keep_alive(&id, false).await;
         assert!(result.is_err(), "true→false should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -4987,8 +4457,8 @@ mod tests {
 
         assert_eq!(outcome.result.text_content(), "handled tool_catalog_load");
 
-        let persisted = service
-            .load_persisted(&id)
+        let persisted = store
+            .load(&id)
             .await
             .expect("load persisted session")
             .expect("persisted session should exist");

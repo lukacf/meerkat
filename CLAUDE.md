@@ -263,8 +263,7 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-mob/src/runtime/local_bridge.rs` - LocalMobRuntimeBridge (in-process MeerkatMachine wrapper)
 - `meerkat-mob/src/runtime/supervisor_bridge.rs` - MobSupervisorBridge (comms transport for remote commands)
 - `meerkat-mob/src/storage.rs` - MobStorage bundle (SQLite persistent, in-memory)
-- `meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops)
-- `meerkat-mob/src/runtime/loop_iteration_authority.rs` - Loop body/evaluate seam ownership
+- `meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops with MobMachine-owned feedback)
 - `meerkat-mob-mcp/src/agent_tools.rs` - Agent-facing delegation tools (delegate, mob_create, mob_spawn_member, mob_wire, mob_unwire, etc.)
 - `meerkat-mob/src/backend.rs` - MobBackendKind and RuntimeBinding (identity-first mob binding)
 - `meerkat-mob-pack/src/lib.rs` - Mobpack archive format, signing, trust

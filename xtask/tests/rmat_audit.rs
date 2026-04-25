@@ -314,7 +314,7 @@ fn projection() -> Snapshot {
 }
 
 #[test]
-fn forbidden_shell_reads_can_be_suppressed_with_rmat_allow() {
+fn forbidden_shell_reads_production_rmat_allow_does_not_suppress() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
@@ -322,7 +322,7 @@ fn forbidden_shell_reads_can_be_suppressed_with_rmat_allow() {
         r"
 use std::collections::HashMap;
 struct Router {
-    // RMAT-ALLOW(ForbiddenShellAuthorityReads): migration in flight — see issue #42
+    // RMAT-ALLOW(ForbiddenShellAuthorityReads): production-style fixture must remain unsuppressed
     removal_timeouts: HashMap<String, u64>,
 }
 ",
@@ -336,7 +336,39 @@ struct Router {
                 && finding.key.symbol == "Router::removal_timeouts"
         })
         .expect("forbidden finding");
-    assert!(finding.suppressed);
+    assert!(
+        !finding.suppressed,
+        "ForbiddenShellAuthorityReads suppressions must not mask production violations",
+    );
+}
+
+#[test]
+fn forbidden_shell_reads_fixture_rmat_allow_is_test_only() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "rmat-test-fixtures/meerkat-mcp/src/router.rs",
+        r"
+use std::collections::HashMap;
+struct Router {
+    // RMAT-ALLOW(ForbiddenShellAuthorityReads): fixture-only canary
+    removal_timeouts: HashMap<String, u64>,
+}
+",
+    );
+
+    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let finding = findings
+        .iter()
+        .find(|finding| {
+            finding.key.rule == "ForbiddenShellAuthorityReads"
+                && finding.key.symbol == "Router::removal_timeouts"
+        })
+        .expect("forbidden finding");
+    assert!(
+        finding.suppressed,
+        "ForbiddenShellAuthorityReads suppressions are accepted only under explicit RMAT fixture paths",
+    );
 }
 
 #[test]

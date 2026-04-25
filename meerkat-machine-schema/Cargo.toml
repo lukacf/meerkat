@@ -14,7 +14,13 @@ categories.workspace = true
 
 [dependencies]
 indexmap = { version = "2", default-features = false, features = ["std"] }
+meerkat-core = { workspace = true }
 meerkat-machine-dsl.workspace = true
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

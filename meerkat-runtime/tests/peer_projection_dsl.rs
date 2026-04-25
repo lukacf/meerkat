@@ -51,6 +51,7 @@ fn endpoint(name: &str, peer_id: &str, address: &str) -> mm_dsl::PeerEndpoint {
         name: name.into(),
         peer_id: peer_id.into(),
         address: address.into(),
+        signing_key: mm_dsl::PeerSigningKey([name.as_bytes()[0]; 32]),
     }
 }
 

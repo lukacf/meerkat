@@ -572,7 +572,6 @@ export interface ScheduleToolCallRequest {
 export interface SessionOptions {
   model?: string;
   provider?: string;
-  connectionRef?: Readonly<{ realmId: string; bindingId: string }>;
   systemPrompt?: string;
   maxTokens?: number;
   outputSchema?: Record<string, unknown>;

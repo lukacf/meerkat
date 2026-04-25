@@ -1,5 +1,5 @@
 // @generated — protocol helpers for `mob_destroying_session_ingress`
-// Composition: mob_destroy_session_ingress_bundle, Producer: mob_destroy_session_ingress_bridge, Effect: RequestSessionIngressDetachForMobDestroy
+// Composition: meerkat_mob_seam, Producer: mob, Effect: RequestSessionIngressDetachForMobDestroy
 // Closure policy: AckRequired
 // Liveness: eventual feedback: the mob destroy path awaits each session's DetachIngress ack before requesting runtime destroy
 

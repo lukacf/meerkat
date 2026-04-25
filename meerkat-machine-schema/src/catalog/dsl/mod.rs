@@ -75,8 +75,11 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
             NamedTypeBinding::string("SessionLlmIdentity"),
             NamedTypeBinding::string("SessionToolVisibilityDelta"),
             NamedTypeBinding::string("SessionToolVisibilityState"),
+            NamedTypeBinding::string("SurfaceId"),
             NamedTypeBinding::string("ToolFilter"),
             NamedTypeBinding::string("ToolVisibilityWitness"),
+            NamedTypeBinding::string("TurnNumber"),
+            NamedTypeBinding::string("WaitRequestId"),
             NamedTypeBinding::string("WorkId"),
             // Wave-c C-6r: typed PeerEndpoint twin.
             NamedTypeBinding::type_path(

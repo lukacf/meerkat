@@ -65,7 +65,7 @@ machine! {
             WakeRefreshLoop,
         }
 
-        disposition EmitLifecycleEvent => external,
+        disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication,
         disposition WakeRefreshLoop => local,
 
         // --- Transitions ---

@@ -1,8 +1,4 @@
 pub mod catalog;
-/// Compatibility-only absorbed machine schemas retained for generated kernel
-/// consumers during the two-kernel collapse. These are intentionally excluded
-/// from the canonical registry.
-pub mod compat;
 mod composition;
 pub mod identity;
 mod machine;
@@ -16,11 +12,6 @@ pub use catalog::{
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_schemas, compat_composition_schemas,
     meerkat_mob_seam_composition,
-};
-pub use compat::{
-    auth_lease_bridge_machine, external_tool_surface_bridge_machine,
-    mob_destroy_session_ingress_bridge_machine, ops_barrier_bridge_machine,
-    supervisor_trust_bridge_machine,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriver,

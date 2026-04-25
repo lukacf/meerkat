@@ -117,10 +117,10 @@ machine! {
             // `DetachIngress` input before the mob fires its own
             // `RequestRuntimeDestroy`. That ordering is formalised as the
             // `mob_destroying_session_ingress` handoff obligation declared
-            // on the `mob_destroy_session_ingress_bundle` compat
-            // composition — see `meerkat-machine-schema/src/compat/
-            // mob_destroy_session_ingress_bridge.rs`. The
-            // `xtask seam-inventory` destroy-obligation-pairing check
+            // on the canonical `MobMachine::RequestSessionIngressDetachForMobDestroy`
+            // effect in the `mob_destroy_session_ingress_bundle`
+            // composition. The `xtask seam-inventory`
+            // destroy-obligation-pairing check
             // (`## Destroy-obligation Pairing`) flags any canonical
             // routed `Request*Destroy*` effect that lacks the paired
             // ingress-detach ack protocol.
@@ -163,8 +163,7 @@ machine! {
             //     `SupervisorTrustEdgeRevokeFailed`.
             //
             // Both use `ClosurePolicy::AckRequired`. See
-            // `meerkat-machine-schema/src/compat/supervisor_trust_bridge.rs`
-            // and `xtask seam-inventory` output
+            // `supervisor_trust_bundle` and `xtask seam-inventory` output
             // (`## Declared Handoff Obligation Pairs`).
             supervisor_binding_kind: Enum<SupervisorBindingKind>,
             supervisor_bound_name: Option<String>,
@@ -445,9 +444,9 @@ machine! {
             // Supervisor-trust-edge feedback inputs (C-F2 / wave-d D-d).
             //
             // The `PublishSupervisorTrustEdge` and `RevokeSupervisorTrustEdge`
-            // producer effects on `SupervisorTrustBridgeMachine` feed back
-            // through these four inputs. The `epoch` carries through from
-            // the producer effect so transitions can guard against stale
+            // producer effects feed back through these four inputs. The
+            // `epoch` carries through from the producer effect so transitions
+            // can guard against stale
             // acks — if the supervisor binding rotated forward between
             // effect emission and ack arrival, the ack is rejected without
             // mutating state. Guards: current binding is `Bound`; the
@@ -514,6 +513,19 @@ machine! {
                 epoch: u64,
                 endpoints: Set<PeerEndpoint>,
             },
+            PendingSucceeded {
+                surface_id: SurfaceId,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+            },
+            PendingFailed {
+                surface_id: SurfaceId,
+                pending_task_sequence: u64,
+                reason: String,
+            },
+            SnapshotAligned {
+                snapshot_epoch: u64,
+            },
         }
 
         surface_only [
@@ -542,14 +554,17 @@ machine! {
             StageAdd,
             StageRemove,
             StageReload,
-            ApplySurfaceBoundary,
-            PendingSucceeded,
-            PendingFailed,
+            ApplySurfaceBoundary {
+                surface_id: SurfaceId,
+                operation: Enum<SurfaceDeltaOperation>,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+                applied_at_turn: TurnNumber,
+            },
             CallStarted,
             CallFinished,
             FinalizeRemovalClean,
             FinalizeRemovalForced,
-            SnapshotAligned,
             ShutdownSurface,
         }
 
@@ -588,18 +603,18 @@ machine! {
             RetainTerminalRecord,
             EvictCompletedRecord,
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
-            // Wait-all barrier satisfaction. The handoff protocol's
-            // obligation payload (wait_request_id + operation_ids) lives
-            // on the compat `OpsBarrierBridgeMachine`'s mirror effect so
-            // the DSL-macro-constrained canonical effect can stay
-            // fieldless without expanding the DSL syntax. See
-            // `meerkat-machine-schema/src/compat/ops_barrier_bridge.rs`.
-            WaitAllSatisfied,
+            WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
             CollectCompletedResult,
             EnqueueClassifiedEntry,
             SpawnDrainTask,
-            ScheduleSurfaceCompletion,
-            RefreshVisibleSurfaceSet,
+            ScheduleSurfaceCompletion {
+                surface_id: SurfaceId,
+                operation: Enum<SurfaceDeltaOperation>,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+                applied_at_turn: TurnNumber,
+            },
+            RefreshVisibleSurfaceSet { snapshot_epoch: u64 },
             EmitExternalToolDelta,
             CloseSurfaceConnection,
             RejectSurfaceCall,
@@ -666,6 +681,14 @@ machine! {
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             PeerProjectionChanged { peer_projection_epoch: u64 },
             CommsTrustReconcileRequested { peer_projection_epoch: u64 },
+            PublishSupervisorTrustEdge {
+                peer_id: PeerId,
+                name: String,
+                address: String,
+                signing_public_key: Option<String>,
+                epoch: u64,
+            },
+            RevokeSupervisorTrustEdge { peer_id: PeerId, epoch: u64 },
         }
 
         // =====================================================================
@@ -703,12 +726,12 @@ machine! {
         disposition RetainTerminalRecord => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
-        disposition WaitAllSatisfied => local,
+        disposition WaitAllSatisfied => local handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
         disposition SpawnDrainTask => local,
-        disposition ScheduleSurfaceCompletion => local,
-        disposition RefreshVisibleSurfaceSet => external,
+        disposition ScheduleSurfaceCompletion => local handoff surface_completion,
+        disposition RefreshVisibleSurfaceSet => external handoff surface_snapshot_alignment,
         disposition EmitExternalToolDelta => external,
         disposition CloseSurfaceConnection => local,
         disposition RejectSurfaceCall => external,
@@ -730,6 +753,8 @@ machine! {
         disposition LocalEndpointChanged => external,
         disposition PeerProjectionChanged => external,
         disposition CommsTrustReconcileRequested => external,
+        disposition PublishSupervisorTrustEdge => external handoff supervisor_trust_publish,
+        disposition RevokeSupervisorTrustEdge => external handoff supervisor_trust_revoke,
 
         // =====================================================================
         // Invariants
@@ -1754,23 +1779,35 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition ApplySurfaceBoundaryAttached {
-            on signal ApplySurfaceBoundary
+            on signal ApplySurfaceBoundary { surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
             to Attached
-            emit ScheduleSurfaceCompletion
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: operation,
+                pending_task_sequence: pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
         }
         transition ApplySurfaceBoundaryRunning {
-            on signal ApplySurfaceBoundary
+            on signal ApplySurfaceBoundary { surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
             to Running
-            emit ScheduleSurfaceCompletion
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: operation,
+                pending_task_sequence: pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
         }
         transition PendingSucceededAttached {
-            on signal PendingSucceeded
+            on input PendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1778,7 +1815,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingSucceededRunning {
-            on signal PendingSucceeded
+            on input PendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1786,7 +1823,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingFailedAttached {
-            on signal PendingFailed
+            on input PendingFailed { surface_id, pending_task_sequence, reason }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1794,7 +1831,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition PendingFailedRunning {
-            on signal PendingFailed
+            on input PendingFailed { surface_id, pending_task_sequence, reason }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1862,7 +1899,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedAttached {
-            on signal SnapshotAligned
+            on input SnapshotAligned { snapshot_epoch }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -1870,7 +1907,7 @@ machine! {
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedRunning {
-            on signal SnapshotAligned
+            on input SnapshotAligned { snapshot_epoch }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -2988,6 +3025,7 @@ stub_newtype!(FenceToken);
 stub_newtype!(RunId);
 stub_newtype!(InputId);
 stub_newtype!(WorkId);
+stub_newtype!(WaitRequestId);
 stub_newtype!(OperationId);
 stub_newtype!(SessionLlmIdentity);
 stub_newtype!(SessionToolVisibilityState);
@@ -3002,6 +3040,18 @@ pub enum SessionLlmCapabilitySurfaceStatus {
     #[default]
     Unresolved,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceDeltaOperation {
+    #[default]
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+stub_newtype!(SurfaceId);
+stub_newtype!(TurnNumber);
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);

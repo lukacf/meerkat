@@ -2601,7 +2601,7 @@ machine! {
             //
             // Feedback acks for the `supervisor_trust_publish` /
             // `supervisor_trust_revoke` handoff protocols hosted on the
-            // compat `SupervisorTrustBridgeMachine`. The realising shell
+            // canonical `MeerkatMachine` producer effects. The realising shell
             // (`comms_drain::try_handle_supervisor_bridge_command`) calls
             // `Router::add_trusted_peer` / `remove_trusted_peer` after the
             // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`

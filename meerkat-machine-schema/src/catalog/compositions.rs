@@ -389,6 +389,12 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
 }
 
 pub fn meerkat_mob_seam_composition() -> CompositionSchema {
+    let mut handoff_protocols = Vec::new();
+    handoff_protocols.extend(mob_bundle_composition().handoff_protocols);
+    handoff_protocols.extend(external_tool_bundle_composition().handoff_protocols);
+    handoff_protocols.extend(supervisor_trust_bundle_composition().handoff_protocols);
+    handoff_protocols.extend(mob_destroy_session_ingress_bundle_composition().handoff_protocols);
+
     CompositionSchema {
         name: comp_id("meerkat_mob_seam"),
         machines: vec![
@@ -403,8 +409,15 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 actor: act_id("mob_kernel"),
             },
         ],
-        actors: vec![machine_actor("meerkat_kernel"), machine_actor("mob_kernel")],
-        handoff_protocols: vec![],
+        actors: vec![
+            machine_actor("meerkat_kernel"),
+            machine_actor("mob_kernel"),
+            owner_actor("ops_lifecycle_owner"),
+            owner_actor("surface_host_owner"),
+            owner_actor("supervisor_bridge_owner"),
+            owner_actor("mob_destroy_session_ingress_owner"),
+        ],
+        handoff_protocols,
         entry_inputs: vec![
             EntryInput {
                 name: "spawn_member".into(),
@@ -689,21 +702,12 @@ fn default_ci_limits() -> CompositionStateLimits {
     }
 }
 
-/// Compositions declared to host cross-machine handoff protocols whose
-/// producer side is backed either by a compat machine (flow/loop) or by
-/// the canonical `MeerkatMachine` with an absorbed handoff effect that
-/// the runtime authority fills in. They sit alongside
-/// `canonical_composition_schemas()` in the codegen iteration.
-///
-/// Populated as each handoff protocol's producer side is wired up.
+/// Perimeter handoff compositions that are not part of the Mob seam.
+/// Runtime/Mob handoff protocols are hosted directly by
+/// `meerkat_mob_seam_composition`; the auth lease lifecycle is
+/// per-binding and remains a standalone perimeter composition.
 pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
-    vec![
-        mob_bundle_composition(),
-        external_tool_bundle_composition(),
-        supervisor_trust_bundle_composition(),
-        mob_destroy_session_ingress_bundle_composition(),
-        auth_lease_bundle_composition(),
-    ]
+    vec![auth_lease_bundle_composition()]
 }
 
 /// Host composition for the `ops_barrier_satisfaction` handoff protocol.
@@ -741,41 +745,27 @@ fn mob_bundle_composition() -> CompositionSchema {
 
     CompositionSchema {
         name: comp_id("mob_bundle"),
-        // The producer is the compat `OpsBarrierBridgeMachine` which hosts
-        // the handoff-annotated `WaitAllSatisfied` effect declaration.
-        // Its shape mirrors the runtime-owned effect; the DSL can now
-        // express this handoff directly when this producer moves back to
-        // the canonical `MeerkatMachine` instance.
         machines: vec![MachineInstance {
-            instance_id: mi_id("ops_barrier_bridge"),
-            machine_name: mach_id("OpsBarrierBridgeMachine"),
-            actor: act_id("ops_barrier_bridge_authority"),
+            instance_id: mi_id("meerkat"),
+            machine_name: mach_id("MeerkatMachine"),
+            actor: act_id("meerkat_kernel"),
         }],
-        actors: vec![
-            machine_actor("ops_barrier_bridge_authority"),
-            owner_actor("ops_lifecycle_owner"),
-        ],
+        actors: vec![machine_actor("meerkat_kernel"), owner_actor("ops_lifecycle_owner")],
         handoff_protocols: vec![EffectHandoffProtocol {
             name: protocol_id("ops_barrier_satisfaction"),
-            producer_instance: mi_id("ops_barrier_bridge"),
-            effect_variant: ev_id("WaitAllSatisfied"),
-            realizing_actor: act_id("ops_lifecycle_owner"),
-            correlation_fields: vec![fld_id("wait_request_id")],
+            producer_instance: mi_id("meerkat"),
+                effect_variant: ev_id("WaitAllSatisfied"),
+                realizing_actor: act_id("ops_lifecycle_owner"),
+                correlation_fields: vec![fld_id("operation_ids")],
             obligation_fields: vec![fld_id("wait_request_id"), fld_id("operation_ids")],
-            allowed_feedback_inputs: vec![FeedbackInputRef {
-                machine_instance: mi_id("ops_barrier_bridge"),
-                input_variant: iv_id("OpsBarrierSatisfied"),
-                field_bindings: vec![
-                    FeedbackFieldBinding {
-                        input_field: fld_id("wait_request_id"),
-                        source: FeedbackFieldSource::ObligationField(fld_id("wait_request_id")),
-                    },
-                    FeedbackFieldBinding {
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: mi_id("meerkat"),
+                    input_variant: iv_id("OpsBarrierSatisfied"),
+                    field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("operation_ids"),
                         source: FeedbackFieldSource::ObligationField(fld_id("operation_ids")),
-                    },
-                ],
-            }],
+                    }],
+                }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
@@ -787,11 +777,10 @@ fn mob_bundle_composition() -> CompositionSchema {
                 // from the shell-owned `WaitAllSatisfied` struct via the
                 // shared `accept_<effect>` emission; feedback flows
                 // through the `TurnStateHandle::ops_barrier_satisfied`
-                // trait method. The compat `OpsBarrierBridgeMachine`
-                // hosts the handoff annotation purely so the protocol
-                // passes composition validation — it has no runtime
-                // authority of its own, so stacking ShellBridge with an
-                // `authority.apply` submitter would point at nothing.
+                // trait method. The canonical `MeerkatMachine`
+                // declares the handoff protocol directly; the shell
+                // struct is the source projection consumed by the
+                // generated helper.
                 generation_mode: ProtocolGenerationMode::HandleBridge,
                 required_imports: vec![
                     "use crate::handles::{DslTransitionError, TurnStateHandle};".into(),
@@ -826,16 +815,13 @@ fn mob_bundle_composition() -> CompositionSchema {
         invariants: vec![CompositionInvariant {
             name: "ops_barrier_satisfaction_protocol_covered".into(),
             kind: CompositionInvariantKind::HandoffProtocolCovered {
-                producer_instance: mi_id("ops_barrier_bridge"),
+                producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("WaitAllSatisfied"),
                 protocol_name: protocol_id("ops_barrier_satisfaction"),
             },
             statement: "wait-all barrier satisfaction crosses from the ops lifecycle owner back into turn-state authority only through the explicit `ops_barrier_satisfaction` protocol".into(),
-            references_machines: vec![mi_id("ops_barrier_bridge")],
-            references_actors: vec![
-                act_id("ops_barrier_bridge_authority"),
-                act_id("ops_lifecycle_owner"),
-            ],
+            references_machines: vec![mi_id("meerkat")],
+            references_actors: vec![act_id("meerkat_kernel"), act_id("ops_lifecycle_owner")],
         }],
         witnesses: vec![witness("ops_barrier_close_round_trip", &[])],
         deep_domain_cardinality: 3,
@@ -849,12 +835,12 @@ fn mob_bundle_composition() -> CompositionSchema {
 /// Host composition for the `surface_completion` and
 /// `surface_snapshot_alignment` handoff protocols.
 ///
-/// Both protocols' producer-side effects are emitted by the runtime's
-/// hand-written `ExternalToolSurfaceAuthority`. The compat
-/// `ExternalToolSurfaceBridgeMachine` mirrors each effect's shape and
-/// hosts handoff annotations in the same DSL/schema shape now available
-/// to the canonical producer, preserving checked helper output while the
-/// bridge module remains the declared producer.
+/// Both protocols' producer-side effects are emitted from the canonical
+/// `MeerkatMachine` surface-boundary effect set and consumed through the
+/// runtime's hand-written `ExternalToolSurfaceAuthority` effect enum.
+/// The schema keeps those field names and typed atoms in parity so the
+/// generated helper remains a checked boundary rather than an ad-hoc
+/// shell convention.
 ///
 /// - `surface_completion` — EffectExtractor (scans `ExternalToolSurfaceEffect`
 ///   for `ScheduleSurfaceCompletion` variants) + HandleBridge
@@ -907,20 +893,17 @@ fn external_tool_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("external_tool_bundle"),
         machines: vec![MachineInstance {
-            instance_id: mi_id("external_tool_surface"),
-            machine_name: mach_id("ExternalToolSurfaceBridgeMachine"),
-            actor: act_id("external_tool_surface_authority"),
+            instance_id: mi_id("meerkat"),
+            machine_name: mach_id("MeerkatMachine"),
+            actor: act_id("meerkat_kernel"),
         }],
-        actors: vec![
-            machine_actor("external_tool_surface_authority"),
-            owner_actor("surface_host_owner"),
-        ],
+        actors: vec![machine_actor("meerkat_kernel"), owner_actor("surface_host_owner")],
         handoff_protocols: vec![
             // Protocol 1: surface_completion — dual-mode emission
             // (EffectExtractor + HandleBridge).
             EffectHandoffProtocol {
                 name: protocol_id("surface_completion"),
-                producer_instance: mi_id("external_tool_surface"),
+                producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("ScheduleSurfaceCompletion"),
                 realizing_actor: act_id("surface_host_owner"),
                 correlation_fields: vec![
@@ -936,7 +919,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 ],
                 allowed_feedback_inputs: vec![
                     FeedbackInputRef {
-                        machine_instance: mi_id("external_tool_surface"),
+                        machine_instance: mi_id("meerkat"),
                         input_variant: iv_id("PendingSucceeded"),
                         field_bindings: vec![
                             FeedbackFieldBinding {
@@ -954,7 +937,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                         ],
                     },
                     FeedbackInputRef {
-                        machine_instance: mi_id("external_tool_surface"),
+                        machine_instance: mi_id("meerkat"),
                         input_variant: iv_id("PendingFailed"),
                         field_bindings: vec![
                             FeedbackFieldBinding {
@@ -1010,13 +993,13 @@ fn external_tool_bundle_composition() -> CompositionSchema {
             // Protocol 2: surface_snapshot_alignment — dual-mode.
             EffectHandoffProtocol {
                 name: protocol_id("surface_snapshot_alignment"),
-                producer_instance: mi_id("external_tool_surface"),
+                producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("RefreshVisibleSurfaceSet"),
                 realizing_actor: act_id("surface_host_owner"),
                 correlation_fields: vec![fld_id("snapshot_epoch")],
                 obligation_fields: vec![fld_id("snapshot_epoch")],
                 allowed_feedback_inputs: vec![FeedbackInputRef {
-                    machine_instance: mi_id("external_tool_surface"),
+                    machine_instance: mi_id("meerkat"),
                     input_variant: iv_id("SnapshotAligned"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("snapshot_epoch"),
@@ -1068,34 +1051,28 @@ fn external_tool_bundle_composition() -> CompositionSchema {
             CompositionInvariant {
                 name: "surface_completion_protocol_covered".into(),
                 kind: CompositionInvariantKind::HandoffProtocolCovered {
-                    producer_instance: mi_id("external_tool_surface"),
+                    producer_instance: mi_id("meerkat"),
                     effect_variant: ev_id("ScheduleSurfaceCompletion"),
                     protocol_name: protocol_id("surface_completion"),
                 },
                 statement:
                     "pending-op completion on a tool surface is returned to the authority only through the explicit `surface_completion` protocol"
                         .into(),
-                references_machines: vec![mi_id("external_tool_surface")],
-                references_actors: vec![
-                    act_id("external_tool_surface_authority"),
-                    act_id("surface_host_owner"),
-                ],
+                references_machines: vec![mi_id("meerkat")],
+                references_actors: vec![act_id("meerkat_kernel"), act_id("surface_host_owner")],
             },
             CompositionInvariant {
                 name: "surface_snapshot_alignment_protocol_covered".into(),
                 kind: CompositionInvariantKind::HandoffProtocolCovered {
-                    producer_instance: mi_id("external_tool_surface"),
+                    producer_instance: mi_id("meerkat"),
                     effect_variant: ev_id("RefreshVisibleSurfaceSet"),
                     protocol_name: protocol_id("surface_snapshot_alignment"),
                 },
                 statement:
                     "visible-set refresh acknowledgement crosses back through the explicit `surface_snapshot_alignment` protocol rather than ad-hoc polling"
                         .into(),
-                references_machines: vec![mi_id("external_tool_surface")],
-                references_actors: vec![
-                    act_id("external_tool_surface_authority"),
-                    act_id("surface_host_owner"),
-                ],
+                references_machines: vec![mi_id("meerkat")],
+                references_actors: vec![act_id("meerkat_kernel"), act_id("surface_host_owner")],
             },
         ],
         witnesses: vec![
@@ -1133,10 +1110,10 @@ fn owner_actor(name: &str) -> ActorSchema {
 /// C-F2 formalises the step-lock as a generated obligation pair so the
 /// companion trust-edge mutation crosses from the supervisor-binding
 /// authority back through acknowledged owner feedback, not via a raw
-/// shell call that the machine forgets about. The compat
-/// `SupervisorTrustBridgeMachine` hosts the `handoff_protocol`
-/// annotations; the realising actor `supervisor_bridge_owner`
-/// corresponds to `meerkat-runtime::comms_drain`, which calls
+/// shell call that the machine forgets about. The canonical
+/// `MeerkatMachine` effects host the `handoff_protocol` annotations;
+/// the realising actor `supervisor_bridge_owner` corresponds to
+/// `meerkat-runtime::comms_drain`, which calls
 /// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` and emits
 /// the typed feedback ack through the generated protocol helper.
 ///
@@ -1171,18 +1148,15 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("supervisor_trust_bundle"),
         machines: vec![MachineInstance {
-            instance_id: mi_id("supervisor_trust_bridge"),
-            machine_name: mach_id("SupervisorTrustBridgeMachine"),
-            actor: act_id("supervisor_trust_bridge_authority"),
+            instance_id: mi_id("meerkat"),
+            machine_name: mach_id("MeerkatMachine"),
+            actor: act_id("meerkat_kernel"),
         }],
-        actors: vec![
-            machine_actor("supervisor_trust_bridge_authority"),
-            owner_actor("supervisor_bridge_owner"),
-        ],
+        actors: vec![machine_actor("meerkat_kernel"), owner_actor("supervisor_bridge_owner")],
         handoff_protocols: vec![
             EffectHandoffProtocol {
                 name: protocol_id("supervisor_trust_publish"),
-                producer_instance: mi_id("supervisor_trust_bridge"),
+                producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("PublishSupervisorTrustEdge"),
                 realizing_actor: act_id("supervisor_bridge_owner"),
                 // Correlation on `peer_id + epoch` — the same tuple
@@ -1194,6 +1168,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     fld_id("peer_id"),
                     fld_id("name"),
                     fld_id("address"),
+                    fld_id("signing_public_key"),
                     fld_id("epoch"),
                 ],
                 allowed_feedback_inputs: vec![],
@@ -1208,19 +1183,8 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::comms_drain::SupervisorTrustBridgeEffect;".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
                     ],
-                    // Compat bridge — `SupervisorTrustBridgeMachine` is
-                    // intentionally excluded from the canonical TLC state
-                    // space (see `compat/supervisor_trust_bridge.rs`). Its
-                    // authority surface is realised directly on
-                    // `MeerkatMachine`'s DSL (the `SupervisorTrustEdge*`
-                    // inputs at `meerkat-runtime dsl.rs:2598-2615`). These
-                    // paths point to that authority so the schema validator
-                    // accepts the ShellBridge shape; codegen skips this
-                    // protocol because `SupervisorTrustBridgeMachine` is
-                    // not in the canonical codegen machine list
-                    // (`xtask::protocol_codegen` machine registry).
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
                     ),
@@ -1230,9 +1194,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     input_enum_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineInput".into(),
                     ),
-                    effect_enum_path: Some(
-                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
-                    ),
+                    effect_enum_path: Some("crate::meerkat_machine::dsl::MeerkatMachineEffect".into()),
                     transition_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineTransition".into(),
                     ),
@@ -1241,7 +1203,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     ),
                     executor_trigger_input_variant: None,
                     bridge_source_type_path: Some(
-                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
+                        "crate::meerkat_machine::dsl::MeerkatMachineEffect".into(),
                     ),
                     helper_return_shape: ProtocolHelperReturnShape::Obligations,
                     handle_trait_path: None,
@@ -1254,7 +1216,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
             },
             EffectHandoffProtocol {
                 name: protocol_id("supervisor_trust_revoke"),
-                producer_instance: mi_id("supervisor_trust_bridge"),
+                producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                 realizing_actor: act_id("supervisor_bridge_owner"),
                 correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
@@ -1271,10 +1233,8 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::comms_drain::SupervisorTrustBridgeEffect;".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
                     ],
-                    // See `supervisor_trust_publish` above for the
-                    // compat-bridge rationale for these authority paths.
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
                     ),
@@ -1284,9 +1244,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     input_enum_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineInput".into(),
                     ),
-                    effect_enum_path: Some(
-                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
-                    ),
+                    effect_enum_path: Some("crate::meerkat_machine::dsl::MeerkatMachineEffect".into()),
                     transition_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineTransition".into(),
                     ),
@@ -1295,7 +1253,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     ),
                     executor_trigger_input_variant: None,
                     bridge_source_type_path: Some(
-                        "crate::comms_drain::SupervisorTrustBridgeEffect".into(),
+                        "crate::meerkat_machine::dsl::MeerkatMachineEffect".into(),
                     ),
                     helper_return_shape: ProtocolHelperReturnShape::Obligations,
                     handle_trait_path: None,
@@ -1318,30 +1276,24 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
             CompositionInvariant {
                 name: "supervisor_trust_publish_protocol_covered".into(),
                 kind: CompositionInvariantKind::HandoffProtocolCovered {
-                    producer_instance: mi_id("supervisor_trust_bridge"),
+                    producer_instance: mi_id("meerkat"),
                     effect_variant: ev_id("PublishSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_publish"),
                 },
                 statement: "supervisor trust-edge publication crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_publish` protocol".into(),
-                references_machines: vec![mi_id("supervisor_trust_bridge")],
-                references_actors: vec![
-                    act_id("supervisor_trust_bridge_authority"),
-                    act_id("supervisor_bridge_owner"),
-                ],
+                references_machines: vec![mi_id("meerkat")],
+                references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
             CompositionInvariant {
                 name: "supervisor_trust_revoke_protocol_covered".into(),
                 kind: CompositionInvariantKind::HandoffProtocolCovered {
-                    producer_instance: mi_id("supervisor_trust_bridge"),
+                    producer_instance: mi_id("meerkat"),
                     effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_revoke"),
                 },
                 statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_revoke` protocol".into(),
-                references_machines: vec![mi_id("supervisor_trust_bridge")],
-                references_actors: vec![
-                    act_id("supervisor_trust_bridge_authority"),
-                    act_id("supervisor_bridge_owner"),
-                ],
+                references_machines: vec![mi_id("meerkat")],
+                references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
         ],
         witnesses: vec![
@@ -1376,7 +1328,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
 /// C-F3 closes that seam with a generated obligation pair. The
 /// `mob_destroying_session_ingress` protocol declares:
 ///
-/// * producer: compat `MobDestroySessionIngressBridgeMachine` effect
+/// * producer: canonical `MobMachine` effect
 ///   `RequestSessionIngressDetachForMobDestroy { mob_id,
 ///   agent_runtime_id }`, emitted from the mob's destroy path before
 ///   any `RequestRuntimeDestroy` is routed;
@@ -1407,17 +1359,14 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("mob_destroy_session_ingress_bundle"),
         machines: vec![MachineInstance {
-            instance_id: mi_id("mob_destroy_session_ingress_bridge"),
-            machine_name: mach_id("MobDestroySessionIngressBridgeMachine"),
-            actor: act_id("mob_destroy_session_ingress_bridge_authority"),
+            instance_id: mi_id("mob"),
+            machine_name: mach_id("MobMachine"),
+            actor: act_id("mob_kernel"),
         }],
-        actors: vec![
-            machine_actor("mob_destroy_session_ingress_bridge_authority"),
-            owner_actor("mob_destroy_session_ingress_owner"),
-        ],
+        actors: vec![machine_actor("mob_kernel"), owner_actor("mob_destroy_session_ingress_owner")],
         handoff_protocols: vec![EffectHandoffProtocol {
             name: protocol_id("mob_destroying_session_ingress"),
-            producer_instance: mi_id("mob_destroy_session_ingress_bridge"),
+            producer_instance: mi_id("mob"),
             effect_variant: ev_id("RequestSessionIngressDetachForMobDestroy"),
             realizing_actor: act_id("mob_destroy_session_ingress_owner"),
             correlation_fields: vec![fld_id("mob_id"), fld_id("agent_runtime_id")],
@@ -1432,7 +1381,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
             // session-detach` ordering cannot regress silently.
             allowed_feedback_inputs: vec![
                 FeedbackInputRef {
-                    machine_instance: mi_id("mob_destroy_session_ingress_bridge"),
+                    machine_instance: mi_id("mob"),
                     input_variant: iv_id("SessionIngressDetachedForMobDestroy"),
                     field_bindings: vec![
                         FeedbackFieldBinding {
@@ -1448,7 +1397,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                     ],
                 },
                 FeedbackInputRef {
-                    machine_instance: mi_id("mob_destroy_session_ingress_bridge"),
+                    machine_instance: mi_id("mob"),
                     input_variant: iv_id("SessionIngressDetachFailedForMobDestroy"),
                     field_bindings: vec![
                         FeedbackFieldBinding {
@@ -1482,12 +1431,6 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                     "use crate::runtime::actor::MobDestroySessionIngressBridgeEffect;".into(),
                     "use crate::machines::mob_machine::{AgentRuntimeId, MobId, MobMachineAuthority, MobMachineInput, MobMachineMutator, MobMachineTransition, MobMachineTransitionError};".into(),
                 ],
-                // Compat bridge — the `MobDestroySessionIngressBridgeMachine`
-                // is declarative-only (codegen skips it because its
-                // producer machine is not in the canonical codegen
-                // machine registry). The DetachIngress ack flows through
-                // `MobMachine`'s DSL; these paths point to that authority
-                // so the schema validator accepts the ShellBridge shape.
                 authority_type_path: Some(
                     "crate::machines::mob_machine::dsl::MobMachineAuthority".into(),
                 ),
@@ -1529,16 +1472,13 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
         invariants: vec![CompositionInvariant {
             name: "mob_destroying_session_ingress_protocol_covered".into(),
             kind: CompositionInvariantKind::HandoffProtocolCovered {
-                producer_instance: mi_id("mob_destroy_session_ingress_bridge"),
+                producer_instance: mi_id("mob"),
                 effect_variant: ev_id("RequestSessionIngressDetachForMobDestroy"),
                 protocol_name: protocol_id("mob_destroying_session_ingress"),
             },
             statement: "mob destroying its runtime crosses from the mob authority back into meerkat acknowledgement only through the explicit `mob_destroying_session_ingress` protocol: DetachIngress is fired against the target session and acknowledged before RequestRuntimeDestroy is routed".into(),
-            references_machines: vec![mi_id("mob_destroy_session_ingress_bridge")],
-            references_actors: vec![
-                act_id("mob_destroy_session_ingress_bridge_authority"),
-                act_id("mob_destroy_session_ingress_owner"),
-            ],
+            references_machines: vec![mi_id("mob")],
+            references_actors: vec![act_id("mob_kernel"), act_id("mob_destroy_session_ingress_owner")],
         }],
         witnesses: vec![witness("mob_destroying_session_ingress_round_trip", &[])],
         deep_domain_cardinality: 2,
@@ -1558,16 +1498,11 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
 /// External-disposition effect crossed to the runtime's
 /// `RuntimeAuthLeaseHandle` owner as an undeclared seam.
 ///
-/// The composition links the canonical `AuthMachine` to the compat
-/// `AuthLeaseBridgeMachine` via a route that mirrors the lifecycle
-/// event into the bridge's input; the bridge then hosts the
-/// `handoff_protocol = Some("auth_lease_lifecycle_publication")`
-/// disposition annotation. The pattern mirrors `supervisor_trust_bundle_composition`
-/// and `mob_bundle_composition`: a minimal compat bridge hosts the
-/// protocol annotation, the canonical machine owns the authoritative
-/// state, and a composition Route wires the producer effect into the
-/// bridge's mirror input so the seam is discoverable in the registry
-/// and `xtask seam-inventory`.
+/// The canonical `AuthMachine` now hosts the
+/// `auth_lease_lifecycle_publication` handoff annotation directly on
+/// `EmitLifecycleEvent`; no bridge machine or mirrored route is
+/// allowed to stand between the lifecycle owner and the runtime
+/// auth-lease owner.
 ///
 /// Mode: `EffectExtractor` with zero declared feedback inputs.
 /// `AuthMachine`'s own transitions already carry the authoritative
@@ -1585,33 +1520,24 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
 ///
 /// Actors:
 /// - `auth_machine_authority` (Machine) — canonical `AuthMachine`.
-/// - `auth_lease_bridge_authority` (Machine) — compat bridge.
 /// - `auth_lease_owner` (Owner) — realising actor; corresponds to
 ///   `meerkat-runtime::handles::auth_lease::RuntimeAuthLeaseHandle`.
 fn auth_lease_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("auth_lease_bundle"),
-        machines: vec![
-            MachineInstance {
-                instance_id: mi_id("auth_machine"),
-                machine_name: mach_id("AuthMachine"),
-                actor: act_id("auth_machine_authority"),
-            },
-            MachineInstance {
-                instance_id: mi_id("auth_lease_bridge"),
-                machine_name: mach_id("AuthLeaseBridgeMachine"),
-                actor: act_id("auth_lease_bridge_authority"),
-            },
-        ],
+        machines: vec![MachineInstance {
+            instance_id: mi_id("auth_machine"),
+            machine_name: mach_id("AuthMachine"),
+            actor: act_id("auth_machine_authority"),
+        }],
         actors: vec![
             machine_actor("auth_machine_authority"),
-            machine_actor("auth_lease_bridge_authority"),
             owner_actor("auth_lease_owner"),
         ],
         handoff_protocols: vec![EffectHandoffProtocol {
             name: protocol_id("auth_lease_lifecycle_publication"),
-            producer_instance: mi_id("auth_lease_bridge"),
-            effect_variant: ev_id("PublishLifecycleEvent"),
+            producer_instance: mi_id("auth_machine"),
+            effect_variant: ev_id("EmitLifecycleEvent"),
             realizing_actor: act_id("auth_lease_owner"),
             correlation_fields: vec![fld_id("new_state")],
             obligation_fields: vec![fld_id("new_state")],
@@ -1629,12 +1555,12 @@ fn auth_lease_bundle_composition() -> CompositionSchema {
                         .into(),
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![
-                    "use crate::handles::auth_lease::AuthLeaseBridgeEffect;".into(),
+                    "use crate::auth_machine::dsl::{AuthLifecyclePhase, AuthMachineEffect};".into(),
                 ],
                 authority_type_path: None,
                 mutator_trait_path: None,
                 input_enum_path: None,
-                effect_enum_path: Some("crate::handles::auth_lease::AuthLeaseBridgeEffect".into()),
+                effect_enum_path: Some("crate::auth_machine::dsl::AuthMachineEffect".into()),
                 transition_type_path: None,
                 error_type_path: None,
                 executor_trigger_input_variant: None,
@@ -1649,62 +1575,28 @@ fn auth_lease_bundle_composition() -> CompositionSchema {
             },
         }],
         entry_inputs: vec![],
-        routes: vec![route(
-            "auth_lifecycle_event_crosses_to_bridge",
-            "auth_machine",
-            "EmitLifecycleEvent",
-            "auth_lease_bridge",
-            RouteTargetKind::Input,
-            "MirrorLifecycleEvent",
-            &[bind("new_state", "new_state")],
-        )],
+        routes: vec![],
         route_target_selectors: vec![],
         driver: None,
         transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
-        invariants: vec![
-            CompositionInvariant {
-                name: "auth_lease_lifecycle_publication_protocol_covered".into(),
-                kind: CompositionInvariantKind::HandoffProtocolCovered {
-                    producer_instance: mi_id("auth_lease_bridge"),
-                    effect_variant: ev_id("PublishLifecycleEvent"),
-                    protocol_name: protocol_id("auth_lease_lifecycle_publication"),
-                },
-                statement: "every AuthMachine lifecycle-phase transition's external \
+        invariants: vec![CompositionInvariant {
+            name: "auth_lease_lifecycle_publication_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: mi_id("auth_machine"),
+                effect_variant: ev_id("EmitLifecycleEvent"),
+                protocol_name: protocol_id("auth_lease_lifecycle_publication"),
+            },
+            statement: "every AuthMachine lifecycle-phase transition's external \
                     publication crosses into the runtime auth-lease owner through the \
                     explicit `auth_lease_lifecycle_publication` protocol rather than \
                     ad-hoc shell observation"
-                    .into(),
-                references_machines: vec![mi_id("auth_machine"), mi_id("auth_lease_bridge")],
-                references_actors: vec![
-                    act_id("auth_machine_authority"),
-                    act_id("auth_lease_bridge_authority"),
-                    act_id("auth_lease_owner"),
-                ],
-            },
-            CompositionInvariant {
-                name: "auth_lifecycle_event_bridge_route_present".into(),
-                kind: CompositionInvariantKind::RoutePresent {
-                    from_machine: mi_id("auth_machine"),
-                    effect_variant: ev_id("EmitLifecycleEvent"),
-                    to_machine: mi_id("auth_lease_bridge"),
-                    input_variant: rv(RouteTargetKind::Input, "MirrorLifecycleEvent"),
-                },
-                statement: "canonical AuthMachine lifecycle events reach the \
-                    publication-bridge input through the explicit composition route"
-                    .into(),
-                references_machines: vec![mi_id("auth_machine"), mi_id("auth_lease_bridge")],
-                references_actors: vec![
-                    act_id("auth_machine_authority"),
-                    act_id("auth_lease_bridge_authority"),
-                ],
-            },
-        ],
-        witnesses: vec![witness(
-            "auth_lease_lifecycle_publication_round_trip",
-            &["auth_lifecycle_event_crosses_to_bridge"],
-        )],
+                .into(),
+            references_machines: vec![mi_id("auth_machine")],
+            references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
+        }],
+        witnesses: vec![witness("auth_lease_lifecycle_publication_round_trip", &[])],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,

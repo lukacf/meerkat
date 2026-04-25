@@ -1297,7 +1297,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`, `Retired`
 - On: `Recycle`()
 - Guards:
-  - `runtime_is_bound`
+  - `session_registered`
 - Emits: `InitiateRecycle`
 - To: `Idle`
 
@@ -1305,7 +1305,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `Recycle`()
 - Guards:
-  - `runtime_is_bound`
+  - `session_registered`
 - Emits: `InitiateRecycle`
 - To: `Attached`
 

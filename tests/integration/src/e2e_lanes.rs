@@ -468,7 +468,7 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
 
 fn scenario_env(spec: &Spec, cargo_target_dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
-    std::fs::create_dir_all(&cargo_target_dir).map_err(|error| {
+    std::fs::create_dir_all(cargo_target_dir).map_err(|error| {
         format!(
             "failed to create scenario cargo target dir {}: {error}",
             cargo_target_dir.display()
@@ -502,10 +502,7 @@ fn scenario_env(spec: &Spec, cargo_target_dir: &Path) -> Result<Vec<(String, Str
     env.entry("RUST_MIN_STACK".to_string())
         .or_insert_with(|| (16 * 1024 * 1024).to_string());
     for (key, value) in spec.env {
-        env.insert(
-            (*key).to_string(),
-            expand_template(value, &cargo_target_dir),
-        );
+        env.insert((*key).to_string(), expand_template(value, cargo_target_dir));
     }
     for binary in spec.cargo_bin_env {
         env.insert(

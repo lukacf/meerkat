@@ -75,6 +75,12 @@ struct CompletedCommand {
     output: String,
 }
 
+const WEB_RUNTIME_BUILD_IF_MISSING: &[&str] = &[
+    "/bin/sh",
+    "-c",
+    "if test -f ../../../sdks/web/wasm/meerkat_web_runtime.js && test -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm; then :; else npm --prefix ../../../sdks/web run build; fi",
+];
+
 #[derive(Clone, Debug)]
 enum PreCommandState {
     Running,
@@ -1493,7 +1499,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                &["npm", "--prefix", "../../../sdks/web", "run", "build"],
+                WEB_RUNTIME_BUILD_IF_MISSING,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -1525,7 +1531,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                &["npm", "--prefix", "../../../sdks/web", "run", "build"],
+                WEB_RUNTIME_BUILD_IF_MISSING,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -1557,7 +1563,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                &["npm", "--prefix", "../../../sdks/web", "run", "build"],
+                WEB_RUNTIME_BUILD_IF_MISSING,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -1589,7 +1595,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                &["npm", "--prefix", "../../../sdks/web", "run", "build"],
+                WEB_RUNTIME_BUILD_IF_MISSING,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {

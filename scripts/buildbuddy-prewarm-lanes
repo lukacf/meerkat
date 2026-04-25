@@ -39,19 +39,28 @@ case "${profile}" in
     wait_for_all "${pid_source}" "${pid_exact}" "${pid_support}"
     ;;
   ci)
+    run_lane workspace-test-rbe workspace-test-rbe --jobs=64 &
+    pid_workspace=$!
+    run_lane clippy-rbe clippy-rbe --jobs=64 --color=no --curses=no &
+    pid_clippy=$!
+    wait_for_all "${pid_workspace}" "${pid_clippy}"
+    ;;
+  ci-fast)
     run_lane fast fast-test --jobs=64 &
     pid_fast=$!
-    run_lane clippy clippy --jobs=64 --color=no --curses=no &
+    run_lane clippy-rbe clippy-rbe --jobs=64 --color=no --curses=no &
     pid_clippy=$!
     wait_for_all "${pid_fast}" "${pid_clippy}"
     ;;
   *)
     cat >&2 <<'EOF'
-usage: buildbuddy-prewarm-lanes [dev|ci]
+usage: buildbuddy-prewarm-lanes [dev|ci|ci-fast]
 
 Profiles:
   dev  Prewarm common source, exact-test, and support-file feedback lanes.
-  ci   Prewarm/run fast-test and clippy lanes in parallel.
+  ci   Prewarm/run workspace-test-rbe and clippy-rbe lanes in parallel.
+  ci-fast
+       Prewarm/run fast-test and clippy-rbe lanes in parallel.
 EOF
     exit 2
     ;;

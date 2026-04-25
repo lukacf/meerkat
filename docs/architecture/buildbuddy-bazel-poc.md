@@ -91,7 +91,8 @@ lanes, prints compact summaries, and cleans up the temporary output roots.
 `scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
 
 - `dev`: source-owned-build, exact-test, and support-local feedback lanes.
-- `ci`: fast-test and clippy lanes in parallel.
+- `ci`: remote-compatible workspace-test and clippy lanes in parallel.
+- `ci-fast`: fast-test and clippy-RBE lanes in parallel.
 
 The prewarm helper uses direct Bazel labels instead of path selectors so several
 startup lanes do not contend on Cargo metadata/package-cache locks.
@@ -122,8 +123,8 @@ Representative measurements from the POC environment:
 | Prewarmed temp worktree support-local edit probe | `5.62s` wall |
 | Direct-label dev prewarm, first touch | `46.13s` wall |
 | Direct-label dev prewarm, warm | `4.62s` wall |
-| Direct-label CI prewarm, first touch | `37.01-37.05s` wall |
-| Direct-label CI prewarm, warm | `4.74-5.07s` wall |
+| Direct-label CI prewarm, first touch | `29.88s` wall |
+| Direct-label CI prewarm, warm | `6.15s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |

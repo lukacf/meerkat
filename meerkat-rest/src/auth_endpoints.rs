@@ -437,9 +437,8 @@ pub async fn test_auth_profile(
 
 // --- OAuth login flow -----------------------------------------------
 //
-// The PKCE verifier + state are returned to the client in /login/start;
-// the client holds them and posts them back in /login/complete along
-// with the authorization code it received from the provider.
+// The server owns the state -> PKCE verifier correlation. The client receives
+// only the authorize URL and state, then posts the provider code with that state.
 
 fn provider_endpoints(
     provider: &str,
@@ -488,9 +487,16 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
     let state_token = match global_oauth_flow_registry().start(
         body.provider.clone(),
         body.redirect_uri.clone(),
-        verifier.clone(),
+        verifier,
     ) {
         Ok(state) => state,
+        Err(OAuthFlowError::CapacityExceeded { .. }) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "oauth state registry is at capacity" })),
+            )
+                .into_response();
+        }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -505,8 +511,6 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
         Json(WireLoginStart {
             authorize_url,
             state: state_token,
-            pkce_verifier: verifier,
-            pkce_challenge: pkce.challenge.code.clone(),
             redirect_uri: body.redirect_uri,
             provider: body.provider,
         }),
@@ -519,8 +523,6 @@ pub struct LoginCompleteBody {
     pub provider: String,
     pub code: String,
     pub state: String,
-    #[serde(default, rename = "pkce_verifier")]
-    pkce_verifier: Option<String>,
     pub redirect_uri: String,
     #[serde(default = "default_realm")]
     pub realm_id: RealmId,
@@ -588,16 +590,6 @@ pub async fn complete_login(
                 .into_response();
             }
         };
-
-    if let Some(client_verifier) = &body.pkce_verifier
-        && client_verifier != &flow.pkce_verifier
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "pkce_verifier does not match oauth state" })),
-        )
-            .into_response();
-    }
 
     let http = reqwest::Client::new();
     let result = match exchange_authorization_code(

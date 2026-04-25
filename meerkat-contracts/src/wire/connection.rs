@@ -310,8 +310,6 @@ pub struct WireAuthProfileCleared {
 pub struct WireLoginStart {
     pub authorize_url: String,
     pub state: String,
-    pub pkce_verifier: String,
-    pub pkce_challenge: String,
     pub redirect_uri: String,
     pub provider: String,
 }

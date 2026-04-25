@@ -3,7 +3,7 @@
 //! Real implementations using the shared `SessionRuntime.token_store()`.
 //! OAuth login is split across two calls (server keeps state -> PKCE verifier):
 //!
-//!   auth/login/start     → returns authorize_url + state + pkce_verifier
+//!   auth/login/start     → returns authorize_url + state
 //!   auth/login/complete  → verifies state, exchanges code → persists
 
 use std::sync::Arc;
@@ -438,9 +438,16 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
     let state_token = match global_oauth_flow_registry().start(
         parsed.provider.clone(),
         parsed.redirect_uri.clone(),
-        verifier.clone(),
+        verifier,
     ) {
         Ok(state) => state,
+        Err(OAuthFlowError::CapacityExceeded { .. }) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "oauth state registry is at capacity",
+            );
+        }
         Err(e) => {
             return RpcResponse::error(
                 id,
@@ -455,8 +462,6 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
         serde_json::json!({
             "authorize_url": authorize_url,
             "state": state_token,
-            "pkce_verifier": verifier,
-            "pkce_challenge": pkce.challenge.code,
             "redirect_uri": parsed.redirect_uri,
             "provider": parsed.provider,
         }),
@@ -468,8 +473,6 @@ struct LoginCompleteParams {
     provider: String,
     code: String,
     state: String,
-    #[serde(default, rename = "pkce_verifier")]
-    pkce_verifier: Option<String>,
     redirect_uri: String,
     realm_id: String,
     #[serde(default)]
@@ -537,16 +540,6 @@ pub async fn handle_auth_login_complete(
             );
         }
     };
-
-    if let Some(client_verifier) = &parsed.pkce_verifier
-        && client_verifier != &flow.pkce_verifier
-    {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            "pkce_verifier does not match oauth state",
-        );
-    }
 
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,

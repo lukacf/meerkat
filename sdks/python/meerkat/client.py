@@ -403,9 +403,9 @@ class MeerkatClient:
         self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
     ) -> dict[str, Any]:
         """Start an OAuth authorization-code login via
-        `auth/login/start`. Returns `{authorize_url, state,
-        pkce_verifier}`; client directs user to the URL then calls
-        `auth_login_complete` once the redirect carries a code."""
+        `auth/login/start`. Returns `{authorize_url, state}`; client directs
+        user to the URL then calls `auth_login_complete` once the redirect
+        carries a code."""
         return await self._request(
             "auth/login/start",
             {"provider": provider, "redirect_uri": redirect_uri},
@@ -415,24 +415,24 @@ class MeerkatClient:
         self,
         provider: str,
         code: str,
-        pkce_verifier: str,
+        state: str,
         *,
         realm_id: str = "dev",
-        profile_id: str | None = None,
+        binding_id: str | None = None,
         redirect_uri: str = "http://127.0.0.1:0/callback",
     ) -> dict[str, Any]:
         """Exchange an authorization code for tokens via
-        `auth/login/complete`. Tokens land in the server's
-        TokenStore under `<realm_id>:<profile_id>`."""
+        `auth/login/complete`. Tokens land in the server-side credential
+        source for the resolved binding."""
         params: dict[str, Any] = {
             "provider": provider,
             "code": code,
-            "pkce_verifier": pkce_verifier,
+            "state": state,
             "realm_id": realm_id,
             "redirect_uri": redirect_uri,
         }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
+        if binding_id is not None:
+            params["binding_id"] = binding_id
         return await self._request("auth/login/complete", params)
 
     async def auth_login_device_start(self, provider: str) -> dict[str, Any]:

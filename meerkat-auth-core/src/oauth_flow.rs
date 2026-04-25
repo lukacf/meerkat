@@ -31,6 +31,8 @@ pub enum OAuthFlowError {
     RedirectUriMismatch,
     #[error("failed to generate oauth state token")]
     StateGenerationFailed,
+    #[error("oauth state registry is at capacity ({max_outstanding} outstanding flows)")]
+    CapacityExceeded { max_outstanding: usize },
 }
 
 #[derive(Debug)]
@@ -68,7 +70,11 @@ impl OAuthFlowRegistry {
         };
         let mut flows = self.flows.lock();
         prune_expired_locked(&mut flows, self.ttl);
-        evict_oldest_until_under_capacity(&mut flows, self.max_outstanding);
+        if flows.len() >= self.max_outstanding {
+            return Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: self.max_outstanding,
+            });
+        }
         flows.insert(state.clone(), record);
         Ok(state)
     }
@@ -113,22 +119,6 @@ fn new_state_token() -> Result<String, OAuthFlowError> {
 
 fn prune_expired_locked(flows: &mut HashMap<String, OAuthFlowRecord>, ttl: Duration) {
     flows.retain(|_, record| record.created_at.elapsed() <= ttl);
-}
-
-fn evict_oldest_until_under_capacity(
-    flows: &mut HashMap<String, OAuthFlowRecord>,
-    max_outstanding: usize,
-) {
-    while flows.len() >= max_outstanding {
-        let Some(oldest_state) = flows
-            .iter()
-            .min_by_key(|(_, record)| record.created_at)
-            .map(|(state, _)| state.clone())
-        else {
-            break;
-        };
-        flows.remove(&oldest_state);
-    }
 }
 
 #[cfg(test)]
@@ -220,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_state_registry_evicts_oldest_at_capacity() {
+    fn oauth_state_registry_rejects_start_at_capacity() {
         let registry = OAuthFlowRegistry::new_with_capacity(Duration::from_secs(60), 2);
         let first = registry
             .start("openai", "http://127.0.0.1/callback", "first")
@@ -228,22 +218,20 @@ mod tests {
         let second = registry
             .start("openai", "http://127.0.0.1/callback", "second")
             .expect("state generation succeeds");
-        let third = registry
-            .start("openai", "http://127.0.0.1/callback", "third")
-            .expect("state generation succeeds");
+        let third = registry.start("openai", "http://127.0.0.1/callback", "third");
 
         assert!(matches!(
-            registry.consume(&first, "openai", "http://127.0.0.1/callback"),
-            Err(OAuthFlowError::Missing)
+            third,
+            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 2 })
         ));
         assert!(
             registry
-                .consume(&second, "openai", "http://127.0.0.1/callback")
+                .consume(&first, "openai", "http://127.0.0.1/callback")
                 .is_ok()
         );
         assert!(
             registry
-                .consume(&third, "openai", "http://127.0.0.1/callback")
+                .consume(&second, "openai", "http://127.0.0.1/callback")
                 .is_ok()
         );
     }

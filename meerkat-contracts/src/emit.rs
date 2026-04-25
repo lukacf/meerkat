@@ -153,6 +153,19 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     });
     write_pretty_json(output_dir.join("capabilities.json"), &capabilities)?;
 
+    // Runtime host projections
+    let runtime_host = serde_json::json!({
+        "RuntimeHostIdScope": schema_for!(crate::wire::RuntimeHostIdScope),
+        "RuntimeHostHealthStatus": schema_for!(crate::wire::RuntimeHostHealthStatus),
+        "RuntimeHostFeatureFlags": schema_for!(crate::wire::RuntimeHostFeatureFlags),
+        "RuntimeHostRealmProjection": schema_for!(crate::wire::RuntimeHostRealmProjection),
+        "RuntimeHostEndpointProjection": schema_for!(crate::wire::RuntimeHostEndpointProjection),
+        "RuntimeHostCapabilities": schema_for!(crate::wire::RuntimeHostCapabilities),
+        "RuntimeHostHealth": schema_for!(crate::wire::RuntimeHostHealth),
+        "RuntimeHostInfo": schema_for!(crate::wire::RuntimeHostInfo),
+    });
+    write_pretty_json(output_dir.join("runtime-host.json"), &runtime_host)?;
+
     // Models catalog
     let models = serde_json::json!({
         "WireModelTier": schema_for!(crate::wire::WireModelTier),

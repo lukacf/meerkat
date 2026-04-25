@@ -106,6 +106,21 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::basic("config/patch", "Merge-patch config"),
         RpcMethodDescriptor::basic("capabilities/get", "Get runtime capabilities"),
         RpcMethodDescriptor::result_only(
+            "runtime/host_info",
+            "Get read-only runtime host information",
+            "RuntimeHostInfo",
+        ),
+        RpcMethodDescriptor::result_only(
+            "runtime/capabilities",
+            "Get runtime host capability flags",
+            "RuntimeHostCapabilities",
+        ),
+        RpcMethodDescriptor::result_only(
+            "runtime/health",
+            "Get runtime host health",
+            "RuntimeHostHealth",
+        ),
+        RpcMethodDescriptor::result_only(
             "models/catalog",
             "Get the effective model catalog (built-in plus config-backed entries)",
             "ModelsCatalogResponse",
@@ -512,6 +527,9 @@ mod tests {
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         assert!(methods.iter().any(|m| m == "session/inject_context"));
+        assert!(methods.iter().any(|m| m == "runtime/host_info"));
+        assert!(methods.iter().any(|m| m == "runtime/capabilities"));
+        assert!(methods.iter().any(|m| m == "runtime/health"));
         assert!(
             methods
                 .iter()

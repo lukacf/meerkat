@@ -3,6 +3,7 @@
 mod comms;
 mod connection;
 mod event;
+mod host;
 mod mcp_live;
 mod mob;
 mod models;
@@ -29,6 +30,11 @@ pub use connection::{
 };
 
 pub use event::WireEvent;
+pub use host::{
+    RuntimeHostCapabilities, RuntimeHostEndpointProjection, RuntimeHostFeatureFlags,
+    RuntimeHostHealth, RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo,
+    RuntimeHostRealmProjection,
+};
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
     McpRemoveParams,

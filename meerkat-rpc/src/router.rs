@@ -1126,6 +1126,17 @@ impl MethodRouter {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)
             }
+            "runtime/host_info" => handlers::runtime_host::handle_info(
+                id,
+                &self.runtime,
+                &self.config_store,
+                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+            ),
+            "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
+                id,
+                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+            ),
+            "runtime/health" => handlers::runtime_host::handle_health(id),
             "models/catalog" => {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::models::handle_catalog(id, &config)
@@ -2603,6 +2614,78 @@ mod tests {
             memory_blob_store(),
         ));
         (router.with_runtime_adapter(runtime_adapter), notif_rx)
+    }
+
+    #[tokio::test]
+    async fn runtime_host_info_reports_projection_without_topology_authority() {
+        let (router, _rx) = test_router_with_v9_runtime().await;
+        let response = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "runtime/host_info".to_string(),
+                params: None,
+                id: Some(RpcId::Num(1)),
+            })
+            .await
+            .expect("response");
+        let value = serde_json::to_value(response).expect("response serializes");
+        let result = &value["result"];
+
+        assert!(
+            result["host_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("process:")),
+            "default host id should be process-scoped: {result}"
+        );
+        assert_eq!(result["host_id_scope"], "process");
+        assert_eq!(
+            result["capabilities"]["features"]["runtime_backed_sessions"],
+            true
+        );
+        assert_eq!(result["capabilities"]["features"]["event_replay"], false);
+
+        let text = serde_json::to_string(result).expect("result serializes");
+        for forbidden in ["topology", "registry", "lease", "claim", "project"] {
+            assert!(
+                !text.contains(forbidden),
+                "runtime host projection must not claim topology authority token `{forbidden}`: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_host_capabilities_and_health_are_read_only_projections() {
+        let (router, _rx) = test_router_with_v9_runtime().await;
+        let capabilities = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "runtime/capabilities".to_string(),
+                params: None,
+                id: Some(RpcId::Num(1)),
+            })
+            .await
+            .expect("capabilities response");
+        let health = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "runtime/health".to_string(),
+                params: None,
+                id: Some(RpcId::Num(2)),
+            })
+            .await
+            .expect("health response");
+
+        let capabilities = serde_json::to_value(capabilities).expect("serialize capabilities");
+        let health = serde_json::to_value(health).expect("serialize health");
+        assert_eq!(
+            capabilities["result"]["features"]["runtime_backed_sessions"],
+            true
+        );
+        assert_eq!(
+            capabilities["result"]["features"]["secure_remote_rpc"],
+            false
+        );
+        assert_eq!(health["result"]["status"], "ok");
     }
 
     async fn test_router_with_v9_runtime_and_realtime_ws_host()

@@ -46,9 +46,14 @@ pub use schedule_host::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
 
-use meerkat_contracts::{CapabilitiesResponse, CapabilityEntry, ContractVersion};
-use meerkat_core::{AgentEvent, Config, PeerMeta};
+use meerkat_contracts::{
+    CapabilitiesResponse, CapabilityEntry, ContractVersion, RuntimeHostCapabilities,
+    RuntimeHostEndpointProjection, RuntimeHostFeatureFlags, RuntimeHostHealth,
+    RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo, RuntimeHostRealmProjection,
+};
+use meerkat_core::{AgentEvent, Config, ConfigStoreMetadata, PeerMeta};
 
+use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
@@ -66,6 +71,162 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "mcp")]
 use std::sync::{Mutex, OnceLock};
+
+/// Surface-specific facts used to build a read-only runtime host projection.
+#[derive(Debug, Clone)]
+pub struct RuntimeHostSurfaceOptions {
+    pub process_name: String,
+    pub process_version: String,
+    pub runtime_backed_sessions: bool,
+    pub mobs: bool,
+    pub mcp_live: bool,
+    pub comms: bool,
+    pub blobs: bool,
+    pub session_events: bool,
+    pub session_streams: bool,
+    pub schedules: bool,
+    pub skills: bool,
+    pub rpc_transport: Option<String>,
+    pub rest_base_url: Option<String>,
+    pub rpc_methods: Vec<String>,
+    pub rest_paths: Vec<String>,
+}
+
+impl RuntimeHostSurfaceOptions {
+    /// Build a process-local default for callers that do not own a richer
+    /// transport context.
+    pub fn process(process_name: impl Into<String>, process_version: impl Into<String>) -> Self {
+        Self {
+            process_name: process_name.into(),
+            process_version: process_version.into(),
+            runtime_backed_sessions: false,
+            mobs: false,
+            mcp_live: false,
+            comms: false,
+            blobs: false,
+            session_events: false,
+            session_streams: false,
+            schedules: false,
+            skills: false,
+            rpc_transport: None,
+            rest_base_url: None,
+            rpc_methods: Vec::new(),
+            rest_paths: Vec::new(),
+        }
+    }
+}
+
+fn runtime_host_id(metadata: Option<&ConfigStoreMetadata>) -> (String, RuntimeHostIdScope) {
+    if let Some(metadata) = metadata
+        && let (Some(realm_id), Some(instance_id)) =
+            (metadata.realm_id.as_ref(), metadata.instance_id.as_ref())
+    {
+        return (
+            format!("realm-instance:{realm_id}:{instance_id}"),
+            RuntimeHostIdScope::RealmInstance,
+        );
+    }
+
+    (
+        format!("process:{}", runtime_host_process_id()),
+        RuntimeHostIdScope::Process,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn runtime_host_process_id() -> u32 {
+    std::process::id()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn runtime_host_process_id() -> u32 {
+    0
+}
+
+fn runtime_host_realm_projection(
+    metadata: Option<&ConfigStoreMetadata>,
+    context_root: Option<std::path::PathBuf>,
+) -> RuntimeHostRealmProjection {
+    let mut projection = RuntimeHostRealmProjection::default();
+    if let Some(metadata) = metadata {
+        projection.realm_id = metadata.realm_id.clone();
+        projection.instance_id = metadata.instance_id.clone();
+        projection.backend = metadata.backend.clone();
+        projection.state_root = metadata
+            .resolved_paths
+            .as_ref()
+            .map(|paths| paths.root.clone());
+    }
+    projection.context_root = context_root.map(|path| path.display().to_string());
+    projection
+}
+
+/// Build read-only capability flags for the runtime host surface.
+pub fn build_runtime_host_capabilities(
+    options: &RuntimeHostSurfaceOptions,
+) -> RuntimeHostCapabilities {
+    RuntimeHostCapabilities {
+        contract_version: ContractVersion::CURRENT,
+        features: RuntimeHostFeatureFlags {
+            runtime_backed_sessions: options.runtime_backed_sessions,
+            mobs: options.mobs,
+            mcp_live: options.mcp_live,
+            comms: options.comms,
+            blobs: options.blobs,
+            session_events: options.session_events,
+            session_streams: options.session_streams,
+            schedules: options.schedules,
+            skills: options.skills,
+            // First slice: these future surfaces are deliberately reported as
+            // unsupported until their owning lanes add durable contracts.
+            event_replay: false,
+            artifacts: false,
+            approvals: false,
+            external_members: false,
+            secure_remote_rpc: false,
+        },
+    }
+}
+
+/// Build a read-only runtime health projection.
+pub fn build_runtime_host_health() -> RuntimeHostHealth {
+    RuntimeHostHealth {
+        contract_version: ContractVersion::CURRENT,
+        status: RuntimeHostHealthStatus::Ok,
+        checks: BTreeMap::new(),
+    }
+}
+
+/// Build host information from existing surface/runtime facts.
+///
+/// This projection intentionally does not expose topology, lease, project, or
+/// host-registry authority. Callers can rebuild it from the config-store
+/// metadata and surface options.
+pub fn build_runtime_host_info(
+    options: &RuntimeHostSurfaceOptions,
+    metadata: Option<&ConfigStoreMetadata>,
+    context_root: Option<std::path::PathBuf>,
+) -> RuntimeHostInfo {
+    let (host_id, host_id_scope) = runtime_host_id(metadata);
+    RuntimeHostInfo {
+        contract_version: ContractVersion::CURRENT,
+        host_id,
+        host_id_scope,
+        process_name: options.process_name.clone(),
+        process_version: options.process_version.clone(),
+        capabilities: build_runtime_host_capabilities(options),
+        health: build_runtime_host_health(),
+        realm: runtime_host_realm_projection(metadata, context_root),
+        endpoints: RuntimeHostEndpointProjection {
+            rpc_transport: options.rpc_transport.clone(),
+            rest_base_url: options.rest_base_url.clone(),
+            rpc_methods: options.rpc_methods.clone(),
+            rest_paths: options.rest_paths.clone(),
+        },
+        placement_labels: BTreeMap::new(),
+        policy_profile_summary: None,
+    }
+}
 
 /// Build a [`CapabilitiesResponse`] with status resolved against config.
 ///

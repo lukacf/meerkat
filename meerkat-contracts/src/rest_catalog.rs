@@ -204,6 +204,27 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/runtime/host_info",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get read-only runtime host information",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/runtime/capabilities",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get runtime host capability flags",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/runtime/health",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get runtime host health",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/models/catalog",
             vec![RestOperationDescriptor::new(
                 "get",

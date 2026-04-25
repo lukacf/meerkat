@@ -33,6 +33,18 @@ pub struct WireModelProfile {
     pub inline_video: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
+    /// Beta headers authorized by the model capability catalog.
+    #[serde(default)]
+    pub beta_headers: Vec<WireModelBetaHeader>,
+}
+
+/// Catalog-owned beta header metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireModelBetaHeader {
+    pub feature: String,
+    pub header_name: String,
+    pub header_value: String,
 }
 
 /// A single model entry in the catalog response.

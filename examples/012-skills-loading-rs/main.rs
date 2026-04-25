@@ -31,7 +31,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillRuntime, SkillScope};
 use meerkat_core::skills::SkillEngine as _;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillKey, SkillName};
+use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillKey, SkillName, SourceUuid};
 use meerkat_skills::source::SourceNode;
 use meerkat_skills::{
     CompositeSkillSource, DefaultSkillEngine, FilesystemSkillSource, InMemorySkillSource,
@@ -172,10 +172,12 @@ You are a security auditor reviewing code for vulnerabilities.
     let composite_source = CompositeSkillSource::from_named(vec![
         NamedSource {
             name: "inline".to_string(),
+            source_uuid: SourceUuid::builtin(),
             source: SourceNode::Memory(inline_source),
         },
         NamedSource {
             name: "filesystem".to_string(),
+            source_uuid: SourceUuid::project_local(),
             source: SourceNode::Filesystem(fs_source),
         },
     ]);

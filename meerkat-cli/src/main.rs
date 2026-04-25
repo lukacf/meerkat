@@ -2876,7 +2876,14 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
             let env = meerkat_providers::ResolverEnvironment::with_process_env();
-            match registry.resolve(&realm_set, &binding_id, &env).await {
+            let connection_ref = meerkat_core::ConnectionRef {
+                realm: meerkat_core::RealmId::parse(realm.clone())
+                    .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
+                binding: meerkat_core::BindingId::parse(binding_id.clone())
+                    .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
+                profile: None,
+            };
+            match registry.resolve(&realm_set, &connection_ref, &env).await {
                 Ok(conn) => {
                     println!("state: valid");
                     println!("provider: {}", conn.provider.as_str());
@@ -3239,8 +3246,15 @@ async fn refresh_auth_profile(
         .with_token_store(store.clone())
         .with_refresh_coordinator(coord);
     let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
+    let connection_ref = meerkat_core::ConnectionRef {
+        realm: meerkat_core::RealmId::parse(realm)
+            .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
+        binding: meerkat_core::BindingId::parse(binding_id.clone())
+            .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
+        profile: None,
+    };
     let connection = registry
-        .resolve(&realm_set, &binding_id, &env)
+        .resolve(&realm_set, &connection_ref, &env)
         .await
         .map_err(|e| anyhow::anyhow!("Binding resolution failed: {e}"))?;
 
@@ -10376,11 +10390,12 @@ mod tests {
     #[test]
     fn test_parse_comms_send_payload_peer_request_accepts_reserve_interaction_stream() {
         let session_id = SessionId::new();
-        let cmd = parse_comms_send_payload(
-            r#"{"kind":"peer_request","to":"agent-b","intent":"help","params":{"topic":"x"},"handling_mode":"queue","stream":"reserve_interaction"}"#,
-            &session_id,
-        )
-        .expect("peer request reserve_interaction stream should be accepted");
+        let to = uuid::Uuid::new_v4();
+        let payload = format!(
+            r#"{{"kind":"peer_request","to":"{to}","intent":"help","params":{{"topic":"x"}},"handling_mode":"queue","stream":"reserve_interaction"}}"#,
+        );
+        let cmd = parse_comms_send_payload(&payload, &session_id)
+            .expect("peer request reserve_interaction stream should be accepted");
         assert!(
             matches!(cmd, meerkat_core::comms::CommsCommand::PeerRequest { .. }),
             "unexpected command parsed for peer request payload: {cmd:?}"
@@ -10413,9 +10428,10 @@ mod tests {
     #[test]
     fn test_parse_comms_send_payload_rejects_invalid_command_shape() {
         let session_id = SessionId::new();
-        let err =
-            parse_comms_send_payload(r#"{"kind":"peer_request","to":"agent-b"}"#, &session_id)
-                .expect_err("missing intent should be rejected");
+        let to = uuid::Uuid::new_v4();
+        let payload = format!(r#"{{"kind":"peer_request","to":"{to}"}}"#);
+        let err = parse_comms_send_payload(&payload, &session_id)
+            .expect_err("missing intent should be rejected");
         // Missing required `intent` field is rejected at the typed-serde
         // boundary, not a runtime string match.
         assert!(err.to_string().contains("Invalid comms JSON payload"));

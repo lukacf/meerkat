@@ -62,6 +62,18 @@ where
         self.registry = Some(registry);
         self
     }
+
+    fn resolve_key(&self, key: &SkillKey) -> Result<SkillKey, SkillError> {
+        let Some(registry) = &self.registry else {
+            return Ok(key.clone());
+        };
+        registry
+            .resolve(key)
+            .map(|resolved| resolved.key)
+            .map_err(|e| {
+                SkillError::Load(format!("source identity resolution failed for {key}: {e}").into())
+            })
+    }
 }
 
 fn filter_by_capabilities(
@@ -85,7 +97,7 @@ where
 {
     fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
         async move {
-            let all_skills = self.source.list(&SkillFilter::default()).await?;
+            let all_skills = self.list_skills(&SkillFilter::default()).await?;
             let available = filter_by_capabilities(all_skills, &self.available_capabilities);
             let collections = meerkat_core::skills::derive_collections(&available);
             Ok(renderer::render_inventory(
@@ -103,7 +115,8 @@ where
         async move {
             let mut results = Vec::new();
             for key in keys {
-                let doc = self.source.load(key).await?;
+                let canonical_key = self.resolve_key(key)?;
+                let doc = self.source.load(&canonical_key).await?;
 
                 if let Some(missing) = doc
                     .descriptor
@@ -112,16 +125,19 @@ where
                     .find(|cap| !self.available_capabilities.contains(*cap))
                 {
                     return Err(SkillError::CapabilityUnavailable {
-                        key: key.clone(),
+                        key: canonical_key.clone(),
                         capability: missing.clone(),
                     });
                 }
 
-                let rendered =
-                    renderer::render_injection_with_limit(key, &doc.body, self.max_injection_bytes);
+                let rendered = renderer::render_injection_with_limit(
+                    &canonical_key,
+                    &doc.body,
+                    self.max_injection_bytes,
+                );
                 let byte_size = rendered.len();
                 results.push(ResolvedSkill {
-                    key: key.clone(),
+                    key: canonical_key,
                     name: doc.descriptor.name.clone(),
                     rendered_body: rendered,
                     byte_size,
@@ -141,8 +157,12 @@ where
     ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
         async move {
             let all_skills = self.source.list(filter).await?;
+            let active_skills: Vec<_> = all_skills
+                .into_iter()
+                .filter(|descriptor| self.resolve_key(&descriptor.key).is_ok())
+                .collect();
             Ok(filter_by_capabilities(
-                all_skills,
+                active_skills,
                 &self.available_capabilities,
             ))
         }
@@ -164,7 +184,10 @@ where
         &self,
         key: &SkillKey,
     ) -> impl Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send {
-        async move { self.source.list_artifacts(key).await }
+        async move {
+            let canonical_key = self.resolve_key(key)?;
+            self.source.list_artifacts(&canonical_key).await
+        }
     }
 
     fn read_artifact(
@@ -172,7 +195,12 @@ where
         key: &SkillKey,
         artifact_path: &str,
     ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send {
-        async move { self.source.read_artifact(key, artifact_path).await }
+        async move {
+            let canonical_key = self.resolve_key(key)?;
+            self.source
+                .read_artifact(&canonical_key, artifact_path)
+                .await
+        }
     }
 
     fn invoke_function(
@@ -182,8 +210,9 @@ where
         arguments: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
         async move {
+            let canonical_key = self.resolve_key(key)?;
             self.source
-                .invoke_function(key, function_name, arguments)
+                .invoke_function(&canonical_key, function_name, arguments)
                 .await
         }
     }
@@ -197,11 +226,12 @@ where
             Ok(entries
                 .into_iter()
                 .filter(|e| {
-                    !e.is_active
-                        || e.descriptor
-                            .capability_requirements
-                            .iter()
-                            .all(|cap| self.available_capabilities.contains(cap))
+                    self.resolve_key(&e.descriptor.key).is_ok()
+                        && (!e.is_active
+                            || e.descriptor
+                                .capability_requirements
+                                .iter()
+                                .all(|cap| self.available_capabilities.contains(cap)))
                 })
                 .collect())
         }
@@ -214,8 +244,9 @@ where
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
         let source_name = source_name.map(ToString::to_string);
         async move {
+            let canonical_key = self.resolve_key(key)?;
             self.source
-                .load_from_source(key, source_name.as_deref())
+                .load_from_source(&canonical_key, source_name.as_deref())
                 .await
         }
     }

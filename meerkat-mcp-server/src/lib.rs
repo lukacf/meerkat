@@ -2432,9 +2432,7 @@ async fn handle_meerkat_comms_send(
         meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
         | meerkat_core::comms::CommsCommandRequest::PeerLifecycle { to, .. }
         | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => {
-            Some(to.as_str().to_string())
-        }
+        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
     };
     let cmd = input.command.into_command(&session_id).map_err(|err| {
         ToolCallError::new(

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
 #[allow(unused_imports)]
-use meerkat_core::comms::{CommsCommand, PeerId, PeerName, TrustedPeerDescriptor};
+use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute, TrustedPeerDescriptor};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, PeerInputClass};
 use meerkat_core::lifecycle::RunControlCommand;
@@ -818,14 +818,13 @@ async fn send_bridge_response(
             "reason": "bridge reply serialization failed",
         })
     });
-    let to = match PeerName::new(candidate.interaction.from.clone()) {
-        Ok(name) => name,
-        Err(error) => {
+    let to = match resolve_peer_route(comms_runtime, &candidate.interaction.from).await {
+        Some(route) => route,
+        None => {
             tracing::warn!(
                 from = %candidate.interaction.from,
                 interaction_id = %candidate.interaction.id,
-                error = %error,
-                "comms_drain: failed to route bridge response"
+                "comms_drain: failed to resolve bridge response peer route"
             );
             comms_runtime.mark_interaction_complete(&candidate.interaction.id);
             return;
@@ -850,6 +849,28 @@ async fn send_bridge_response(
         );
     }
     comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+}
+
+async fn resolve_peer_route(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    from: &str,
+) -> Option<PeerRoute> {
+    let peers = comms_runtime.peers().await;
+    peers
+        .iter()
+        .find(|entry| entry.peer_id.as_str() == from)
+        .or_else(|| peers.iter().find(|entry| entry.name.as_str() == from))
+        .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name.clone()))
+        .or_else(|| {
+            meerkat_core::comms::PeerId::parse(from)
+                .ok()
+                .map(PeerRoute::new)
+        })
+        .or_else(|| {
+            PeerName::new(from.to_string())
+                .ok()
+                .map(|name| PeerRoute::with_display_name(meerkat_core::comms::PeerId::new(), name))
+        })
 }
 
 async fn send_bridge_failure(

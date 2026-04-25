@@ -4,7 +4,7 @@ use crate::store::SupervisorAuthorityRecord;
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerName, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, InputStreamMode, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::interaction::{
     InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
@@ -136,12 +136,7 @@ impl MobSupervisorBridge {
         // `SendError::PeerNotFound(recipient.name)` because the supervisor
         // runtime's trusted-peer directory is empty for the new member.
         runtime.add_trusted_peer(recipient.clone()).await?;
-        let to = PeerName::new(recipient.name.clone()).map_err(|error| {
-            MobError::WiringError(format!(
-                "invalid supervisor recipient name '{}': {error}",
-                recipient.name
-            ))
-        })?;
+        let to = PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let params = serde_json::to_value(payload).map_err(|error| {
             MobError::Internal(format!("serialize supervisor payload: {error}"))
         })?;

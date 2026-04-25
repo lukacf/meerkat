@@ -24,7 +24,7 @@
 
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, SendReceipt};
+use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
 use meerkat_core::{
     ClassifiedInboxInteraction, HandlingMode, InteractionContent, InteractionId, ResponseStatus,
 };
@@ -44,7 +44,10 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let receipt = CoreCommsRuntime::send(
         a.as_ref(),
         CommsCommand::PeerRequest {
-            to: PeerName::new(name_b.clone()).expect("peer_name valid"),
+            to: PeerRoute::with_display_name(
+                b.public_key().to_peer_id(),
+                PeerName::new(name_b.clone()).expect("peer_name valid"),
+            ),
             intent: "reservation-contract-probe".to_string(),
             params: serde_json::json!({"probe": true}),
             handling_mode: HandlingMode::Queue,
@@ -92,7 +95,10 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let _response_receipt = CoreCommsRuntime::send(
         b.as_ref(),
         CommsCommand::PeerResponse {
-            to: PeerName::new(name_a.clone()).expect("peer_name valid"),
+            to: PeerRoute::with_display_name(
+                a.public_key().to_peer_id(),
+                PeerName::new(name_a.clone()).expect("peer_name valid"),
+            ),
             in_reply_to: InteractionId(envelope_id),
             status: ResponseStatus::Completed,
             result: serde_json::json!({"probe_reply": true}),

@@ -29,7 +29,7 @@ use ::tokio::sync::RwLock;
 use tokio_with_wasm::alias::sync::RwLock;
 
 use crate::MobMcpState;
-use meerkat_core::comms::{CommsCommand, PeerName};
+use meerkat_core::comms::{CommsCommand, PeerName, PeerRoute};
 
 // ─── Tool name constants ─────────────────────────────────────────────────
 
@@ -119,9 +119,18 @@ impl AgentMobToolSurface {
         let Ok(to) = PeerName::new(recipient_comms_name) else {
             return false;
         };
+        let Some(route) = sender
+            .peers()
+            .await
+            .into_iter()
+            .find(|entry| entry.name == to)
+            .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name))
+        else {
+            return false;
+        };
         sender
             .send(CommsCommand::PeerRequest {
-                to,
+                to: route,
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({
                     "peer": peer,
@@ -1921,11 +1930,11 @@ mod tests {
             self.runtimes
                 .write()
                 .await
-                .insert(runtime.name.clone(), runtime);
+                .insert(runtime.key.clone(), runtime);
         }
 
-        async fn get(&self, name: &str) -> Option<Arc<TestCommsRuntime>> {
-            self.runtimes.read().await.get(name).cloned()
+        async fn get(&self, peer_id: &str) -> Option<Arc<TestCommsRuntime>> {
+            self.runtimes.read().await.get(peer_id).cloned()
         }
     }
 
@@ -1988,18 +1997,16 @@ mod tests {
                     stream: _,
                 } => {
                     let trusted = self.trusted.read().await;
-                    if !trusted
-                        .values()
-                        .any(|peer| peer.name.as_str() == to.as_str())
-                    {
-                        return Err(SendError::PeerNotFound(to.as_string()));
+                    let peer_id = to.peer_id.as_str();
+                    if !trusted.contains_key(&peer_id) {
+                        return Err(SendError::PeerNotFound(to.label()));
                     }
                     drop(trusted);
                     let recipient = self
                         .registry
-                        .get(to.as_str())
+                        .get(&peer_id)
                         .await
-                        .ok_or_else(|| SendError::PeerNotFound(to.as_string()))?;
+                        .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
                     recipient.inbox.write().await.push(InboxInteraction {
                         id: InteractionId(uuid::Uuid::new_v4()),
                         from: self.name.clone(),

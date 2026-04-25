@@ -255,7 +255,7 @@ mod scenario_23_structured_output {
         // --- OpenAI ---
         #[cfg(feature = "openai")]
         if let Some(_api_key) = openai_api_key() {
-            let openai_model = "gpt-5.2".to_string();
+            let openai_model = "gpt-5.4".to_string();
             eprintln!("[scenario 23] Testing structured output with OpenAI ({openai_model})");
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));

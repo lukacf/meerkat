@@ -416,6 +416,35 @@ impl RealmConnectionSet {
             .ok_or_else(|| ProviderBindingError::UnknownAuth(binding.auth_profile.clone()))?;
         Ok((binding, backend, auth))
     }
+
+    /// Resolve a typed connection reference. `ConnectionRef.profile`, when
+    /// present, overrides the binding's configured auth profile while keeping
+    /// the binding's backend and policy authoritative.
+    pub fn lookup_connection_ref(
+        &self,
+        connection_ref: &ConnectionRef,
+    ) -> Result<(&ProviderBinding, &BackendProfile, &AuthProfile), ProviderBindingError> {
+        let binding = self
+            .bindings
+            .get(connection_ref.binding.as_str())
+            .ok_or_else(|| {
+                ProviderBindingError::UnknownBinding(connection_ref.binding.to_string())
+            })?;
+        let backend = self
+            .backends
+            .get(&binding.backend_profile)
+            .ok_or_else(|| ProviderBindingError::UnknownBackend(binding.backend_profile.clone()))?;
+        let auth_profile_id = connection_ref
+            .profile
+            .as_ref()
+            .map(ProfileId::as_str)
+            .unwrap_or(binding.auth_profile.as_str());
+        let auth = self
+            .auth_profiles
+            .get(auth_profile_id)
+            .ok_or_else(|| ProviderBindingError::UnknownAuth(auth_profile_id.to_string()))?;
+        Ok((binding, backend, auth))
+    }
 }
 
 /// Validation / reference-resolution errors for a realm connection set.
@@ -610,6 +639,43 @@ mod tests {
         assert!(s.contains("\"profile\":\"override\""));
         let back: ConnectionRef = serde_json::from_str(&s).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn connection_ref_profile_overrides_binding_auth_profile() {
+        let toml = r#"
+realm_id = "prod"
+default_binding = "primary"
+
+[backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+base_url = "https://api.openai.com/v1"
+
+[auth.default_profile]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "OPENAI_API_KEY" }
+
+[auth.override_profile]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "OVERRIDE_OPENAI_API_KEY" }
+
+[binding.primary]
+backend_profile = "openai_default"
+auth_profile = "default_profile"
+"#;
+        let section: RealmConfigSection = toml::from_str(toml).unwrap();
+        let realm = RealmConnectionSet::from_config("prod", &section).unwrap();
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("prod").unwrap(),
+            binding: BindingId::parse("primary").unwrap(),
+            profile: Some(ProfileId::parse("override_profile").unwrap()),
+        };
+
+        let (_binding, _backend, auth) = realm.lookup_connection_ref(&connection_ref).unwrap();
+        assert_eq!(auth.id, "override_profile");
     }
 
     #[test]

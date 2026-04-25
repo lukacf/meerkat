@@ -22,7 +22,9 @@ pub mod gemini;
 pub mod openai;
 pub mod schema_builder;
 
-use crate::model_profile::capabilities::{ModelCapabilities, ThinkingSupport, capabilities_for};
+use crate::model_profile::capabilities::{
+    BetaHeader, ModelCapabilities, ThinkingSupport, capabilities_for,
+};
 use serde::{Deserialize, Serialize};
 
 /// Runtime profile for a model, describing its capabilities and operational defaults.
@@ -58,6 +60,9 @@ pub struct ModelProfile {
     pub supports_web_search: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
+    /// Beta headers authorized by the model capability catalog.
+    #[serde(default)]
+    pub beta_headers: Vec<ModelBetaHeader>,
     /// Authoritative default call timeout in seconds for this model family.
     ///
     /// `None` means the model family has no profiled default timeout.
@@ -65,6 +70,24 @@ pub struct ModelProfile {
     /// consumed by the factory/agent-loop resolver trait at call time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_timeout_secs: Option<u64>,
+}
+
+/// Catalog-owned beta header metadata for a model.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ModelBetaHeader {
+    pub feature: String,
+    pub header_name: String,
+    pub header_value: String,
+}
+
+impl From<&BetaHeader> for ModelBetaHeader {
+    fn from(value: &BetaHeader) -> Self {
+        Self {
+            feature: value.feature.to_string(),
+            header_name: value.header_name.to_string(),
+            header_value: value.header_value.to_string(),
+        }
+    }
 }
 
 /// Look up the profile for a model by provider string and model ID.
@@ -104,6 +127,11 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         image_tool_results: caps.image_tool_results,
         realtime: caps.realtime,
         params_schema: schema_builder::build_params_schema(caps),
+        beta_headers: caps
+            .beta_headers
+            .iter()
+            .map(ModelBetaHeader::from)
+            .collect(),
         call_timeout_secs: caps.call_timeout_secs,
     }
 }

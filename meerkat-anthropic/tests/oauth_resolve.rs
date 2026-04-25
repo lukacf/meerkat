@@ -28,8 +28,8 @@ use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec,
-    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet,
+    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
+    CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
@@ -77,6 +77,14 @@ fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
     RealmConnectionSet::from_config("dev", &section).unwrap()
 }
 
+fn default_connection_ref() -> ConnectionRef {
+    ConnectionRef {
+        realm: RealmId::parse("dev").expect("valid realm"),
+        binding: BindingId::parse("default_claude").expect("valid binding"),
+        profile: None,
+    }
+}
+
 // --- Fresh OAuth bundle → inline secret ---------------------
 
 #[tokio::test]
@@ -112,7 +120,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     ));
 
     let connection = registry
-        .resolve(&realm, "default_claude", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .expect("fresh OAuth tokens should resolve");
     assert_eq!(
@@ -243,7 +251,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     ));
 
     let connection = registry
-        .resolve(&realm, "default_claude", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .expect("persisted api_key should resolve");
     assert_eq!(
@@ -264,7 +272,7 @@ async fn missing_oauth_tokens_surface_interactive_login_required() {
     ));
 
     let err = registry
-        .resolve(&realm, "default_claude", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -289,7 +297,7 @@ async fn no_token_store_surface_interactive_login_required() {
     ));
 
     let err = registry
-        .resolve(&realm, "default_claude", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .unwrap_err();
     assert!(

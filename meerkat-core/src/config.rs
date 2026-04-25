@@ -2384,13 +2384,16 @@ api_style = "chat_completions"
             Some(Provider::Anthropic)
         );
         assert_eq!(
-            Provider::infer_from_model("gpt-5.2"),
+            Provider::infer_from_model("gpt-5.4"),
             Some(Provider::OpenAI)
         );
         assert_eq!(
             Provider::infer_from_model("gemini-3-flash-preview"),
             Some(Provider::Gemini)
         );
+        assert_eq!(Provider::infer_from_model("gpt-unknown-preview"), None);
+        assert_eq!(Provider::infer_from_model("claude-unknown-preview"), None);
+        assert_eq!(Provider::infer_from_model("gemini-unknown-preview"), None);
         assert_eq!(Provider::infer_from_model("llama-3"), None);
         assert_eq!(Provider::infer_from_model(""), None);
     }

@@ -55,7 +55,8 @@ pub use mob::{
     WireWorkOrigin,
 };
 pub use models::{
-    CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,
+    CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
+    WireModelProfile, WireModelTier,
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{

@@ -211,11 +211,23 @@ impl SkillsConfig {
 impl SkillsConfig {
     /// Build a source identity registry from repository config + governance overlays.
     pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
-        let records = self
-            .repositories
-            .iter()
-            .map(repository_to_identity_record)
-            .collect();
+        let mut records: Vec<SourceIdentityRecord> = vec![
+            SourceIdentityRecord {
+                source_uuid: SourceUuid::builtin(),
+                display_name: "embedded".to_string(),
+                transport_kind: SourceTransportKind::Embedded,
+                fingerprint: "embedded:inventory".to_string(),
+                status: SourceIdentityStatus::Active,
+            },
+            SourceIdentityRecord {
+                source_uuid: SourceUuid::project_local(),
+                display_name: "project".to_string(),
+                transport_kind: SourceTransportKind::Filesystem,
+                fingerprint: "filesystem:.rkat/skills".to_string(),
+                status: SourceIdentityStatus::Active,
+            },
+        ];
+        records.extend(self.repositories.iter().map(repository_to_identity_record));
         SourceIdentityRegistry::build(
             records,
             self.identity.lineage.clone(),

@@ -158,7 +158,22 @@ impl SessionAgent for FactoryAgent {
         // LLM identity so subsequent turns run against the new
         // model/provider/connection_ref and persisted recovery sees
         // the swap.
+        let previous_connection_ref = self
+            .agent
+            .session()
+            .session_metadata()
+            .and_then(|metadata| metadata.connection_ref);
         self.agent.replace_client(client);
+        self.agent
+            .rotate_auth_lease_connection_ref(
+                previous_connection_ref.as_ref(),
+                identity.connection_ref.as_ref(),
+            )
+            .map_err(|e| {
+                meerkat_core::error::AgentError::ConfigError(format!(
+                    "failed to rotate auth lease during llm identity hot-swap: {e}"
+                ))
+            })?;
         if let Some(mut metadata) = self.agent.session().session_metadata() {
             metadata.apply_llm_identity(&identity);
             self.agent

@@ -112,15 +112,15 @@ pub struct CommsSendParams {
 }
 
 impl CommsSendParams {
-    /// Recipient peer name for error normalization, if the command targets one.
-    pub fn peer_name(&self) -> Option<&str> {
+    /// Recipient peer id for error normalization, if the command targets one.
+    pub fn peer_label(&self) -> Option<String> {
         use meerkat_core::comms::CommsCommandRequest;
         match &self.command {
             CommsCommandRequest::Input { .. } => None,
             CommsCommandRequest::PeerMessage { to, .. }
             | CommsCommandRequest::PeerLifecycle { to, .. }
             | CommsCommandRequest::PeerRequest { to, .. }
-            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
+            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.to_string()),
         }
     }
 }
@@ -158,7 +158,7 @@ pub async fn handle_send(
         }
     };
 
-    let peer_name = params.peer_name().map(str::to_string);
+    let peer_name = params.peer_label();
     let cmd = match params.command.into_command(&session_id) {
         Ok(cmd) => cmd,
         Err(err) => {
@@ -282,8 +282,12 @@ mod tests {
 
     #[test]
     fn deserialize_peer_response_invalid_status_fails_at_serde_boundary() {
-        let json = r#"{"session_id":"sid_1","kind":"peer_response","to":"alice","in_reply_to":"00000000-0000-0000-0000-000000000000","status":"almost-done"}"#;
-        let err = serde_json::from_str::<CommsSendParams>(json).unwrap_err();
+        let json = format!(
+            r#"{{"session_id":"sid_1","kind":"peer_response","to":"{}","in_reply_to":"{}","status":"almost-done"}}"#,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        );
+        let err = serde_json::from_str::<CommsSendParams>(&json).unwrap_err();
         assert!(
             err.to_string().contains("status") || err.to_string().contains("almost-done"),
             "expected invalid-status serde error, got: {err}"

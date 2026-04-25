@@ -6,9 +6,9 @@
 //! credentials are visible to the AgentFactory's `resolve_binding`
 //! path.
 //!
-//! The OAuth PKCE verifier is held client-side (returned in
-//! /login/start and passed back in /login/complete) so the server
-//! doesn't need a session map.
+//! OAuth state and PKCE verifier correlation is owned server-side by
+//! `OAuthFlowRegistry`; complete consumes the state before exchanging
+//! the provider code.
 
 use std::sync::Arc;
 
@@ -33,6 +33,7 @@ use meerkat_providers::auth_oauth::{
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
+use meerkat_providers::oauth_flow::{OAuthFlowError, global_oauth_flow_registry};
 
 use crate::AppState;
 
@@ -388,10 +389,12 @@ pub async fn test_auth_profile(
             let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store));
-            match registry
-                .resolve(&realm, body.binding_id.as_str(), &env)
-                .await
-            {
+            let connection_ref = ConnectionRef {
+                realm: body.realm_id.clone(),
+                binding: body.binding_id.clone(),
+                profile: None,
+            };
+            match registry.resolve(&realm, &connection_ref, &env).await {
                 Ok(conn) => {
                     let (connection_ref, binding, auth_profile) =
                         match resolve_binding_identity(&state, &body.realm_id, &body.binding_id)
@@ -481,20 +484,28 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
         }
     };
     let pkce = PkcePair::generate_s256();
-    let state_token = format!(
-        "st-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
+    let verifier = pkce.verifier.secret().to_string();
+    let state_token = match global_oauth_flow_registry().start(
+        body.provider.clone(),
+        body.redirect_uri.clone(),
+        verifier.clone(),
+    ) {
+        Ok(state) => state,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("oauth state initialization failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
     let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
     (
         StatusCode::OK,
         Json(WireLoginStart {
             authorize_url,
             state: state_token,
-            pkce_verifier: pkce.verifier.secret().to_string(),
+            pkce_verifier: verifier,
             pkce_challenge: pkce.challenge.code.clone(),
             redirect_uri: body.redirect_uri,
             provider: body.provider,
@@ -507,7 +518,9 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
 pub struct LoginCompleteBody {
     pub provider: String,
     pub code: String,
-    pub pkce_verifier: String,
+    pub state: String,
+    #[serde(default, rename = "pkce_verifier")]
+    pkce_verifier: Option<String>,
     pub redirect_uri: String,
     #[serde(default = "default_realm")]
     pub realm_id: RealmId,
@@ -554,12 +567,44 @@ pub async fn complete_login(
             .into_response();
     }
 
+    let flow =
+        match global_oauth_flow_registry().consume(&body.state, &body.provider, &body.redirect_uri)
+        {
+            Ok(flow) => flow,
+            Err(OAuthFlowError::Missing) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "oauth state is missing or expired" })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({ "error": format!("oauth state verification failed: {e}") }),
+                ),
+            )
+                .into_response();
+            }
+        };
+
+    if let Some(client_verifier) = &body.pkce_verifier
+        && client_verifier != &flow.pkce_verifier
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pkce_verifier does not match oauth state" })),
+        )
+            .into_response();
+    }
+
     let http = reqwest::Client::new();
     let result = match exchange_authorization_code(
         &http,
         &endpoints,
         &body.code,
-        &body.pkce_verifier,
+        &flow.pkce_verifier,
         client_secret,
     )
     .await

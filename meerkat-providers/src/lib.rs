@@ -37,6 +37,10 @@ pub mod auth_oauth {
     pub use meerkat_auth_core::auth_oauth::*;
 }
 #[cfg(not(target_arch = "wasm32"))]
+pub mod oauth_flow {
+    pub use meerkat_auth_core::oauth_flow::*;
+}
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth_store {
     pub use meerkat_auth_core::auth_store::*;
 }

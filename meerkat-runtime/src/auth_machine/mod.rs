@@ -1,8 +1,8 @@
 //! AuthMachine runtime surface.
 //!
-//! Per-binding auth-lease lifecycle machine. Each `binding_key`
-//! (format `"<realm_id>:<binding_id>"`) has its own `AuthMachine`
-//! instance, managed by the per-binding registry in
+//! Per-binding auth-lease lifecycle machine. Each typed `LeaseKey`
+//! (`realm`, `binding`, optional `profile`) has its own `AuthMachine`
+//! instance, managed by the lease-key registry in
 //! `meerkat-runtime/src/handles/auth_lease.rs`.
 //!
 //! See `dsl.rs` for the machine definition. See

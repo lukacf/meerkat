@@ -18,8 +18,8 @@ use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, CredentialSourceSpec,
-    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet,
+    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
+    CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -71,6 +71,14 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
     .unwrap()
 }
 
+fn default_connection_ref() -> ConnectionRef {
+    ConnectionRef {
+        realm: RealmId::parse("dev").expect("valid realm"),
+        binding: BindingId::parse("default_chatgpt").expect("valid binding"),
+        profile: None,
+    }
+}
+
 // --- OpenAI managed_chatgpt_oauth ------------------------------------
 
 #[tokio::test]
@@ -103,7 +111,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
-        .resolve(&realm, "default_chatgpt", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .expect("fresh ChatGPT tokens should resolve");
     assert_eq!(
@@ -139,7 +147,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
-        .resolve(&realm, "default_chatgpt", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .expect("external tokens should resolve");
     assert_eq!(
@@ -156,7 +164,7 @@ async fn openai_chatgpt_oauth_missing_tokens_surfaces_interactive_login_required
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, "default_chatgpt", &env)
+        .resolve(&realm, &default_connection_ref(), &env)
         .await
         .unwrap_err();
     assert!(

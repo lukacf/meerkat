@@ -19,8 +19,8 @@ use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, PeerReachabilityReason, SendAndStreamError, SendError,
-    SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    PeerDirectorySource, PeerName, PeerReachabilityReason, PeerRoute, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -523,7 +523,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 // installed (standalone / WASM), the shell retains the
                 // legacy inline behavior unchanged.
                 if let Some(handle) = self.peer_interaction_handle()
-                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                    && let Err(err) = handle.request_sent(corr_id, to.peer_id.to_string())
                 {
                     tracing::warn!(
                         error = %err,
@@ -689,7 +689,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 // W1-A: DSL authority runs first — see the mirror comment
                 // in the `send` path's PeerRequest arm.
                 if let Some(handle) = self.peer_interaction_handle()
-                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                    && let Err(err) = handle.request_sent(corr_id, to.peer_id.to_string())
                 {
                     tracing::warn!(
                         error = %err,
@@ -1918,26 +1918,20 @@ impl CommsRuntime {
         emitted
     }
 
-    /// Canonical send path: destination is a typed [`PeerName`] that the
-    /// runtime resolves to a [`PeerId`] via the trusted-peer snapshot.
-    ///
-    /// Duplicate names are a discovery concern, not a routing concern —
-    /// the first resolvable entry wins here because the router itself
-    /// keys by `PeerId`. Surfaces that must reject ambiguity should
-    /// resolve names through [`crate::trust::TrustStore::resolve_name`]
-    /// at their own boundary.
+    /// Canonical send path: destination is a typed [`PeerRoute`] whose
+    /// [`PeerId`] is already resolved at the surface boundary.
     async fn send_peer_command(
         &self,
-        peer_name: &PeerName,
+        route: &PeerRoute,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
-        self.send_peer_command_with_id(peer_name, Uuid::new_v4(), kind)
+        self.send_peer_command_with_id(route, Uuid::new_v4(), kind)
             .await
     }
 
     async fn send_peer_command_with_id(
         &self,
-        peer_name: &PeerName,
+        route: &PeerRoute,
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
@@ -1945,11 +1939,8 @@ impl CommsRuntime {
         self.reconcile_peer_directory(&resolved);
         let resolved_peer = resolved
             .into_iter()
-            .find(|peer| peer.name.as_str() == peer_name.as_str());
-        let dest_peer_id = match resolved_peer.as_ref() {
-            Some(peer) => peer.peer_id,
-            None => return Err(SendError::PeerNotFound(peer_name.as_string())),
-        };
+            .find(|peer| peer.peer_id == route.peer_id);
+        let dest_peer_id = route.peer_id;
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self
             .router
@@ -2501,7 +2492,7 @@ mod tests {
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
             InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
-            PeerReachabilityReason, StreamError, StreamScope, TrustedPeerDescriptor,
+            PeerReachabilityReason, PeerRoute, StreamError, StreamScope, TrustedPeerDescriptor,
         },
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
@@ -2517,6 +2508,20 @@ mod tests {
             address: parse_peer_address(address),
             pubkey: *pubkey.as_bytes(),
         }
+    }
+
+    fn peer_route(name: &str, pubkey: PubKey) -> PeerRoute {
+        PeerRoute::with_display_name(
+            crate::router::peer_id_from_pubkey(&pubkey),
+            PeerName::new(name.to_string()).expect("valid peer name"),
+        )
+    }
+
+    fn missing_peer_route(name: &str) -> PeerRoute {
+        PeerRoute::with_display_name(
+            meerkat_core::comms::PeerId::new(),
+            PeerName::new(name.to_string()).expect("valid peer name"),
+        )
     }
     use parking_lot::Mutex;
     use std::{collections::HashMap, sync::Arc};
@@ -2918,7 +2923,7 @@ mod tests {
         let receipt = CoreCommsRuntime::send(
             &runtime,
             CommsCommand::PeerRequest {
-                to: PeerName::new(peer_name).expect("peer_name is valid"),
+                to: peer_route(&peer_name, peer.public_key()),
                 intent: "checksum".to_string(),
                 params: serde_json::json!({"path": "README.md"}),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -2974,7 +2979,7 @@ mod tests {
         let receipt = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerLifecycle {
-                to: PeerName::new(receiver_name).expect("peer_name is valid"),
+                to: peer_route(&receiver_name, receiver.public_key()),
                 kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
                 params: serde_json::json!({
                     "peer": "worker-1",
@@ -3785,17 +3790,13 @@ mod tests {
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new("missing-peer".to_string())
-                .expect("missing-peer is a valid peer name"),
+            to: missing_peer_route("missing-peer"),
             body: "hello".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let result = CoreCommsRuntime::send(&runtime, cmd).await;
-        assert!(matches!(
-            result,
-            Err(SendError::PeerNotFound(peer)) if peer == "missing-peer"
-        ));
+        assert!(matches!(result, Err(SendError::PeerNotFound(_))));
     }
 
     #[tokio::test]
@@ -3830,7 +3831,7 @@ mod tests {
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "greeting".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
@@ -3895,7 +3896,7 @@ mod tests {
                     blob_id: blob_ref.blob_id,
                 },
             }]),
-            to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "blob-backed image".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
@@ -3930,14 +3931,14 @@ mod tests {
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "inproc-only hello".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
         match receipt {
-            Err(SendError::PeerNotFound(peer)) => assert_eq!(peer, receiver_name),
+            Err(SendError::PeerNotFound(_)) => {}
             other => panic!("Expected peer-not-found for missing trust, got: {other:?}"),
         }
 
@@ -3994,7 +3995,7 @@ mod tests {
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "hello without trusted".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
@@ -4057,7 +4058,7 @@ mod tests {
 
         let send_cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "hello trusted peer".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
@@ -4385,7 +4386,7 @@ mod tests {
             &sender,
             CommsCommand::PeerMessage {
                 blocks: None,
-                to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+                to: peer_route(&receiver_name, receiver.public_key()),
                 body: "hello".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
@@ -4420,7 +4421,7 @@ mod tests {
             &sender,
             CommsCommand::PeerMessage {
                 blocks: None,
-                to: PeerName::new(peer_name.clone()).expect("valid peer name"),
+                to: peer_route(&peer_name, peer_pubkey),
                 body: "hello".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
@@ -4475,7 +4476,7 @@ mod tests {
             &sender,
             CommsCommand::PeerMessage {
                 blocks: None,
-                to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+                to: peer_route(&receiver_name, receiver.public_key()),
                 body: "policy-rejected".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
@@ -4514,14 +4515,14 @@ mod tests {
             &sender,
             CommsCommand::PeerMessage {
                 blocks: None,
-                to: PeerName::new(missing_name.clone()).expect("valid peer name"),
+                to: missing_peer_route(&missing_name),
                 body: "hello".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )
         .await;
         assert!(
-            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_name),
+            matches!(result, Err(SendError::PeerNotFound(_))),
             "missing peer should fail with PeerNotFound, got: {result:?}"
         );
 
@@ -4558,7 +4559,7 @@ mod tests {
             &sender,
             CommsCommand::PeerMessage {
                 blocks: None,
-                to: PeerName::new(missing_name.clone()).expect("valid peer name"),
+                to: peer_route(&missing_name, missing_pubkey),
                 body: "hello".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
@@ -4616,19 +4617,19 @@ mod tests {
                 let cmd = match kind.as_str() {
                     "peer_message" => CommsCommand::PeerMessage {
                         blocks: None,
-                        to: entry.name.clone(),
+                        to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         body: "truthfulness test".to_string(),
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                     },
                     "peer_request" => CommsCommand::PeerRequest {
-                        to: entry.name.clone(),
+                        to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         intent: "test".to_string(),
                         params: serde_json::json!({}),
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         stream: InputStreamMode::None,
                     },
                     "peer_response" => CommsCommand::PeerResponse {
-                        to: entry.name.clone(),
+                        to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                         status: meerkat_core::ResponseStatus::Completed,
                         result: serde_json::json!({}),
@@ -4751,13 +4752,13 @@ mod tests {
         let peer_name = format!("m5-peer-{suffix}");
         let runtime_name = format!("m5-runtime-{suffix}");
 
-        let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
             let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
-                pubkey: _peer.public_key(),
+                pubkey: peer.public_key(),
                 addr: format!("inproc://{peer_name}"),
                 meta: crate::PeerMeta::default(),
             });
@@ -4765,7 +4766,7 @@ mod tests {
         // Receive side must also trust the sender after the silent-drop fix.
         // Use `add_trusted_peer` so the classified queue's trust set syncs.
         CoreCommsRuntime::add_trusted_peer(
-            &_peer,
+            &peer,
             trusted_descriptor(
                 &runtime_name,
                 runtime.public_key(),
@@ -4777,7 +4778,7 @@ mod tests {
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(peer_name).expect("peer_name is a valid peer name"),
+            to: peer_route(&peer_name, peer.public_key()),
             body: "not streamable".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
@@ -4941,7 +4942,7 @@ mod tests {
         // Verify sending to the removed peer fails (PeerNotFound)
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
-            to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+            to: peer_route(&receiver_name, receiver.public_key()),
             body: "should fail".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };

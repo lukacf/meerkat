@@ -163,7 +163,7 @@ async fn build_agent_with_openai_connection_ref_resolves_through_registry() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-5.2");
+    let mut build = AgentBuildConfig::new("gpt-5.4");
     build.connection_ref = Some(conn_ref("default_openai"));
 
     let agent = factory
@@ -281,7 +281,7 @@ async fn build_agent_unknown_binding_surfaces_connection_resolution_error() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-5.2");
+    let mut build = AgentBuildConfig::new("gpt-5.4");
     build.connection_ref = Some(conn_ref("does_not_exist"));
 
     let result = factory.build_agent(build, &config).await;
@@ -299,7 +299,7 @@ async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
     // Config has no realm at all → unknown realm path.
     let config = Config::default();
 
-    let mut build = AgentBuildConfig::new("gpt-5.2");
+    let mut build = AgentBuildConfig::new("gpt-5.4");
     build.connection_ref = Some(conn_ref("default_openai"));
 
     let result = factory.build_agent(build, &config).await;
@@ -324,7 +324,7 @@ async fn llm_client_override_beats_connection_ref() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-5.2");
+    let mut build = AgentBuildConfig::new("gpt-5.4");
     build.connection_ref = Some(conn_ref("does_not_exist"));
     build.llm_client_override = Some(Arc::new(MockLlmClient));
 
@@ -350,7 +350,7 @@ async fn build_agent_without_connection_ref_uses_default_realm_binding() {
     let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "flat-key")]);
     config.realm.insert("default".to_string(), section);
 
-    let build = AgentBuildConfig::new("gpt-5.2");
+    let build = AgentBuildConfig::new("gpt-5.4");
     assert!(build.connection_ref.is_none());
 
     let agent = factory
@@ -383,7 +383,7 @@ async fn session_metadata_persists_connection_ref_across_build() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-5.2");
+    let mut build = AgentBuildConfig::new("gpt-5.4");
     build.connection_ref = Some(conn_ref("default_openai"));
 
     let agent = factory

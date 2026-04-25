@@ -936,7 +936,7 @@ impl AgentFactory {
         &self,
         config: &Config,
     ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, BuildAgentError> {
-        let (realm, binding_id, _connection_ref) =
+        let (realm, _binding_id, connection_ref) =
             Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
                 .map_err(BuildAgentError::ConnectionResolution)?;
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
@@ -951,7 +951,7 @@ impl AgentFactory {
         }
         let connection = self
             .provider_registry
-            .resolve(&realm, &binding_id, &env)
+            .resolve(&realm, &connection_ref, &env)
             .await
             .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
         let secret = connection.resolved_secret().ok_or_else(|| {
@@ -1284,11 +1284,20 @@ impl AgentFactory {
 
         skill_source.map(|source| {
             let available_caps = self.effective_skill_capabilities(config, None);
-            let engine = Arc::new(
-                meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                    .with_inventory_threshold(config.skills.inventory_threshold)
-                    .with_max_injection_bytes(config.skills.max_injection_bytes),
-            );
+            let registry = match config.skills.build_source_identity_registry() {
+                Ok(registry) => Some(Arc::new(registry)),
+                Err(e) => {
+                    tracing::warn!("Failed to build skill source identity registry: {e}");
+                    None
+                }
+            };
+            let mut engine = meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                .with_inventory_threshold(config.skills.inventory_threshold)
+                .with_max_injection_bytes(config.skills.max_injection_bytes);
+            if let Some(registry) = registry {
+                engine = engine.with_source_identity_registry(registry);
+            }
+            let engine = Arc::new(engine);
             Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
         })
     }
@@ -1433,7 +1442,7 @@ impl AgentFactory {
             return Ok(Arc::new(meerkat_client::TestClient::default()));
         }
 
-        let (realm, binding_id, _connection_ref) = Self::resolve_realm_binding_for_provider(
+        let (realm, _binding_id, connection_ref) = Self::resolve_realm_binding_for_provider(
             config,
             identity.provider,
             identity.connection_ref.as_ref(),
@@ -1457,7 +1466,7 @@ impl AgentFactory {
         }
         let provider_registry = Arc::clone(&self.provider_registry);
         let connection = provider_registry
-            .resolve(&realm, &binding_id, &env)
+            .resolve(&realm, &connection_ref, &env)
             .await
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
         provider_registry
@@ -1523,10 +1532,6 @@ impl AgentFactory {
             ));
         }
 
-        let inferred = Provider::infer_from_model(&build_config.model).unwrap_or(Provider::Other);
-        if inferred != Provider::Other {
-            return Ok((inferred, None));
-        }
         if let Some(client) = build_config.llm_client_override.as_ref() {
             return Ok((Provider::from_name(client.provider()), None));
         }
@@ -1863,7 +1868,7 @@ impl AgentFactory {
                     )
                     .map_err(BuildAgentError::LlmClient)?
                 } else {
-                    let (realm, binding_id, resolved_connection_ref) =
+                    let (realm, _binding_id, resolved_connection_ref) =
                         Self::resolve_realm_binding_for_provider(
                             config,
                             provider,
@@ -1871,7 +1876,7 @@ impl AgentFactory {
                             build_config.realm_id.as_deref(),
                         )
                         .map_err(BuildAgentError::ConnectionResolution)?;
-                    build_config.connection_ref = Some(resolved_connection_ref);
+                    build_config.connection_ref = Some(resolved_connection_ref.clone());
 
                     // Provider-runtime registry needs the OAuth-backed
                     // TokenStore attached so persisted tokens (written by
@@ -1893,7 +1898,7 @@ impl AgentFactory {
                     }
                     let provider_registry = Arc::clone(&self.provider_registry);
                     let connection = provider_registry
-                        .resolve(&realm, &binding_id, &env)
+                        .resolve(&realm, &resolved_connection_ref, &env)
                         .await
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
 
@@ -1907,7 +1912,9 @@ impl AgentFactory {
                     if let RuntimeBuildMode::SessionOwned(bindings) =
                         &build_config.runtime_build_mode
                     {
-                        let binding_key = format!("{}:{}", realm.realm_id, binding_id);
+                        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(
+                            &resolved_connection_ref,
+                        );
                         let expires_at = connection
                             .auth_lease
                             .expires_at()
@@ -1916,7 +1923,7 @@ impl AgentFactory {
                         // Ignore result: the DSL may reject if an earlier
                         // hot-swap already transitioned this binding; the
                         // lease state is orthogonal to error semantics.
-                        let _ = bindings.auth_lease.acquire_lease(&binding_key, expires_at);
+                        let _ = bindings.auth_lease.acquire_lease(&lease_key, expires_at);
                     }
 
                     // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
@@ -2050,11 +2057,20 @@ impl AgentFactory {
 
             skill_source.map(|source| {
                 let available_caps = self.effective_skill_capabilities(config, Some(&build_config));
-                let engine = Arc::new(
-                    meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                        .with_inventory_threshold(config.skills.inventory_threshold)
-                        .with_max_injection_bytes(config.skills.max_injection_bytes),
-                );
+                let registry = match config.skills.build_source_identity_registry() {
+                    Ok(registry) => Some(Arc::new(registry)),
+                    Err(e) => {
+                        tracing::warn!("Failed to build skill source identity registry: {e}");
+                        None
+                    }
+                };
+                let mut engine = meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                    .with_inventory_threshold(config.skills.inventory_threshold)
+                    .with_max_injection_bytes(config.skills.max_injection_bytes);
+                if let Some(registry) = registry {
+                    engine = engine.with_source_identity_registry(registry);
+                }
+                let engine = Arc::new(engine);
                 Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
             })
         }; // end else (filesystem resolution fallthrough)

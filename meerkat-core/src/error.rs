@@ -231,7 +231,7 @@ pub enum AgentError {
     BuildError(String),
 
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
-    /// state at a CallingLlm boundary; the binding cannot proceed
+    /// state at a CallingLlm boundary; the lease cannot proceed
     /// until the user re-authenticates (`rkat auth login`). This is a
     /// machine-owned terminal class (Phase 1.5-rev), distinct from
     /// [`AgentError::InternalError`] which is for genuinely

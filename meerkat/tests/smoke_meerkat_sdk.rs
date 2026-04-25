@@ -330,7 +330,7 @@ mod scenario_01_multi_provider {
         // --- OpenAI ---
         #[cfg(feature = "openai")]
         if let Some(_api_key) = openai_api_key() {
-            let openai_model = "gpt-5.2".to_string();
+            let openai_model = "gpt-5.4".to_string();
             eprintln!("[scenario 1] Testing OpenAI with model {openai_model}");
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));
@@ -1938,7 +1938,7 @@ mod scenario_23_web_search_default_on {
             let temp = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp.path().join("sessions"));
             let config = Config::default();
-            let mut build = AgentBuildConfig::new("gpt-5.2");
+            let mut build = AgentBuildConfig::new("gpt-5.4");
             build.provider = Some(meerkat_core::Provider::OpenAI);
             let mut agent = factory
                 .build_agent(build, &config)

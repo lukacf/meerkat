@@ -19,6 +19,8 @@ pub mod auth_oauth;
 pub mod auth_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod oauth_flow;
 // `resolver` contains per-source-spec arms that are individually cfg-split
 // for filesystem/command/managed-store sources. The InlineSecret, Env
 // (host env_lookup), ExternalResolver, and authorizer-stub arms compile

@@ -24,7 +24,7 @@ mod tests {
 
     fn create_request(prompt: &str) -> CreateSessionRequest {
         CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.4".to_string(),
             prompt: prompt.to_string().into(),
             render_metadata: None,
             system_prompt: None,

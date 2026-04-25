@@ -335,7 +335,7 @@ async fn build_agent_without_connection_ref_uses_default_realm_config_api_key() 
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]);
     config.realm.insert("default".to_string(), section);
 
-    let build_config = AgentBuildConfig::new("gpt-5.2");
+    let build_config = AgentBuildConfig::new("gpt-5.4");
     assert!(build_config.connection_ref.is_none());
     let agent = factory
         .build_agent(build_config, &config)
@@ -756,7 +756,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         provider: Some(Provider::OpenAI),
         max_tokens: Some(1024),
         provider_params: Some(json!({ "temperature": 0.1 })),
-        ..AgentBuildConfig::new("gpt-5.2")
+        ..AgentBuildConfig::new("gpt-5.4")
     };
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -841,7 +841,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
         keep_alive: false,
         comms_name: Some("explicit-name".to_string()),
         peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "explicit")),
-        ..AgentBuildConfig::new("gpt-5.2")
+        ..AgentBuildConfig::new("gpt-5.4")
     };
     build_config.resume_override_mask.provider = true;
     build_config.resume_override_mask.max_tokens = true;
@@ -914,7 +914,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
-        ..AgentBuildConfig::new("gpt-5.2")
+        ..AgentBuildConfig::new("gpt-5.4")
     };
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -969,7 +969,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
         override_builtins: ToolCategoryOverride::Inherit,
-        ..AgentBuildConfig::new("gpt-5.2")
+        ..AgentBuildConfig::new("gpt-5.4")
     };
     build_config.resume_override_mask.override_builtins = true;
 
@@ -1350,7 +1350,8 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
 
     let valid_build = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        preload_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
+        preload_skills: Some(vec![meerkat_core::skills::SkillKey::new(
+            meerkat_core::skills::SourceUuid::project_local(),
             meerkat_core::skills::SkillName::parse("valid-skill").expect("valid skill name"),
         )]),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
@@ -1368,7 +1369,8 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
         .expect("valid preload session metadata");
     assert_eq!(
         metadata.tooling.active_skills,
-        Some(vec![meerkat_core::skills::SkillKey::builtin(
+        Some(vec![meerkat_core::skills::SkillKey::new(
+            meerkat_core::skills::SourceUuid::project_local(),
             meerkat_core::skills::SkillName::parse("valid-skill").expect("valid skill name"),
         )]),
         "session metadata should persist only the explicitly preloaded skills"
@@ -1376,7 +1378,8 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
 
     let invalid_build = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        preload_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
+        preload_skills: Some(vec![meerkat_core::skills::SkillKey::new(
+            meerkat_core::skills::SourceUuid::project_local(),
             meerkat_core::skills::SkillName::parse("broken-skill").expect("valid skill name"),
         )]),
         ..AgentBuildConfig::new("claude-sonnet-4-5")

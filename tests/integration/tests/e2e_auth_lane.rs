@@ -143,25 +143,30 @@ async fn e2e_auth_refresh_coordinator_inproc_dedup() {
 #[tokio::test]
 #[ignore = "lane:e2e-auth"]
 async fn e2e_auth_mid_turn_reauth_notice_surface() {
-    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase};
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+    use meerkat_core::{BindingId, RealmId};
     use meerkat_runtime::RuntimeAuthLeaseHandle;
 
     let handle = RuntimeAuthLeaseHandle::ephemeral();
-    let key = "test-realm:test-binding";
+    let key = LeaseKey::new(
+        RealmId::parse("test-realm").unwrap(),
+        BindingId::parse("test-binding").unwrap(),
+        None,
+    );
 
     // 1. Acquire lease at state=valid.
-    handle.acquire_lease(key, 9_999_999_999).unwrap();
-    let snap = handle.snapshot(key);
+    handle.acquire_lease(&key, 9_999_999_999).unwrap();
+    let snap = handle.snapshot(&key);
     assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
 
     // 2. Drive to reauth_required and assert state.
-    handle.mark_reauth_required(key).unwrap();
-    let snap = handle.snapshot(key);
+    handle.mark_reauth_required(&key).unwrap();
+    let snap = handle.snapshot(&key);
     assert_eq!(snap.phase, Some(AuthLeasePhase::ReauthRequired));
 
     // 3. Release clears the lease.
-    handle.release_lease(key).unwrap();
-    let snap = handle.snapshot(key);
+    handle.release_lease(&key).unwrap();
+    let snap = handle.snapshot(&key);
     assert_eq!(snap.phase, None);
 }
 
@@ -175,16 +180,21 @@ async fn e2e_auth_mid_turn_reauth_notice_surface() {
 #[tokio::test]
 #[ignore = "lane:e2e-auth"]
 async fn e2e_auth_refresh_dedup_at_dsl_level() {
-    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase};
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+    use meerkat_core::{BindingId, RealmId};
     use meerkat_runtime::RuntimeAuthLeaseHandle;
 
     let handle = RuntimeAuthLeaseHandle::ephemeral();
-    let key = "dedup:binding";
+    let key = LeaseKey::new(
+        RealmId::parse("dedup").unwrap(),
+        BindingId::parse("binding").unwrap(),
+        None,
+    );
 
-    handle.acquire_lease(key, 1_000).unwrap();
-    handle.begin_refresh(key).unwrap();
+    handle.acquire_lease(&key, 1_000).unwrap();
+    handle.begin_refresh(&key).unwrap();
     assert_eq!(
-        handle.snapshot(key).phase,
+        handle.snapshot(&key).phase,
         Some(AuthLeasePhase::Refreshing),
         "lease should be in refreshing after begin_refresh"
     );
@@ -192,13 +202,13 @@ async fn e2e_auth_refresh_dedup_at_dsl_level() {
     // Second BeginRefresh must be rejected — dedup invariant owned by
     // the per-binding AuthMachine DSL (guard only permits
     // `Valid → Refreshing` or `Expiring → Refreshing`).
-    let err = handle.begin_refresh(key).unwrap_err();
+    let err = handle.begin_refresh(&key).unwrap_err();
     assert!(
         err.to_string().contains("BeginRefresh") || err.to_string().contains("begin_refresh"),
         "expected DSL rejection mentioning BeginRefresh / begin_refresh, got: {err}"
     );
 
     // Unblock refresh path: Complete transitions back to valid.
-    handle.complete_refresh(key, 2_000, 1_500).unwrap();
-    assert_eq!(handle.snapshot(key).phase, Some(AuthLeasePhase::Valid));
+    handle.complete_refresh(&key, 2_000, 1_500).unwrap();
+    assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
 }

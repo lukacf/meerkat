@@ -103,7 +103,7 @@ mod llm_normalization {
 
         let client = OpenAiClient::new(api_key);
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text(
                 "Say 'hello' and nothing else".to_string(),
             ))],

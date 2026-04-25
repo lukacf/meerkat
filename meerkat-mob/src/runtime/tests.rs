@@ -22,7 +22,7 @@ use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability,
-    PeerReachabilityReason, SendError, SendReceipt, TrustedPeerDescriptor,
+    PeerReachabilityReason, PeerRoute, SendError, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
@@ -283,11 +283,9 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 }
 
                 let trusted = self.trusted_peers.read().await;
-                if !trusted
-                    .values()
-                    .any(|peer| peer.name.as_str() == to.as_str())
-                {
-                    return Err(SendError::PeerNotFound(to.as_string()));
+                let peer_id = to.peer_id.as_str();
+                if !trusted.contains_key(&peer_id) {
+                    return Err(SendError::PeerNotFound(to.label()));
                 }
                 drop(trusted);
 
@@ -321,11 +319,9 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 }
 
                 let trusted = self.trusted_peers.read().await;
-                if !trusted
-                    .values()
-                    .any(|peer| peer.name.as_str() == to.as_str())
-                {
-                    return Err(SendError::PeerNotFound(to.as_string()));
+                let peer_id = to.peer_id.as_str();
+                if !trusted.contains_key(&peer_id) {
+                    return Err(SendError::PeerNotFound(to.label()));
                 }
                 drop(trusted);
 
@@ -2773,9 +2769,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                             .await
                             .push(intent.clone());
                         let reply_name = candidate.interaction.from.clone();
-                        let to = PeerName::new(reply_name).expect("bridge response peer name");
+                        let to = test_trusted_peer_route(responder_runtime.as_ref(), &reply_name);
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
+                        let mut remove_supervisors_after_response = Vec::new();
                         let response = if let Ok(command) = bridge_parse {
                             match command {
                                 super::bridge_protocol::BridgeCommand::BindMember(payload) => {
@@ -2919,14 +2916,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 || payload.supervisor.peer_id
                                                     != current.supervisor.peer_id.to_string()
                                             {
-                                                let _ = responder_runtime
-                                                    .remove_trusted_peer(
-                                                        &meerkat_comms::PubKey::new(
-                                                            current.supervisor.pubkey,
-                                                        )
-                                                        .to_pubkey_string(),
-                                                    )
-                                                    .await;
+                                                remove_supervisors_after_response.push(
+                                                    meerkat_comms::PubKey::new(
+                                                        current.supervisor.pubkey,
+                                                    ),
+                                                );
                                             }
                                             let supervisor_spec =
                                                 meerkat_core::comms::TrustedPeerDescriptor::try_from(
@@ -2977,12 +2971,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             payload.supervisor,
                                         )
                                         .expect("valid supervisor spec");
-                                    let _ = responder_runtime
-                                        .remove_trusted_peer(
-                                            &meerkat_comms::PubKey::new(supervisor_spec.pubkey)
-                                                .to_pubkey_string(),
-                                        )
-                                        .await;
+                                    remove_supervisors_after_response
+                                        .push(meerkat_comms::PubKey::new(supervisor_spec.pubkey));
                                     *responder_supervisor_state.write().await = None;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
@@ -3195,6 +3185,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                             panic!("send live external peer response failed: {error}");
                         }
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
+                        for supervisor_pubkey in remove_supervisors_after_response {
+                            let _ = responder_runtime
+                                .remove_trusted_peer(&supervisor_pubkey.to_pubkey_string())
+                                .await;
+                        }
                     }
                     _ => {
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
@@ -3303,6 +3298,43 @@ fn test_comms_name(profile: &str, agent_identity: &str) -> String {
 
 fn test_comms_name_for(mob_id: &MobId, profile: &str, agent_identity: &str) -> String {
     format!("{mob_id}/{profile}/{agent_identity}")
+}
+
+async fn test_peer_route<C>(comms: &C, name: &str) -> PeerRoute
+where
+    C: CoreCommsRuntime + ?Sized,
+{
+    let peers = comms.peers().await;
+    let entry = peers
+        .iter()
+        .find(|entry| entry.name.as_str() == name)
+        .unwrap_or_else(|| panic!("peer route not found for {name}; peers={peers:?}"));
+    PeerRoute::with_display_name(entry.peer_id, entry.name.clone())
+}
+
+fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> PeerRoute {
+    let trusted = comms.trusted_peers_shared();
+    let trusted = trusted.read();
+    if let Some(peer) = trusted.peers.iter().find(|peer| peer.name == name) {
+        return PeerRoute::with_display_name(
+            peer.pubkey.to_peer_id(),
+            PeerName::new(peer.name.clone()).expect("valid trusted peer name"),
+        );
+    }
+    drop(trusted);
+
+    let namespace = comms.inproc_namespace().unwrap_or("");
+    let inproc_peers = meerkat_comms::InprocRegistry::global().peers_in_namespace(namespace);
+    if let Some(peer) = inproc_peers.iter().find(|peer| peer.name == name) {
+        return PeerRoute::with_display_name(
+            peer.pubkey.to_peer_id(),
+            PeerName::new(peer.name.clone()).expect("valid inproc peer name"),
+        );
+    }
+
+    let trusted = comms.trusted_peers_shared();
+    let trusted = trusted.read();
+    panic!("trusted or inproc peer route not found for {name}; trusted={trusted:?}");
 }
 
 fn with_unique_mob_id(mut definition: MobDefinition, label: &str) -> MobDefinition {
@@ -16554,7 +16586,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
-            to: PeerName::new(test_comms_name("worker", "w-1")).expect("valid peer name"),
+            to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-1")).await,
             body: "body: please inspect this image".to_string(),
             blocks: Some(vec![
                 meerkat_core::types::ContentBlock::Text {
@@ -16710,7 +16742,7 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
-            to: PeerName::new(test_comms_name("worker", "w-prekickoff")).expect("valid peer name"),
+            to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-prekickoff")).await,
             body: "body: immediate orchestration after wait_for_ready".to_string(),
             blocks: Some(vec![
                 meerkat_core::types::ContentBlock::Text {
@@ -16835,8 +16867,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
         let receipt = CoreCommsRuntime::send(
             &*comms_lead,
             CommsCommand::PeerMessage {
-                to: PeerName::new(test_comms_name("worker", agent_identity))
-                    .expect("valid peer name"),
+                to: test_peer_route(&*comms_lead, &test_comms_name("worker", agent_identity)).await,
                 body: format!("body: fanout to {agent_identity}"),
                 blocks: Some(vec![
                     meerkat_core::types::ContentBlock::Text {
@@ -16970,7 +17001,7 @@ async fn test_running_peer_message_to_autonomous_member_drains_after_current_app
     CoreCommsRuntime::send(
         &*artist_comms,
         CommsCommand::PeerMessage {
-            to: PeerName::new(test_comms_name("worker", "w-target")).expect("valid peer name"),
+            to: test_peer_route(&*artist_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: first peer message".to_string(),
             blocks: Some(vec![
                 meerkat_core::types::ContentBlock::Text {
@@ -17007,7 +17038,7 @@ async fn test_running_peer_message_to_autonomous_member_drains_after_current_app
     CoreCommsRuntime::send(
         &*helper_comms,
         CommsCommand::PeerMessage {
-            to: PeerName::new(test_comms_name("worker", "w-target")).expect("valid peer name"),
+            to: test_peer_route(&*helper_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: second peer message while running".to_string(),
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
@@ -17104,7 +17135,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
-            to: PeerName::new(test_comms_name("worker", "w-responder")).expect("valid peer name"),
+            to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
             intent: "interpret_image".to_string(),
             params: serde_json::json!({"description":"tower with a light"}),
             handling_mode: meerkat_core::types::HandlingMode::Steer,
@@ -17137,7 +17168,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
-            to: PeerName::new(test_comms_name("lead", "l-requester")).expect("valid peer name"),
+            to: test_peer_route(&*responder_comms, &test_comms_name("lead", "l-requester")).await,
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
             result: serde_json::json!({"interpretation":"lighthouse"}),
@@ -17395,9 +17426,8 @@ async fn test_wire_enables_peer_request_delivery() {
         "worker should receive mob.peer_added for lead"
     );
 
-    let peer_name = meerkat_core::comms::PeerName::new(&comms_name_b).expect("valid peer name");
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
-        to: peer_name,
+        to: test_peer_route(&*comms_a, &comms_name_b).await,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
         handling_mode: meerkat_core::types::HandlingMode::Queue,

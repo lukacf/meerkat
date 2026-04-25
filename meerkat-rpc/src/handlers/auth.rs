@@ -1,10 +1,10 @@
 //! `auth/*` + `realm/*` method handlers.
 //!
 //! Real implementations using the shared `SessionRuntime.token_store()`.
-//! OAuth login is split across two calls (client keeps PKCE verifier):
+//! OAuth login is split across two calls (server keeps state -> PKCE verifier):
 //!
 //!   auth/login/start     → returns authorize_url + state + pkce_verifier
-//!   auth/login/complete  → exchanges code + pkce_verifier → persists
+//!   auth/login/complete  → verifies state, exchanges code → persists
 
 use std::sync::Arc;
 
@@ -22,6 +22,7 @@ use meerkat_providers::auth_oauth::{
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
+use meerkat_providers::oauth_flow::{OAuthFlowError, global_oauth_flow_registry};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -433,20 +434,28 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
             }
         };
     let pkce = PkcePair::generate_s256();
-    let state_token = format!(
-        "st-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
+    let verifier = pkce.verifier.secret().clone();
+    let state_token = match global_oauth_flow_registry().start(
+        parsed.provider.clone(),
+        parsed.redirect_uri.clone(),
+        verifier.clone(),
+    ) {
+        Ok(state) => state,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("oauth state initialization failed: {e}"),
+            );
+        }
+    };
     let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
     RpcResponse::success(
         id,
         serde_json::json!({
             "authorize_url": authorize_url,
             "state": state_token,
-            "pkce_verifier": pkce.verifier.secret(),
+            "pkce_verifier": verifier,
             "pkce_challenge": pkce.challenge.code,
             "redirect_uri": parsed.redirect_uri,
             "provider": parsed.provider,
@@ -458,7 +467,9 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
 struct LoginCompleteParams {
     provider: String,
     code: String,
-    pkce_verifier: String,
+    state: String,
+    #[serde(default, rename = "pkce_verifier")]
+    pkce_verifier: Option<String>,
     redirect_uri: String,
     realm_id: String,
     #[serde(default)]
@@ -505,6 +516,38 @@ pub async fn handle_auth_login_complete(
         );
     }
 
+    let flow = match global_oauth_flow_registry().consume(
+        &parsed.state,
+        &parsed.provider,
+        &parsed.redirect_uri,
+    ) {
+        Ok(flow) => flow,
+        Err(OAuthFlowError::Missing) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "oauth state is missing or expired",
+            );
+        }
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("oauth state verification failed: {e}"),
+            );
+        }
+    };
+
+    if let Some(client_verifier) = &parsed.pkce_verifier
+        && client_verifier != &flow.pkce_verifier
+    {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "pkce_verifier does not match oauth state",
+        );
+    }
+
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
@@ -514,7 +557,7 @@ pub async fn handle_auth_login_complete(
         &http,
         &endpoints,
         &parsed.code,
-        &parsed.pkce_verifier,
+        &flow.pkce_verifier,
         client_secret,
     )
     .await

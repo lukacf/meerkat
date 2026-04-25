@@ -888,7 +888,6 @@ where
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     /// Runtime-backed auth lease handle (Phase 1.5-rev).
-    #[expect(dead_code, reason = "wired by D-c AuthMachine composition")]
     pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
     /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary

@@ -306,6 +306,33 @@ where
         self.client = client;
     }
 
+    /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
+    pub fn rotate_auth_lease_connection_ref(
+        &self,
+        previous: Option<&crate::ConnectionRef>,
+        target: Option<&crate::ConnectionRef>,
+    ) -> Result<(), AgentError> {
+        let Some(handle) = self.auth_lease_handle.as_deref() else {
+            return Ok(());
+        };
+        if previous == target {
+            return Ok(());
+        }
+        if let Some(previous) = previous {
+            let previous_key = crate::handles::LeaseKey::from_connection_ref(previous);
+            let _ = handle.release_lease(&previous_key);
+        }
+        if let Some(target) = target {
+            let target_key = crate::handles::LeaseKey::from_connection_ref(target);
+            handle.acquire_lease(&target_key, u64::MAX).map_err(|err| {
+                AgentError::ConfigError(format!(
+                    "failed to rotate auth lease to connection_ref {target_key}: {err}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Shared live control flag for boundary-only cancellation requests.
     pub fn cancel_after_boundary_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.cancel_after_boundary_requested)

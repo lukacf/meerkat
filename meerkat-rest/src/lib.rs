@@ -1857,16 +1857,16 @@ pub struct CommsSendRequest {
 }
 
 impl CommsSendRequest {
-    /// Recipient peer name for error normalization, if the command targets one.
+    /// Recipient peer id for error normalization, if the command targets one.
     ///
-    fn peer_name(&self) -> Option<&str> {
+    fn peer_label(&self) -> Option<String> {
         use meerkat_core::comms::CommsCommandRequest;
         match &self.command {
             CommsCommandRequest::Input { .. } => None,
             CommsCommandRequest::PeerMessage { to, .. }
             | CommsCommandRequest::PeerLifecycle { to, .. }
             | CommsCommandRequest::PeerRequest { to, .. }
-            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
+            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.to_string()),
         }
     }
 }
@@ -1904,7 +1904,7 @@ async fn comms_send(
             ))
         })?;
 
-    let peer_name = req.peer_name().map(str::to_string);
+    let peer_name = req.peer_label();
     let cmd = req
         .command
         .into_command(&session_id)
@@ -5677,8 +5677,11 @@ mod tests {
 
     #[test]
     fn test_comms_send_request_peer_request_invalid_stream_rejected_at_serde() {
-        let json = r#"{"session_id":"sid_123","kind":"peer_request","to":"alice","intent":"ask","stream":"invalid"}"#;
-        let err = serde_json::from_str::<CommsSendRequest>(json)
+        let json = format!(
+            r#"{{"session_id":"sid_123","kind":"peer_request","to":"{}","intent":"ask","stream":"invalid"}}"#,
+            uuid::Uuid::new_v4()
+        );
+        let err = serde_json::from_str::<CommsSendRequest>(&json)
             .expect_err("invalid stream must fail deserialization");
         assert!(
             err.to_string().contains("stream") || err.to_string().contains("invalid"),
@@ -5689,7 +5692,8 @@ mod tests {
     #[test]
     fn test_comms_send_request_peer_response_invalid_status_rejected_at_serde() {
         let json = format!(
-            r#"{{"session_id":"sid_123","kind":"peer_response","to":"alice","in_reply_to":"{}","status":"almost-done"}}"#,
+            r#"{{"session_id":"sid_123","kind":"peer_response","to":"{}","in_reply_to":"{}","status":"almost-done"}}"#,
+            uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4()
         );
         let err = serde_json::from_str::<CommsSendRequest>(&json)
@@ -5789,7 +5793,7 @@ mod tests {
         };
         assert!(!rest_continue_requires_rebuild(&req));
 
-        req.model = Some("gpt-5.2".into());
+        req.model = Some("gpt-5.4".into());
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
 

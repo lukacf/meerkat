@@ -4,7 +4,7 @@ use meerkat_machine_dsl::machine;
 // refactored from the original "absorbed into MeerkatMachine"
 // design after review).
 //
-// Each binding_key (format: "<realm_id>:<binding_id>") has its own
+// Each typed LeaseKey (realm, binding, optional profile) has its own
 // AuthMachine instance, tracked by the runtime-level registry in
 // `meerkat-runtime/src/handles/auth_lease.rs`. The machine owns the
 // semantics of:

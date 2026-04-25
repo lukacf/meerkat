@@ -304,7 +304,7 @@ fn anthropic_model() -> String {
 /// Get the OpenAI model to use in tests (configurable via OPENAI_MODEL env var)
 #[allow(dead_code)]
 fn openai_model() -> String {
-    std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.2".to_string())
+    std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string())
 }
 
 /// Get the Gemini model to use in tests (configurable via GEMINI_MODEL env var)

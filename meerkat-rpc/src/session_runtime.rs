@@ -4922,7 +4922,7 @@ mod tests {
     async fn keep_alive_comms_drain_emits_run_completed_for_terminal_peer_response() {
         use futures::StreamExt;
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerDescriptor};
+        use meerkat_core::comms::{CommsCommand, PeerName, PeerRoute, TrustedPeerDescriptor};
         use meerkat_core::interaction::InteractionId;
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5011,7 +5011,10 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
-                to: PeerName::new(operator_name.to_string()).expect("valid operator peer name"),
+                to: PeerRoute::with_display_name(
+                    operator_pubkey.to_peer_id(),
+                    PeerName::new(operator_name.to_string()).expect("valid operator peer name"),
+                ),
                 in_reply_to: InteractionId(uuid::Uuid::new_v4()),
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({
@@ -7058,7 +7061,7 @@ mod tests {
 
         // Hot-swap to an OpenAI model (does NOT support image_tool_results).
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.2".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -7125,7 +7128,7 @@ mod tests {
 
         // Hot-swap to OpenAI (deny view_image).
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.2".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -7220,7 +7223,7 @@ mod tests {
 
         // Hot-swap to OpenAI — should add view_image to the deny set, not replace it.
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.2".to_string()),
+            model: Some("gpt-5.4".to_string()),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -7488,7 +7491,7 @@ mod tests {
             "reasoning": { "effort": "medium" }
         });
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.2".to_string()),
+            model: Some("gpt-5.4".to_string()),
             provider_params: Some(provider_params.clone()),
             ..Default::default()
         };
@@ -7510,7 +7513,7 @@ mod tests {
             .read_session_rich(&session_id)
             .await
             .expect("read_session_rich after hot-swap");
-        assert_eq!(info.model, "gpt-5.2");
+        assert_eq!(info.model, "gpt-5.4");
         assert_eq!(info.provider, "openai");
 
         runtime
@@ -7544,7 +7547,7 @@ mod tests {
             .read_session_rich(&session_id)
             .await
             .expect("read recovered session after re-materialization");
-        assert_eq!(info.model, "gpt-5.2", "recovered model must match hot-swap");
+        assert_eq!(info.model, "gpt-5.4", "recovered model must match hot-swap");
         assert_eq!(
             info.provider, "openai",
             "recovered provider must match hot-swap"

@@ -4,9 +4,9 @@ use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
-use meerkat_core::skills::SkillError;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills::SkillScope;
+use meerkat_core::skills::{SkillError, SourceUuid};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills_config::GitRefType;
 use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
@@ -52,6 +52,7 @@ pub async fn resolve_repositories_with_roots(
         }
         Ok(Some(CompositeSkillSource::from_named(vec![NamedSource {
             name: "embedded".to_string(),
+            source_uuid: SourceUuid::builtin(),
             source: SourceNode::Embedded(EmbeddedSkillSource::new()),
         }])))
     }
@@ -60,6 +61,7 @@ pub async fn resolve_repositories_with_roots(
     {
         let mut sources: Vec<NamedSource> = vec![NamedSource {
             name: "embedded".to_string(),
+            source_uuid: SourceUuid::builtin(),
             source: SourceNode::Embedded(EmbeddedSkillSource::new()),
         }];
         for repo in &config.repositories {
@@ -75,6 +77,7 @@ pub async fn resolve_repositories_with_roots(
                     };
                     sources.push(NamedSource {
                         name: repo.name.clone(),
+                        source_uuid: repo.source_uuid.clone(),
                         source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                             full_path,
                             SkillScope::Project,
@@ -102,6 +105,7 @@ pub async fn resolve_repositories_with_roots(
                         };
                         sources.push(NamedSource {
                             name: repo.name.clone(),
+                            source_uuid: repo.source_uuid.clone(),
                             source: SourceNode::Http(Box::new(
                                 HttpSkillSource::new_with_thresholds(
                                     repo.source_uuid.clone(),
@@ -155,6 +159,7 @@ pub async fn resolve_repositories_with_roots(
                     );
                     sources.push(NamedSource {
                         name: repo.name.clone(),
+                        source_uuid: repo.source_uuid.clone(),
                         source: SourceNode::External(ExternalSkillSource::new_with_source_uuid(
                             client,
                             repo.source_uuid.clone(),
@@ -193,6 +198,7 @@ pub async fn resolve_repositories_with_roots(
                         });
                     sources.push(NamedSource {
                         name: repo.name.clone(),
+                        source_uuid: repo.source_uuid.clone(),
                         source: SourceNode::Git(Box::new(GitSkillSource::new(GitSkillConfig {
                             repo_url: url.clone(),
                             git_ref,
@@ -214,9 +220,12 @@ pub async fn resolve_repositories_with_roots(
             if default_project_skills.is_dir() {
                 sources.push(NamedSource {
                     name: "project".to_string(),
-                    source: SourceNode::Filesystem(FilesystemSkillSource::new(
+                    source_uuid: SourceUuid::project_local(),
+                    source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                         default_project_skills,
                         SkillScope::Project,
+                        SourceUuid::project_local(),
+                        config.health_thresholds,
                     )),
                 });
             }

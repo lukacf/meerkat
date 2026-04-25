@@ -24,6 +24,10 @@ pub use identity::{ResolveError, SkillAlias, SourceIdentityRegistry};
 /// registrations. Embedded skills all live inside this single logical source.
 pub const BUILTIN_SOURCE_UUID: Uuid = Uuid::from_u128(0x0000_0000_0000_4b11_8111_0000_0000_0001);
 
+/// Canonical source UUID for conventional project-local `.rkat/skills`.
+pub const PROJECT_LOCAL_SOURCE_UUID: Uuid =
+    Uuid::from_u128(0x0000_0000_0000_4b11_8111_0000_0000_0002);
+
 /// Canonical source identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -48,6 +52,11 @@ impl SourceUuid {
     /// The canonical UUID for builtin (inventory-registered) skills.
     pub fn builtin() -> Self {
         Self(BUILTIN_SOURCE_UUID)
+    }
+
+    /// The canonical UUID for conventional project-local `.rkat/skills`.
+    pub fn project_local() -> Self {
+        Self(PROJECT_LOCAL_SOURCE_UUID)
     }
 }
 
@@ -635,6 +644,9 @@ pub struct SkillIntrospectionEntry {
     /// If this skill is shadowed, the name of the higher-precedence source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowed_by: Option<String>,
+    /// Canonical source UUID that shadows this skill, when shadowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_by_source_uuid: Option<SourceUuid>,
     /// Whether this skill is active (not shadowed).
     pub is_active: bool,
 }
@@ -790,6 +802,7 @@ pub trait SkillSource: Send + Sync {
                 .map(|descriptor| SkillIntrospectionEntry {
                     descriptor,
                     shadowed_by: None,
+                    shadowed_by_source_uuid: None,
                     is_active: true,
                 })
                 .collect())
@@ -949,6 +962,7 @@ pub trait SkillEngine: Send + Sync {
                 .map(|descriptor| SkillIntrospectionEntry {
                     descriptor,
                     shadowed_by: None,
+                    shadowed_by_source_uuid: None,
                     is_active: true,
                 })
                 .collect())

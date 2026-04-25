@@ -172,6 +172,7 @@ pub use wire::{
     WireMobLifecycleAction,
     WireMobMemberStatus,
     WireMobRuntimeMode,
+    WireModelBetaHeader,
     WireModelProfile,
     WireModelTier,
     WireProviderBinding,

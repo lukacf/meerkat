@@ -614,7 +614,46 @@ pub trait SessionAdmissionHandle: Send + Sync {
 // AuthLeaseHandle (Phase 1.5-rev)
 // ---------------------------------------------------------------------------
 
-/// Observable snapshot of an auth lease's DSL state for a given binding_key.
+/// Typed key for one auth lease machine.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LeaseKey {
+    pub realm: crate::connection::RealmId,
+    pub binding: crate::connection::BindingId,
+    pub profile: Option<crate::connection::ProfileId>,
+}
+
+impl LeaseKey {
+    pub fn new(
+        realm: crate::connection::RealmId,
+        binding: crate::connection::BindingId,
+        profile: Option<crate::connection::ProfileId>,
+    ) -> Self {
+        Self {
+            realm,
+            binding,
+            profile,
+        }
+    }
+
+    pub fn from_connection_ref(connection_ref: &crate::connection::ConnectionRef) -> Self {
+        Self {
+            realm: connection_ref.realm.clone(),
+            binding: connection_ref.binding.clone(),
+            profile: connection_ref.profile.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for LeaseKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.profile {
+            Some(profile) => write!(f, "{}:{}:{}", self.realm, self.binding, profile),
+            None => write!(f, "{}:{}", self.realm, self.binding),
+        }
+    }
+}
+
+/// Observable snapshot of an auth lease's DSL state for a given [`LeaseKey`].
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
 /// at all, `phase` is `None` and `expires_at` is `None`.
@@ -639,46 +678,54 @@ pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
 pub trait AuthLeaseHandle: Send + Sync {
-    /// Fire `AcquireAuthLease { binding_key, expires_at }` — unconditional.
+    /// Fire `AcquireAuthLease { lease_key, expires_at }` — unconditional.
     ///
     /// Moves the binding into `auth_valid_leases` and records its expiry.
-    fn acquire_lease(&self, binding_key: &str, expires_at: u64) -> Result<(), DslTransitionError>;
+    fn acquire_lease(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<(), DslTransitionError>;
 
-    /// Fire `MarkAuthExpiring { binding_key }` — only legal from `valid`.
-    fn mark_expiring(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+    /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
+    fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
-    /// Fire `BeginAuthRefresh { binding_key }` — legal from `valid` or
+    /// Fire `BeginAuthRefresh { lease_key }` — legal from `valid` or
     /// `expiring`.
     ///
     /// Provides the DSL-level refresh dedup: once the binding is in
     /// `auth_refreshing_leases`, no concurrent `BeginAuthRefresh` is
     /// permitted until `CompleteAuthRefresh` or `AuthRefreshFailed` moves
     /// it back out.
-    fn begin_refresh(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+    fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
-    /// Fire `CompleteAuthRefresh { binding_key, new_expires_at, now }` — only
+    /// Fire `CompleteAuthRefresh { lease_key, new_expires_at, now }` — only
     /// legal from `refreshing`.
     fn complete_refresh(
         &self,
-        binding_key: &str,
+        lease_key: &LeaseKey,
         new_expires_at: u64,
         now: u64,
     ) -> Result<(), DslTransitionError>;
 
-    /// Fire `AuthRefreshFailed { binding_key, permanent }` — only legal from
+    /// Fire `AuthRefreshFailed { lease_key, permanent }` — only legal from
     /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
     /// reauth notice; `permanent=false` routes back to `expiring`.
-    fn refresh_failed(&self, binding_key: &str, permanent: bool) -> Result<(), DslTransitionError>;
+    fn refresh_failed(
+        &self,
+        lease_key: &LeaseKey,
+        permanent: bool,
+    ) -> Result<(), DslTransitionError>;
 
-    /// Fire `MarkReauthRequired { binding_key }` — any known state → reauth.
-    fn mark_reauth_required(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+    /// Fire `MarkReauthRequired { lease_key }` — any known state → reauth.
+    fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
-    /// Fire `ReleaseAuthLease { binding_key }` — removes the binding from all
+    /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.
-    fn release_lease(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+    fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
     /// Observe the current DSL-level state of a binding.
-    fn snapshot(&self, binding_key: &str) -> AuthLeaseSnapshot;
+    fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;
 }
 
 // ---------------------------------------------------------------------------

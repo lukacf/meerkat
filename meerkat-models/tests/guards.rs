@@ -67,6 +67,7 @@ const EXPECTED_MODEL_PROFILE_FIELDS: &[&str] = &[
     "realtime",
     "params_schema",
     "call_timeout_secs",
+    "beta_headers",
 ];
 
 #[test]

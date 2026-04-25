@@ -174,16 +174,16 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
     fn infer(m: &str) -> Provider {
         Provider::infer_from_model(m).unwrap_or(Provider::Other)
     }
-    assert_eq!(infer("claude-3"), Provider::Anthropic);
-    assert_eq!(infer("gpt-4"), Provider::OpenAI);
-    assert_eq!(infer("gemini-1.5"), Provider::Gemini);
+    assert_eq!(infer("claude-opus-4-6"), Provider::Anthropic);
+    assert_eq!(infer("gpt-5.4"), Provider::OpenAI);
+    assert_eq!(infer("gemini-3-flash-preview"), Provider::Gemini);
     assert_eq!(infer("unknown"), Provider::Other);
 
     // Phase 6.6 removed the legacy env-precedence credential helpers
     // from this struct. The RKAT_*-preferred env resolution now lives
     // inside the factory's env-var fallback (meerkat/src/factory.rs)
     // and inside the provider-runtime registry's env_lookup seam.
-    // This test stays focused on the infer_from_model contract above;
+    // This test stays focused on the catalog-backed infer_from_model contract above;
     // env-precedence is covered by integration tests that exercise
     // the registry.
 
@@ -192,6 +192,6 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn test_inv_006_provider_inference_uses_resolver() {
-    let provider = Provider::infer_from_model("claude-sonnet-4").unwrap_or(Provider::Other);
+    let provider = Provider::infer_from_model("claude-sonnet-4-6").unwrap_or(Provider::Other);
     assert_eq!(provider, Provider::Anthropic);
 }

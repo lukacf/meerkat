@@ -9,7 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use meerkat_core::{AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope};
+use meerkat_core::{
+    AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::ConnectionRef,
+};
 
 use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -163,31 +165,24 @@ impl ProviderRuntimeRegistry {
     pub async fn resolve(
         &self,
         realm: &RealmConnectionSet,
-        binding_id: &str,
+        connection_ref: &ConnectionRef,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
         let (binding, backend, auth) = realm
-            .lookup_binding(binding_id)
+            .lookup_connection_ref(connection_ref)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        // Wave-c C-1 follow-up: `ConnectionRef` retyped to
-        // `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`
-        // (connection.rs:100). Parse the raw realm / binding slugs here at
-        // the typed boundary — an invalid slug at this point means the
-        // `RealmConnectionSet` was built from malformed config, which is a
-        // resolver-level source error.
-        let connection_ref = meerkat_core::ConnectionRef {
-            realm: meerkat_core::RealmId::parse(&realm.realm_id)
-                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
-            binding: meerkat_core::BindingId::parse(&binding.id)
-                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?,
-            profile: None,
-        };
+        if connection_ref.realm.as_str() != realm.realm_id {
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "connection_ref realm '{}' does not match resolved realm '{}'",
+                connection_ref.realm, realm.realm_id
+            )));
+        }
         let runtime = self
             .runtimes
             .get(&backend.provider)
             .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
         let validated = runtime
-            .validate_binding(&connection_ref, backend, auth, &binding.policy)
+            .validate_binding(connection_ref, backend, auth, &binding.policy)
             .map_err(ProviderAuthError::Binding)?;
         runtime.resolve_binding(&validated, env).await
     }

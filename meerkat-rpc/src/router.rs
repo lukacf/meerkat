@@ -1713,7 +1713,7 @@ impl MethodRouter {
                 format!("Session not found or comms not enabled: {session_id}"),
             );
         };
-        let peer_name = params.peer_name().map(str::to_string);
+        let peer_name = params.peer_label();
         let cmd = match params.command.into_command(&session_id) {
             Ok(cmd) => cmd,
             Err(err) => {
@@ -3688,7 +3688,7 @@ mod tests {
     #[tokio::test]
     async fn mob_member_stream_surfaces_run_completed_for_late_terminal_peer_response() {
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerDescriptor};
+        use meerkat_core::comms::{CommsCommand, PeerName, PeerRoute, TrustedPeerDescriptor};
         use meerkat_core::interaction::InteractionId;
 
         let (router, mut notif_rx) = test_router().await;
@@ -3816,7 +3816,10 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
-                to: PeerName::new(format!("{mob_id}/worker/worker-1")).expect("valid peer name"),
+                to: PeerRoute::with_display_name(
+                    operator_pubkey.to_peer_id(),
+                    PeerName::new(format!("{mob_id}/worker/worker-1")).expect("valid peer name"),
+                ),
                 in_reply_to: InteractionId(uuid::Uuid::new_v4()),
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({

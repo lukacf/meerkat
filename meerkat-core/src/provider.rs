@@ -38,27 +38,14 @@ impl Provider {
         }
     }
 
-    /// Infer provider from a model name using well-known prefixes.
-    /// Returns `None` when no prefix matches.
+    /// Infer provider from the built-in model catalog.
+    /// Returns `None` for uncatalogued models; callers that admit custom
+    /// models must resolve them through `ModelRegistry`, not name prefixes.
     pub fn infer_from_model(model: &str) -> Option<Self> {
-        let lower = model.to_lowercase();
-
-        // Anthropic: claude-*
-        if lower.starts_with("claude-") {
-            return Some(Self::Anthropic);
-        }
-
-        // OpenAI: gpt-*, chatgpt-*
-        if lower.starts_with("gpt-") || lower.starts_with("chatgpt-") {
-            return Some(Self::OpenAI);
-        }
-
-        // Gemini: gemini-*
-        if lower.starts_with("gemini-") {
-            return Some(Self::Gemini);
-        }
-
-        None
+        crate::model_profile::catalog::catalog()
+            .iter()
+            .find(|entry| entry.id == model)
+            .and_then(|entry| Self::parse_strict(entry.provider))
     }
 
     /// Return the canonical string representation.

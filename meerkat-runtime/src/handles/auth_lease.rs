@@ -1,7 +1,7 @@
 //! Runtime impl of [`meerkat_core::handles::AuthLeaseHandle`].
 //!
 //! Per-binding [`AuthMachine`](crate::auth_machine) instances, keyed by
-//! `binding_key` (format `"<realm_id>:<binding_id>"`). Each trait
+//! typed [`LeaseKey`](meerkat_core::handles::LeaseKey). Each trait
 //! method looks up or creates the corresponding machine, then fires
 //! the matching DSL input. `snapshot` projects the machine's phase
 //! + expires_at back out.
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
 };
 
 use crate::auth_machine::dsl as auth_dsl;
@@ -36,14 +36,17 @@ use crate::auth_machine::dsl as auth_dsl;
 /// actual acceptance of the transition and avoids duplication /
 /// drift (dogma §1).
 fn emit_audit(
-    binding_key: &str,
+    lease_key: &LeaseKey,
     action: &'static str,
     from_phase: AuthLeasePhase,
     to_phase: AuthLeasePhase,
 ) {
     tracing::info!(
         target: "meerkat::auth::audit",
-        binding_key = %binding_key,
+        lease_key = %lease_key,
+        realm = %lease_key.realm,
+        binding = %lease_key.binding,
+        profile = lease_key.profile.as_ref().map(meerkat_core::ProfileId::as_str),
         action = %action,
         from_phase = ?from_phase,
         to_phase = ?to_phase,
@@ -57,7 +60,7 @@ fn emit_audit(
 /// instances. Lookup-or-insert happens on first `acquire_lease`; all
 /// other operations require the binding to already exist.
 pub struct RuntimeAuthLeaseHandle {
-    machines: Arc<Mutex<HashMap<String, auth_dsl::AuthMachineAuthority>>>,
+    machines: Arc<Mutex<HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>>>,
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
@@ -67,7 +70,7 @@ impl std::fmt::Debug for RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("RuntimeAuthLeaseHandle")
-            .field("bindings", &guard.keys().collect::<Vec<_>>())
+            .field("leases", &guard.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -90,7 +93,7 @@ impl RuntimeAuthLeaseHandle {
 
     fn apply(
         &self,
-        binding_key: &str,
+        lease_key: &LeaseKey,
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
@@ -101,16 +104,16 @@ impl RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = if create_if_missing {
-            guard.entry(binding_key.to_string()).or_insert_with(|| {
+            guard.entry(lease_key.clone()).or_insert_with(|| {
                 auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState::default())
             })
         } else {
-            match guard.get_mut(binding_key) {
+            match guard.get_mut(lease_key) {
                 Some(m) => m,
                 None => {
                     return Err(DslTransitionError::new(
                         context,
-                        format!("no auth lease registered for binding_key `{binding_key}`"),
+                        format!("no auth lease registered for lease_key `{lease_key}`"),
                     ));
                 }
             }
@@ -119,7 +122,7 @@ impl RuntimeAuthLeaseHandle {
         auth_dsl::AuthMachineMutator::apply(entry, input)
             .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
         let to_phase = map_phase(entry.state.lifecycle_phase);
-        emit_audit(binding_key, action, from_phase, to_phase);
+        emit_audit(lease_key, action, from_phase, to_phase);
         Ok(())
     }
 
@@ -157,32 +160,36 @@ impl Default for RuntimeAuthLeaseHandle {
 }
 
 impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
-    fn acquire_lease(&self, binding_key: &str, expires_at: u64) -> Result<(), DslTransitionError> {
+    fn acquire_lease(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<(), DslTransitionError> {
         let expires_at_ts = if expires_at == u64::MAX {
             None
         } else {
             Some(expires_at)
         };
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::Acquire { expires_at_ts },
             "AuthLeaseHandle::acquire_lease",
             true,
         )
     }
 
-    fn mark_expiring(&self, binding_key: &str) -> Result<(), DslTransitionError> {
+    fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::MarkExpiring,
             "AuthLeaseHandle::mark_expiring",
             false,
         )
     }
 
-    fn begin_refresh(&self, binding_key: &str) -> Result<(), DslTransitionError> {
+    fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::BeginRefresh,
             "AuthLeaseHandle::begin_refresh",
             false,
@@ -191,7 +198,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 
     fn complete_refresh(
         &self,
-        binding_key: &str,
+        lease_key: &LeaseKey,
         new_expires_at: u64,
         now: u64,
     ) -> Result<(), DslTransitionError> {
@@ -201,7 +208,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             Some(new_expires_at)
         };
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::CompleteRefresh {
                 new_expires_at,
                 now_ts: now,
@@ -211,31 +218,35 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         )
     }
 
-    fn refresh_failed(&self, binding_key: &str, permanent: bool) -> Result<(), DslTransitionError> {
+    fn refresh_failed(
+        &self,
+        lease_key: &LeaseKey,
+        permanent: bool,
+    ) -> Result<(), DslTransitionError> {
         let input = if permanent {
             auth_dsl::AuthMachineInput::RefreshFailedPermanent
         } else {
             auth_dsl::AuthMachineInput::RefreshFailedTransient
         };
-        self.apply(binding_key, input, "AuthLeaseHandle::refresh_failed", false)
+        self.apply(lease_key, input, "AuthLeaseHandle::refresh_failed", false)
     }
 
-    fn mark_reauth_required(&self, binding_key: &str) -> Result<(), DslTransitionError> {
+    fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::MarkReauthRequired,
             "AuthLeaseHandle::mark_reauth_required",
             false,
         )
     }
 
-    fn release_lease(&self, binding_key: &str) -> Result<(), DslTransitionError> {
+    fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         // Drive the DSL transition, then drop the machine from the
         // registry: a released lease has no observable state and
         // keeping the spent AuthMachine around is shell-side bookkeeping
         // that dogma §14 forbids (local state, no canonical role).
         self.apply(
-            binding_key,
+            lease_key,
             auth_dsl::AuthMachineInput::Release,
             "AuthLeaseHandle::release_lease",
             false,
@@ -244,16 +255,16 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.remove(binding_key);
+        guard.remove(lease_key);
         Ok(())
     }
 
-    fn snapshot(&self, binding_key: &str) -> AuthLeaseSnapshot {
+    fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.get(binding_key) {
+        match guard.get(lease_key) {
             Some(machine) => AuthLeaseSnapshot {
                 phase: Some(map_phase(machine.state.lifecycle_phase)),
                 expires_at: machine.state.expires_at,
@@ -270,13 +281,22 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::connection::{BindingId, RealmId};
+
+    fn lease(realm: &str, binding: &str) -> LeaseKey {
+        LeaseKey::new(
+            RealmId::parse(realm).expect("valid realm"),
+            BindingId::parse(binding).expect("valid binding"),
+            None,
+        )
+    }
 
     #[test]
     fn acquire_and_snapshot_roundtrip() {
         let h = RuntimeAuthLeaseHandle::new();
-        h.acquire_lease("dev:default_openai", 1_800_000_000)
-            .unwrap();
-        let snap = h.snapshot("dev:default_openai");
+        let key = lease("dev", "default_openai");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let snap = h.snapshot(&key);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_000));
     }
@@ -284,19 +304,20 @@ mod tests {
     #[test]
     fn lifecycle_transitions() {
         let h = RuntimeAuthLeaseHandle::new();
-        let k = "dev:default_anthropic";
+        let k = lease("dev", "default_anthropic");
 
-        h.acquire_lease(k, 1_800_000_000).unwrap();
-        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Valid));
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
 
-        h.mark_expiring(k).unwrap();
-        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Expiring));
+        h.mark_expiring(&k).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
 
-        h.begin_refresh(k).unwrap();
-        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Refreshing));
+        h.begin_refresh(&k).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
 
-        h.complete_refresh(k, 1_800_000_900, 1_800_000_000).unwrap();
-        let snap = h.snapshot(k);
+        h.complete_refresh(&k, 1_800_000_900, 1_800_000_000)
+            .unwrap();
+        let snap = h.snapshot(&k);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_900));
     }
@@ -304,31 +325,31 @@ mod tests {
     #[test]
     fn refresh_failed_permanent_routes_to_reauth() {
         let h = RuntimeAuthLeaseHandle::new();
-        let k = "dev:default_google";
+        let k = lease("dev", "default_google");
 
-        h.acquire_lease(k, 1_800_000_000).unwrap();
-        h.begin_refresh(k).unwrap();
-        h.refresh_failed(k, true).unwrap();
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        h.begin_refresh(&k).unwrap();
+        h.refresh_failed(&k, true).unwrap();
 
-        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::ReauthRequired));
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::ReauthRequired));
     }
 
     #[test]
     fn refresh_failed_transient_routes_to_expiring() {
         let h = RuntimeAuthLeaseHandle::new();
-        let k = "dev:foo";
+        let k = lease("dev", "foo");
 
-        h.acquire_lease(k, 1_800_000_000).unwrap();
-        h.begin_refresh(k).unwrap();
-        h.refresh_failed(k, false).unwrap();
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        h.begin_refresh(&k).unwrap();
+        h.refresh_failed(&k, false).unwrap();
 
-        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
     }
 
     #[test]
     fn snapshot_for_unknown_binding_is_none() {
         let h = RuntimeAuthLeaseHandle::new();
-        let snap = h.snapshot("dev:never_registered");
+        let snap = h.snapshot(&lease("dev", "never_registered"));
         assert!(snap.phase.is_none());
         assert!(snap.expires_at.is_none());
     }
@@ -336,25 +357,21 @@ mod tests {
     #[test]
     fn mark_expiring_before_acquire_errors() {
         let h = RuntimeAuthLeaseHandle::new();
-        let err = h.mark_expiring("dev:ghost").unwrap_err();
+        let err = h.mark_expiring(&lease("dev", "ghost")).unwrap_err();
         assert_eq!(err.context, "AuthLeaseHandle::mark_expiring");
     }
 
     #[test]
     fn per_binding_isolation() {
         let h = RuntimeAuthLeaseHandle::new();
-        h.acquire_lease("dev:openai", 1_800_000_000).unwrap();
-        h.acquire_lease("dev:anthropic", 1_900_000_000).unwrap();
-        h.mark_expiring("dev:openai").unwrap();
+        let openai = lease("dev", "openai");
+        let anthropic = lease("dev", "anthropic");
+        h.acquire_lease(&openai, 1_800_000_000).unwrap();
+        h.acquire_lease(&anthropic, 1_900_000_000).unwrap();
+        h.mark_expiring(&openai).unwrap();
 
-        assert_eq!(
-            h.snapshot("dev:openai").phase,
-            Some(AuthLeasePhase::Expiring)
-        );
-        assert_eq!(
-            h.snapshot("dev:anthropic").phase,
-            Some(AuthLeasePhase::Valid)
-        );
-        assert_eq!(h.snapshot("dev:anthropic").expires_at, Some(1_900_000_000));
+        assert_eq!(h.snapshot(&openai).phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(h.snapshot(&anthropic).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(h.snapshot(&anthropic).expires_at, Some(1_900_000_000));
     }
 }

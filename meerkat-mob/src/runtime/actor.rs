@@ -11,7 +11,7 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
-use meerkat_core::comms::{PeerLifecycleKind, TrustedPeerDescriptor};
+use meerkat_core::comms::{PeerLifecycleKind, PeerRoute, TrustedPeerDescriptor};
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -8764,15 +8764,11 @@ impl MobActor {
         {
             WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
-        let peer_name = PeerName::new(recipient_spec.name.clone()).map_err(|error| {
-            MobError::WiringError(format!(
-                "notify_peer_added: invalid recipient comms name '{}': {error}",
-                recipient_spec.name
-            ))
-        })?;
+        let peer_route =
+            PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
 
         let cmd = CommsCommand::PeerLifecycle {
-            to: peer_name,
+            to: peer_route,
             kind: PeerLifecycleKind::PeerAdded,
             params: serde_json::json!({
                 "peer": new_peer_id.as_str(),
@@ -8803,12 +8799,8 @@ impl MobActor {
         {
             WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
-        let peer_name = PeerName::new(recipient_spec.name.clone()).map_err(|error| {
-            MobError::WiringError(format!(
-                "notify_peer_retired: invalid peer comms name '{}': {error}",
-                recipient_spec.name
-            ))
-        })?;
+        let peer_route =
+            PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
 
         let params = serde_json::json!({
             "peer": other_peer_id.as_str(),
@@ -8821,17 +8813,17 @@ impl MobActor {
 
         let cmd = match intent {
             "mob.peer_retired" => CommsCommand::PeerLifecycle {
-                to: peer_name,
+                to: peer_route,
                 kind: PeerLifecycleKind::PeerRetired,
                 params,
             },
             "mob.peer_unwired" => CommsCommand::PeerLifecycle {
-                to: peer_name,
+                to: peer_route,
                 kind: PeerLifecycleKind::PeerUnwired,
                 params,
             },
             _ => CommsCommand::PeerRequest {
-                to: peer_name,
+                to: peer_route,
                 intent: intent.to_string(),
                 params,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,

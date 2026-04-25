@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::{CommsConfig, Keypair};
 use crate::{Router, Status, TrustedPeers};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName};
+use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute};
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::types::HandlingMode;
 
@@ -141,7 +141,7 @@ pub async fn handle_tools_call(
         "send_message" => {
             let input: SendMessageInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_name(&input.to)?;
+            let to = peer_route(ctx, &input.to)?;
             let command = CommsCommand::PeerMessage {
                 to,
                 body: input.body,
@@ -153,7 +153,7 @@ pub async fn handle_tools_call(
         "send_request" => {
             let input: SendRequestInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_name(&input.to)?;
+            let to = peer_route(ctx, &input.to)?;
             let command = CommsCommand::PeerRequest {
                 to,
                 intent: input.intent,
@@ -166,7 +166,7 @@ pub async fn handle_tools_call(
         "send_response" => {
             let input: SendResponseInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_name(&input.to)?;
+            let to = peer_route(ctx, &input.to)?;
             let in_reply_to_uuid = uuid::Uuid::parse_str(&input.in_reply_to)
                 .map_err(|_| format!("invalid UUID for in_reply_to: {}", input.in_reply_to))?;
             // Accepted progress responses reject a handling_mode override
@@ -197,13 +197,19 @@ fn peer_name(value: &str) -> Result<PeerName, String> {
     PeerName::new(value).map_err(|err| format!("invalid to: {err}"))
 }
 
+fn peer_route(ctx: &ToolContext, value: &str) -> Result<PeerRoute, String> {
+    let name = peer_name(value)?;
+    let peer_id = resolve_name_to_peer_id(ctx, &name)?;
+    Ok(PeerRoute::with_display_name(peer_id, name))
+}
+
 async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, String> {
-    // Capture peer name for error normalization before consuming the command.
+    // Capture peer display label for error normalization before consuming the command.
     let peer_for_errors = match &command {
         CommsCommand::PeerMessage { to, .. }
         | CommsCommand::PeerLifecycle { to, .. }
         | CommsCommand::PeerRequest { to, .. }
-        | CommsCommand::PeerResponse { to, .. } => Some(to.clone()),
+        | CommsCommand::PeerResponse { to, .. } => Some(to.label()),
         CommsCommand::Input { .. } => None,
     };
     let cmd_kind = command.command_kind().to_string();
@@ -215,18 +221,12 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
             }
             meerkat_core::comms::SendError::PeerOffline => format!(
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
-                peer_for_errors
-                    .as_ref()
-                    .map(PeerName::as_str)
-                    .unwrap_or("<unknown>")
+                peer_for_errors.as_deref().unwrap_or("<unknown>")
             ),
             meerkat_core::comms::SendError::Internal(inner) if is_transport_internal(&inner) => {
                 format!(
                     "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
-                    peer_for_errors
-                        .as_ref()
-                        .map(PeerName::as_str)
-                        .unwrap_or("<unknown>")
+                    peer_for_errors.as_deref().unwrap_or("<unknown>")
                 )
             }
             other => other.to_string(),
@@ -235,19 +235,17 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
     }
 
     // Fallback path (no runtime): dispatch directly through the router.
-    // This is used by unit tests and minimal host configurations. Resolve
-    // the destination `PeerName` against the trusted-peer set exactly once
-    // — duplicate names refuse the send rather than guessing.
+    // This is used by unit tests and minimal host configurations. The
+    // destination was resolved to `PeerId` at the tool boundary.
     let dest_display = peer_for_errors
-        .as_ref()
-        .map(PeerName::as_str)
+        .as_deref()
         .unwrap_or("<unknown>")
         .to_string();
     let dest_peer_id = match &command {
         CommsCommand::PeerMessage { to, .. }
         | CommsCommand::PeerLifecycle { to, .. }
         | CommsCommand::PeerRequest { to, .. }
-        | CommsCommand::PeerResponse { to, .. } => resolve_name_to_peer_id(ctx, to)?,
+        | CommsCommand::PeerResponse { to, .. } => to.peer_id,
         CommsCommand::Input { .. } => {
             return Err("input command is not supported by MCP send".to_string());
         }

@@ -110,6 +110,16 @@ pub fn build_models_catalog_response(
                         supports_web_search: entry.profile.supports_web_search,
                         inline_video: entry.profile.inline_video,
                         params_schema: entry.profile.params_schema.clone(),
+                        beta_headers: entry
+                            .profile
+                            .beta_headers
+                            .iter()
+                            .map(|header| meerkat_contracts::WireModelBetaHeader {
+                                feature: header.feature.clone(),
+                                header_name: header.header_name.clone(),
+                                header_value: header.header_value.clone(),
+                            })
+                            .collect(),
                     });
                     meerkat_contracts::CatalogModelEntry {
                         id: entry.id.clone(),

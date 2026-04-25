@@ -487,10 +487,16 @@ async fn send_peer_message(
     body: &str,
     blocks: &[ContentBlock],
 ) -> Result<bool, String> {
+    let to = comms_runtime
+        .peers()
+        .await
+        .into_iter()
+        .find(|entry| entry.name.as_str() == peer_name)
+        .map(|entry| meerkat_core::comms::PeerRoute::with_display_name(entry.peer_id, entry.name))
+        .ok_or_else(|| format!("peer not found: {peer_name}"))?;
     match comms_runtime
         .send(meerkat_core::comms::CommsCommand::PeerMessage {
-            to: meerkat_core::comms::PeerName::new(peer_name)
-                .map_err(|err| format!("invalid peer name {peer_name}: {err}"))?,
+            to,
             body: body.to_string(),
             blocks: Some(blocks.to_vec()),
             handling_mode: HandlingMode::Steer,

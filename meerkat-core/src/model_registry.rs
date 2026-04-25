@@ -100,9 +100,7 @@ impl ModelRegistry {
     }
 
     pub fn profile_for(&self, model_id: &str) -> Option<ModelProfile> {
-        self.entry(model_id)
-            .map(|entry| entry.profile.clone())
-            .or_else(|| inferred_builtin_profile(model_id))
+        self.entry(model_id).map(|entry| entry.profile.clone())
     }
 
     pub fn default_model(&self, provider: Provider) -> Option<&str> {
@@ -123,11 +121,6 @@ impl ModelRegistry {
             .iter()
             .map(|(provider, default_model)| (*provider, default_model.as_str()))
     }
-}
-
-fn inferred_builtin_profile(model_id: &str) -> Option<ModelProfile> {
-    let provider = Provider::infer_from_model(model_id)?;
-    crate::model_profile::profile_for(provider.as_str(), model_id)
 }
 
 fn append_self_hosted(
@@ -179,6 +172,7 @@ fn append_self_hosted(
             image_tool_results: model.image_tool_results,
             realtime: false,
             params_schema: serde_json::json!({}),
+            beta_headers: Vec::new(),
             call_timeout_secs: model.call_timeout_secs,
         };
 
@@ -376,17 +370,13 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_inferred_builtin_profiles_for_non_catalog_models() {
+    fn uncatalogued_models_do_not_use_provider_prefix_inference() {
         let registry = match ModelRegistry::from_config(&Config::default()) {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
-        let profile = match registry.profile_for("gpt-5.2") {
-            Some(profile) => profile,
-            None => panic!("gpt-5.2 should resolve via built-in provider inference"),
-        };
-        assert_eq!(profile.provider, "openai");
-        assert!(profile.vision);
-        assert!(!profile.image_tool_results);
+        assert!(registry.profile_for("gpt-unknown-preview").is_none());
+        assert!(registry.profile_for("claude-unknown-preview").is_none());
+        assert!(registry.profile_for("gemini-unknown-preview").is_none());
     }
 }

@@ -138,6 +138,22 @@ fn anthropic_tag(request: &LlmRequest) -> Option<&AnthropicProviderTag> {
     }
 }
 
+fn catalog_beta_value(request: &LlmRequest, feature: &str) -> Option<&'static str> {
+    meerkat_core::model_profile::capabilities::capabilities_for("anthropic", &request.model)?
+        .beta_headers
+        .iter()
+        .find(|header| header.feature == feature)
+        .map(|header| header.header_value)
+}
+
+fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
+    let header =
+        meerkat_core::model_profile::capabilities::capabilities_for("anthropic", &request.model)?
+            .context_window_beta?
+            .header;
+    header.strip_prefix("anthropic-beta: ")
+}
+
 impl AnthropicClient {
     fn model_supports_temperature(model: &str) -> bool {
         meerkat_core::model_profile::anthropic::supports_temperature(model)
@@ -616,25 +632,32 @@ impl LlmClient for AnthropicClient {
             let thinking_type = body.get("thinking")
                 .and_then(|t| t.get("type"))
                 .and_then(|t| t.as_str());
-            if thinking_type == Some("enabled") {
-                betas.push("interleaved-thinking-2025-05-14");
+            if thinking_type == Some("enabled")
+                && let Some(beta) = catalog_beta_value(request, "interleaved_thinking")
+            {
+                betas.push(beta);
             }
 
             // Structured output format requires beta header
-            if body.get("output_config").and_then(|c| c.get("format")).is_some() {
-                betas.push("structured-outputs-2025-11-13");
+            if body.get("output_config").and_then(|c| c.get("format")).is_some()
+                && let Some(beta) = catalog_beta_value(request, "structured_output")
+            {
+                betas.push(beta);
             }
 
             // 1M context window (opt-in via typed AnthropicProviderTag.context)
             if anthropic_tag(request).and_then(|t| t.context)
                 == Some(AnthropicContextWindow::OneMegabyte)
+                && let Some(beta) = catalog_context_beta_value(request)
             {
-                betas.push("context-1m-2025-08-07");
+                betas.push(beta);
             }
 
             // Compaction API (beta)
-            if body.get("context_management").is_some() {
-                betas.push("compact-2026-01-12");
+            if body.get("context_management").is_some()
+                && let Some(beta) = catalog_beta_value(request, "compaction")
+            {
+                betas.push(beta);
             }
 
             let url = format!("{}/v1/messages", self.base_url);

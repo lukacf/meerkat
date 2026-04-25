@@ -251,9 +251,11 @@ impl AuthLease for DynamicLease {
     fn source_label(&self) -> &str {
         &self.source_label
     }
-    async fn refresh(&self, _reason: AuthRefreshReason) -> Result<(), AuthError> {
-        // DynamicLease refresh semantics land in Phase 1.5 (AuthLeaseMachine).
-        Ok(())
+    async fn refresh(&self, reason: AuthRefreshReason) -> Result<(), AuthError> {
+        Err(AuthError::RefreshFailed(format!(
+            "dynamic lease '{}' cannot refresh in place for reason {reason:?}; re-resolve the typed connection_ref",
+            self.source_label
+        )))
     }
 }
 
@@ -275,5 +277,37 @@ mod tests {
         assert!(matches!(lease.kind(), ResolvedAuthKind::StaticHeaders(_)));
         assert_eq!(lease.source_label(), "test");
         assert!(lease.refresh(AuthRefreshReason::Manual).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dynamic_lease_refresh_reports_unsupported_instead_of_success() {
+        #[derive(Debug)]
+        struct TestAuthorizer;
+
+        #[async_trait::async_trait]
+        impl HttpAuthorizer for TestAuthorizer {
+            async fn authorize(
+                &self,
+                _req: &mut meerkat_core::auth::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            fn label(&self) -> &'static str {
+                "test-authorizer"
+            }
+        }
+
+        let lease: Arc<dyn AuthLease> = Arc::new(DynamicLease::new(
+            Arc::new(TestAuthorizer),
+            AuthMetadata::default(),
+            None,
+            "dynamic:test",
+        ));
+        let err = lease
+            .refresh(AuthRefreshReason::Manual)
+            .await
+            .expect_err("dynamic refresh must not report success without work");
+        assert!(matches!(err, AuthError::RefreshFailed(_)));
     }
 }

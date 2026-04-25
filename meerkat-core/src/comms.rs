@@ -201,6 +201,40 @@ impl From<PeerName> for String {
     }
 }
 
+/// Canonical outbound peer route.
+///
+/// `peer_id` is the only routing key. `display_name` is optional presentation
+/// metadata retained for diagnostics after a boundary resolves a name through
+/// trust or discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRoute {
+    pub peer_id: PeerId,
+    pub display_name: Option<PeerName>,
+}
+
+impl PeerRoute {
+    pub fn new(peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            display_name: None,
+        }
+    }
+
+    pub fn with_display_name(peer_id: PeerId, display_name: PeerName) -> Self {
+        Self {
+            peer_id,
+            display_name: Some(display_name),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        self.display_name
+            .as_ref()
+            .map(PeerName::as_string)
+            .unwrap_or_else(|| self.peer_id.to_string())
+    }
+}
+
 /// Routing-subset descriptor for a trusted peer — the identity fields that
 /// traverse the core seam.
 ///
@@ -411,7 +445,7 @@ pub enum CommsCommandRequest {
     },
     /// Send a one-way peer message.
     PeerMessage {
-        to: PeerName,
+        to: PeerId,
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
@@ -420,14 +454,14 @@ pub enum CommsCommandRequest {
     },
     /// Send a one-way peer lifecycle notification.
     PeerLifecycle {
-        to: PeerName,
+        to: PeerId,
         lifecycle_kind: PeerLifecycleKind,
         #[serde(default)]
         params: serde_json::Value,
     },
     /// Send a request to a peer.
     PeerRequest {
-        to: PeerName,
+        to: PeerId,
         intent: String,
         #[serde(default)]
         params: serde_json::Value,
@@ -438,7 +472,7 @@ pub enum CommsCommandRequest {
     },
     /// Send a response to a prior peer request.
     PeerResponse {
-        to: PeerName,
+        to: PeerId,
         in_reply_to: InteractionId,
         status: ResponseStatus,
         #[serde(default)]
@@ -493,7 +527,7 @@ impl CommsCommandRequest {
                 blocks,
                 handling_mode,
             } => CommsCommand::PeerMessage {
-                to,
+                to: PeerRoute::new(to),
                 body,
                 blocks,
                 handling_mode: handling_mode.unwrap_or_default(),
@@ -503,7 +537,7 @@ impl CommsCommandRequest {
                 lifecycle_kind,
                 params,
             } => CommsCommand::PeerLifecycle {
-                to,
+                to: PeerRoute::new(to),
                 kind: lifecycle_kind,
                 params,
             },
@@ -514,7 +548,7 @@ impl CommsCommandRequest {
                 handling_mode,
                 stream,
             } => CommsCommand::PeerRequest {
-                to,
+                to: PeerRoute::new(to),
                 intent,
                 params,
                 handling_mode: handling_mode.unwrap_or_default(),
@@ -531,7 +565,7 @@ impl CommsCommandRequest {
                     return Err(CommsCommandError::HandlingModeForbiddenForAcceptedResponse);
                 }
                 CommsCommand::PeerResponse {
-                    to,
+                    to: PeerRoute::new(to),
                     in_reply_to,
                     status,
                     result,
@@ -614,20 +648,20 @@ pub enum CommsCommand {
     },
     /// Send a one-way peer message.
     PeerMessage {
-        to: PeerName,
+        to: PeerRoute,
         body: String,
         blocks: Option<Vec<ContentBlock>>,
         handling_mode: HandlingMode,
     },
     /// Send a one-way peer lifecycle notification.
     PeerLifecycle {
-        to: PeerName,
+        to: PeerRoute,
         kind: PeerLifecycleKind,
         params: serde_json::Value,
     },
     /// Send a request to a peer.
     PeerRequest {
-        to: PeerName,
+        to: PeerRoute,
         intent: String,
         params: serde_json::Value,
         handling_mode: HandlingMode,
@@ -635,7 +669,7 @@ pub enum CommsCommand {
     },
     /// Send a response to a prior peer request.
     PeerResponse {
-        to: PeerName,
+        to: PeerRoute,
         in_reply_to: InteractionId,
         status: ResponseStatus,
         result: serde_json::Value,

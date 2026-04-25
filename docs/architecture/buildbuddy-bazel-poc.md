@@ -19,6 +19,8 @@ Initial POC commit: `a58e2613f1a5f3cfb952b4035e8f0d38c0c35a71`
 Use `scripts/buildbuddy-bazel-poc` with `BUILDBUDDY_BAZEL_COMMAND`:
 
 - `workspace-test`: run the full Bazel workspace test suite.
+- `workspace-test-rbe`: run the remote-compatible workspace test suite,
+  excluding local-only Cargo/trybuild fixtures.
 - `workspace-test-local`: run the full workspace test suite with local spawns.
 - `owned-build <path>`: build the owning package target for a changed path.
 - `affected-build <path>`: build the reverse-dependency closure for a changed path.
@@ -57,6 +59,8 @@ local Bazel output bases.
 modes:
 
 - `workspace-test`: full Bazel workspace test suite.
+- `workspace-test-rbe`: remote-compatible workspace suite excluding local-only
+  fixtures.
 - `workspace-test-local`: full Bazel workspace test suite with local spawns.
 - `warm-noop`: warm full fast-test and clippy checks.
 - `same-worktree`: two same-checkout agents using distinct lanes.
@@ -92,6 +96,8 @@ Representative measurements from the POC environment:
 | --- | ---: |
 | Full workspace test lane (`152` tests), remote/cache | `23.25s` wall |
 | Full workspace test lane (`152` tests), warm remote/cache | `3.96s` wall |
+| Remote-compatible workspace lane (`151` tests), first touch | `31.02s` wall |
+| Remote-compatible workspace lane (`151` tests), warm | `5.33s` wall |
 | Full workspace test lane (`152` tests), local-spawn first pass | `67.01s` wall |
 | Full workspace test lane (`152` tests), warm local-spawn | `4.75s` wall |
 | Warm root fast suite (`117` tests) | `3.99s` wall |

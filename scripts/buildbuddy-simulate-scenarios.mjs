@@ -9,6 +9,7 @@ function usage() {
 
 Scenarios:
   workspace-test     Run the full Bazel workspace test lane.
+  workspace-test-rbe Run the remote-compatible workspace test lane.
   workspace-test-local
                      Run the full workspace test lane with local spawns.
   warm-noop          Run warm fast-test and clippy no-op checks.
@@ -114,6 +115,19 @@ async function workspaceTest(root, { local = false } = {}) {
     command,
     [],
     local ? [] : ["--jobs=64"],
+  );
+  printResult(result);
+  return result.code;
+}
+
+async function workspaceTestRbe(root) {
+  console.log("\n== workspace-test-rbe ==");
+  const result = await repoCommand(
+    root,
+    { RUST_LANE_ID: "workspace-test-rbe" },
+    "workspace-test-rbe",
+    [],
+    ["--jobs=64"],
   );
   printResult(result);
   return result.code;
@@ -360,6 +374,7 @@ if (requested.includes("--help") || requested.includes("-h")) {
 const scenarios = requested.length === 0 || requested.includes("all")
   ? [
       "workspace-test",
+      "workspace-test-rbe",
       "warm-noop",
       "same-worktree",
       "same-command",
@@ -376,6 +391,7 @@ const scenarios = requested.length === 0 || requested.includes("all")
 
 const runners = new Map([
   ["workspace-test", workspaceTest],
+  ["workspace-test-rbe", workspaceTestRbe],
   ["workspace-test-local", (root) => workspaceTest(root, { local: true })],
   ["warm-noop", warmNoop],
   ["same-worktree", sameWorktree],

@@ -42,6 +42,18 @@ case "${command}" in
       --curses=no
     )
     ;;
+  workspace-test-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//..."
+    extra_args+=(
+      --test_tag_filters=-local
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
   workspace-test-local)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"

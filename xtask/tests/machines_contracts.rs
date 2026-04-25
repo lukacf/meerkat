@@ -244,8 +244,7 @@ fn flow_runtime_until_feedback_does_not_use_loop_iteration_authority_bridge() {
         );
     }
 
-    let schema_src = root.join("meerkat-machine-schema/src");
-    let mut stack = vec![schema_src.clone()];
+    let mut stack = vec![root.join("meerkat-machine-schema/src")];
     while let Some(path) = stack.pop() {
         let metadata = fs::metadata(&path)
             .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));

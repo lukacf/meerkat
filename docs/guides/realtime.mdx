@@ -116,16 +116,6 @@ The runtime-owned `RealtimeAttachmentStatus` is surfaced by `session/realtime_at
 // => { "session_id": "...", "status": "binding_ready" }
 ```
 
-```json JSON-RPC (batch)
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "session/realtime_attachment_statuses",
-  "params": {"session_ids": ["01936f8a-...", "01936f8b-..."]}
-}
-// => { "statuses": [{ "session_id": "...", "status": "binding_ready" }, ...] }
-```
-
 ```bash REST
 curl http://127.0.0.1:8080/sessions/01936f8a-.../realtime-attachment-status
 # => {"session_id": "...", "status": "binding_ready"}
@@ -308,7 +298,7 @@ provider = "openai"
 peer_description = "Realtime host"
 ```
 
-Every member spawned under that profile is initialized on `gpt-realtime-1.5` and its session gets a realtime binding automatically. Use `session/realtime_attachment_statuses` with the member session IDs to observe attachment state across the whole mob in one round trip.
+Every member spawned under that profile is initialized on `gpt-realtime-1.5` and its session gets a realtime binding automatically. Use `session/realtime_attachment_status` with each member session ID to observe attachment state.
 
 ## Limitations and known gaps
 
@@ -321,7 +311,7 @@ Every member spawned under that profile is initialized on `gpt-realtime-1.5` and
 
 - [Mobs guide](/guides/mobs) — spawning members, profiles, realtime-capable per-member models
 - [Configuration guide](/concepts/configuration) — setting `default_model`
-- [JSON-RPC API](/api/rpc) — `session/create`, `session/realtime_attachment_status`, `session/realtime_attachment_statuses`, `realtime/*` bootstrap
+- [JSON-RPC API](/api/rpc) — `session/create`, `session/realtime_attachment_status`, `realtime/*` bootstrap
 - [REST API](/api/rest) — REST routes for session creation and realtime attachment status
 - Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`
 - Product design record: `docs/architecture/identity-first-live-voice-proposal.md`

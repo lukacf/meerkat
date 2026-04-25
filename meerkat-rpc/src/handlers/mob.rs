@@ -959,7 +959,7 @@ pub struct MobSpawnHelperParams {
     pub prompt: String,
     #[serde(default)]
     pub agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
@@ -1025,7 +1025,7 @@ pub struct MobForkHelperParams {
     pub prompt: String,
     #[serde(default)]
     pub agent_identity: Option<String>,
-    #[serde(default, alias = "profile_name")]
+    #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
     pub fork_context: Option<meerkat_mob::ForkContext>,

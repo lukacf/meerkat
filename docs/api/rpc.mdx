@@ -152,7 +152,6 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `auth/profile/get` | Auth | Get one auth profile |
 | `auth/profile/create` | Auth | Create an auth profile (CLI-driven for now) |
 | `auth/profile/delete` | Auth | Delete an auth profile (CLI-driven for now) |
-| `auth/profile/test` | Auth | Dry-run a binding's resolve path |
 | `auth/login/start` | Auth | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
 | `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
 | `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
@@ -316,8 +315,16 @@ Create a new session and run the first turn.
     "keep_alive": null,
     "comms_name": null,
     "provider_params": null,
-    "preload_skills": ["extraction/email"],
-    "skill_references": ["formatting/markdown"]
+    "preload_skills": [
+      {"source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f", "skill_name": "extraction-email"}
+    ],
+    "skill_refs": [
+      {
+        "kind": "structured",
+        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+        "skill_name": "formatting-markdown"
+      }
+    ]
   }
 }
 ```
@@ -535,7 +542,13 @@ Start a new turn on an existing session.
   "params": {
     "session_id": "01936f8a-...",
     "prompt": "Can you explain ownership?",
-    "skill_references": ["rust-patterns/ownership"]
+    "skill_refs": [
+      {
+        "kind": "structured",
+        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+        "skill_name": "rust-patterns-ownership"
+      }
+    ]
   }
 }
 ```
@@ -587,8 +600,8 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
   Max tokens override.
 </ParamField>
 
-<ParamField body="skill_references" type="string[] | null">
-  Skill IDs to resolve and inject for this turn.
+<ParamField body="skill_refs" type="object[] | null">
+  Structured skill references to resolve and inject for this turn.
 </ParamField>
 
 ### turn/interrupt

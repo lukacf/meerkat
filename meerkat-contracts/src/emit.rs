@@ -11,14 +11,21 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
     fs::create_dir_all(output_dir)?;
 
+    fn write_pretty_json(
+        path: std::path::PathBuf,
+        value: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut body = serde_json::to_string_pretty(value)?;
+        body.push('\n');
+        fs::write(path, body)?;
+        Ok(())
+    }
+
     // Version
     let version_schema = serde_json::json!({
         "contract_version": crate::version::ContractVersion::CURRENT.to_string(),
     });
-    fs::write(
-        output_dir.join("version.json"),
-        serde_json::to_string_pretty(&version_schema)?,
-    )?;
+    write_pretty_json(output_dir.join("version.json"), &version_schema)?;
 
     // Wire types (contracts-owned types only — types embedding core types
     // without JsonSchema use serde for serialization but not for schema generation)
@@ -100,10 +107,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireAuthError": schema_for!(crate::wire::WireAuthError),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
     });
-    fs::write(
-        output_dir.join("wire-types.json"),
-        serde_json::to_string_pretty(&wire_types)?,
-    )?;
+    write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 
     // Params (only contracts-owned param types)
     let params = serde_json::json!({
@@ -125,10 +129,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ScheduleOccurrencesParams": schema_for!(crate::wire::ScheduleOccurrencesParams),
         "UpdateScheduleParams": schema_for!(crate::wire::UpdateScheduleParams),
     });
-    fs::write(
-        output_dir.join("params.json"),
-        serde_json::to_string_pretty(&params)?,
-    )?;
+    write_pretty_json(output_dir.join("params.json"), &params)?;
 
     // Errors
     let errors = serde_json::json!({
@@ -137,10 +138,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireError": schema_for!(crate::error::WireError),
         "CapabilityHint": schema_for!(crate::error::CapabilityHint),
     });
-    fs::write(
-        output_dir.join("errors.json"),
-        serde_json::to_string_pretty(&errors)?,
-    )?;
+    write_pretty_json(output_dir.join("errors.json"), &errors)?;
 
     // Capabilities
     let capabilities = serde_json::json!({
@@ -149,10 +147,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "CapabilityStatus": schema_for!(crate::capability::CapabilityStatus),
         "CapabilitiesResponse": schema_for!(crate::capability::CapabilitiesResponse),
     });
-    fs::write(
-        output_dir.join("capabilities.json"),
-        serde_json::to_string_pretty(&capabilities)?,
-    )?;
+    write_pretty_json(output_dir.join("capabilities.json"), &capabilities)?;
 
     // Models catalog
     let models = serde_json::json!({
@@ -162,10 +157,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ProviderCatalog": schema_for!(crate::wire::ProviderCatalog),
         "ModelsCatalogResponse": schema_for!(crate::wire::ModelsCatalogResponse),
     });
-    fs::write(
-        output_dir.join("models.json"),
-        serde_json::to_string_pretty(&models)?,
-    )?;
+    write_pretty_json(output_dir.join("models.json"), &models)?;
 
     // Events — includes canonical event type inventory plus schema-ready
     // payload definitions where available.
@@ -197,10 +189,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "note": "AgentEvent schema is emitted above. known_event_types stays as a lightweight canonical inventory for surface drift checks."
         }
     });
-    fs::write(
-        output_dir.join("events.json"),
-        serde_json::to_string_pretty(&events)?,
-    )?;
+    write_pretty_json(output_dir.join("events.json"), &events)?;
 
     // RPC methods — structural description of the method surface.
     // This is documentation, not a consumable schema for codegen.
@@ -210,10 +199,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             crate::RpcMethodCatalogOptions::documented_surface()
         )
     });
-    fs::write(
-        output_dir.join("rpc-methods.json"),
-        serde_json::to_string_pretty(&rpc_methods)?,
-    )?;
+    write_pretty_json(output_dir.join("rpc-methods.json"), &rpc_methods)?;
 
     // REST OpenAPI — endpoint listing snapshot, not a full OpenAPI spec.
     // Request/response body schemas are intentionally omitted, but the path
@@ -250,10 +236,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         },
         "paths": Value::Object(rest_paths),
     });
-    fs::write(
-        output_dir.join("rest-openapi.json"),
-        serde_json::to_string_pretty(&rest_openapi)?,
-    )?;
+    write_pretty_json(output_dir.join("rest-openapi.json"), &rest_openapi)?;
 
     Ok(())
 }

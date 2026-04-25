@@ -764,7 +764,7 @@ fn realtime_target_wire(target: &RealtimeTargetCommands) -> serde_json::Value {
             mob_id,
             agent_identity,
         } => serde_json::json!({
-            "type": "mob_member_target",
+            "type": "mob_member",
             "mob_id": mob_id,
             "agent_identity": agent_identity,
         }),
@@ -6360,50 +6360,18 @@ fn cli_session_metadata_marks_archived(session: &Session) -> bool {
 }
 
 fn scheduled_skill_keys(
-    skill_references: &[String],
+    skill_refs: &[meerkat_core::skills::SkillRef],
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, meerkat::ScheduleDomainError> {
-    if skill_references.is_empty() {
+    if skill_refs.is_empty() {
         return Ok(None);
     }
 
-    skill_references
-        .iter()
-        .map(|reference| {
-            let mut parts = reference.split('/');
-            let Some(source_uuid_raw) = parts.next() else {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            };
-            let Some(skill_name_raw) = parts.next() else {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            };
-            if parts.next().is_some() {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            }
-            Ok(meerkat_core::skills::SkillKey {
-                source_uuid: meerkat_core::skills::SourceUuid::parse(source_uuid_raw).map_err(
-                    |_| {
-                        meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                            "invalid scheduled skill reference: {reference}"
-                        ))
-                    },
-                )?,
-                skill_name: meerkat_core::skills::SkillName::parse(skill_name_raw).map_err(
-                    |_| {
-                        meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                            "invalid scheduled skill reference: {reference}"
-                        ))
-                    },
-                )?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
+    Ok(Some(
+        skill_refs
+            .iter()
+            .map(|reference| reference.key().clone())
+            .collect(),
+    ))
 }
 
 #[cfg(feature = "session-store")]
@@ -6528,7 +6496,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     handling_mode: None,
                     keep_alive: None,
-                    skill_references: scheduled_skill_keys(&dispatch.skill_references)?,
+                    skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
                     flow_tool_overlay: None,
                     // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
                     // is typed `Vec<TurnInstruction>`; project the scheduled
@@ -13163,5 +13131,19 @@ supports_reasoning = true
             json["skill_diagnostics"]["source_health"]["state"],
             "degraded"
         );
+    }
+
+    #[test]
+    fn test_realtime_member_target_wire_uses_canonical_discriminator() {
+        let target = RealtimeTargetCommands::Member {
+            mob_id: "mob-1".to_string(),
+            agent_identity: "agent-1".to_string(),
+        };
+
+        let wire = realtime_target_wire(&target);
+
+        assert_eq!(wire["type"], "mob_member");
+        assert_eq!(wire["mob_id"], "mob-1");
+        assert_eq!(wire["agent_identity"], "agent-1");
     }
 }

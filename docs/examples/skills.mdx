@@ -276,7 +276,7 @@ Use the CLI `--skill` flag for preload-oriented local skill loading, or pass typ
 
 ## Preload skills
 
-Preloaded skills are resolved and injected into the system prompt before the first turn runs. Unlike `skill_references`, these are loaded eagerly at session creation.
+Preloaded skills are resolved and injected into the system prompt before the first turn runs. They use the same structured skill keys as per-turn skill injection.
 
 <Tabs>
   <Tab title="CLI">
@@ -291,7 +291,16 @@ Preloaded skills are resolved and injected into the system prompt before the fir
       "method": "session/create",
       "params": {
         "prompt": "Help me deploy",
-        "preload_skills": ["deployment-guide", "shell-patterns"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "deployment-guide"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "shell-patterns"
+          }
+        ]
       }
     }
     ```
@@ -302,7 +311,16 @@ Preloaded skills are resolved and injected into the system prompt before the fir
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Help me deploy",
-        "preload_skills": ["deployment-guide", "shell-patterns"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "deployment-guide"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "shell-patterns"
+          }
+        ]
       }'
     ```
   </Tab>
@@ -312,7 +330,16 @@ Preloaded skills are resolved and injected into the system prompt before the fir
       "name": "meerkat_run",
       "arguments": {
         "prompt": "Help me deploy",
-        "preload_skills": ["deployment-guide", "shell-patterns"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "deployment-guide"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "shell-patterns"
+          }
+        ]
       }
     }
     ```
@@ -321,14 +348,32 @@ Preloaded skills are resolved and injected into the system prompt before the fir
     ```python
     result = await client.create_session(
         "Help me deploy",
-        preload_skills=["deployment-guide", "shell-patterns"],
+        preload_skills=[
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="deployment-guide",
+            ),
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="shell-patterns",
+            ),
+        ],
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await client.createSession("Help me deploy", {
-      preloadSkills: ["deployment-guide", "shell-patterns"],
+      preloadSkills: [
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "deployment-guide",
+        },
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "shell-patterns",
+        },
+      ],
     });
     ```
   </Tab>

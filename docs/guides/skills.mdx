@@ -267,7 +267,7 @@ Pass `skill_refs` in the API request to resolve and inject skills for a specific
 }
 ```
 
-Legacy `skill_references` strings remain boundary compatibility input only.
+Legacy `skill_references` strings are retired; use structured `skill_refs`.
 
 ### 3. Preloading at session creation
 
@@ -278,7 +278,16 @@ Pass `preload_skills` to inject skills into the system prompt at session creatio
   "method": "session/create",
   "params": {
     "prompt": "Hello!",
-    "preload_skills": ["extraction/email", "formatting/markdown"]
+    "preload_skills": [
+      {
+        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+        "skill_name": "extraction-email"
+      },
+      {
+        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+        "skill_name": "formatting-markdown"
+      }
+    ]
   }
 }
 ```

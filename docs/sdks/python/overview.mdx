@@ -70,7 +70,7 @@ asyncio.run(main())
 
 `Session.turn(...)`, `Session.stream(...)`, and `DeferredSession.start_turn(...)` support:
 
-- `skill_refs`, `skill_references`, `flow_tool_overlay`
+- `skill_refs`, `flow_tool_overlay`
 - `additional_instructions`
 - `keep_alive`, `model`, `provider`, `max_tokens`, `system_prompt`
 - `output_schema`, `structured_output_retries`, `provider_params`
@@ -108,8 +108,6 @@ All config APIs return a **config envelope** (`config`, `generation`, realm meta
 - `await mob.spawn_helper(..., role_name=...)`
 - `await mob.fork_helper(..., role_name=...)`
 
-`profile_name` is accepted as a legacy alias for helper APIs, but `role_name` is canonical.
-
 ### Realm profile CRUD
 
 - `await client.create_mob_profile(name, profile)`
@@ -123,9 +121,10 @@ All config APIs return a **config envelope** (`config`, `generation`, realm meta
 The Python client also exposes:
 
 - realm helpers: `list_realms()`, `get_realm(...)`
-- auth helpers: `list_auth_profiles(...)`, `get_auth_profile(...)`, `create_auth_profile(...)`, `delete_auth_profile(...)`, `test_auth_profile(...)`, `auth_login_*`, `auth_provision_api_key(...)`, `auth_status(...)`, `auth_logout(...)`
-- realtime/runtime helpers: `runtime_realtime_attachment_status(...)`, `runtime_realtime_attachment_statuses(...)`, `realtime_open_info(...)`, `realtime_status(...)`, `realtime_capabilities(...)`
+- auth helpers: `list_auth_profiles(...)`, `get_auth_profile(...)`, `create_auth_profile(...)`, `delete_auth_profile(...)`, `auth_login_*`, `auth_provision_api_key(...)`, `auth_status(...)`, `auth_logout(...)`
+- realtime/runtime helpers: `runtime_realtime_attachment_status(...)`, `realtime_open_info(...)`, `realtime_status(...)`, `realtime_capabilities(...)`
 - blob/skill/MCP helpers: `get_blob(...)`, `list_skills()`, `inspect_skill(...)`, `mcp_add(...)`, `mcp_remove(...)`, `mcp_reload(...)`
+- comms helpers: `session.send(...)`, `session.peers()`
 - typed ingress helpers: `send_peer_response_terminal(...)`
 
 ## Typed session metadata

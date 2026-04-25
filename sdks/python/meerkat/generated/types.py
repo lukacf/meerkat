@@ -6,7 +6,7 @@ Contract version: 0.6.0
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
 
 CONTRACT_VERSION = "0.6.0"
@@ -125,48 +125,48 @@ class CommsParams:
 class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
-    skill_references: list[str] = field(default_factory=list)
+    skill_refs: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class McpAddParams:
     """Request payload for `mcp/add`."""
-    persisted: bool = False
-    server_config: Any = None
-    server_name: str = ''
-    session_id: str = ''
+    server_config: Any
+    server_name: str
+    session_id: str
+    persisted: Optional[bool] = None
 
 
 @dataclass
 class McpRemoveParams:
     """Request payload for `mcp/remove`."""
-    persisted: bool = False
-    server_name: str = ''
-    session_id: str = ''
+    server_name: str
+    session_id: str
+    persisted: Optional[bool] = None
 
 
 @dataclass
 class McpReloadParams:
     """Request payload for optional `mcp/reload`."""
-    persisted: bool = False
+    session_id: str
+    persisted: Optional[bool] = None
     server_name: Optional[str] = None
-    session_id: str = ''
 
 
 @dataclass
 class MobWireParams:
     """Request payload for `mob/wire`."""
-    member: str = ''
-    mob_id: str = ''
-    peer: dict[str, str] | dict[str, WireTrustedPeerSpec] = None
+    member: str
+    mob_id: str
+    peer: dict[str, str] | dict[str, WireTrustedPeerSpec]
 
 
 @dataclass
 class MobUnwireParams:
     """Request payload for `mob/unwire`."""
-    member: str = ''
-    mob_id: str = ''
-    peer: dict[str, str] | dict[str, WireTrustedPeerSpec] = None
+    member: str
+    mob_id: str
+    peer: dict[str, str] | dict[str, WireTrustedPeerSpec]
 
 
 @dataclass
@@ -177,29 +177,29 @@ class RuntimeStateParams:
 @dataclass
 class RuntimeRealtimeAttachmentStatusParams:
     """Request payload for `session/realtime_attachment_status`."""
-    session_id: str = ''
+    session_id: str
 
 
 @dataclass
 class RealtimeOpenRequest:
     """Request payload for `realtime/open_info`."""
+    role: Literal['primary', 'observer']
+    target: dict[str, Any]
+    turning_mode: Literal['provider_managed', 'explicit_commit']
     channel_config: Optional[dict[str, Any]] = None
     reconnect_policy: Optional[dict[str, Any]] = None
-    role: Literal['primary', 'observer'] = None
-    target: dict[str, Any] = field(default_factory=dict)
-    turning_mode: Literal['provider_managed', 'explicit_commit'] = None
 
 
 @dataclass
 class RealtimeStatusParams:
     """Request payload for `realtime/status`."""
-    target: dict[str, Any] = field(default_factory=dict)
+    target: dict[str, Any]
 
 
 @dataclass
 class RealtimeCapabilitiesParams:
     """Request payload for `realtime/capabilities`."""
-    target: dict[str, Any] = field(default_factory=dict)
+    target: dict[str, Any]
 
 
 @dataclass
@@ -230,7 +230,7 @@ class InputListParams:
 @dataclass
 class ScheduleIdParams:
     """Request payload for schedule id lookups."""
-    schedule_id: str = ''
+    schedule_id: str
 
 
 @dataclass
@@ -244,13 +244,14 @@ class ListSchedulesParams:
 @dataclass
 class ScheduleOccurrencesParams:
     """Request payload for schedule/occurrences."""
+    schedule_id: str
     include_terminal: Optional[bool] = None
-    schedule_id: str = ''
 
 
 @dataclass
 class UpdateScheduleParams:
     """Request payload for schedule/update."""
+    schedule_id: str
     description: Optional[str] = None
     expected_revision: Optional[int] = None
     labels: Optional[dict[str, Any]] = None
@@ -260,7 +261,6 @@ class UpdateScheduleParams:
     overlap_policy: Optional[Literal['allow_concurrent', 'skip_if_running']] = None
     planning_horizon_days: Optional[int] = None
     planning_horizon_occurrences: Optional[int] = None
-    schedule_id: str = ''
     target: Optional[dict[str, Any]] = None
     trigger: Optional[dict[str, Any]] = None
 
@@ -268,18 +268,18 @@ class UpdateScheduleParams:
 @dataclass
 class McpLiveOpResponse:
     """Response payload for live MCP operations."""
+    operation: Literal['add', 'remove', 'reload']
+    persisted: bool
+    session_id: str
+    status: Literal['staged', 'applied', 'rejected']
     applied_at_turn: Optional[int] = None
-    operation: Literal['add', 'remove', 'reload'] = None
-    persisted: bool = False
     server_name: Optional[str] = None
-    session_id: str = ''
-    status: Literal['staged', 'applied', 'rejected'] = None
 
 
 @dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
-    class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress'] = None
+    class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
     salience: Optional[Literal['background', 'normal', 'important', 'urgent']] = None
 
 
@@ -294,103 +294,102 @@ Serialized as a 32-element JSON array of numbers (matching
 the corresponding `TrustedPeerDescriptor::pubkey` will then be all
 zeros, which makes signature verification fail closed. Production
 clients MUST send the real pubkey."""
-    address: str = ''
-    name: str = ''
-    peer_id: str = ''
-    pubkey: list[int] = field(default_factory=list)
+    address: str
+    name: str
+    peer_id: str
+    pubkey: Optional[list[int]] = None
 
 
 @dataclass
 class MobWireResult:
     """Response payload for `mob/wire`."""
-    wired: bool = False
+    wired: bool
 
 
 @dataclass
 class MobUnwireResult:
     """Response payload for `mob/unwire`."""
-    unwired: bool = False
+    unwired: bool
 
 
 @dataclass
 class RuntimeStateResult:
     """Response payload for session/status."""
-    state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped'] = None
 
 
 @dataclass
 class RuntimeRealtimeAttachmentStatusResult:
     """Response payload for `session/realtime_attachment_status`."""
-    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required'] = None
+    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
 
 
 @dataclass
 class RealtimeReconnectPolicy:
     """Public reconnect policy for a realtime channel."""
-    initial_backoff_ms: int = 0
-    max_attempts: int = 0
-    max_backoff_ms: int = 0
-    max_total_ms: int = 0
+    initial_backoff_ms: int
+    max_attempts: int
+    max_backoff_ms: int
+    max_total_ms: int
 
 
 @dataclass
 class RealtimeCapabilities:
     """Product-facing realtime capability set for one target/provider combination."""
+    interrupt_supported: bool
+    tool_lifecycle_events_supported: bool
+    transcript_supported: bool
+    video_supported: bool
     audio_input_format: Optional[dict[str, Any]] = None
     audio_output_format: Optional[dict[str, Any]] = None
-    input_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
-    interrupt_supported: bool = False
-    output_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
-    tool_lifecycle_events_supported: bool = False
-    transcript_supported: bool = False
-    turning_modes: list[Literal['provider_managed', 'explicit_commit']] = field(default_factory=list)
-    video_supported: bool = False
+    input_kinds: Optional[list[Literal['text', 'audio', 'video']]] = None
+    output_kinds: Optional[list[Literal['text', 'audio', 'video']]] = None
+    turning_modes: Optional[list[Literal['provider_managed', 'explicit_commit']]] = None
 
 
 @dataclass
 class RealtimeChannelStatus:
     """Public realtime channel status projection."""
-    attempt_count: int = 0
+    state: Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
+    attempt_count: Optional[int] = None
     deadline_at: Optional[str] = None
     next_retry_at: Optional[str] = None
     reason: Optional[str] = None
-    state: Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error'] = None
 
 
 @dataclass
 class RealtimeOpenInfo:
     """Response payload for `realtime/open_info`."""
-    capabilities: dict[str, Any] = field(default_factory=dict)
-    default_protocol_version: str = ''
-    expires_at: str = ''
-    open_token: str = ''
-    supported_protocol_versions: list[str] = field(default_factory=list)
-    target: dict[str, Any] = field(default_factory=dict)
-    ws_url: str = ''
+    capabilities: dict[str, Any]
+    default_protocol_version: str
+    expires_at: str
+    open_token: str
+    target: dict[str, Any]
+    ws_url: str
+    supported_protocol_versions: Optional[list[str]] = None
 
 
 @dataclass
 class RealtimeStatusResult:
     """Response payload for `realtime/status`."""
-    status: dict[str, Any] = field(default_factory=dict)
+    status: dict[str, Any]
 
 
 @dataclass
 class RealtimeCapabilitiesResult:
     """Response payload for `realtime/capabilities`."""
-    capabilities: dict[str, Any] = field(default_factory=dict)
+    capabilities: dict[str, Any]
 
 
 @dataclass
 class RealtimeTextChunk:
     """A text chunk for realtime ingress/egress."""
-    text: str = ''
+    text: str
 
 
 @dataclass
 class RealtimeTextDelta:
     """A text delta chunk for realtime output."""
-    delta: str = ''
+    delta: str
 
 
 @dataclass
@@ -401,61 +400,61 @@ Both sender and receiver MUST stamp `sample_rate_hz` and `channels` so the
 transport layer can validate against the provider session's negotiated
 format instead of silently producing garbled audio when an ESP32 or browser
 client ships the wrong rate."""
-    channels: int = 0
-    data: str = ''
-    mime_type: str = ''
-    sample_rate_hz: int = 0
+    channels: int
+    data: str
+    mime_type: str
+    sample_rate_hz: int
 
 
 @dataclass
 class RealtimeVideoChunk:
     """An opaque realtime video chunk with MIME metadata."""
-    data: str = ''
-    mime_type: str = ''
+    data: str
+    mime_type: str
 
 
 @dataclass
 class RealtimeChannelOpenFrame:
     """Payload for `channel.open`."""
-    open_token: str = ''
-    protocol_version: str = ''
-    role: Literal['primary', 'observer'] = None
-    turning_mode: Literal['provider_managed', 'explicit_commit'] = None
+    open_token: str
+    protocol_version: str
+    role: Literal['primary', 'observer']
+    turning_mode: Literal['provider_managed', 'explicit_commit']
 
 
 @dataclass
 class RealtimeChannelInputFrame:
     """Payload for `channel.input`."""
-    chunk: dict[str, Any] = field(default_factory=dict)
+    chunk: dict[str, Any]
 
 
 @dataclass
 class RealtimeChannelOpenedFrame:
     """Payload for `channel.opened`."""
-    capabilities: dict[str, Any] = field(default_factory=dict)
-    protocol_version: str = ''
-    role: Literal['primary', 'observer'] = None
-    status: dict[str, Any] = field(default_factory=dict)
+    capabilities: dict[str, Any]
+    protocol_version: str
+    role: Literal['primary', 'observer']
+    status: dict[str, Any]
 
 
 @dataclass
 class RealtimeChannelStatusFrame:
     """Payload for `channel.status`."""
-    status: dict[str, Any] = field(default_factory=dict)
+    status: dict[str, Any]
 
 
 @dataclass
 class RealtimeChannelEventFrame:
     """Payload for `channel.event`."""
-    event: dict[str, Any] = field(default_factory=dict)
+    event: dict[str, Any]
 
 
 @dataclass
 class RealtimeChannelErrorFrame:
     """Payload for `channel.error`."""
-    code: str = ''
+    code: Literal['invalid_frame', 'expected_channel_open', 'invalid_open_token', 'open_token_expired', 'role_mismatch', 'turning_mode_mismatch', 'unsupported_turning_mode', 'target_busy', 'unsupported_protocol_version', 'audio_format_mismatch', 'unauthorized_realm', 'tool_call_timeout', 'internal_error', 'reconnect_exhausted', 'invalid_target', 'channel_not_bound', 'runtime_internal', 'runtime_not_ready', 'provider_session_closed', 'provider_session_failed', 'provider_session_unavailable', 'unsupported_input_kind', 'no_pending_turn', 'observer_read_only', 'unexpected_channel_open', 'commit_turn_unavailable', 'channel_reconnecting', 'binding_released', 'authentication_failed', 'content_filtered', 'model_not_found', 'invalid_request']
+    message: str
     details: Optional[dict[str, Any]] = None
-    message: str = ''
 
 
 @dataclass
@@ -467,9 +466,9 @@ class RealtimeChannelClosedFrame:
 @dataclass
 class RuntimeAcceptResult:
     """Response payload for `session/submit`."""
+    outcome_type: Literal['accepted', 'deduplicated', 'rejected']
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
-    outcome_type: Literal['accepted', 'deduplicated', 'rejected'] = None
     policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reason: Optional[str] = None
     state: Optional[dict[str, Any]] = None
@@ -488,10 +487,10 @@ class RuntimeResetResult:
 @dataclass
 class WireInputStateHistoryEntry:
     """Input transition history entry for RPC-facing snapshots."""
-    from_: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
+    from_: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
+    timestamp: str
+    to: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
     reason: Optional[str] = None
-    timestamp: str = ''
-    to: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
 
 
 @dataclass
@@ -500,21 +499,21 @@ class WireInputState:
 
 All fields are typed. Wave B replaced six former `serde_json::Value`
 fields with typed projections so the wire carries no untyped carriers."""
-    attempt_count: int = 0
-    created_at: str = ''
-    current_state: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
+    created_at: str
+    current_state: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
+    input_id: str
+    updated_at: str
+    attempt_count: Optional[int] = None
     durability: Optional[Literal['durable', 'volatile', 'ephemeral']] = None
-    history: list[dict[str, Any]] = field(default_factory=list)
+    history: Optional[list[dict[str, Any]]] = None
     idempotency_key: Optional[str] = None
-    input_id: str = ''
     last_boundary_sequence: Optional[int] = None
     last_run_id: Optional[str] = None
     persisted_input: Optional[dict[str, Any]] = None
     policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
-    recovery_count: int = 0
+    recovery_count: Optional[int] = None
     terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
-    updated_at: str = ''
 
 
 @dataclass
@@ -525,41 +524,41 @@ class InputListResult:
 @dataclass
 class ScheduleListResult:
     """Response payload for schedule/list."""
-    schedules: list[dict[str, Any]] = field(default_factory=list)
+    schedules: list[dict[str, Any]]
 
 
 @dataclass
 class ScheduleOccurrencesResult:
     """Response payload for schedule/occurrences."""
-    occurrences: list[dict[str, Any]] = field(default_factory=list)
+    occurrences: list[dict[str, Any]]
 
 
 @dataclass
 class WireSessionInfo:
     """Canonical session info for wire protocol."""
-    created_at: int = 0
-    is_active: bool = False
-    labels: dict[str, Any] = field(default_factory=dict)
+    created_at: int
+    is_active: bool
+    message_count: int
+    model: str
+    provider: str
+    session_id: str
+    updated_at: int
+    labels: Optional[dict[str, Any]] = None
     last_assistant_text: Optional[str] = None
-    message_count: int = 0
-    model: str = ''
-    provider: str = ''
-    session_id: str = ''
     session_ref: Optional[str] = None
-    updated_at: int = 0
 
 
 @dataclass
 class WireSessionSummary:
     """Canonical session summary for wire protocol."""
-    created_at: int = 0
-    is_active: bool = False
-    labels: dict[str, Any] = field(default_factory=dict)
-    message_count: int = 0
-    session_id: str = ''
+    created_at: int
+    is_active: bool
+    message_count: int
+    session_id: str
+    total_tokens: int
+    updated_at: int
+    labels: Optional[dict[str, Any]] = None
     session_ref: Optional[str] = None
-    total_tokens: int = 0
-    updated_at: int = 0
 
 
 @dataclass
@@ -570,40 +569,40 @@ class ContractVersion:
 @dataclass
 class CatalogModelEntry:
     """A single model entry in the catalog response."""
+    display_name: str
+    id: str
+    tier: Literal['recommended', 'supported']
     context_window: Optional[int] = None
-    display_name: str = ''
-    id: str = ''
     max_output_tokens: Optional[int] = None
     profile: Optional[dict[str, Any]] = None
     server_id: Optional[str] = None
-    tier: str = ''
 
 
 @dataclass
 class ProviderCatalog:
     """Provider-level grouping in the catalog response."""
-    default_model_id: str = ''
-    models: list[dict[str, Any]] = field(default_factory=list)
-    provider: str = ''
+    default_model_id: str
+    models: list[dict[str, Any]]
+    provider: str
 
 
 @dataclass
 class ModelsCatalogResponse:
     """Response for `models/catalog` — the compiled-in model catalog."""
-    contract_version: dict[str, Any] = field(default_factory=dict)
-    providers: list[dict[str, Any]] = field(default_factory=list)
+    contract_version: dict[str, Any]
+    providers: list[dict[str, Any]]
 
 
 @dataclass
 class WireModelProfile:
     """Runtime profile for a model — capabilities and parameter schema."""
-    inline_video: bool = False
-    model_family: str = ''
-    params_schema: Any = None
-    supports_reasoning: bool = False
-    supports_temperature: bool = False
-    supports_thinking: bool = False
-    supports_web_search: bool = False
+    inline_video: bool
+    model_family: str
+    params_schema: Any
+    supports_reasoning: bool
+    supports_temperature: bool
+    supports_thinking: bool
+    supports_web_search: Optional[bool] = None
 
 
 @dataclass
@@ -613,19 +612,19 @@ class WireConnectionRef:
 Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
 `parse` and `Display` on both the core type and the wire projection so
 the colon-joined form cannot travel across wire boundaries."""
-    binding: str = ''
+    binding: str
+    realm: str
     profile: Optional[str] = None
-    realm: str = ''
 
 
 @dataclass
 class WireBackendProfile:
     """Wire projection of [`meerkat_core::BackendProfile`]."""
-    backend_kind: str = ''
+    backend_kind: str
+    id: str
+    provider: str
     base_url: Optional[str] = None
-    id: str = ''
-    options: Any = None
-    provider: str = ''
+    options: Optional[Any] = None
 
 
 @dataclass
@@ -636,55 +635,107 @@ material have to go through the server-side
 `auth.profile.get` / `/auth/profiles/:id` endpoints which return
 typed redacted shapes. `source_kind` is a discriminator for the
 credential-source variant."""
-    auth_method: str = ''
-    id: str = ''
-    provider: str = ''
-    source_kind: str = ''
+    auth_method: str
+    id: str
+    provider: str
+    source_kind: str
 
 
 @dataclass
 class WireProviderBinding:
     """Wire projection of [`meerkat_core::ProviderBinding`]."""
-    allow_auth_override: bool = False
-    auth_profile: str = ''
-    backend_profile: str = ''
+    auth_profile: str
+    backend_profile: str
+    id: str
+    allow_auth_override: Optional[bool] = None
     default_model: Optional[str] = None
-    id: str = ''
-    require_metadata_account: bool = False
-    require_metadata_workspace: bool = False
+    require_metadata_account: Optional[bool] = None
+    require_metadata_workspace: Optional[bool] = None
 
 
 @dataclass
 class WireRealmConnectionSet:
     """Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned
 from the `realm/get` / `GET /realm/:id` endpoints."""
-    auth_profiles: dict[str, Any] = field(default_factory=dict)
-    backends: dict[str, Any] = field(default_factory=dict)
-    bindings: dict[str, Any] = field(default_factory=dict)
+    auth_profiles: dict[str, Any]
+    backends: dict[str, Any]
+    bindings: dict[str, Any]
+    realm_id: str
     default_binding: Optional[str] = None
-    realm_id: str = ''
 
 
 @dataclass
 class WireAuthStatus:
     """Wire projection of the auth-profile status. Returned from
 `auth.status.get` / `GET /auth/status/:id`."""
+    auth_method: str
+    profile_id: str
+    provider: str
+    state: str
     account_id: Optional[str] = None
-    auth_method: str = ''
     expires_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
     last_refresh_at: Optional[str] = None
-    profile_id: str = ''
-    provider: str = ''
-    state: str = ''
 
 
 # Stable wire kind for auth errors. Mirrors `meerkat_core::AuthErrorKind`
 # on the wire as a normalized string.
-WireAuthError = dict[str, Any]
+class WireAuthErrorMissingSecret(TypedDict, total=False):
+    kind: Required[Literal['missing_secret']]
+
+class WireAuthErrorUnsupportedCombination(TypedDict, total=False):
+    auth: Required[str]
+    backend: Required[str]
+    kind: Required[Literal['unsupported_combination']]
+
+class WireAuthErrorMissingRequiredMetadata(TypedDict, total=False):
+    field: Required[str]
+    kind: Required[Literal['missing_required_metadata']]
+
+class WireAuthErrorWorkspaceMismatch(TypedDict, total=False):
+    kind: Required[Literal['workspace_mismatch']]
+
+class WireAuthErrorExpired(TypedDict, total=False):
+    kind: Required[Literal['expired']]
+
+class WireAuthErrorRefreshFailed(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['refresh_failed']]
+
+class WireAuthErrorInteractiveLoginRequired(TypedDict, total=False):
+    kind: Required[Literal['interactive_login_required']]
+
+class WireAuthErrorHostOwnedUnavailable(TypedDict, total=False):
+    kind: Required[Literal['host_owned_unavailable']]
+
+class WireAuthErrorIo(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['io']]
+
+class WireAuthErrorOther(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['other']]
+
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
 
 # Wire-safe content block (no `source_path` — internal only).
-WireContentBlock = dict[str, Any]
+class WireContentBlockText(TypedDict, total=False):
+    text: Required[str]
+    type: Required[Literal['text']]
+
+class WireContentBlockImage(TypedDict, total=False):
+    media_type: Required[str]
+    type: Required[Literal['image']]
+
+class WireContentBlockVideo(TypedDict, total=False):
+    duration_ms: Required[int]
+    media_type: Required[str]
+    type: Required[Literal['video']]
+
+class WireContentBlockUnknown(TypedDict, total=False):
+    type: Required[Literal['unknown']]
+
+WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[dict[str, Any]]
@@ -729,7 +780,16 @@ WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', '
 #   channel survives without any SDK round-trip. A terminal
 #   `MemberSessionBindingChanged { old: Some, new: None }` closes the
 #   channel with `RealtimeErrorCode::BindingReleased`.
-RealtimeChannelTarget = dict[str, Any]
+class RealtimeChannelTargetSessionTarget(TypedDict, total=False):
+    session_id: Required[str]
+    type: Required[Literal['session_target']]
+
+class RealtimeChannelTargetMobMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    mob_id: Required[str]
+    type: Required[Literal['mob_member']]
+
+RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | RealtimeChannelTargetMobMember
 
 # Opening role for a realtime channel.
 RealtimeChannelRole = Literal['primary', 'observer']
@@ -747,19 +807,135 @@ RealtimeOutputKind = Literal['text', 'audio', 'video']
 RealtimeChannelState = Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
 
 # Modality-neutral input chunk.
-RealtimeInputChunk = dict[str, Any]
+class RealtimeInputChunkTextChunk(TypedDict, total=False):
+    kind: Required[Literal['text_chunk']]
+
+class RealtimeInputChunkAudioChunk(TypedDict, total=False):
+    kind: Required[Literal['audio_chunk']]
+
+class RealtimeInputChunkVideoChunk(TypedDict, total=False):
+    kind: Required[Literal['video_chunk']]
+
+RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk
 
 # Modality-neutral output chunk.
-RealtimeOutputChunk = dict[str, Any]
+class RealtimeOutputChunkTextDelta(TypedDict, total=False):
+    kind: Required[Literal['text_delta']]
+
+class RealtimeOutputChunkAudioChunk(TypedDict, total=False):
+    kind: Required[Literal['audio_chunk']]
+
+class RealtimeOutputChunkVideoChunk(TypedDict, total=False):
+    kind: Required[Literal['video_chunk']]
+
+RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk
 
 # Normalized realtime event stream payload.
-RealtimeEvent = dict[str, Any]
+class RealtimeEventInputTranscriptPartial(TypedDict, total=False):
+    text: Required[str]
+    type: Required[Literal['input_transcript_partial']]
+
+class RealtimeEventInputTranscriptFinal(TypedDict, total=False):
+    prosody_hint: NotRequired[str]
+    text: Required[str]
+    type: Required[Literal['input_transcript_final']]
+
+class RealtimeEventTurnStarted(TypedDict, total=False):
+    type: Required[Literal['turn_started']]
+
+class RealtimeEventTurnCommitted(TypedDict, total=False):
+    type: Required[Literal['turn_committed']]
+
+class RealtimeEventTurnCompleted(TypedDict, total=False):
+    type: Required[Literal['turn_completed']]
+
+class RealtimeEventOutputTextDelta(TypedDict, total=False):
+    delta: Required[str]
+    type: Required[Literal['output_text_delta']]
+
+class RealtimeEventOutputAudioChunk(TypedDict, total=False):
+    chunk: Required[dict[str, Any]]
+    type: Required[Literal['output_audio_chunk']]
+
+class RealtimeEventOutputVideoChunk(TypedDict, total=False):
+    chunk: Required[dict[str, Any]]
+    type: Required[Literal['output_video_chunk']]
+
+class RealtimeEventInterrupted(TypedDict, total=False):
+    type: Required[Literal['interrupted']]
+
+class RealtimeEventToolCallRequested(TypedDict, total=False):
+    call_id: Required[str]
+    tool_name: Required[str]
+    type: Required[Literal['tool_call_requested']]
+
+class RealtimeEventToolCallCompleted(TypedDict, total=False):
+    call_id: Required[str]
+    type: Required[Literal['tool_call_completed']]
+
+class RealtimeEventToolCallFailed(TypedDict, total=False):
+    call_id: Required[str]
+    error: Required[str]
+    type: Required[Literal['tool_call_failed']]
+
+class RealtimeEventToolCallTimedOut(TypedDict, total=False):
+    call_id: Required[str]
+    elapsed_ms: Required[int]
+    type: Required[Literal['tool_call_timed_out']]
+
+class RealtimeEventAssistantTranscriptTruncated(TypedDict, total=False):
+    audio_played_ms: Required[int]
+    item_id: Required[str]
+    truncated_text: NotRequired[str]
+    type: Required[Literal['assistant_transcript_truncated']]
+
+class RealtimeEventStatusChanged(TypedDict, total=False):
+    status: Required[dict[str, Any]]
+    type: Required[Literal['status_changed']]
+
+class RealtimeEventNeedsReattach(TypedDict, total=False):
+    type: Required[Literal['needs_reattach']]
+
+RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscriptFinal | RealtimeEventTurnStarted | RealtimeEventTurnCommitted | RealtimeEventTurnCompleted | RealtimeEventOutputTextDelta | RealtimeEventOutputAudioChunk | RealtimeEventOutputVideoChunk | RealtimeEventInterrupted | RealtimeEventToolCallRequested | RealtimeEventToolCallCompleted | RealtimeEventToolCallFailed | RealtimeEventToolCallTimedOut | RealtimeEventAssistantTranscriptTruncated | RealtimeEventStatusChanged | RealtimeEventNeedsReattach
 
 # Client-to-server realtime frame.
-RealtimeClientFrame = dict[str, Any]
+class RealtimeClientFrameChannelOpen(TypedDict, total=False):
+    type: Required[Literal['channel.open']]
+
+class RealtimeClientFrameChannelInput(TypedDict, total=False):
+    type: Required[Literal['channel.input']]
+
+class RealtimeClientFrameChannelCommitTurn(TypedDict, total=False):
+    type: Required[Literal['channel.commit_turn']]
+
+class RealtimeClientFrameChannelInterrupt(TypedDict, total=False):
+    type: Required[Literal['channel.interrupt']]
+
+class RealtimeClientFrameChannelBargeInTruncate(TypedDict, total=False):
+    type: Required[Literal['channel.barge_in_truncate']]
+
+class RealtimeClientFrameChannelClose(TypedDict, total=False):
+    type: Required[Literal['channel.close']]
+
+RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChannelInput | RealtimeClientFrameChannelCommitTurn | RealtimeClientFrameChannelInterrupt | RealtimeClientFrameChannelBargeInTruncate | RealtimeClientFrameChannelClose
 
 # Server-to-client realtime frame.
-RealtimeServerFrame = dict[str, Any]
+class RealtimeServerFrameChannelOpened(TypedDict, total=False):
+    type: Required[Literal['channel.opened']]
+
+class RealtimeServerFrameChannelStatus(TypedDict, total=False):
+    type: Required[Literal['channel.status']]
+
+class RealtimeServerFrameChannelEvent(TypedDict, total=False):
+    type: Required[Literal['channel.event']]
+
+class RealtimeServerFrameChannelError(TypedDict, total=False):
+    type: Required[Literal['channel.error']]
+
+class RealtimeServerFrameChannelClosed(TypedDict, total=False):
+    type: Required[Literal['channel.closed']]
+
+RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
 
 # Discriminator for `session/submit` responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
@@ -774,7 +950,7 @@ WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 
 WireToolResultContent = str | list[dict[str, Any]]
 
 # Model recommendation tier.
-WireModelTier = str
+WireModelTier = Literal['recommended', 'supported']
 
 # Typed wire request for `comms/send`.
 #
@@ -787,7 +963,45 @@ WireModelTier = str
 # Cross-field invariants that cannot be expressed structurally (e.g.
 # `handling_mode` is forbidden on `Accepted` peer responses) are checked
 # in [`CommsCommandRequest::into_command`].
-CommsCommandRequest = dict[str, Any]
+class CommsCommandInput(TypedDict, total=False):
+    allow_self_session: NotRequired[bool]
+    blocks: NotRequired[list[dict[str, Any]]]
+    body: Required[str]
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    kind: Required[Literal['input']]
+    source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
+    stream: NotRequired[Literal['none', 'reserve_interaction']]
+
+class CommsCommandPeerMessage(TypedDict, total=False):
+    blocks: NotRequired[list[dict[str, Any]]]
+    body: Required[str]
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    kind: Required[Literal['peer_message']]
+    to: Required[str]
+
+class CommsCommandPeerLifecycle(TypedDict, total=False):
+    kind: Required[Literal['peer_lifecycle']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    params: NotRequired[Any]
+    to: Required[str]
+
+class CommsCommandPeerRequest(TypedDict, total=False):
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    intent: Required[str]
+    kind: Required[Literal['peer_request']]
+    params: NotRequired[Any]
+    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    to: Required[str]
+
+class CommsCommandPeerResponse(TypedDict, total=False):
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    in_reply_to: Required[str]
+    kind: Required[Literal['peer_response']]
+    result: NotRequired[Any]
+    status: Required[Literal['accepted', 'completed', 'failed']]
+    to: Required[str]
+
+CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
 
 # Response payload for `session/submission`.
 InputStateResult = Optional[WireInputState]

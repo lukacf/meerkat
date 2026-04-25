@@ -2563,6 +2563,7 @@
         ]
       },
       "HelperOptionsSpec": {
+        "additionalProperties": false,
         "properties": {
           "backend": {
             "anyOf": [
@@ -2973,9 +2974,9 @@
                   }
                 ]
               },
-              "skill_references": {
+              "skill_refs": {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/SkillRef"
                 },
                 "type": "array"
               },
@@ -3235,6 +3236,48 @@
             "type": "object"
           }
         ]
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [

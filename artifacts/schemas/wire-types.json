@@ -157,6 +157,32 @@
             "type": "string"
           }
         ]
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "PeerLifecycleKind": {
+        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
+        "enum": [
+          "mob.peer_added",
+          "mob.peer_retired",
+          "mob.peer_unwired"
+        ],
+        "type": "string"
+      },
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "ResponseStatus": {
+        "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
+        "enum": [
+          "accepted",
+          "completed",
+          "failed"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -221,6 +247,152 @@
         "required": [
           "kind",
           "body"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a one-way peer message.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "peer_message",
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "body"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a one-way peer lifecycle notification.",
+        "properties": {
+          "kind": {
+            "const": "peer_lifecycle",
+            "type": "string"
+          },
+          "lifecycle_kind": {
+            "$ref": "#/$defs/PeerLifecycleKind"
+          },
+          "params": {
+            "default": null
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "lifecycle_kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a request to a peer.",
+        "properties": {
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "intent": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_request",
+            "type": "string"
+          },
+          "params": {
+            "default": null
+          },
+          "stream": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputStreamMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "intent"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a response to a prior peer request.",
+        "properties": {
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_reply_to": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "kind": {
+            "const": "peer_response",
+            "type": "string"
+          },
+          "result": {
+            "default": null
+          },
+          "status": {
+            "$ref": "#/$defs/ResponseStatus"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "in_reply_to",
+          "status"
         ],
         "type": "object"
       }
@@ -6477,6 +6649,7 @@
         ]
       },
       "HelperOptionsSpec": {
+        "additionalProperties": false,
         "properties": {
           "backend": {
             "anyOf": [
@@ -7002,9 +7175,9 @@
                   }
                 ]
               },
-              "skill_references": {
+              "skill_refs": {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/SkillRef"
                 },
                 "type": "array"
               },
@@ -7264,6 +7437,48 @@
             "type": "object"
           }
         ]
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [
@@ -7768,6 +7983,7 @@
         ]
       },
       "HelperOptionsSpec": {
+        "additionalProperties": false,
         "properties": {
           "backend": {
             "anyOf": [
@@ -8434,9 +8650,9 @@
                   }
                 ]
               },
-              "skill_references": {
+              "skill_refs": {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/SkillRef"
                 },
                 "type": "array"
               },
@@ -8696,6 +8912,48 @@
             "type": "object"
           }
         ]
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [

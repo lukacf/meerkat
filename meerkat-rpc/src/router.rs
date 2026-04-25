@@ -1139,16 +1139,6 @@ impl MethodRouter {
             "auth/profile/delete" => {
                 handlers::auth::handle_auth_profile_delete(id, params, &self.runtime).await
             }
-            "auth/profile/test" => {
-                // Post-wave-a dogma: the auth probe seam was retired; use
-                // `auth/profile/get` + `capabilities/get` to verify profile state.
-                let _ = params;
-                RpcResponse::error(
-                    id,
-                    error::METHOD_NOT_FOUND,
-                    "auth/profile/test is no longer served; use auth/profile/get".to_string(),
-                )
-            }
             "auth/login/start" => handlers::auth::handle_auth_login_start(id, params).await,
             "auth/login/complete" => {
                 handlers::auth::handle_auth_login_complete(id, params, &self.runtime).await
@@ -5343,6 +5333,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_open_info_rejects_retired_mob_member_target_discriminator() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": "mob-1",
+                        "agent_identity": "agent-1",
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&response), error::INVALID_PARAMS);
+        let message = response
+            .error
+            .as_ref()
+            .expect("error response")
+            .message
+            .as_str();
+        assert!(
+            message.contains("unsupported target.type 'mob_member_target'"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_accepts_canonical_mob_member_discriminator() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "mob_member",
+                        "mob_id": "mob-1",
+                        "agent_identity": "agent-1",
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&response), error::INVALID_PARAMS);
+        let message = response
+            .error
+            .as_ref()
+            .expect("error response")
+            .message
+            .as_str();
+        assert!(
+            message.contains("mob not found: mob-1"),
+            "canonical discriminator should reach mob resolution, got: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn realtime_open_info_returns_bootstrap_when_ws_host_is_configured() {
         let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
         let create_resp = router
@@ -6070,9 +6126,9 @@ mod tests {
         assert!(result["text"].as_str().unwrap().contains("Hello from mock"));
     }
 
-    /// 8b2. Alias refs resolve through configured non-default identity registry.
+    /// 8b2. Retired legacy string refs are rejected even when a registry has aliases.
     #[tokio::test]
-    async fn session_create_accepts_alias_ref_with_registry() {
+    async fn session_create_rejects_legacy_skill_references_with_registry() {
         let (router, _notif_rx) = test_router_with_registry(alias_registry()).await;
         let req = make_request(
             "session/create",
@@ -6083,14 +6139,17 @@ mod tests {
         );
 
         let resp = router.dispatch(req).await.unwrap();
-        let result = result_value(&resp);
-        assert!(result["session_id"].as_str().is_some());
-        assert!(result["text"].as_str().unwrap().contains("Hello from mock"));
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("skill_references is retired"),
+            "unexpected error: {:?}",
+            resp.error
+        );
     }
 
-    /// 8c. `turn/start` accepts legacy+structured refs together.
+    /// 8c. `turn/start` rejects retired legacy refs even with structured refs.
     #[tokio::test]
-    async fn turn_start_accepts_mixed_skill_ref_formats() {
+    async fn turn_start_rejects_legacy_skill_references() {
         let (router, _notif_rx) = test_router().await;
 
         let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
@@ -6113,12 +6172,11 @@ mod tests {
         );
 
         let turn_resp = router.dispatch(turn_req).await.unwrap();
-        let turn_result = result_value(&turn_resp);
+        assert_eq!(error_code(&turn_resp), error::INVALID_PARAMS);
         assert!(
-            turn_result["text"]
-                .as_str()
-                .unwrap()
-                .contains("Hello from mock")
+            error_message(&turn_resp).contains("skill_references is retired"),
+            "unexpected error: {:?}",
+            turn_resp.error
         );
     }
 
@@ -6144,9 +6202,9 @@ mod tests {
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
     }
 
-    /// 8e. Retired legacy alias ingress is ignored even when a registry exists.
+    /// 8e. Retired legacy alias ingress is rejected even when a registry exists.
     #[tokio::test]
-    async fn session_create_ignores_legacy_skill_references_with_registry() {
+    async fn session_create_rejects_unknown_legacy_skill_references_with_registry() {
         let (router, _notif_rx) = test_router_with_registry(alias_registry()).await;
         let req = make_request(
             "session/create",
@@ -6157,8 +6215,12 @@ mod tests {
         );
 
         let resp = router.dispatch(req).await.unwrap();
-        let result = result_value(&resp);
-        assert!(result["session_id"].as_str().is_some());
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("skill_references is retired"),
+            "unexpected error: {:?}",
+            resp.error
+        );
     }
 
     /// 9. `turn/interrupt` on an idle session returns ok.
@@ -6312,22 +6374,18 @@ mod tests {
 
     /// 12b. `config/patch` does not re-enable retired legacy skill alias ingress.
     #[tokio::test]
-    async fn config_patch_keeps_legacy_skill_references_ignored() {
+    async fn config_patch_keeps_legacy_skill_references_rejected() {
         let (router, _notif_rx) = test_router().await;
 
-        let ignored_before = make_request(
+        let rejected_before = make_request(
             "session/create",
             serde_json::json!({
                 "prompt": "hello",
                 "skill_references": ["legacy/email"]
             }),
         );
-        let ignored_before_resp = router.dispatch(ignored_before).await.unwrap();
-        assert!(
-            result_value(&ignored_before_resp)["session_id"]
-                .as_str()
-                .is_some()
-        );
+        let rejected_before_resp = router.dispatch(rejected_before).await.unwrap();
+        assert_eq!(error_code(&rejected_before_resp), error::INVALID_PARAMS);
 
         let set_req = make_request(
             "config/patch",
@@ -6368,16 +6426,20 @@ mod tests {
             set_resp.error
         );
 
-        let ignored_after = make_request(
+        let rejected_after = make_request(
             "session/create",
             serde_json::json!({
                 "prompt": "hello",
                 "skill_references": ["legacy/email"]
             }),
         );
-        let ignored_after_resp = router.dispatch(ignored_after).await.unwrap();
-        let result = result_value(&ignored_after_resp);
-        assert!(result["session_id"].as_str().is_some());
+        let rejected_after_resp = router.dispatch(rejected_after).await.unwrap();
+        assert_eq!(error_code(&rejected_after_resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&rejected_after_resp).contains("skill_references is retired"),
+            "unexpected error: {:?}",
+            rejected_after_resp.error
+        );
     }
 
     /// 12c. Invalid identity configs are rejected on patch and do not advance generation.

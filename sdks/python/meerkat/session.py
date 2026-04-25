@@ -24,7 +24,6 @@ Example::
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Any
 
 from .types import ContentBlock, RunResult, SessionHistory, SkillKey, SkillRef
@@ -35,29 +34,11 @@ if TYPE_CHECKING:
 
 
 def _normalize_skill_ref(skill_ref: SkillRef) -> SkillKey:
-    """Convert a skill reference to a canonical :class:`SkillKey`.
-
-    Accepts either a :class:`SkillKey` (passed through) or a legacy string
-    of the form ``"<source_uuid>/<skill_name>"`` (with optional leading ``/``).
-    Legacy strings emit a :class:`DeprecationWarning`.
-    """
+    """Validate a structured skill reference."""
     if isinstance(skill_ref, SkillKey):
         return skill_ref
 
-    value = skill_ref[1:] if skill_ref.startswith("/") else skill_ref
-    parts = value.split("/")
-    if len(parts) < 2:
-        raise ValueError(
-            f"Invalid skill reference '{skill_ref}'. "
-            "Expected '<source_uuid>/<skill_name>'."
-        )
-
-    warnings.warn(
-        "Legacy string skill references are deprecated; pass SkillKey instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    return SkillKey(source_uuid=parts[0], skill_name="/".join(parts[1:]))
+    raise TypeError("Skill references must be SkillKey objects")
 
 
 class Session:
@@ -134,7 +115,6 @@ class Session:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
@@ -155,7 +135,6 @@ class Session:
             self._id,
             prompt,
             skill_refs=skill_refs,
-            skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
             keep_alive=keep_alive,
@@ -175,7 +154,6 @@ class Session:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
@@ -202,7 +180,6 @@ class Session:
             self._id,
             prompt,
             skill_refs=skill_refs,
-            skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
             keep_alive=keep_alive,
@@ -299,7 +276,6 @@ class Session:
     ) -> RunResult:
         """Invoke a skill in this session.
 
-        Accepts a :class:`~meerkat.SkillKey` or a legacy string reference.
         Sends the structured ``skill_refs`` parameter to the runtime.
         """
         self._client.require_capability("skills")
@@ -371,7 +347,6 @@ class DeferredSession:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
@@ -392,7 +367,6 @@ class DeferredSession:
             self._id,
             prompt,
             skill_refs=skill_refs,
-            skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
             keep_alive=keep_alive,

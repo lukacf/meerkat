@@ -43,7 +43,7 @@ fn sample_occurrence(attempt_count: u32) -> Occurrence {
                 prompt: ContentInput::Text("hi".into()),
                 system_prompt: None,
                 render_metadata: None,
-                skill_references: Vec::new(),
+                skill_refs: Vec::new(),
                 additional_instructions: Vec::new(),
             },
         }),

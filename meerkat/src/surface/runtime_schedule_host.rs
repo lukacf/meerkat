@@ -126,8 +126,7 @@ impl RuntimeBackedScheduleSessionHost {
         // Schedule wire type `SessionMaterializationSpec.preload_skills: Vec<String>`
         // carries only slug halves — no lossless projection to the typed
         // `SkillKey` (source_uuid + skill_name) required by the session
-        // build. Callers use `skill_refs` / `skill_references` for
-        // typed per-turn skill injection.
+        // build. Callers use typed `skill_refs` for per-turn skill injection.
         build.preload_skills = None;
         build.realm_id = create.realm_id.clone();
         build.instance_id = create.instance_id.clone();

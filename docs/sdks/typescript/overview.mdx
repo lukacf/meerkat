@@ -89,11 +89,10 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 The SDK also exposes the runtime/product realtime helpers and auth-profile wrappers from the RPC surface:
 
 - `runtimeRealtimeAttachmentStatus(...)`
-- `runtimeRealtimeAttachmentStatuses(...)`
 - `realtimeOpenInfo(...)`
 - `realtimeStatus(...)`
 - `realtimeCapabilities(...)`
-- `authProfileList(...)`, `authProfileGet(...)`, `authProfileCreate(...)`, `authProfileDelete(...)`, `authProfileTest(...)`
+- `authProfileList(...)`, `authProfileGet(...)`, `authProfileCreate(...)`, `authProfileDelete(...)`
 - `authLoginStart(...)`, `authLoginComplete(...)`, `authLoginDeviceStart(...)`, `authLoginDeviceComplete(...)`, `authLoginProvisionApiKey(...)`
 - `authStatusGet(...)`, `authLogout(...)`
 - `realmList(...)`, `realmGet(...)`
@@ -120,7 +119,7 @@ The SDK also exposes the runtime/product realtime helpers and auth-profile wrapp
 | `session.interrupt()` | Cancel the currently running turn |
 | `session.archive()` | Remove the session from the server |
 | `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
-| `session.send(command)` | Send a comms command scoped to this session |
+| `session.send(command)` | Send a typed comms command scoped to this session |
 | `session.peers()` | List peers visible to this session's comms runtime |
 | `session.subscribeEvents()` | Open a standalone event subscription; returns `EventSubscription<AgentEventEnvelope>` |
 
@@ -248,9 +247,8 @@ interface SessionOptions {
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
-  preloadSkills?: string[];
+  preloadSkills?: SkillRef[];
   skillRefs?: SkillRef[];
-  skillReferences?: string[];
   labels?: Record<string, string>;
   additionalInstructions?: string[];
   appContext?: unknown;
@@ -292,7 +290,6 @@ async turn(
   prompt: string | ContentBlock[],
   options?: {
     skillRefs?: SkillRef[];
-    skillReferences?: string[];
     flowToolOverlay?: TurnToolOverlay;
     additionalInstructions?: string[];
     keepAlive?: boolean;
@@ -321,7 +318,6 @@ stream(
   prompt: string | ContentBlock[],
   options?: {
     skillRefs?: SkillRef[];
-    skillReferences?: string[];
     flowToolOverlay?: TurnToolOverlay;
     additionalInstructions?: string[];
     keepAlive?: boolean;
@@ -369,23 +365,19 @@ Removes this session from the server. The `Session` object should not be used af
 async invokeSkill(skillRef: SkillRef, prompt: string): Promise<RunResult>
 ```
 
-Calls `requireCapability("skills")`, then runs a turn with the provided skill reference injected. `SkillRef` is either a `SkillKey` object or a legacy string:
+Calls `requireCapability("skills")`, then runs a turn with the provided structured `SkillKey` injected:
 
 ```typescript
-// Structured (preferred)
 const result = await session.invokeSkill(
   { sourceUuid: "abc123", skillName: "code-review" },
   "Review this function for safety issues",
 );
-
-// Legacy string (deprecated)
-const result = await session.invokeSkill("/abc123/code-review", "Review this function");
 ```
 
 ### send() and peers()
 
 ```typescript
-async send(command: Record<string, unknown>): Promise<CommsSendReceipt>
+async send(command: CommsCommand): Promise<CommsSendReceipt>
 async peers(): Promise<Array<Record<string, unknown>>>
 ```
 

@@ -399,16 +399,6 @@ class MeerkatClient:
             {"realm_id": realm_id, "profile_id": profile_id},
         )
 
-    async def test_auth_profile(
-        self, realm_id: str, binding_id: str
-    ) -> dict[str, Any]:
-        """Dry-run a provider binding via `auth/profile/test`. Returns
-        the resolved connection shape or a typed error."""
-        return await self._request(
-            "auth/profile/test",
-            {"realm_id": realm_id, "binding_id": binding_id},
-        )
-
     async def auth_login_start(
         self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
     ) -> dict[str, Any]:
@@ -534,9 +524,8 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
-        preload_skills: list[str] | None = None,
+        preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
         additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
@@ -565,7 +554,7 @@ class MeerkatClient:
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
-            skill_refs=skill_refs, skill_references=skill_references,
+            skill_refs=skill_refs,
             labels=labels,
             additional_instructions=additional_instructions,
             app_context=app_context,
@@ -597,9 +586,8 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
-        preload_skills: list[str] | None = None,
+        preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
         additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
@@ -632,7 +620,7 @@ class MeerkatClient:
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
-            skill_refs=skill_refs, skill_references=skill_references,
+            skill_refs=skill_refs,
             labels=labels,
             additional_instructions=additional_instructions,
             app_context=app_context,
@@ -675,9 +663,8 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
-        preload_skills: list[str] | None = None,
+        preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
         additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
@@ -710,7 +697,7 @@ class MeerkatClient:
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
-            skill_refs=skill_refs, skill_references=skill_references,
+            skill_refs=skill_refs,
             labels=labels,
             additional_instructions=additional_instructions,
             app_context=app_context,
@@ -1552,16 +1539,14 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
-        profile_name: str | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
-        canonical_role_name = role_name if role_name is not None else profile_name
         result = await self._request("mob/spawn_helper", {
             "mob_id": mob_id,
             "prompt": prompt,
             "agent_identity": agent_identity,
-            "role_name": canonical_role_name,
+            "role_name": role_name,
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
@@ -1591,18 +1576,16 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
-        profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
-        canonical_role_name = role_name if role_name is not None else profile_name
         result = await self._request("mob/fork_helper", {
             "mob_id": mob_id,
             "source_member_id": source_member_id,
             "prompt": prompt,
             "agent_identity": agent_identity,
-            "role_name": canonical_role_name,
+            "role_name": role_name,
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
             "backend": backend,
@@ -1894,7 +1877,6 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
@@ -1910,8 +1892,6 @@ class MeerkatClient:
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
-        if skill_references is not None:
-            params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
         if additional_instructions is not None:
@@ -1941,7 +1921,6 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
@@ -1964,8 +1943,6 @@ class MeerkatClient:
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
-        if skill_references is not None:
-            params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
         if additional_instructions is not None:
@@ -2014,11 +1991,12 @@ class MeerkatClient:
     # (`meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
     # at the server's typed-serde boundary — these aliases document the
     # closed-world shape for callers.
-    _CommsKind = Literal["input", "peer_message", "peer_request", "peer_response"]
+    _CommsKind = Literal["input", "peer_message", "peer_lifecycle", "peer_request", "peer_response"]
     _HandlingMode = Literal["queue", "steer"]
     _InputSource = Literal["tcp", "uds", "stdin", "webhook", "rpc"]
     _InputStreamMode = Literal["none", "reserve_interaction"]
     _ResponseStatus = Literal["accepted", "completed", "failed"]
+    _PeerLifecycleKind = Literal["mob.peer_added", "mob.peer_retired", "mob.peer_unwired"]
 
     async def send(
         self,
@@ -2027,6 +2005,7 @@ class MeerkatClient:
         kind: "MeerkatClient._CommsKind",
         to: str | None = None,
         body: str | None = None,
+        lifecycle_kind: "MeerkatClient._PeerLifecycleKind | None" = None,
         intent: str | None = None,
         params: dict[str, Any] | None = None,
         in_reply_to: str | None = None,
@@ -2042,6 +2021,7 @@ class MeerkatClient:
         Mirrors the Rust `CommsCommandRequest` variants:
         - ``kind="input"`` — inject input into the local session.
         - ``kind="peer_message"`` — fire-and-forget peer message.
+        - ``kind="peer_lifecycle"`` — one-way peer topology notification.
         - ``kind="peer_request"`` — request/response with correlated reply.
         - ``kind="peer_response"`` — reply to a prior peer request.
 
@@ -2051,6 +2031,7 @@ class MeerkatClient:
         fields: dict[str, Any] = {
             "to": to,
             "body": body,
+            "lifecycle_kind": lifecycle_kind,
             "intent": intent,
             "params": params,
             "in_reply_to": in_reply_to,
@@ -2126,14 +2107,6 @@ class MeerkatClient:
             {"session_id": session_id},
         )
         return RuntimeRealtimeAttachmentStatusResult(**raw)
-
-    async def runtime_realtime_attachment_statuses(
-        self, session_ids: list[str]
-    ) -> dict[str, Any]:
-        return await self._request(
-            "session/realtime_attachment_statuses",
-            {"session_ids": session_ids},
-        )
 
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]
@@ -2434,9 +2407,8 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
-        preload_skills: list[str] | None = None,
+        preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
         additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
@@ -2479,12 +2451,10 @@ class MeerkatClient:
         if provider_params is not None:
             params["provider_params"] = provider_params
         if preload_skills is not None:
-            params["preload_skills"] = preload_skills
+            params["preload_skills"] = _skill_refs_to_wire(preload_skills)
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
-        if skill_references is not None:
-            params["skill_references"] = skill_references
         if labels is not None:
             params["labels"] = labels
         if additional_instructions is not None:

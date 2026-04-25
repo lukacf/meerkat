@@ -86,16 +86,17 @@ export class RealtimeConnection {
         "realtime websocket closed before channel.open completed",
       );
     }
-    if ((opened as Record<string, unknown>).type === "channel.error") {
+    const openedRecord = opened as unknown as Record<string, unknown>;
+    if (openedRecord.type === "channel.error") {
       throw new MeerkatError(
         "REALTIME_OPEN_FAILED",
-        String((opened as Record<string, unknown>).message ?? "realtime websocket rejected channel.open"),
+        String(openedRecord.message ?? "realtime websocket rejected channel.open"),
       );
     }
-    if ((opened as Record<string, unknown>).type !== "channel.opened") {
+    if (openedRecord.type !== "channel.opened") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        `Expected channel.opened after channel.open, got ${String((opened as Record<string, unknown>).type)}`,
+        `Expected channel.opened after channel.open, got ${String(openedRecord.type)}`,
       );
     }
 

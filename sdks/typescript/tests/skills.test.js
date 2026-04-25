@@ -53,24 +53,12 @@ describe("Skills v2.1", () => {
     ]);
   });
 
-  it("Session.invokeSkill also accepts legacy string refs", async () => {
-    const calls = [];
-    const originalWarn = console.warn;
-    const warnings = [];
-    console.warn = (msg) => { warnings.push(String(msg ?? "")); };
-
+  it("Session.invokeSkill rejects legacy string refs", async () => {
     const mockClient = {
       hasCapability() { return true; },
       requireCapability() {},
-      async _startTurn(sessionId, prompt, options) {
-        calls.push({ sessionId, prompt, options });
-        return {
-          sessionId: "s-1",
-          text: "ok",
-          turns: 1,
-          toolCalls: 0,
-          usage: { inputTokens: 10, outputTokens: 5 },
-        };
+      async _startTurn() {
+        throw new Error("_startTurn should not be called");
       },
     };
 
@@ -79,21 +67,13 @@ describe("Skills v2.1", () => {
       usage: { inputTokens: 0, outputTokens: 0 },
     });
 
-    try {
-      await session.invokeSkill(
+    await assert.rejects(
+      () => session.invokeSkill(
         "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor",
         "run",
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    assert.equal(calls.length, 1);
-    // Legacy string refs get passed through to _startTurn as-is; normalization
-    // happens at the wire boundary in buildCreateParams / _startTurn
-    assert.deepEqual(calls[0].options.skillRefs, [
-      "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor",
-    ]);
+      ),
+      /Skill references must be SkillKey objects/,
+    );
   });
 
   it("parseRunResult includes skillDiagnostics", () => {
@@ -169,6 +149,39 @@ describe("Skills v2.1", () => {
       to: "agent-b",
       body: "hello",
     });
+  });
+
+  it("Session.send forwards peer_lifecycle commands", async () => {
+    const calls = [];
+    const mockClient = {
+      async _send(sessionId, command) {
+        calls.push({ sessionId, command });
+        return { queued: true };
+      },
+    };
+
+    const session = new Session(mockClient, {
+      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const result = await session.send({
+      kind: "peer_lifecycle",
+      to: "agent-b",
+      lifecycle_kind: "mob.peer_retired",
+      params: { reason: "done" },
+    });
+
+    assert.deepEqual(result, { queued: true });
+    assert.deepEqual(calls, [{
+      sessionId: "s-1",
+      command: {
+        kind: "peer_lifecycle",
+        to: "agent-b",
+        lifecycle_kind: "mob.peer_retired",
+        params: { reason: "done" },
+      },
+    }]);
   });
 
   it("Session.peers returns peers list from _peers", async () => {

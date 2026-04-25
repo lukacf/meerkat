@@ -1,7 +1,5 @@
 """Tests for skills v2.1: SkillKey, SkillRef, and Session.invoke_skill()."""
 
-import warnings
-
 import pytest
 
 from meerkat import MeerkatClient, SkillKey
@@ -27,27 +25,9 @@ def test_normalize_skill_ref_passes_skill_key_through():
     assert result is key
 
 
-def test_normalize_skill_ref_parses_legacy_string():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        result = _normalize_skill_ref("dc256086-0d2f-4f61-a307-320d4148107f/email-extractor")
-
-    assert result == SkillKey(source_uuid="dc256086-0d2f-4f61-a307-320d4148107f", skill_name="email-extractor")
-    assert len(caught) >= 1
-    assert any(item.category is DeprecationWarning for item in caught)
-
-
-def test_normalize_skill_ref_strips_leading_slash():
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        result = _normalize_skill_ref("/dc256086/nested/skill")
-
-    assert result == SkillKey(source_uuid="dc256086", skill_name="nested/skill")
-
-
-def test_normalize_skill_ref_rejects_single_segment():
-    with pytest.raises(ValueError, match="Invalid skill reference"):
-        _normalize_skill_ref("just-a-name")
+def test_normalize_skill_ref_rejects_legacy_string():
+    with pytest.raises(TypeError, match="Skill references must be SkillKey objects"):
+        _normalize_skill_ref("dc256086-0d2f-4f61-a307-320d4148107f/email-extractor")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +56,6 @@ class _MockClient:
         prompt,
         *,
         skill_refs=None,
-        skill_references=None,
         flow_tool_overlay=None,
         additional_instructions=None,
         keep_alive=None,
@@ -92,7 +71,6 @@ class _MockClient:
             "session_id": session_id,
             "prompt": prompt,
             "skill_refs": skill_refs,
-            "skill_references": skill_references,
             "flow_tool_overlay": flow_tool_overlay,
             "additional_instructions": additional_instructions,
             "keep_alive": keep_alive,
@@ -162,18 +140,15 @@ async def test_invoke_skill_with_skill_key():
 
 
 @pytest.mark.asyncio
-async def test_invoke_skill_with_legacy_string_emits_deprecation():
+async def test_invoke_skill_rejects_legacy_string():
     session, client = _make_session()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(TypeError, match="Skill references must be SkillKey objects"):
         await session.invoke_skill(
             "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor",
             "run",
-        )
+        )  # type: ignore[arg-type]
 
-    assert len(caught) >= 1
-    assert any(item.category is DeprecationWarning for item in caught)
-    assert len(client._calls) == 1
+    assert client._calls == []
 
 
 @pytest.mark.asyncio
@@ -188,6 +163,27 @@ async def test_session_send_routes_to_client_send():
         "kind": "peer_message",
         "to": "agent-b",
         "body": "hello",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_send_routes_peer_lifecycle_command():
+    session, client = _make_session()
+    result = await session.send(
+        kind="peer_lifecycle",
+        to="agent-b",
+        lifecycle_kind="mob.peer_retired",
+        params={"reason": "done"},
+    )
+
+    assert result["queued"] is True
+    assert len(client._send_calls) == 1
+    assert client._send_calls[0]["session_id"] == "s-1"
+    assert client._send_calls[0]["kwargs"] == {
+        "kind": "peer_lifecycle",
+        "to": "agent-b",
+        "lifecycle_kind": "mob.peer_retired",
+        "params": {"reason": "done"},
     }
 
 

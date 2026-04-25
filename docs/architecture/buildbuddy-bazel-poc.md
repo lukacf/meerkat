@@ -79,6 +79,8 @@ modes:
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
+- `ci-workspace`: parallel CI-like `workspace-test-rbe` and clippy on fresh
+  output bases.
 
 `scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
 
@@ -119,6 +121,7 @@ Representative measurements from the POC environment:
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |
+| CI-like workspace-RBE + clippy, fresh output bases | `55.78s` max wall |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel

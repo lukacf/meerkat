@@ -33,26 +33,26 @@ fn configure_bazel_trybuild_tools() {
         unsafe { std::env::set_var("CARGO_MANIFEST_DIR", manifest_dir) };
     }
 
-    if std::env::var_os("CARGO").is_none() {
-        if let Some(cargo) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/cargo") {
-            // SAFETY: this test configures process-wide tool paths before
-            // spawning trybuild/cargo and before starting any test threads.
-            unsafe { std::env::set_var("CARGO", cargo) };
-        }
+    if std::env::var_os("CARGO").is_none()
+        && let Some(cargo) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/cargo")
+    {
+        // SAFETY: this test configures process-wide tool paths before
+        // spawning trybuild/cargo and before starting any test threads.
+        unsafe { std::env::set_var("CARGO", cargo) };
     }
 
-    if std::env::var_os("RUSTC").is_none() {
-        if let Some(rustc) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/rustc") {
-            // SAFETY: see the CARGO setup above.
-            unsafe { std::env::set_var("RUSTC", rustc) };
-        }
+    if std::env::var_os("RUSTC").is_none()
+        && let Some(rustc) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/rustc")
+    {
+        // SAFETY: see the CARGO setup above.
+        unsafe { std::env::set_var("RUSTC", rustc) };
     }
 
-    if std::env::var_os("CARGO_HOME").is_none() {
-        if let Some(cargo_home) = std::env::var_os("MEERKAT_HOST_CARGO_HOME") {
-            // SAFETY: see the CARGO setup above.
-            unsafe { std::env::set_var("CARGO_HOME", cargo_home) };
-        }
+    if std::env::var_os("CARGO_HOME").is_none()
+        && let Some(cargo_home) = std::env::var_os("MEERKAT_HOST_CARGO_HOME")
+    {
+        // SAFETY: see the CARGO setup above.
+        unsafe { std::env::set_var("CARGO_HOME", cargo_home) };
     }
 }
 

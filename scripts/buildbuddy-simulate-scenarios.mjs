@@ -23,6 +23,7 @@ Scenarios:
   multi-worktree     Create two temporary git worktrees and run parallel agents.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
+  ci-workspace       Run workspace-test-rbe and clippy in parallel.
   all                Run the default scenario set.
 `);
 }
@@ -92,6 +93,11 @@ function printResult(result) {
     )
     .slice(-8);
   for (const line of interesting) console.log(`  ${line}`);
+}
+
+async function removeTempTree(path) {
+  await run("chmod", ["-R", "u+w", path], { cwd: "/", label: `chmod ${path}` });
+  rmSync(path, { force: true, maxRetries: 3, recursive: true, retryDelay: 100 });
 }
 
 async function warmNoop(root) {
@@ -249,7 +255,7 @@ async function editProbes(root, { prewarm = false } = {}) {
     return 0;
   } finally {
     await run("git", ["worktree", "remove", "--force", worktree], { cwd: root, label: "remove-edit-probe-worktree" });
-    rmSync(temp, { force: true, recursive: true });
+    await removeTempTree(temp);
   }
 }
 
@@ -289,7 +295,7 @@ async function multiWorktree(root) {
   } finally {
     await run("git", ["worktree", "remove", "--force", a], { cwd: root, label: "remove-worktree-a" });
     await run("git", ["worktree", "remove", "--force", b], { cwd: root, label: "remove-worktree-b" });
-    rmSync(temp, { force: true, recursive: true });
+    await removeTempTree(temp);
   }
 }
 
@@ -327,7 +333,7 @@ async function ciCold(root) {
     }
     return 0;
   } finally {
-    rmSync(temp, { force: true, recursive: true });
+    await removeTempTree(temp);
   }
 }
 
@@ -352,7 +358,38 @@ async function ciParallel(root) {
     for (const result of results) printResult(result);
     return results.some((result) => result.code !== 0) ? 1 : 0;
   } finally {
-    rmSync(temp, { force: true, recursive: true });
+    await removeTempTree(temp);
+  }
+}
+
+async function ciWorkspace(root) {
+  console.log("\n== ci-workspace ==");
+  const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-ci-workspace-"));
+  try {
+    const commonEnv = {
+      BUILDBUDDY_MAX_IDLE_SECS: "5",
+      MEERKAT_BUILDBUDDY_OUTPUT_ROOT: temp,
+    };
+    const results = await Promise.all([
+      repoCommand(
+        root,
+        { ...commonEnv, RUST_LANE_ID: "ci-workspace-test-rbe" },
+        "workspace-test-rbe",
+        [],
+        ["--jobs=64"],
+      ),
+      repoCommand(
+        root,
+        { ...commonEnv, RUST_LANE_ID: "ci-workspace-clippy" },
+        "clippy",
+        [],
+        ["--jobs=64", "--color=no", "--curses=no"],
+      ),
+    ]);
+    for (const result of results) printResult(result);
+    return results.some((result) => result.code !== 0) ? 1 : 0;
+  } finally {
+    await removeTempTree(temp);
   }
 }
 
@@ -386,6 +423,7 @@ const scenarios = requested.length === 0 || requested.includes("all")
       "multi-worktree",
       "ci-cold",
       "ci-parallel",
+      "ci-workspace",
     ]
   : requested;
 
@@ -404,6 +442,7 @@ const runners = new Map([
   ["multi-worktree", multiWorktree],
   ["ci-cold", ciCold],
   ["ci-parallel", ciParallel],
+  ["ci-workspace", ciWorkspace],
 ]);
 
 for (const scenario of scenarios) {

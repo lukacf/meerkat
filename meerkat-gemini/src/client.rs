@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, GeminiThinkingLevel, ProviderTag};
+use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use meerkat_llm_core::LlmError;
@@ -1086,6 +1086,7 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel;
     use meerkat_core::{
         AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
     };

@@ -247,9 +247,9 @@ pub struct CompositionDriverRustBinding {
 /// this descriptor to install the driver and route observed effects through
 /// its decision function.
 ///
-/// This is the declarative seam that replaces the previously hand-crafted
-/// `flow_frame_loop` driver template: any composition can now declare a
-/// driver without the codegen knowing about it by name.
+/// This is the declarative seam that replaces hand-crafted per-composition
+/// driver templates: any composition can now declare a driver without the
+/// codegen knowing about it by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriver {
     /// Stable logical name — used for driver registration at runtime and

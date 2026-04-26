@@ -745,34 +745,52 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
+                            if let Err(error) = self
+                                .index_compaction_discards(&outcome.discarded, turn_count)
+                                .await
+                            {
+                                let error_message =
+                                    format!("memory indexing failed after compaction: {error}");
+                                tracing::warn!(
+                                    error = %error,
+                                    "memory store rejected compaction discard indexing; preserving original session history"
+                                );
+                                if !crate::event_tap::tap_emit(
+                                    &self.event_tap,
+                                    event_tx.as_ref(),
+                                    AgentEvent::CompactionFailed {
+                                        error: error_message,
+                                    },
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "compaction event stream receiver dropped before memory-indexing CompactionFailed"
+                                    );
+                                }
+                                continue;
+                            }
+
                             *self.session.messages_mut_internal() = outcome.new_messages;
                             self.session.record_usage(outcome.summary_usage.clone());
                             self.budget.record_usage(&outcome.summary_usage);
                             self.last_input_tokens = 0;
                             self.compaction_cadence.last_compaction_boundary_index =
                                 Some(outcome.session_boundary_index);
-
-                            if let Some(ref memory_store) = self.memory_store {
-                                let store = std::sync::Arc::clone(memory_store);
-                                let session_id = self.session.id().clone();
-                                let discarded = outcome.discarded;
-                                tokio::spawn(async move {
-                                    for message in &discarded {
-                                        let content = message.as_indexable_text();
-                                        if !content.is_empty() {
-                                            let metadata = crate::memory::MemoryMetadata {
-                                                session_id: session_id.clone(),
-                                                turn: Some(turn_count),
-                                                indexed_at: crate::time_compat::SystemTime::now(),
-                                            };
-                                            if let Err(e) = store.index(&content, metadata).await {
-                                                tracing::warn!(
-                                                    "failed to index compaction discard into memory: {e}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                });
+                            if !crate::event_tap::tap_emit(
+                                &self.event_tap,
+                                event_tx.as_ref(),
+                                AgentEvent::CompactionCompleted {
+                                    summary_tokens: outcome.summary_usage.output_tokens,
+                                    messages_before: outcome.messages_before,
+                                    messages_after: outcome.messages_after,
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "compaction event stream receiver dropped before CompactionCompleted"
+                                );
                             }
                         }
                     }
@@ -792,6 +810,30 @@ where
                 }
             }
         }
+    }
+
+    async fn index_compaction_discards(
+        &self,
+        discarded: &[Message],
+        turn_count: u32,
+    ) -> Result<(), crate::memory::MemoryStoreError> {
+        let Some(memory_store) = self.memory_store.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self.session.id().clone();
+        for message in discarded {
+            let content = message.as_indexable_text();
+            if content.is_empty() {
+                continue;
+            }
+            let metadata = crate::memory::MemoryMetadata {
+                session_id: session_id.clone(),
+                turn: Some(turn_count),
+                indexed_at: crate::time_compat::SystemTime::now(),
+            };
+            memory_store.index(&content, metadata).await?;
+        }
+        Ok(())
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
@@ -2283,6 +2325,9 @@ mod tests {
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
+    use crate::memory::{
+        MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    };
     use crate::retry::select_retry_delay;
     use crate::skills::{
         ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillKey,
@@ -2784,6 +2829,108 @@ mod tests {
                 messages: messages.to_vec(),
                 discarded: Vec::new(),
             }
+        }
+    }
+
+    struct DiscardingCompactor {
+        compact_on_boundary: u64,
+    }
+
+    impl DiscardingCompactor {
+        fn new(compact_on_boundary: u64) -> Self {
+            Self {
+                compact_on_boundary,
+            }
+        }
+    }
+
+    impl Compactor for DiscardingCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.compact_on_boundary == ctx.session_boundary_index
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find(|message| matches!(message, Message::User(_)))
+                .cloned();
+            let mut compacted = vec![Message::User(UserMessage::text(format!(
+                "[Context compacted] {summary}"
+            )))];
+            if let Some(last_user) = last_user {
+                compacted.push(last_user);
+            }
+            let discarded_len = messages.len().saturating_sub(1);
+            CompactionResult {
+                messages: compacted,
+                discarded: messages.iter().take(discarded_len).cloned().collect(),
+            }
+        }
+    }
+
+    struct RecordingMemoryStore {
+        entries: Mutex<Vec<(String, MemoryMetadata)>>,
+        fail_indexing: bool,
+    }
+
+    impl RecordingMemoryStore {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(Vec::new()),
+                fail_indexing: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                entries: Mutex::new(Vec::new()),
+                fail_indexing: true,
+            }
+        }
+
+        fn contents(&self) -> Vec<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(content, _)| content.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for RecordingMemoryStore {
+        async fn index(
+            &self,
+            content: &str,
+            metadata: MemoryMetadata,
+        ) -> Result<(), MemoryStoreError> {
+            if self.fail_indexing {
+                return Err(MemoryStoreError::Index("injected failure".to_string()));
+            }
+            self.entries
+                .lock()
+                .unwrap()
+                .push((content.to_string(), metadata));
+            Ok(())
+        }
+
+        async fn search(
+            &self,
+            _scope: &MemorySearchScope,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+            Ok(Vec::new())
         }
     }
 
@@ -3503,6 +3650,88 @@ mod tests {
                 "COMPACT NOW".to_string(),
                 "second".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_discards_are_indexed_before_history_replacement() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        let indexed = memory_store.contents();
+        assert!(
+            indexed.iter().any(|content| content.contains("first")),
+            "discarded first turn should be indexed before compaction commits"
+        );
+        assert!(
+            !agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "committed compacted history should no longer carry indexed discarded text"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_memory_index_failure_preserves_original_history() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(RecordingMemoryStore::failing());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("indexing failure should preserve history and continue the turn");
+
+        assert!(memory_store.contents().is_empty());
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "failed indexing must not discard the only authoritative copy of compacted text"
+        );
+
+        let mut saw_memory_failure = false;
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::CompactionFailed { error }
+                    if error.contains("memory indexing failed") =>
+                {
+                    saw_memory_failure = true;
+                }
+                crate::event::AgentEvent::CompactionCompleted { .. } => {
+                    saw_completed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_memory_failure,
+            "memory-index rejection should surface as a typed compaction failure"
+        );
+        assert!(
+            !saw_completed,
+            "compaction must not complete when memory indexing rejects discarded history"
         );
     }
 

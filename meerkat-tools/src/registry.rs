@@ -4,12 +4,77 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::ToolValidationError;
-use meerkat_core::types::{ToolDef, ToolName};
+use meerkat_core::ToolCatalogEntry;
+use meerkat_core::types::{ToolDef, ToolIdentity, ToolName};
 
 /// Registry for managing available tools and their schemas
 #[derive(Debug, Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<ToolName, Arc<ToolDef>>,
+}
+
+/// Frozen registry of tool identities in catalog order.
+///
+/// This intentionally records only identity plus the static tool definition
+/// needed for validation/fallback projections. Live callability remains owned
+/// by the router catalog.
+#[derive(Debug, Clone, Default)]
+pub struct ToolIdentityRegistry {
+    entries: Vec<ToolIdentityEntry>,
+    by_name: HashMap<ToolName, usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolIdentityEntry {
+    pub identity: ToolIdentity,
+    pub tool: Arc<ToolDef>,
+}
+
+impl ToolIdentityRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_catalog(catalog: &[ToolCatalogEntry]) -> Self {
+        let mut registry = Self::new();
+        for entry in catalog {
+            registry.register(Arc::clone(&entry.tool));
+        }
+        registry
+    }
+
+    pub fn register(&mut self, tool: Arc<ToolDef>) {
+        let identity = tool.identity();
+        if let Some(index) = self.by_name.get(&identity.name).copied() {
+            self.entries[index] = ToolIdentityEntry { identity, tool };
+            return;
+        }
+        let index = self.entries.len();
+        self.by_name.insert(identity.name.clone(), index);
+        self.entries.push(ToolIdentityEntry { identity, tool });
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ToolIdentityEntry> {
+        self.by_name
+            .get(name)
+            .and_then(|index| self.entries.get(*index))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ToolIdentityEntry> {
+        self.entries.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl ToolRegistry {
@@ -86,7 +151,7 @@ mod tests {
     fn test_registry_register_and_get() {
         let mut registry = ToolRegistry::new();
         let def = ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "A test tool".to_string(),
             input_schema: empty_object_schema(),
             provenance: None,
@@ -108,7 +173,7 @@ mod tests {
     fn test_registry_validate_invalid_args() {
         let mut registry = ToolRegistry::new();
         let def = ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "A test tool".to_string(),
             input_schema: json!({
                 "type": "object",

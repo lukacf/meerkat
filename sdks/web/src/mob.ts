@@ -22,6 +22,7 @@ import type {
   MobRespawnResult,
   MobMemberSnapshot,
   MobHelperResult,
+  EventEnvelope,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -58,28 +59,27 @@ interface MobWasmBindings {
   close_subscription: (handle: number) => void;
 }
 
-/**
- * Encode the wire `{identity, generation}` shape as an opaque
- * `AgentRuntimeRef` handle.
- *
- * The server emits `AgentRuntimeId` as a `{identity, generation}` object.
- * The SDK re-encodes it as a base64url-encoded opaque token
- * (`base64url(json({"i": identity, "g": generation}))`) so public callers
- * cannot parse incarnation internals — they can only compare handles for
- * equality to detect incarnation rotation. Matches the `WireMemberRef`
- * pattern from dogma round 1 (PR #295).
- *
- * Returns `''` when the field is absent. Any other non-canonical shape
- * throws — no string legacy form, no `agent_identity` alias, no
- * fabrication.
- */
-function encodeAgentRuntimeRef(raw: unknown): string {
+function encodeBase64UrlJson(payload: Record<string, unknown>): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const b64 = btoa(binary);
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function encodeMemberRef(mobId: string, agentIdentity: string): string {
+  return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
+}
+
+function encodeIncarnationRef(raw: unknown): string {
   if (raw == null) {
     return '';
   }
   if (typeof raw !== 'object') {
     throw new Error(
-      `Invalid agent_runtime_id wire shape: expected object, got ${typeof raw}`,
+      `Invalid incarnation wire shape: expected object, got ${typeof raw}`,
     );
   }
   const record = raw as Record<string, unknown>;
@@ -91,16 +91,57 @@ function encodeAgentRuntimeRef(raw: unknown): string {
     typeof generation !== 'number' ||
     !Number.isFinite(generation)
   ) {
-    throw new Error('Invalid agent_runtime_id wire shape: missing identity/generation');
+    throw new Error('Invalid incarnation wire shape: missing identity/generation');
   }
-  const payload = JSON.stringify({ i: identity, g: generation });
-  const bytes = new TextEncoder().encode(payload);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
+  return encodeBase64UrlJson({ i: identity, g: generation });
+}
+
+function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
+  if (!raw || typeof raw !== 'object') {
+    return raw as MemberEventItem;
   }
-  const b64 = btoa(binary);
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const record = raw as Record<string, unknown>;
+  if (record.type === 'lagged') {
+    return raw as MemberEventItem;
+  }
+  const agentIdentity =
+    typeof record.agent_identity === 'string' && record.agent_identity.length > 0
+      ? record.agent_identity
+      : undefined;
+  const incarnationRef = record.agent_runtime_id
+    ? encodeIncarnationRef(record.agent_runtime_id)
+    : undefined;
+  return {
+    agent_identity: agentIdentity,
+    member_ref: agentIdentity ? encodeMemberRef(mobId, agentIdentity) : undefined,
+    incarnation_ref: incarnationRef || undefined,
+    cursor:
+      typeof record.cursor === 'string' || typeof record.cursor === 'number'
+        ? record.cursor
+        : undefined,
+    event:
+      record.event && typeof record.event === 'object'
+        ? (record.event as EventEnvelope['event'])
+        : { type: 'unknown' },
+  };
+}
+
+function normalizeAttributedEvent(raw: unknown, mobId: string): AttributedEventItem {
+  if (!raw || typeof raw !== 'object') {
+    return raw as AttributedEventItem;
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.type === 'lagged') {
+    return raw as AttributedEventItem;
+  }
+  const envelope = normalizeEventEnvelope(record.envelope, mobId);
+  return {
+    source: typeof record.source === 'string' ? record.source : '',
+    source_incarnation_ref:
+      envelope && 'incarnation_ref' in envelope ? envelope.incarnation_ref : undefined,
+    role: typeof record.role === 'string' ? record.role : '',
+    envelope: envelope && 'event' in envelope ? envelope : { event: { type: 'unknown' } },
+  };
 }
 
 /** Capability-bearing handle for one mob member. */
@@ -151,7 +192,10 @@ export class Member {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],
+      (raw) =>
+        Array.isArray(raw)
+          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
+          : [],
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -351,20 +395,14 @@ export class Mob {
   /** Read the current execution snapshot for a member. */
   async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {
     const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
-    const snapshot = JSON.parse(json) as Partial<MobMemberSnapshot>;
-    const agentRuntimeId = encodeAgentRuntimeRef(snapshot.agent_runtime_id);
-    if (!agentRuntimeId) {
-      throw new Error(
-        'Invalid mob_member_status response: missing agent_runtime_id',
-      );
-    }
+    const snapshot = JSON.parse(json) as Record<string, unknown>;
+    const incarnationRef = snapshot.agent_runtime_id
+      ? encodeIncarnationRef(snapshot.agent_runtime_id)
+      : undefined;
     return {
       status: typeof snapshot.status === 'string' ? snapshot.status : 'unknown',
-      agent_runtime_id: agentRuntimeId,
-      fence_token:
-        typeof snapshot.fence_token === 'number' && Number.isFinite(snapshot.fence_token)
-          ? snapshot.fence_token
-          : 0,
+      member_ref: encodeMemberRef(this.mobId, agentIdentity),
+      incarnation_ref: incarnationRef || undefined,
       output_preview:
         typeof snapshot.output_preview === 'string' ? snapshot.output_preview : undefined,
       error: typeof snapshot.error === 'string' ? snapshot.error : undefined,
@@ -374,7 +412,10 @@ export class Mob {
         snapshot.kickoff && typeof snapshot.kickoff === 'object'
           ? (snapshot.kickoff as Record<string, unknown>)
           : undefined,
-      peer_connectivity: snapshot.peer_connectivity,
+      peer_connectivity:
+        snapshot.peer_connectivity && typeof snapshot.peer_connectivity === 'object'
+          ? (snapshot.peer_connectivity as MobMemberSnapshot['peer_connectivity'])
+          : undefined,
     };
   }
 
@@ -507,7 +548,10 @@ export class Mob {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],
+      (raw) =>
+        Array.isArray(raw)
+          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
+          : [],
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -517,7 +561,10 @@ export class Mob {
     const handle = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as AttributedEventItem[]) : [],
+      (raw) =>
+        Array.isArray(raw)
+          ? raw.map((item) => normalizeAttributedEvent(item, this.mobId))
+          : [],
       () => this.bindings.close_subscription(handle),
     );
   }

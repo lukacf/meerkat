@@ -70,7 +70,7 @@
     <script type="module">
       import {
         MeerkatRuntime,
-        WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+        WASM_EXTERNAL_AUTH_RESOLVER_HANDLE as WASM_EXTERNAL_AUTH_RESOLVER_ID,
         registerExternalAuthResolver,
         withConnectionRef,
       } from '../src/index.js';
@@ -114,7 +114,7 @@
                 auth_method: 'external_authorizer',
                 source: {
                   kind: 'external_resolver',
-                  handle: WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+                  handle: WASM_EXTERNAL_AUTH_RESOLVER_ID,
                 },
               },
             },

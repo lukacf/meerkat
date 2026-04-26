@@ -145,16 +145,7 @@ impl MobSeamEffect {
                 work_id,
                 origin,
             }) => match id.as_str() {
-                // The composition's route binding for
-                // `work_request_reaches_meerkat` projects producer field
-                // `runtime_id` → consumer field `agent_runtime_id`. Surface
-                // both slugs against the same backing runtime-id so the
-                // dispatcher's field-binding walk resolves whether the
-                // caller asks by route-producer name (`runtime_id`) or by
-                // consumer-field name (`agent_runtime_id`).
-                "agent_runtime_id" | "runtime_id" => {
-                    Some(FieldValue::Str(agent_runtime_id.as_str()))
-                }
+                "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
                 "fence_token" => Some(FieldValue::U64(fence_token.0)),
                 "work_id" => Some(FieldValue::Str(work_id.0.as_str())),
                 "origin" => Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin)))),
@@ -509,12 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_exposes_both_runtime_id_and_agent_runtime_id_aliases() {
-        // Route bindings carry `(to_field, from_field)` pairs; the
-        // `work_request_reaches_meerkat` route translates producer field
-        // `runtime_id` into consumer field `agent_runtime_id`, so the
-        // producer surfaces under BOTH slugs that the route-binding walk
-        // may probe.
+    fn ingress_exposes_schema_declared_producer_fields() {
         let body = mob_dsl::MobMachineEffect::RequestRuntimeIngress {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-x"),
             fence_token: mob_dsl::FenceToken(1),
@@ -524,15 +510,12 @@ mod tests {
         let effect = MobSeamEffect::Mob(body);
 
         assert!(matches!(
-            effect.field(&fid("runtime_id")).expect("runtime_id alias"),
-            FieldValue::Str("rt-x"),
-        ));
-        assert!(matches!(
             effect
                 .field(&fid("agent_runtime_id"))
-                .expect("agent_runtime_id alias"),
+                .expect("agent_runtime_id"),
             FieldValue::Str("rt-x"),
         ));
+        assert!(effect.field(&fid("runtime_id")).is_none());
         match effect.field(&fid("origin")).expect("origin") {
             FieldValue::Opaque(value) => assert!(matches!(
                 value.downcast_ref::<meerkat_dsl::WorkOrigin>(),

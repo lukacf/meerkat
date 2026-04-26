@@ -77,10 +77,13 @@ impl LlmClient for RecordingToolClient {
         request: &'a meerkat_client::LlmRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
     {
-        self.seen_tools
-            .lock()
-            .expect("recording lock")
-            .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+        self.seen_tools.lock().expect("recording lock").push(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+        );
         Box::pin(stream::iter(vec![Ok(meerkat_client::LlmEvent::Done {
             outcome: meerkat_client::LlmDoneOutcome::Success {
                 stop_reason: StopReason::EndTurn,

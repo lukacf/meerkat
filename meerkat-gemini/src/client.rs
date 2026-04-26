@@ -1241,7 +1241,7 @@ mod tests {
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_1".to_string(),
-                        name: "get_weather".to_string(),
+                        name: "get_weather".into(),
                         args: args_raw,
                         meta: Some(Box::new(ProviderMeta::Gemini {
                             thought_signature: "sig_123".to_string(),
@@ -1816,7 +1816,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -1903,7 +1903,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -1975,7 +1975,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -2059,7 +2059,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -2108,7 +2108,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -2154,7 +2154,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "upsert_record".to_string(),
+            name: "upsert_record".into(),
             description: "test".to_string(),
             input_schema: schema,
             provenance: None,
@@ -2311,7 +2311,7 @@ mod tests {
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_1".to_string(),
-                        name: "get_weather".to_string(),
+                        name: "get_weather".into(),
                         args: args_raw,
                         meta: Some(Box::new(ProviderMeta::Gemini {
                             thought_signature: "sig_123".to_string(),
@@ -2388,7 +2388,7 @@ mod tests {
 
         let event = LlmEvent::ToolCallComplete {
             id: "fc_0".to_string(),
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             args: json!({}),
             meta, // new field
         };
@@ -2547,7 +2547,7 @@ mod tests {
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_1".to_string(),
-                        name: "screenshot".to_string(),
+                        name: "screenshot".into(),
                         args: args_raw,
                         meta: None,
                     }],

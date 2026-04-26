@@ -5,8 +5,41 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::{AgentErrorClass, AgentErrorReport};
+
 use super::identifiers::{InputId, RunId};
 use super::run_receipt::RunBoundaryReceipt;
+
+/// Typed run-failure payload emitted by core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFailureReport {
+    pub class: AgentErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<crate::event::AgentErrorReason>,
+    pub message: String,
+}
+
+impl RunFailureReport {
+    pub fn new(class: AgentErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            reason: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_agent_error_report(report: AgentErrorReport) -> Self {
+        Self {
+            class: report.class,
+            reason: report.reason,
+            message: report.message,
+        }
+    }
+
+    pub fn display_message(&self) -> &str {
+        &self.message
+    }
+}
 
 /// Events emitted by core during run execution.
 #[non_exhaustive]
@@ -42,8 +75,8 @@ pub enum RunEvent {
     RunFailed {
         /// The ID of the run.
         run_id: RunId,
-        /// Human-readable error description.
-        error: String,
+        /// Typed failure details. The human-readable message is a display projection.
+        failure: RunFailureReport,
         /// Whether this failure is recoverable (transient).
         recoverable: bool,
     },
@@ -75,6 +108,14 @@ impl RunEvent {
                 consumed_input_ids, ..
             } => consumed_input_ids,
             _ => &[],
+        }
+    }
+
+    /// Get the display-only failure message if this event is `RunFailed`.
+    pub fn failure_message(&self) -> Option<&str> {
+        match self {
+            RunEvent::RunFailed { failure, .. } => Some(failure.display_message()),
+            _ => None,
         }
     }
 }
@@ -137,11 +178,13 @@ mod tests {
     fn run_failed_serde() {
         let event = RunEvent::RunFailed {
             run_id: RunId::new(),
-            error: "LLM timeout".into(),
+            failure: RunFailureReport::new(AgentErrorClass::Llm, "LLM timeout"),
             recoverable: true,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "run_failed");
+        assert_eq!(json["failure"]["class"], "llm");
+        assert_eq!(json["failure"]["message"], "LLM timeout");
         assert_eq!(json["recoverable"], true);
         let parsed: RunEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(
@@ -177,7 +220,7 @@ mod tests {
             },
             RunEvent::RunFailed {
                 run_id: run_id.clone(),
-                error: "err".into(),
+                failure: RunFailureReport::new(AgentErrorClass::Internal, "err"),
                 recoverable: false,
             },
             RunEvent::RunCancelled {
@@ -198,7 +241,7 @@ mod tests {
 
         let event = RunEvent::RunFailed {
             run_id: RunId::new(),
-            error: "err".into(),
+            failure: RunFailureReport::new(AgentErrorClass::Internal, "err"),
             recoverable: false,
         };
         assert!(event.contributing_input_ids().is_empty());
@@ -207,5 +250,15 @@ mod tests {
             run_id: RunId::new(),
         };
         assert!(event.contributing_input_ids().is_empty());
+    }
+
+    #[test]
+    fn run_failed_message_is_projection() {
+        let event = RunEvent::RunFailed {
+            run_id: RunId::new(),
+            failure: RunFailureReport::new(AgentErrorClass::Hook, "denied"),
+            recoverable: false,
+        };
+        assert_eq!(event.failure_message(), Some("denied"));
     }
 }

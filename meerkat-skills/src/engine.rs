@@ -8,7 +8,7 @@ use meerkat_core::skills::{
     CapabilityId, ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection,
     SkillDescriptor, SkillDocument, SkillEngine, SkillError, SkillFilter, SkillIntrospectionEntry,
     SkillKey, SkillQuarantineDiagnostic, SkillRef, SkillSource, SourceHealthSnapshot,
-    SourceIdentityRegistry,
+    SourceIdentityRecord, SourceIdentityRegistry,
 };
 use meerkat_core::skills_config::default_source_identity_records;
 
@@ -61,6 +61,18 @@ where
         self.registry
             .resolve(key)
             .map(|resolved| resolved.key)
+            .map_err(|e| {
+                SkillError::Load(format!("source identity resolution failed for {key}: {e}").into())
+            })
+    }
+
+    fn resolve_source_identity(
+        &self,
+        key: &SkillKey,
+    ) -> Result<(SkillKey, SourceIdentityRecord), SkillError> {
+        self.registry
+            .resolve(key)
+            .map(|resolved| (resolved.key, resolved.source.clone()))
             .map_err(|e| {
                 SkillError::Load(format!("source identity resolution failed for {key}: {e}").into())
             })
@@ -226,17 +238,36 @@ where
     ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
         async move {
             let entries = self.source.list_all_with_provenance(filter).await?;
-            Ok(entries
-                .into_iter()
-                .filter(|e| {
-                    self.resolve_key(&e.descriptor.key).is_ok()
-                        && (!e.is_active
-                            || e.descriptor
-                                .capability_requirements
-                                .iter()
-                                .all(|cap| self.available_capabilities.contains(cap)))
-                })
-                .collect())
+            let mut active_entries = Vec::new();
+            for mut entry in entries {
+                let Ok((canonical_key, source_identity)) =
+                    self.resolve_source_identity(&entry.descriptor.key)
+                else {
+                    continue;
+                };
+                if entry.is_active
+                    && !entry
+                        .descriptor
+                        .capability_requirements
+                        .iter()
+                        .all(|cap| self.available_capabilities.contains(cap))
+                {
+                    continue;
+                }
+                let skill_name = canonical_key.skill_name.clone();
+                entry.descriptor.key = canonical_key;
+                entry.descriptor.source_name = source_identity.display_name.clone();
+                entry.source_identity = Some(source_identity);
+                if let Some(source_uuid) = entry.shadowed_by_source_uuid.clone() {
+                    let shadow_key = SkillKey::new(source_uuid, skill_name);
+                    if let Ok((_, shadow_identity)) = self.resolve_source_identity(&shadow_key) {
+                        entry.shadowed_by = Some(shadow_identity.display_name.clone());
+                        entry.shadowed_by_identity = Some(shadow_identity);
+                    }
+                }
+                active_entries.push(entry);
+            }
+            Ok(active_entries)
         }
     }
 

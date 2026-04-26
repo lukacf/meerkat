@@ -22,9 +22,12 @@ use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
 #[cfg(all(target_arch = "wasm32", test))]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry};
-use crate::types::{ToolCallView, ToolDef, ToolName};
+use crate::tool_catalog::{
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
+};
+use crate::types::{ToolCallView, ToolDef, ToolIdentity, ToolName};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Entry for a dispatcher in the gateway.
@@ -34,9 +37,9 @@ struct DispatcherEntry {
 
 /// A tool dispatcher that composes multiple dispatchers into one.
 ///
-/// The gateway builds a routing table at construction time, mapping each tool
-/// name to its owning dispatcher. This provides O(1) dispatch and catches
-/// name collisions early.
+/// The gateway freezes a routing table at construction time, mapping each tool
+/// name to its owning dispatcher. Live child catalogs are still consulted for
+/// callability and listing, but they cannot transfer ownership or add routes.
 ///
 /// ## Dynamic Visibility
 ///
@@ -45,8 +48,15 @@ struct DispatcherEntry {
 /// - Only returning available tools from `tools()`
 /// - Returning `ToolError::Unavailable` for hidden tools on dispatch
 pub struct ToolGateway {
-    /// Dispatcher entries with their availability
+    /// Dispatcher entries with frozen ownership snapshots.
     entries: Vec<DispatcherEntry>,
+    /// Frozen name-to-owner registry. Live catalogs may change callability,
+    /// but they do not transfer ownership or create new gateway routes.
+    routes: HashMap<ToolName, usize>,
+    /// Frozen identities in gateway catalog order.
+    frozen_order: Vec<ToolIdentity>,
+    /// Static tool definitions for frozen identities. Callability is live.
+    frozen_tools: HashMap<ToolName, Arc<ToolDef>>,
 }
 
 impl std::fmt::Debug for ToolGateway {
@@ -90,6 +100,35 @@ impl ToolGateway {
             .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
             .collect::<Vec<_>>()
             .into()
+    }
+
+    fn unavailable_frozen_entry(tool: Arc<ToolDef>) -> ToolCatalogEntry {
+        ToolCatalogEntry::session_inline_with_callability(
+            tool,
+            ToolCallability::unavailable(ToolUnavailableReason::NotCurrentlyCallable),
+        )
+    }
+
+    fn live_route_entry(
+        dispatcher: &dyn AgentToolDispatcher,
+        frozen_tool: Arc<ToolDef>,
+        name: &str,
+    ) -> Option<ToolCatalogEntry> {
+        if dispatcher.tool_catalog_capabilities().exact_catalog {
+            return dispatcher
+                .tool_catalog()
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .cloned()
+                .or_else(|| Some(Self::unavailable_frozen_entry(frozen_tool)));
+        }
+
+        dispatcher
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .or_else(|| Some(Self::unavailable_frozen_entry(frozen_tool)))
     }
 }
 
@@ -135,20 +174,35 @@ impl ToolGatewayBuilder {
     pub fn build(self) -> Result<ToolGateway, ToolError> {
         let mut entries: Vec<DispatcherEntry> = Vec::new();
         let mut seen: std::collections::HashSet<ToolName> = std::collections::HashSet::new();
+        let mut routes: HashMap<ToolName, usize> = HashMap::new();
+        let mut frozen_order = Vec::new();
+        let mut frozen_tools = HashMap::new();
 
         for dispatcher in self.dispatchers {
-            for entry in ToolGateway::live_catalog_for_dispatcher(dispatcher.as_ref()).iter() {
-                if !seen.insert(entry.tool.tool_name()) {
+            let frozen_catalog = ToolGateway::live_catalog_for_dispatcher(dispatcher.as_ref());
+            let dispatcher_index = entries.len();
+            for entry in frozen_catalog.iter() {
+                let name = entry.tool.tool_name();
+                let identity = entry.tool.identity();
+                if !seen.insert(name.clone()) {
                     return Err(ToolError::Other(format!(
                         "tool name collision in gateway: '{}'",
-                        entry.tool.name
+                        entry.tool.name.as_str()
                     )));
                 }
+                routes.insert(name.clone(), dispatcher_index);
+                frozen_tools.insert(name, Arc::clone(&entry.tool));
+                frozen_order.push(identity);
             }
             entries.push(DispatcherEntry { dispatcher });
         }
 
-        Ok(ToolGateway { entries })
+        Ok(ToolGateway {
+            entries,
+            routes,
+            frozen_order,
+            frozen_tools,
+        })
     }
 }
 
@@ -175,20 +229,24 @@ impl AgentToolDispatcher for ToolGateway {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        for entry in &self.entries {
-            if let Some(catalog_entry) =
-                Self::live_catalog_for_dispatcher(entry.dispatcher.as_ref())
-                    .iter()
-                    .find(|catalog_entry| catalog_entry.tool.name == call.name)
-                    .cloned()
-            {
-                if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-                    return Err(ToolError::unavailable(call.name, reason.to_string()));
-                }
-                return entry.dispatcher.dispatch(call).await;
-            }
+        let Some(dispatcher_index) = self.routes.get(call.name).copied() else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(entry) = self.entries.get(dispatcher_index) else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(frozen_tool) = self.frozen_tools.get(call.name).cloned() else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(catalog_entry) =
+            Self::live_route_entry(entry.dispatcher.as_ref(), frozen_tool, call.name)
+        else {
+            return Err(ToolError::not_found(call.name));
+        };
+        if let Some(reason) = catalog_entry.callability.unavailable_reason() {
+            return Err(ToolError::unavailable(call.name, reason.to_string()));
         }
-        Err(ToolError::not_found(call.name))
+        entry.dispatcher.dispatch(call).await
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
@@ -218,12 +276,24 @@ impl AgentToolDispatcher for ToolGateway {
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();
-        for entry in &self.entries {
-            for catalog_entry in Self::live_catalog_for_dispatcher(entry.dispatcher.as_ref()).iter()
+        for identity in &self.frozen_order {
+            let Some(dispatcher_index) = self.routes.get(&identity.name).copied() else {
+                continue;
+            };
+            let Some(entry) = self.entries.get(dispatcher_index) else {
+                continue;
+            };
+            let Some(frozen_tool) = self.frozen_tools.get(&identity.name).cloned() else {
+                continue;
+            };
+            if seen.insert(identity.name.clone())
+                && let Some(catalog_entry) = Self::live_route_entry(
+                    entry.dispatcher.as_ref(),
+                    frozen_tool,
+                    identity.name.as_str(),
+                )
             {
-                if seen.insert(catalog_entry.tool.name.clone()) {
-                    result.push(catalog_entry.clone());
-                }
+                result.push(catalog_entry);
             }
         }
         result.into()
@@ -583,7 +653,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
-                        name: name.to_string(),
+                        name: (*name).into(),
                         description: format!("{prefix} tool: {name}"),
                         input_schema: empty_object_schema(),
                         provenance: None,
@@ -611,7 +681,7 @@ mod tests {
                 .map(|(name, currently_callable)| {
                     crate::ToolCatalogEntry::session_inline(
                         Arc::new(ToolDef {
-                            name: (*name).to_string(),
+                            name: (*name).into(),
                             description: format!("{prefix} tool: {name}"),
                             input_schema: empty_object_schema(),
                             provenance: None,
@@ -649,7 +719,7 @@ mod tests {
         fn new(prefix: &str, tool_name: &str, callable: Arc<AtomicBool>) -> Self {
             Self {
                 tool: Arc::new(ToolDef {
-                    name: tool_name.to_string(),
+                    name: tool_name.into(),
                     description: format!("{prefix} tool: {tool_name}"),
                     input_schema: empty_object_schema(),
                     provenance: None,
@@ -675,7 +745,7 @@ mod tests {
                         .iter()
                         .map(|name| {
                             Arc::new(ToolDef {
-                                name: (*name).to_string(),
+                                name: (*name).into(),
                                 description: format!("{prefix} tool: {name}"),
                                 input_schema: empty_object_schema(),
                                 provenance: None,
@@ -689,11 +759,15 @@ mod tests {
 
         fn add_tool(&self, name: &str) {
             self.tools.lock().unwrap().push(Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("{} tool: {}", self.prefix, name),
                 input_schema: empty_object_schema(),
                 provenance: None,
             }));
+        }
+
+        fn remove_tool(&self, name: &str) {
+            self.tools.lock().unwrap().retain(|tool| tool.name != name);
         }
     }
 
@@ -764,7 +838,7 @@ mod tests {
             &self,
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-            if call.name != self.tool.name {
+            if self.tool.name != call.name {
                 return Err(ToolError::not_found(call.name));
             }
             if !self.callable.load(Ordering::SeqCst) {
@@ -984,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_uses_live_child_tools_for_listing_catalog_and_dispatch() {
+    async fn gateway_freezes_routes_but_uses_live_child_callability() {
         let dynamic = Arc::new(MutableMockDispatcher::new("dynamic", &["initial"]));
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(dynamic.clone())
@@ -994,7 +1068,7 @@ mod tests {
         let initial_names: Vec<_> = gateway
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(initial_names, vec!["initial".to_string()]);
 
@@ -1003,27 +1077,33 @@ mod tests {
         let live_names: Vec<_> = gateway
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(
             live_names,
-            vec!["initial".to_string(), "late".to_string()],
-            "gateway must not freeze child tool names at build time"
+            vec!["initial".to_string()],
+            "gateway freezes route identity/order at build time"
         );
 
         let catalog_names: Vec<_> = gateway
             .tool_catalog()
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect();
-        assert_eq!(
-            catalog_names,
-            vec!["initial".to_string(), "late".to_string()]
-        );
+        assert_eq!(catalog_names, vec!["initial".to_string()]);
 
-        let result = dispatch_json(&gateway, "late", json!({})).await.unwrap();
-        assert_eq!(result["source"], "dynamic");
-        assert_eq!(result["tool"], "late");
+        let result = dispatch_json(&gateway, "late", json!({})).await;
+        assert!(matches!(result, Err(ToolError::NotFound { .. })));
+
+        dynamic.remove_tool("initial");
+        assert!(gateway.tools().is_empty());
+        let catalog = gateway.tool_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].tool.name, "initial");
+        assert!(!catalog[0].currently_callable());
+
+        let result = dispatch_json(&gateway, "initial", json!({})).await;
+        assert!(matches!(result, Err(ToolError::Unavailable { .. })));
     }
 
     #[tokio::test]
@@ -1178,14 +1258,14 @@ mod tests {
         let visible_names: Vec<_> = gateway
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(visible_names, vec!["alpha".to_string()]);
 
         let catalog = gateway.tool_catalog();
         let catalog_names: Vec<_> = catalog
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect();
         assert_eq!(catalog_names, vec!["alpha".to_string(), "beta".to_string()]);
         assert!(
@@ -1234,7 +1314,7 @@ mod tests {
         let visible_names: Vec<_> = composite
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(
             visible_names,

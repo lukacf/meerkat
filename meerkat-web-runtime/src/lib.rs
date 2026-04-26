@@ -63,7 +63,7 @@ pub use ::tokio;
 
 // Phase 4d.wasm.1 — External-auth resolver seam for browser-hosted
 // OAuth. Host pages register a JS callback that returns a bearer
-// token; the provider-runtime registry consults the handle when a
+// token; the provider-runtime registry consults the resolver id when a
 // binding uses `CredentialSourceSpec::ExternalResolver`.
 pub mod external_auth;
 
@@ -422,11 +422,11 @@ fn build_service_infrastructure(
     // the provider runtime registry. The resolver itself handles the
     // "no callback registered" case by returning `MissingSecret`; we
     // always register the bridge so realm bindings configured with
-    // `CredentialSourceSpec::ExternalResolver { handle: WASM_EXTERNAL_AUTH_RESOLVER_HANDLE }`
+    // `CredentialSourceSpec::ExternalResolver { handle: WASM_EXTERNAL_AUTH_RESOLVER_ID }`
     // work whether or not the host page has (yet) installed a callback.
     #[cfg(target_arch = "wasm32")]
     let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
-        crate::external_auth::WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+        crate::external_auth::WASM_EXTERNAL_AUTH_RESOLVER_ID,
         std::sync::Arc::new(crate::external_auth::WasmExternalAuthResolver),
     );
     #[cfg(not(target_arch = "wasm32"))]

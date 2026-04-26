@@ -8,16 +8,16 @@
 //!
 //! This module defines:
 //!
-//! - [`ExternalAuthResolverHandle`] — wasm_bindgen-exposed handle that
-//!   stores a JS callback returning a Promise<string> of a bearer
-//!   token. The handle survives across WASM calls (registered once,
-//!   consulted per-session).
+//! - JS callback slot — wasm_bindgen-exposed registration that stores a
+//!   host callback returning a Promise<string> of a bearer token. The
+//!   callback survives across WASM calls (registered once, consulted
+//!   per-session).
 //! - [`register_external_auth_resolver`] — wasm_bindgen entry point
 //!   that the host page calls to install the resolver.
 //! - [`build_session_request_with_connection_ref`] — the post-§6.14
 //!   session-request builder that routes through the provider-runtime
 //!   registry. When the resolved binding uses an `ExternalResolver`
-//!   credential source, the registry looks up this handle's callback,
+//!   credential source, the registry looks up this resolver id's callback,
 //!   awaits it, and wires the returned token into the LLM client's
 //!   Authorization header.
 //!
@@ -47,10 +47,14 @@ thread_local! {
     static EXTERNAL_AUTH_RESOLVER: RefCell<Option<Function>> = const { RefCell::new(None) };
 }
 
-/// Canonical external-auth resolver handle installed by the WASM runtime.
+/// Canonical external-auth resolver id installed by the WASM runtime.
 /// Realm configs that want host-owned browser auth use
 /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`.
-pub const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE: &str = "wasm_host";
+pub const WASM_EXTERNAL_AUTH_RESOLVER_ID: &str = "wasm_host";
+
+/// Back-compat alias for SDKs/examples that still refer to the
+/// credential-source discriminator as a handle.
+pub const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE: &str = WASM_EXTERNAL_AUTH_RESOLVER_ID;
 
 /// Register a JS-side external-auth resolver. The callback receives a
 /// structural connection reference argument (`{ realm, binding, profile? }`)
@@ -138,7 +142,7 @@ fn connection_ref_js_value(connection_ref: &meerkat_core::ConnectionRef) -> JsVa
 /// Rust-side bridge that implements `ExternalAuthResolverHandle` by
 /// delegating to the JS callback registered via
 /// `register_external_auth_resolver`. Registered on `AgentFactory` with
-/// [`WASM_EXTERNAL_AUTH_RESOLVER_HANDLE`] during WASM runtime init. Realm
+/// [`WASM_EXTERNAL_AUTH_RESOLVER_ID`] during WASM runtime init. Realm
 /// bindings configured with
 /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
 /// therefore delegate credential resolution to the JS host's OAuth
@@ -156,7 +160,7 @@ impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver 
         let promise = invoke_external_auth_resolver(&binding.connection_ref).map_err(|e| {
             meerkat_core::AuthError::Other(format!(
                 "{} resolver: {}",
-                WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+                WASM_EXTERNAL_AUTH_RESOLVER_ID,
                 js_value_display(&e),
             ))
         })?;
@@ -165,14 +169,14 @@ impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver 
             .map_err(|e| {
                 meerkat_core::AuthError::Other(format!(
                     "{} resolver rejected: {}",
-                    WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+                    WASM_EXTERNAL_AUTH_RESOLVER_ID,
                     js_value_display(&e),
                 ))
             })?;
         let token = js_value.as_string().ok_or_else(|| {
             meerkat_core::AuthError::Other(format!(
                 "{} resolver must resolve its Promise to a string bearer token",
-                WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
+                WASM_EXTERNAL_AUTH_RESOLVER_ID,
             ))
         })?;
         if token.trim().is_empty() {

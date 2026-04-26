@@ -68,13 +68,14 @@ impl CallbackToolDispatcher {
         id_counter: Arc<AtomicU64>,
         inline_tools: Vec<ToolDef>,
     ) -> Self {
-        let inline_names: HashSet<String> = inline_tools.iter().map(|t| t.name.clone()).collect();
+        let inline_names: HashSet<String> =
+            inline_tools.iter().map(|t| t.name.to_string()).collect();
         let last_seen_globals = registered_tools
             .read()
             .map(|g| {
                 g.iter()
-                    .filter(|t| !inline_names.contains(&t.name))
-                    .map(|t| t.name.clone())
+                    .filter(|t| !inline_names.contains(t.name.as_str()))
+                    .map(|t| t.name.to_string())
                     .collect()
             })
             .unwrap_or_default();
@@ -99,8 +100,8 @@ impl CallbackToolDispatcher {
             .read()
             .map(|g| {
                 g.iter()
-                    .filter(|t| !self.inline_names.contains(&t.name))
-                    .map(|t| t.name.clone())
+                    .filter(|t| !self.inline_names.contains(t.name.as_str()))
+                    .map(|t| t.name.to_string())
                     .collect()
             })
             .unwrap_or_default()
@@ -127,7 +128,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             .collect();
         if let Ok(global) = self.registered_tools.read() {
             for t in global.iter() {
-                if !self.inline_names.contains(&t.name) {
+                if !self.inline_names.contains(t.name.as_str()) {
                     result.push(Arc::new(t.clone()));
                 }
             }
@@ -150,7 +151,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             .collect();
         if let Ok(global) = self.registered_tools.read() {
             for tool in global.iter() {
-                if !self.inline_names.contains(&tool.name) {
+                if !self.inline_names.contains(tool.name.as_str()) {
                     result.push(callback_catalog_entry(tool.clone()));
                 }
             }
@@ -293,7 +294,7 @@ mod tests {
 
     fn make_tool_def(name: &str) -> ToolDef {
         ToolDef {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("Test tool {name}"),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,
@@ -304,7 +305,7 @@ mod tests {
         ToolDef {
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Callback,
-                source_id: "callback".to_string(),
+                source_id: "callback".into(),
             }),
             ..make_tool_def(name)
         }
@@ -454,7 +455,7 @@ mod tests {
         let names = dispatcher
             .tool_catalog()
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect::<Vec<_>>();
         assert!(names.contains(&"secret_lookup".to_string()));
         assert!(names.contains(&"secret_audit".to_string()));
@@ -474,7 +475,11 @@ mod tests {
 
         let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, inline);
 
-        let names: Vec<String> = dispatcher.tools().iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
         // Should have: shared (from inline), inline_only, global_only
         assert_eq!(names.len(), 3);
         assert!(names.contains(&"shared".to_string()));
@@ -505,7 +510,7 @@ mod tests {
         let catalog = dispatcher.tool_catalog();
         let names: Vec<_> = catalog
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect();
         assert_eq!(names.len(), 3);
         assert_eq!(

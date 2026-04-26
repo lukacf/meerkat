@@ -1176,7 +1176,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/health", get(health_check))
         .route("/skills", get(list_skills))
-        .route("/skills/{id}", get(inspect_skill))
         .route("/capabilities", get(get_capabilities))
         .route("/runtime/host_info", get(get_runtime_host_info))
         .route("/runtime/capabilities", get(get_runtime_capabilities))
@@ -1848,12 +1847,6 @@ fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
-#[derive(Debug, Deserialize)]
-struct InspectSkillQuery {
-    #[serde(default)]
-    source_uuid: Option<String>,
-}
-
 /// POST /comms/send — dispatch a canonical comms command.
 async fn comms_send(
     State(state): State<AppState>,
@@ -2253,51 +2246,18 @@ fn skill_source_provenance(
     source_uuid: meerkat_core::skills::SourceUuid,
     display_name: impl Into<String>,
 ) -> meerkat_contracts::SkillSourceProvenance {
+    let display_name = display_name.into();
     meerkat_contracts::SkillSourceProvenance {
-        source_uuid,
-        display_name: display_name.into(),
+        identity: meerkat_core::skills::SourceIdentityRecord {
+            source_uuid,
+            display_name: display_name.clone(),
+            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
+            fingerprint: format!("rest:{display_name}"),
+            status: meerkat_core::skills::SourceIdentityStatus::Active,
+        },
     }
 }
 
-/// Inspect a skill by ID.
-async fn inspect_skill(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    axum::extract::Query(query): axum::extract::Query<InspectSkillQuery>,
-) -> Result<Json<meerkat_contracts::SkillInspectResponse>, ApiError> {
-    let runtime = state
-        .skill_runtime
-        .as_ref()
-        .ok_or_else(|| ApiError::NotFound("skills not enabled".into()))?;
-
-    let source_uuid = query
-        .source_uuid
-        .as_deref()
-        .ok_or_else(|| ApiError::BadRequest("source_uuid query parameter is required".into()))
-        .and_then(|raw| {
-            meerkat_core::skills::SourceUuid::parse(raw)
-                .map_err(|e| ApiError::BadRequest(format!("invalid source_uuid `{raw}`: {e}")))
-        })?;
-    let skill_name = meerkat_core::skills::SkillName::parse(id.as_str())
-        .map_err(|e| ApiError::BadRequest(format!("invalid skill name `{id}`: {e}")))?;
-    let key = meerkat_core::skills::SkillKey::new(source_uuid, skill_name);
-    let doc = runtime
-        .load_from_source(&key, None)
-        .await
-        .map_err(|e| ApiError::NotFound(format!("skill inspect failed: {e}")))?;
-
-    Ok(Json(meerkat_contracts::SkillInspectResponse {
-        key: doc.descriptor.key.clone(),
-        name: doc.descriptor.name.clone(),
-        description: doc.descriptor.description.clone(),
-        scope: doc.descriptor.scope.to_string(),
-        source: skill_source_provenance(
-            doc.descriptor.key.source_uuid.clone(),
-            doc.descriptor.source_name.clone(),
-        ),
-        body: doc.body,
-    }))
-}
 /// Get runtime capabilities with status resolved against config.
 async fn get_capabilities(
     State(state): State<AppState>,

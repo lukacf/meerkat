@@ -388,8 +388,10 @@ impl ToolScope {
         deferred_tool_names: HashSet<String>,
         visibility_owner: Arc<dyn ToolVisibilityOwner>,
     ) -> Self {
-        let known_base_names: ToolNameSet =
-            base_tools.iter().map(|tool| tool.name.clone()).collect();
+        let known_base_names: ToolNameSet = base_tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
 
         Self {
             state: Arc::new(RwLock::new(ToolScopeState {
@@ -553,7 +555,7 @@ impl ToolScope {
         state.known_base_names = state
             .base_tools
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect::<ToolNameSet>();
 
         let known_base_names = state.known_base_names.clone();
@@ -567,7 +569,7 @@ impl ToolScope {
         let tools = Self::visible_tools_for_state(&state, visibility_state);
         let visible_names = tools
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
 
         Ok(ToolScopeBoundaryResult {
@@ -624,7 +626,7 @@ impl ToolScope {
         visibility_state: &SessionToolVisibilityState,
     ) -> Vec<String> {
         let tools = Self::visible_tools_for_state(state, visibility_state);
-        tools.iter().map(|tool| tool.name.clone()).collect()
+        tools.iter().map(|tool| tool.name.to_string()).collect()
     }
 
     fn visible_tools_for_state(
@@ -800,7 +802,7 @@ impl ToolScope {
         self.visible_tools_result().map(|tools| {
             tools
                 .iter()
-                .map(|tool| tool.name.clone())
+                .map(|tool| tool.name.to_string())
                 .collect::<BTreeSet<_>>()
         })
     }
@@ -856,6 +858,25 @@ impl ToolScope {
                     .collect::<BTreeSet<_>>()
             })
             .map_err(|_| ToolScopeApplyError::LockPoisoned)
+    }
+
+    /// Force the live projection closed after a boundary apply failure.
+    ///
+    /// This updates the projection state itself, not only the caller's local
+    /// provider tool list, so later dispatch prechecks cannot accidentally
+    /// observe the previous full tool set before the next healthy boundary.
+    pub fn fail_closed_projection(&self) -> Result<Arc<[Arc<ToolDef>]>, ToolScopeApplyError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        state.base_tools = Arc::<[Arc<ToolDef>]>::from([]);
+        state.known_base_names.clear();
+        state.control_tool_names.clear();
+        state.deferred_tool_names.clear();
+        state.active_turn_allow = Some(ToolNameSet::new());
+        state.active_turn_deny.clear();
+        Ok(Arc::<[Arc<ToolDef>]>::from([]))
     }
 
     /// Return the currently configured active and staged revisions.
@@ -1120,7 +1141,7 @@ mod tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
                     provenance: None,
@@ -1132,12 +1153,12 @@ mod tests {
 
     fn tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({ "type": "object" }),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Callback,
-                source_id: source_id.to_string(),
+                source_id: source_id.into(),
             }),
         })
     }
@@ -1354,7 +1375,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["visible".to_string(), "secret".to_string()]
         );
@@ -1368,7 +1389,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["visible".to_string(), "secret".to_string()]
         );
@@ -1382,7 +1403,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["visible".to_string()]
         );
@@ -1431,7 +1452,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
         );
@@ -1452,7 +1473,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["b".to_string()]
         );
@@ -1569,7 +1590,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
         );
@@ -1581,7 +1602,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             Vec::<String>::new(),
             "external allow(a,b) + turn allow(b,c) + turn deny(b) should be empty"
@@ -1592,7 +1613,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
         );
@@ -1607,7 +1628,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
@@ -1621,7 +1642,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
         );
@@ -1648,7 +1669,7 @@ mod tests {
             scope
                 .visible_tools()
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["b".to_string()]
         );

@@ -61,8 +61,9 @@ fn materialized_build_options(
     build.comms_name = create.comms_name.clone();
     build.peer_meta = create.peer_meta.clone();
     build.provider_params = create.provider_params.clone();
-    build.preload_skills =
-        (!create.preload_skills.is_empty()).then(|| create.preload_skills.clone());
+    if !create.preload_skills.is_empty() {
+        build.preload_skills = Some(create.preload_skills.clone());
+    }
     build.realm_id = create.realm_id.clone();
     build.instance_id = create.instance_id.clone();
     build.backend = create.backend.clone();

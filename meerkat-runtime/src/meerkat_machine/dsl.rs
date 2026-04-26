@@ -534,7 +534,7 @@ impl From<&meerkat_core::types::ToolProvenance> for ToolProvenance {
     fn from(p: &meerkat_core::types::ToolProvenance) -> Self {
         Self {
             kind: ToolSourceKind::from(&p.kind),
-            source_id: p.source_id.clone(),
+            source_id: p.source_id.to_string(),
         }
     }
 }

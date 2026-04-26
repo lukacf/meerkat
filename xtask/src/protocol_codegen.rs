@@ -116,7 +116,7 @@ fn rustfmt_source(source: &str) -> Result<String> {
 }
 
 fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::path::PathBuf {
-    root.join(&protocol.rust.module_path)
+    root.join(protocol.rust.module_path.as_str())
 }
 
 /// Public entry point used by the drift test. Renders the full helper

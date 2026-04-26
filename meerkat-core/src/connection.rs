@@ -303,6 +303,7 @@ pub fn resolve_realm_binding_target_for_provider(
     provider: Provider,
     explicit_realm: Option<&RealmId>,
     explicit_binding: Option<&BindingId>,
+    explicit_profile: Option<&ProfileId>,
     preferred_realm: Option<&RealmId>,
     allow_env_default: bool,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
@@ -352,7 +353,12 @@ pub fn resolve_realm_binding_target_for_provider(
                 })?
             }
         };
-        return materialize_connection_target(realm, provider, binding_id, None);
+        return materialize_connection_target(
+            realm,
+            provider,
+            binding_id,
+            explicit_profile.cloned(),
+        );
     }
 
     if allow_env_default && explicit_realm.is_none() && explicit_binding.is_none() {
@@ -363,7 +369,7 @@ pub fn resolve_realm_binding_target_for_provider(
                 source,
             }
         })?;
-        return materialize_connection_target(realm, provider, binding, None);
+        return materialize_connection_target(realm, provider, binding, explicit_profile.cloned());
     }
 
     if let Some(realm) = missing_default {
@@ -414,6 +420,7 @@ pub fn resolve_connection_ref_or_default_for_provider(
     resolve_realm_binding_target_for_provider(
         config,
         provider,
+        None,
         None,
         None,
         preferred_realm,
@@ -1017,6 +1024,7 @@ auth_profile = "default_profile"
             Provider::OpenAI,
             None,
             None,
+            None,
             Some(&preferred_realm),
             false,
         )
@@ -1037,6 +1045,7 @@ auth_profile = "default_profile"
             Provider::OpenAI,
             None,
             Some(&binding),
+            None,
             Some(&preferred_realm),
             false,
         )
@@ -1054,6 +1063,7 @@ auth_profile = "default_profile"
         let err = resolve_realm_binding_target_for_provider(
             &config,
             Provider::Anthropic,
+            None,
             None,
             None,
             Some(&preferred_realm),

@@ -76,14 +76,14 @@ impl ToolPolicyLayer {
     }
 
     /// Add a tool to the enable set
-    pub fn enable_tool(mut self, name: impl Into<String>) -> Self {
-        self.enable.insert(name.into());
+    pub fn enable_tool(mut self, name: impl Into<ToolName>) -> Self {
+        self.enable.insert(name);
         self
     }
 
     /// Add a tool to the disable set
-    pub fn disable_tool(mut self, name: impl Into<String>) -> Self {
-        self.disable.insert(name.into());
+    pub fn disable_tool(mut self, name: impl Into<ToolName>) -> Self {
+        self.disable.insert(name);
         self
     }
 }

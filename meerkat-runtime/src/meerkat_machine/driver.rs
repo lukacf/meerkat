@@ -1121,16 +1121,47 @@ pub(crate) fn machine_realize_recovered_runtime_state(
 ) {
     match runtime_state {
         RuntimeState::Retired if driver.runtime_state() != RuntimeState::Retired => {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(session_id) = auth.state.session_id.clone() {
+                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut *auth,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
+                );
+            }
+            drop(auth);
             driver.set_control_projection(RuntimeState::Retired, None, None);
         }
         RuntimeState::Stopped
             if driver.runtime_state() != RuntimeState::Stopped
                 && driver.runtime_state() != RuntimeState::Destroyed =>
         {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *auth,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
+            );
+            drop(auth);
             driver.set_control_projection(RuntimeState::Stopped, None, None);
             driver.stop_runtime_cleanup();
         }
         RuntimeState::Destroyed if driver.runtime_state() != RuntimeState::Destroyed => {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(session_id) = auth.state.session_id.clone() {
+                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut *auth,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
+                );
+            }
+            drop(auth);
             driver.set_control_projection(RuntimeState::Destroyed, None, None);
             driver.destroy_cleanup();
         }

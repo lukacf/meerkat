@@ -43,9 +43,15 @@ fn skill_source_provenance(
     source_uuid: meerkat_core::skills::SourceUuid,
     display_name: impl Into<String>,
 ) -> meerkat_contracts::SkillSourceProvenance {
+    let display_name = display_name.into();
     meerkat_contracts::SkillSourceProvenance {
-        source_uuid,
-        display_name: display_name.into(),
+        identity: meerkat_core::skills::SourceIdentityRecord {
+            source_uuid,
+            display_name: display_name.clone(),
+            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
+            fingerprint: format!("mcp:{display_name}"),
+            status: meerkat_core::skills::SourceIdentityStatus::Active,
+        },
     }
 }
 use meerkat_client::TestClient;
@@ -1166,7 +1172,7 @@ fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
         .iter()
         .filter(|tool| tool.handler_kind() == "callback")
         .map(|tool| ToolDef {
-            name: tool.name.clone(),
+            name: tool.name.clone().into(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
             provenance: Some(meerkat_core::types::ToolProvenance {
@@ -3157,12 +3163,13 @@ fn compose_external_tool_dispatchers(
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
         (Some(a), Some(b)) => {
-            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let primary_names: HashSet<String> =
+                a.tools().iter().map(|t| t.name.to_string()).collect();
             let secondary_tools = b.tools();
             let secondary_unique: Vec<String> = secondary_tools
                 .iter()
-                .map(|t| t.name.clone())
-                .filter(|name| !primary_names.contains(name))
+                .map(|t| t.name.to_string())
+                .filter(|name| !primary_names.contains(name.as_str()))
                 .collect();
 
             if secondary_unique.is_empty() {
@@ -3208,7 +3215,7 @@ impl MpcToolDispatcher {
             .iter()
             .map(|t| {
                 Arc::new(ToolDef {
-                    name: t.name.clone(),
+                    name: t.name.clone().into(),
                     description: t.description.clone(),
                     input_schema: t.input_schema.clone(),
                     provenance: Some(meerkat_core::types::ToolProvenance {
@@ -3401,14 +3408,14 @@ mod tests {
                 .expect("uuid");
         config.skills.repositories = vec![
             meerkat_core::skills_config::SkillRepositoryConfig {
-                name: "a".to_string(),
+                name: "a".into(),
                 source_uuid: source_uuid.clone(),
                 transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
                     path: "/tmp/a".to_string(),
                 },
             },
             meerkat_core::skills_config::SkillRepositoryConfig {
-                name: "b".to_string(),
+                name: "b".into(),
                 source_uuid,
                 transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
                     path: "/tmp/b".to_string(),
@@ -3751,13 +3758,13 @@ mod tests {
     fn test_mpc_tool_dispatcher_creates_tool_defs() {
         let mcp_tools = vec![
             McpToolDef {
-                name: "get_weather".to_string(),
+                name: "get_weather".into(),
                 description: "Get weather".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
                 handler: Some("callback".to_string()),
             },
             McpToolDef {
-                name: "search".to_string(),
+                name: "search".into(),
                 description: "Search".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
                 handler: Some("callback".to_string()),
@@ -3775,7 +3782,7 @@ mod tests {
     #[tokio::test]
     async fn test_mpc_tool_dispatcher_returns_callback_error() {
         let mcp_tools = vec![McpToolDef {
-            name: "get_weather".to_string(),
+            name: "get_weather".into(),
             description: "Get weather".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
             handler: Some("callback".to_string()),
@@ -4439,7 +4446,7 @@ mod tests {
                 content: "legacy ok".to_string(),
                 tool_calls: vec![meerkat_core::types::ToolCall {
                     id: "tool-1".to_string(),
-                    name: "search".to_string(),
+                    name: "search".into(),
                     args: serde_json::json!({ "query": "history" }),
                 }],
                 stop_reason: meerkat_core::types::StopReason::ToolUse,
@@ -4450,7 +4457,7 @@ mod tests {
             meerkat_core::types::BlockAssistantMessage {
                 blocks: vec![meerkat_core::types::AssistantBlock::ToolUse {
                     id: "tool-2".to_string(),
-                    name: "lookup".to_string(),
+                    name: "lookup".into(),
                     args: serde_json::value::RawValue::from_string(
                         serde_json::json!({ "item": "transcript" }).to_string(),
                     )

@@ -1,7 +1,7 @@
 //! Agent state machine internals.
 
 use crate::budget::{BudgetDimension, BudgetExceeded};
-use crate::error::AgentError;
+use crate::error::{AgentError, ToolError};
 use crate::event::{
     AgentEvent, BudgetType, DeferredCatalogDelta, ToolConfigChangeDomain,
     ToolConfigChangeOperation, ToolConfigChangedPayload,
@@ -22,7 +22,7 @@ use crate::turn_execution_authority::{
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
-    SystemNoticeMessage, ToolCallView, ToolDef, ToolResult, UserMessage,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, ToolResult, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -32,8 +32,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{
-    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, FilteredToolDispatcher,
-    LlmStreamResult, select_tool_catalog_mode,
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
+    select_tool_catalog_mode,
 };
 
 /// Pre-selected timeout source — determined before the LLM await, not inferred after.
@@ -184,9 +184,47 @@ fn hidden_deferred_catalog_names(
                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
             )
         })
-        .map(|entry| entry.tool.name.clone())
+        .map(|entry| entry.tool.name.to_string())
         .filter(|name| !visible_names.contains(name))
         .collect()
+}
+
+fn dispatcher_knows_tool<T>(dispatcher: &T, name: &str) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if dispatcher.tool_catalog_capabilities().exact_catalog {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .any(|entry| entry.tool.name == name)
+    } else {
+        dispatcher.tools().iter().any(|tool| tool.name == name)
+    }
+}
+
+fn precheck_visible_tool_call<T>(
+    dispatcher: &T,
+    visible_names: &ToolNameSet,
+    name: &str,
+) -> Result<(), ToolError>
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if visible_names.contains(name) {
+        return Ok(());
+    }
+    if dispatcher_knows_tool(dispatcher, name) {
+        return Err(ToolError::access_denied(name));
+    }
+    Err(ToolError::not_found(name))
+}
+
+fn tool_error_result(tool_use_id: String, error: ToolError) -> ToolResult {
+    let payload = error.to_error_payload();
+    let serialized = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
+    ToolResult::new(tool_use_id, serialized, true)
 }
 
 fn parse_runtime_operation_id(value: &str) -> Option<crate::ops::OperationId> {
@@ -772,30 +810,40 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            if let Err(error) = self
+                            match self
                                 .index_compaction_discards(&outcome.discarded, turn_count)
                                 .await
                             {
-                                let error_message =
-                                    format!("memory indexing failed after compaction: {error}");
-                                tracing::warn!(
-                                    error = %error,
-                                    "memory store rejected compaction discard indexing; preserving original session history"
-                                );
-                                if !crate::event_tap::tap_emit(
-                                    &self.event_tap,
-                                    event_tx.as_ref(),
-                                    AgentEvent::CompactionFailed {
-                                        error: error_message,
-                                    },
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        "compaction event stream receiver dropped before memory-indexing CompactionFailed"
+                                crate::memory::MemoryIndexDelivery::Rejected {
+                                    error,
+                                    attempted_entries,
+                                    ..
+                                } => {
+                                    let error_message = format!(
+                                        "memory indexing failed after compaction ({attempted_entries} entries attempted): {error}"
                                     );
+                                    tracing::warn!(
+                                        error = %error,
+                                        attempted_entries,
+                                        "memory store rejected compaction discard indexing; preserving original session history"
+                                    );
+                                    if !crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::CompactionFailed {
+                                            error: error_message,
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "compaction event stream receiver dropped before memory-indexing CompactionFailed"
+                                        );
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                crate::memory::MemoryIndexDelivery::NoStore { .. }
+                                | crate::memory::MemoryIndexDelivery::Delivered(_) => {}
                             }
 
                             *self.session.messages_mut_internal() = outcome.new_messages;
@@ -843,11 +891,14 @@ where
         &self,
         discarded: &[Message],
         turn_count: u32,
-    ) -> Result<(), crate::memory::MemoryStoreError> {
-        let Some(memory_store) = self.memory_store.as_ref() else {
-            return Ok(());
-        };
+    ) -> crate::memory::MemoryIndexDelivery {
         let session_id = self.session.id().clone();
+        let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
+        let Some(memory_store) = self.memory_store.as_ref() else {
+            return crate::memory::MemoryIndexDelivery::NoStore { scope };
+        };
+        let mut indexed_entries = 0;
+        let mut attempted_entries = 0;
         for message in discarded {
             let content = message.as_indexable_text();
             if content.is_empty() {
@@ -858,9 +909,35 @@ where
                 turn: Some(turn_count),
                 indexed_at: crate::time_compat::SystemTime::now(),
             };
-            memory_store.index(&content, metadata).await?;
+            let request =
+                match crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return crate::memory::MemoryIndexDelivery::Rejected {
+                            scope,
+                            attempted_entries,
+                            error,
+                        };
+                    }
+                };
+            attempted_entries += 1;
+            match memory_store.index_scoped(request).await {
+                Ok(receipt) => {
+                    indexed_entries += receipt.indexed_entries;
+                }
+                Err(error) => {
+                    return crate::memory::MemoryIndexDelivery::Rejected {
+                        scope,
+                        attempted_entries,
+                        error,
+                    };
+                }
+            }
         }
-        Ok(())
+        crate::memory::MemoryIndexDelivery::Delivered(crate::memory::MemoryIndexReceipt {
+            scope,
+            indexed_entries,
+        })
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
@@ -1123,7 +1200,7 @@ where
                                 let control_names = catalog
                                     .iter()
                                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                                    .map(|entry| entry.tool.name.clone())
+                                    .map(|entry| entry.tool.name.to_string())
                                     .collect::<std::collections::HashSet<_>>();
                                 let deferred_names = if !control_names.is_empty()
                                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -1139,7 +1216,7 @@ where
                                                         ToolCatalogDeferredEligibility::DeferredEligible { .. }
                                                     )
                                                 })
-                                                .map(|entry| entry.tool.name.clone())
+                                                .map(|entry| entry.tool.name.to_string())
                                                 .collect()
                                 } else {
                                     std::collections::HashSet::new()
@@ -1333,7 +1410,15 @@ where
                                         "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
                                     ),
                                 ));
-                                Vec::<Arc<crate::types::ToolDef>>::new().into()
+                                self.tool_scope.fail_closed_projection().unwrap_or_else(
+                                    |close_err| {
+                                        tracing::warn!(
+                                            error = %close_err,
+                                            "failed to persist fail-closed tool-scope projection"
+                                        );
+                                        Vec::<Arc<crate::types::ToolDef>>::new().into()
+                                    },
+                                )
                             }
                         }
                     };
@@ -1598,7 +1683,7 @@ where
                                 .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
                             emit_event!(AgentEvent::ToolCallRequested {
                                 id: tc.id.to_string(),
-                                name: tc.name.to_string(),
+                                name: tc.name.into(),
                                 args: args_value,
                             });
                         }
@@ -1618,6 +1703,10 @@ where
                         let tools_ref = Arc::clone(&self.tools);
                         let mut executable_tool_calls = Vec::new();
                         let mut tool_results = Vec::with_capacity(tool_calls.len());
+                        let visible_tool_names = tool_defs
+                            .iter()
+                            .map(|tool| tool.tool_name())
+                            .collect::<ToolNameSet>();
 
                         let pre_tool_reports =
                             futures::future::join_all(tool_calls.iter().map(|tc| {
@@ -1709,6 +1798,31 @@ where
                                 }
                             }
 
+                            if let Err(error) = precheck_visible_tool_call(
+                                tools_ref.as_ref(),
+                                &visible_tool_names,
+                                tc.name.as_str(),
+                            ) {
+                                let tool_result = tool_error_result(tc.id.clone(), error);
+                                emit_event!(AgentEvent::ToolExecutionCompleted {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    result: tool_result.text_content(),
+                                    is_error: true,
+                                    duration_ms: 0,
+                                    has_images: false,
+                                });
+                                emit_event!(AgentEvent::ToolResultReceived {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    is_error: true,
+                                });
+                                tool_results.push(tool_result);
+                                self.budget.record_tool_call();
+                                tool_call_count += 1;
+                                continue;
+                            }
+
                             emit_event!(AgentEvent::ToolExecutionStarted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
@@ -1716,17 +1830,11 @@ where
                             executable_tool_calls.push(tc);
                         }
 
-                        let visible_tool_names =
-                            tool_defs.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
-                        let visible_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(
-                            FilteredToolDispatcher::new(Arc::clone(&tools_ref), visible_tool_names),
-                        );
-
                         // Execute all allowed tool calls in parallel using join_all
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|tc| {
-                                let tools_ref = Arc::clone(&visible_dispatcher);
+                                let tools_ref = Arc::clone(&tools_ref);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
                                     let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
@@ -2304,7 +2412,7 @@ impl ToolCallOwned {
             .unwrap_or_else(|_| fallback_raw_value());
         Self {
             id: view.id.to_string(),
-            name: view.name.to_string(),
+            name: view.name.into(),
             args,
         }
     }
@@ -2411,7 +2519,7 @@ mod tests {
             },
             AssistantBlock::ToolUse {
                 id: "t1".to_string(),
-                name: "tool".to_string(),
+                name: "tool".into(),
                 args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
                 meta: None,
             },
@@ -2535,7 +2643,7 @@ mod tests {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| fixture_skill_key("email-extractor")),
-                    name: "email-extractor".to_string(),
+                    name: "email-extractor".into(),
                     rendered_body: "<skill>injected canonical skill</skill>".to_string(),
                     byte_size: 34,
                 }])
@@ -2980,7 +3088,7 @@ mod tests {
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             })
         }
     }
@@ -3010,7 +3118,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
-                        name: (*name).to_string(),
+                        name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),
                         provenance: None,
@@ -3063,19 +3171,19 @@ mod tests {
     impl PlaneAwareToolDispatcher {
         fn new() -> Self {
             let visible = Arc::new(ToolDef {
-                name: "visible".to_string(),
+                name: "visible".into(),
                 description: "visible tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let secret = Arc::new(ToolDef {
-                name: "secret".to_string(),
+                name: "secret".into(),
                 description: "secret tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let control = Arc::new(ToolDef {
-                name: "tool_catalog_search".to_string(),
+                name: "tool_catalog_search".into(),
                 description: "control search tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
@@ -3148,29 +3256,29 @@ mod tests {
     impl DeferredLoadDispatcher {
         fn new() -> Self {
             let deferred = Arc::new(ToolDef {
-                name: "deferred_tool".to_string(),
+                name: "deferred_tool".into(),
                 description:
                     "deferred tool that must stay hidden until tool_catalog_load reaches the next boundary."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "test".to_string(),
+                    source_id: "test".into(),
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
-                name: "deferred_tool_two".to_string(),
+                name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "test".to_string(),
+                    source_id: "test".into(),
                 }),
             });
             let control = Arc::new(ToolDef {
-                name: "tool_catalog_load".to_string(),
+                name: "tool_catalog_load".into(),
                 description: "control load tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
@@ -3237,7 +3345,7 @@ mod tests {
                                 stable_owner_key: Some("callback:test".to_string()),
                                 last_seen_provenance: Some(crate::ToolProvenance {
                                     kind: crate::ToolSourceKind::Callback,
-                                    source_id: "test".to_string(),
+                                    source_id: "test".into(),
                                 }),
                             },
                         )]
@@ -3259,24 +3367,24 @@ mod tests {
     impl DeferredWithoutControlDispatcher {
         fn new() -> Self {
             let secret = Arc::new(ToolDef {
-                name: "secret".to_string(),
+                name: "secret".into(),
                 description: "deferred secret tool that direct AgentBuilder users must still reach without a control plane."
                     .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "direct-builder".to_string(),
+                    source_id: "direct-builder".into(),
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
-                name: "deferred_tool_two".to_string(),
+                name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "direct-builder".to_string(),
+                    source_id: "direct-builder".into(),
                 }),
             });
 
@@ -3371,7 +3479,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
             Ok(super::LlmStreamResult::new(
@@ -3406,7 +3514,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3415,7 +3523,7 @@ mod tests {
                 super::LlmStreamResult::new(
                     vec![AssistantBlock::ToolUse {
                         id: "call-1".to_string(),
-                        name: "secret".to_string(),
+                        name: "secret".into(),
                         args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
                         meta: None,
                     }],
@@ -3476,7 +3584,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3486,14 +3594,14 @@ mod tests {
                     vec![
                         AssistantBlock::ToolUse {
                             id: "call-hidden".to_string(),
-                            name: "secret".to_string(),
+                            name: "secret".into(),
                             args: serde_json::value::RawValue::from_string("{}".to_string())
                                 .unwrap(),
                             meta: None,
                         },
                         AssistantBlock::ToolUse {
                             id: "call-control".to_string(),
-                            name: "tool_catalog_search".to_string(),
+                            name: "tool_catalog_search".into(),
                             args: serde_json::value::RawValue::from_string(
                                 "{\"query\":\"secret\"}".to_string(),
                             )
@@ -3558,7 +3666,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3567,7 +3675,7 @@ mod tests {
                 super::LlmStreamResult::new(
                     vec![AssistantBlock::ToolUse {
                         id: "call-load".to_string(),
-                        name: "tool_catalog_load".to_string(),
+                        name: "tool_catalog_load".into(),
                         args: serde_json::value::RawValue::from_string(
                             "{\"names\":[\"deferred_tool\"]}".to_string(),
                         )

@@ -84,8 +84,11 @@ impl LlmClient for CaptureClient {
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>>
     {
-        *self.seen_tools.lock().expect("capture lock") =
-            request.tools.iter().map(|tool| tool.name.clone()).collect();
+        *self.seen_tools.lock().expect("capture lock") = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
         self.inner.stream(request)
     }
 
@@ -164,7 +167,7 @@ impl NamedDispatcher {
     fn new(name: &str) -> Self {
         Self {
             tools: Arc::from(vec![Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("{name} test tool"),
                 input_schema: json!({
                     "type": "object",
@@ -436,7 +439,7 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
         SelfHostedModelConfig {
             server: "local".to_string(),
             remote_model: "gemma4:31b".to_string(),
-            display_name: "Gemma 4 31B".to_string(),
+            display_name: "Gemma 4 31B".into(),
             family: "gemma-4".to_string(),
             tier: meerkat_models::ModelTier::Supported,
             context_window: Some(256_000),
@@ -488,7 +491,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
         SelfHostedModelConfig {
             server: "local".to_string(),
             remote_model: "gemma4:e2b".to_string(),
-            display_name: "Gemma 4 E2B".to_string(),
+            display_name: "Gemma 4 E2B".into(),
             family: "gemma-4".to_string(),
             tier: meerkat_models::ModelTier::Supported,
             context_window: Some(128_000),
@@ -609,7 +612,7 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
     let temp = tempfile::tempdir().unwrap();
     let comms_config = ResolvedCommsConfig {
         enabled: true,
-        name: "test-scheduler-comms".to_string(),
+        name: "test-scheduler-comms".into(),
         inproc_namespace: None,
         listen_tcp: None,
         listen_uds: None,
@@ -1959,7 +1962,7 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
     let temp = tempfile::tempdir().unwrap();
     let comms_config = meerkat_comms::ResolvedCommsConfig {
         enabled: true,
-        name: "shared-parent".to_string(),
+        name: "shared-parent".into(),
         inproc_namespace: None,
         listen_tcp: None,
         listen_uds: None,

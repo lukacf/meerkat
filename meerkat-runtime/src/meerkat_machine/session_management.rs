@@ -31,7 +31,13 @@ impl MeerkatMachine {
         // before publishing the session entry. The shell projection remains a
         // persistence witness; it never directly seeds `authority.state`.
         let recovered_phase = entry.as_driver().runtime_state();
-        if recovered_phase != RuntimeState::Idle {
+        let authority_phase = {
+            let authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::dsl_authority::runtime_phase_from_authority(&authority)
+        };
+        if recovered_phase != RuntimeState::Idle && recovered_phase != authority_phase {
             let mut authority = dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

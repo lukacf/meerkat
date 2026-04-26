@@ -86,7 +86,7 @@ impl AgentToolDispatcher for NoOpDispatcher {
     }
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
-            name: call.name.to_string(),
+            name: call.name.into(),
         })
     }
 }
@@ -104,7 +104,7 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
         .into_iter()
         .map(|t| {
             Arc::new(ToolDef {
-                name: t["name"].as_str().unwrap_or_default().to_string(),
+                name: t["name"].as_str().unwrap_or_default().into(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
                 provenance: Some(ToolProvenance {
@@ -141,7 +141,7 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             inner.dispatch(call).await
         } else {
             Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             })
         }
     }
@@ -329,7 +329,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tool: Arc::new(ToolDef {
-                    name: "secret_lookup".to_string(),
+                    name: "secret_lookup".into(),
                     description: "Look up a secret".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
                     provenance: None,

@@ -4,7 +4,7 @@
 
 use crate::budget::BudgetLimits;
 use crate::session::ToolVisibilityWitness;
-use crate::types::{Message, ToolName};
+use crate::types::{Message, ToolNameSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -205,9 +205,9 @@ pub enum ToolAccessPolicy {
     #[default]
     Inherit,
     /// Only allow specific tools
-    AllowList(Vec<ToolName>),
+    AllowList(ToolNameSet),
     /// Block specific tools
-    DenyList(Vec<ToolName>),
+    DenyList(ToolNameSet),
 }
 
 /// Policy for operation execution
@@ -423,13 +423,13 @@ mod tests {
         let json = serde_json::to_value(&inherit).unwrap();
         assert_eq!(json["type"], "inherit");
 
-        let allow = ToolAccessPolicy::AllowList(vec!["read_file".into(), "write_file".into()]);
+        let allow = ToolAccessPolicy::AllowList(["read_file", "write_file"].into_iter().collect());
         let json = serde_json::to_value(&allow).unwrap();
         assert_eq!(json["type"], "allow_list");
         // Adjacently-tagged: {"type": "allow_list", "value": [...]}
         assert!(json["value"].is_array());
 
-        let deny = ToolAccessPolicy::DenyList(vec!["dangerous_tool".into()]);
+        let deny = ToolAccessPolicy::DenyList(["dangerous_tool"].into_iter().collect());
         let json = serde_json::to_value(&deny).unwrap();
         assert_eq!(json["type"], "deny_list");
         assert!(json["value"].is_array());
@@ -439,7 +439,7 @@ mod tests {
         match parsed {
             ToolAccessPolicy::DenyList(tools) => {
                 assert_eq!(tools.len(), 1);
-                assert_eq!(tools[0], "dangerous_tool".into());
+                assert!(tools.contains("dangerous_tool"));
             }
             _ => unreachable!("Wrong variant"),
         }

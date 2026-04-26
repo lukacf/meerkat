@@ -626,7 +626,7 @@ impl LlmClient for OpenAiClient {
                                                     let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
                                                     yield LlmEvent::ToolCallComplete {
                                                         id: call_id.to_string(),
-                                                        name: name.to_string(),
+                                                        name: name.into(),
                                                         args: args_value,
                                                         meta: None,
                                                     };
@@ -1117,7 +1117,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
-            name: "get_weather".to_string(),
+            name: "get_weather".into(),
             description: "Get weather info".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1308,7 +1308,7 @@ mod tests {
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_xyz".to_string(),
-                        name: "get_weather".to_string(),
+                        name: "get_weather".into(),
                         args,
                         meta: None,
                     }],
@@ -2127,7 +2127,7 @@ mod tests {
                         },
                         AssistantBlock::ToolUse {
                             id: "call_1".to_string(),
-                            name: "search".to_string(),
+                            name: "search".into(),
                             args,
                             meta: None,
                         },
@@ -2280,7 +2280,7 @@ mod tests {
                         },
                         AssistantBlock::ToolUse {
                             id: "call_1".to_string(),
-                            name: "search".to_string(),
+                            name: "search".into(),
                             args,
                             meta: None,
                         },

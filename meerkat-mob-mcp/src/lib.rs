@@ -2177,7 +2177,7 @@ impl MobMcpDispatcher {
 
 fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
     Arc::new(ToolDef {
-        name: name.to_string(),
+        name: name.into(),
         description: description.to_string(),
         input_schema,
         provenance: Some(ToolProvenance {

@@ -209,12 +209,19 @@ impl SkillsConfig {
 }
 
 impl SkillsConfig {
-    /// Build a source identity registry from repository config + governance overlays.
-    pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
+    /// Canonical source identity records from built-ins + configured
+    /// repositories. Callers should build a `SourceIdentityRegistry` from
+    /// these before resolving source nodes.
+    pub fn source_identity_records(&self) -> Vec<SourceIdentityRecord> {
         let mut records = default_source_identity_records();
         records.extend(self.repositories.iter().map(repository_to_identity_record));
+        records
+    }
+
+    /// Build a source identity registry from repository config + governance overlays.
+    pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
         SourceIdentityRegistry::build(
-            records,
+            self.source_identity_records(),
             self.identity.lineage.clone(),
             self.identity.remaps.clone(),
             self.identity.aliases.clone(),

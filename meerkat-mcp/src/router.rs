@@ -1835,7 +1835,7 @@ impl McpRouter {
             };
             for tool in &entry.tools {
                 if let Some(previous_owner) =
-                    tool_to_server.insert(tool.name.clone(), server_name.clone())
+                    tool_to_server.insert(tool.name.to_string(), server_name.clone())
                     && previous_owner != server_name
                 {
                     tracing::warn!(
@@ -1845,7 +1845,7 @@ impl McpRouter {
                         "MCP projection remapped duplicate tool name to newer owner"
                     );
                 }
-                canonical_tools.insert(tool.name.clone(), Arc::clone(tool));
+                canonical_tools.insert(tool.name.to_string(), Arc::clone(tool));
             }
         }
 

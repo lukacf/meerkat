@@ -2096,16 +2096,24 @@ fn loop_transition_outcome(
     })
 }
 
-fn has_effect_variant(effects: &[flow_frame::Effect], variant: &str) -> bool {
-    effects.iter().any(|effect| {
-        matches!(
-            (variant, effect),
-            (
-                "NodeExecutionReleased",
-                flow_frame::Effect::NodeExecutionReleased(_)
-            )
-        )
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowFrameEffectKind {
+    NodeExecutionReleased,
+}
+
+impl FlowFrameEffectKind {
+    fn parse(effect: &flow_frame::Effect) -> Option<Self> {
+        match effect {
+            flow_frame::Effect::NodeExecutionReleased(_) => Some(Self::NodeExecutionReleased),
+            _ => None,
+        }
+    }
+}
+
+fn has_flow_frame_effect(effects: &[flow_frame::Effect], expected: FlowFrameEffectKind) -> bool {
+    effects
+        .iter()
+        .any(|effect| FlowFrameEffectKind::parse(effect) == Some(expected))
 }
 
 fn effect_admit_step_node_id(effects: &[flow_frame::Effect]) -> Option<FlowNodeId> {
@@ -2179,13 +2187,22 @@ fn frame_ready(state: &flow_frame::State) -> bool {
 }
 
 fn all_nodes_terminal(state: &flow_frame::State, spec: &FrameSpec) -> bool {
-    let terminal = ["Completed", "Failed", "Skipped", "Canceled"];
     spec.nodes.keys().all(|node_id| {
         state
             .node_status
             .get(node_id)
-            .is_some_and(|status| terminal.contains(&status.as_str()))
+            .is_some_and(|status| node_status_is_terminal(*status))
     })
+}
+
+fn node_status_is_terminal(status: flow_frame::NodeRunStatus) -> bool {
+    matches!(
+        status,
+        flow_frame::NodeRunStatus::Completed
+            | flow_frame::NodeRunStatus::Failed
+            | flow_frame::NodeRunStatus::Skipped
+            | flow_frame::NodeRunStatus::Canceled
+    )
 }
 
 fn register_ready_frame_if_needed(
@@ -2260,7 +2277,7 @@ fn pending_until_obligation(
     loop_snapshot: &LoopSnapshot,
 ) -> Result<Option<FlowLoopUntilEvaluationObligation>, MobError> {
     if loop_snapshot.kernel_state.phase != loop_iteration::Phase::Running
-        || loop_snapshot.kernel_state.stage.as_str() != "AwaitingUntil"
+        || loop_snapshot.kernel_state.stage != loop_iteration::LoopIterationStage::AwaitingUntil
     {
         return Ok(None);
     }
@@ -2310,7 +2327,10 @@ fn acknowledge_node_grant(
     };
     let mut next_run_state = grant.next_run_state.clone();
 
-    if has_effect_variant(&admit_outcome.effects, "NodeExecutionReleased") {
+    if has_flow_frame_effect(
+        &admit_outcome.effects,
+        FlowFrameEffectKind::NodeExecutionReleased,
+    ) {
         next_run_state = run_transition_state(
             &next_run_state,
             flow_run::Input::NodeExecutionReleased(flow_run::inputs::NodeExecutionReleased {
@@ -2472,6 +2492,50 @@ fn acknowledge_body_frame_start(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFrameTerminalProjection {
+    Completed,
+    Failed,
+    Canceled,
+}
+
+impl BodyFrameTerminalProjection {
+    fn from_frame_phase(phase: FlowFrameTerminalPhase) -> Self {
+        match phase {
+            FlowFrameTerminalPhase::Completed => Self::Completed,
+            FlowFrameTerminalPhase::Failed => Self::Failed,
+            FlowFrameTerminalPhase::Canceled => Self::Canceled,
+        }
+    }
+
+    fn loop_input(
+        self,
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+    ) -> loop_iteration::Input {
+        match self {
+            Self::Completed => loop_iteration::Input::BodyFrameCompleted(
+                loop_iteration::inputs::BodyFrameCompleted {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                },
+            ),
+            Self::Failed => {
+                loop_iteration::Input::BodyFrameFailed(loop_iteration::inputs::BodyFrameFailed {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                })
+            }
+            Self::Canceled => loop_iteration::Input::BodyFrameCanceled(
+                loop_iteration::inputs::BodyFrameCanceled {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                },
+            ),
+        }
+    }
+}
+
 fn advance_body_frame_after_seal(
     run_state: &flow_run::State,
     body_frame_id: &FrameId,
@@ -2492,11 +2556,8 @@ fn advance_body_frame_after_seal(
     }
 
     let iteration = frame_iteration(&body_frame.kernel_state)?;
-    let first_variant = match terminal_phase(&body_frame.kernel_state)? {
-        FlowFrameTerminalPhase::Completed => "BodyFrameCompleted",
-        FlowFrameTerminalPhase::Failed => "BodyFrameFailed",
-        FlowFrameTerminalPhase::Canceled => "BodyFrameCanceled",
-    };
+    let body_terminal =
+        BodyFrameTerminalProjection::from_frame_phase(terminal_phase(&body_frame.kernel_state)?);
     let next_run_state = flow_run::transition(
         run_state,
         flow_run::Input::FrameTerminated(flow_run::inputs::FrameTerminated {
@@ -2508,27 +2569,7 @@ fn advance_body_frame_after_seal(
     .next_state;
     let loop_outcome = loop_iteration::transition(
         &loop_snapshot.kernel_state,
-        match first_variant {
-            "BodyFrameCompleted" => loop_iteration::Input::BodyFrameCompleted(
-                loop_iteration::inputs::BodyFrameCompleted {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                },
-            ),
-            "BodyFrameFailed" => {
-                loop_iteration::Input::BodyFrameFailed(loop_iteration::inputs::BodyFrameFailed {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                })
-            }
-            "BodyFrameCanceled" => loop_iteration::Input::BodyFrameCanceled(
-                loop_iteration::inputs::BodyFrameCanceled {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                },
-            ),
-            _ => unreachable!(),
-        },
+        body_terminal.loop_input(&loop_instance_id, iteration as u32),
         &loop_iteration::EmptyContext,
     )
     .map_err(|error| MobError::Internal(format!("loop_iteration transition refused: {error:?}")))?;
@@ -2571,7 +2612,7 @@ fn advance_body_frame_after_seal(
             let loop_terminal = first_matching_loop_terminal_effect(&loop_outcome.effects)
                 .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "loop '{loop_instance_id}' did not emit a terminal effect after '{first_variant}'"
+                        "loop '{loop_instance_id}' did not emit a terminal effect after '{body_terminal:?}'"
                     ))
                 })?;
             let parent_frame_id = loop_parent_frame_id(&loop_outcome.next_state)?;

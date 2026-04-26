@@ -17,19 +17,19 @@ Canonical machine set:
 
 - `meerkat_machine`
 - `mob_machine`
-- perimeter machines that remain outside the kernels:
-  - `auth`
-  - `occurrence_lifecycle`
-  - `schedule_lifecycle`
+- `auth`
+- `occurrence_lifecycle`
+- `schedule_lifecycle`
 
 Status:
 
 - `specs/machines/` is the canonical executable spec home
-- the kernel authorities live at:
+- the machine authority specs live at:
   - `specs/machines/meerkat_machine/`
   - `specs/machines/mob_machine/`
-- the auth authority perimeter machine lives at:
   - `specs/machines/auth/`
+  - `specs/machines/occurrence_lifecycle/`
+  - `specs/machines/schedule_lifecycle/`
 - the schema catalog and generated authority artifacts must match these specs
 - where implementation or catalog coverage diverges, `mapping.md` calls that
   out explicitly

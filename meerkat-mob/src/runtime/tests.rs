@@ -576,7 +576,7 @@ impl MockSessionService {
                 dispatcher
                     .tools()
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect()
             })
             .unwrap_or_default()
@@ -3350,7 +3350,7 @@ struct EchoBundleDispatcher;
 impl AgentToolDispatcher for EchoBundleDispatcher {
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
         vec![Arc::new(meerkat_core::ToolDef {
-            name: "bundle_echo".to_string(),
+            name: "bundle_echo".into(),
             description: "Echo input value".to_string(),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
             provenance: None,
@@ -3868,7 +3868,7 @@ impl OverlayProbeDispatcher {
                     "properties": {}
                 });
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema,
                     provenance: None,
@@ -3912,7 +3912,7 @@ impl AgentLlmClient for OverlayProbeLlmClient {
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
-            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+            .push(tools.iter().map(|tool| tool.name.to_string()).collect());
         Ok(LlmStreamResult::new(
             vec![AssistantBlock::Text {
                 text: "{}".to_string(),
@@ -7754,7 +7754,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     .with_label("role", "worker")
                     .with_label("member_id", "w-1"),
             ),
-            realm_id: Some("mob:test-mob".to_string()),
+            realm_id: Some("mob.test-mob".to_string()),
             instance_id: None,
             backend: None,
             config_generation: None,
@@ -18684,7 +18684,7 @@ impl MultiToolDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: name.to_string(),
+                    name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),
                     provenance: None,
@@ -18728,7 +18728,11 @@ async fn test_name_filtered_dispatcher() {
     let filtered = NameFilteredDispatcher::new(inner, excluded);
 
     // tools() should return only ["a", "c"]
-    let tool_names: Vec<String> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = filtered
+        .tools()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
     assert_eq!(tool_names.len(), 2);
     assert!(tool_names.contains(&"a".to_string()));
     assert!(tool_names.contains(&"c".to_string()));
@@ -19334,7 +19338,7 @@ async fn test_external_tools_late_registration() {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: name.to_string(),
+                    name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),
                     provenance: None,
@@ -22613,7 +22617,7 @@ fn mob_runtime_parity_schema_transition_summaries_for_phase_input(
             guard_names: transition
                 .guards
                 .iter()
-                .map(|guard| guard.name.clone())
+                .map(|guard| guard.name.to_string())
                 .collect(),
             update_count: transition.updates.len(),
             effect_variants: transition

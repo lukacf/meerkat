@@ -1958,22 +1958,34 @@ export class MeerkatClient {
     return this.request("auth/profile/list", { realm_id: realmId });
   }
 
-  async authProfileGet(realmId: string, profileId: string): Promise<unknown> {
-    return this.request("auth/profile/get", {
+  async authProfileGet(
+    realmId: string,
+    bindingId: string,
+    profileId?: string,
+  ): Promise<unknown> {
+    const params: Record<string, unknown> = {
       realm_id: realmId,
-      profile_id: profileId,
-    });
+      binding_id: bindingId,
+    };
+    if (profileId) params.profile_id = profileId;
+    return this.request("auth/profile/get", params);
   }
 
   async authProfileCreate(params: Record<string, unknown>): Promise<unknown> {
     return this.request("auth/profile/create", params);
   }
 
-  async authProfileDelete(realmId: string, profileId: string): Promise<unknown> {
-    return this.request("auth/profile/delete", {
+  async authProfileDelete(
+    realmId: string,
+    bindingId: string,
+    profileId?: string,
+  ): Promise<unknown> {
+    const params: Record<string, unknown> = {
       realm_id: realmId,
-      profile_id: profileId,
-    });
+      binding_id: bindingId,
+    };
+    if (profileId) params.profile_id = profileId;
+    return this.request("auth/profile/delete", params);
   }
 
   async authLoginStart(params: Record<string, unknown>): Promise<unknown> {
@@ -2002,18 +2014,30 @@ export class MeerkatClient {
     return this.request("auth/login/provision_api_key", params);
   }
 
-  async authStatusGet(realmId: string, bindingId: string): Promise<unknown> {
-    return this.request("auth/status/get", {
+  async authStatusGet(
+    realmId: string,
+    bindingId: string,
+    profileId?: string,
+  ): Promise<unknown> {
+    const params: Record<string, unknown> = {
       realm_id: realmId,
       binding_id: bindingId,
-    });
+    };
+    if (profileId) params.profile_id = profileId;
+    return this.request("auth/status/get", params);
   }
 
-  async authLogout(realmId: string, bindingId: string): Promise<unknown> {
-    return this.request("auth/logout", {
+  async authLogout(
+    realmId: string,
+    bindingId: string,
+    profileId?: string,
+  ): Promise<unknown> {
+    const params: Record<string, unknown> = {
       realm_id: realmId,
       binding_id: bindingId,
-    });
+    };
+    if (profileId) params.profile_id = profileId;
+    return this.request("auth/logout", params);
   }
 
   // -- Transport ----------------------------------------------------------

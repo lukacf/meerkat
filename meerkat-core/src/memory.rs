@@ -5,6 +5,27 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Canonical semantic-memory owner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryOwner {
+    /// Session that owns the indexed memory shard.
+    session_id: crate::types::SessionId,
+}
+
+impl MemoryOwner {
+    pub fn canonical_session(session_id: crate::types::SessionId) -> Self {
+        Self { session_id }
+    }
+
+    pub fn session_id(&self) -> &crate::types::SessionId {
+        &self.session_id
+    }
+
+    fn includes(&self, metadata: &MemoryMetadata) -> bool {
+        metadata.session_id == self.session_id
+    }
+}
+
 /// Metadata associated with an indexed memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetadata {
@@ -30,18 +51,105 @@ pub struct MemoryResult {
 /// Typed owner/scope for semantic memory retrieval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemorySearchScope {
-    /// The session whose indexed memory is visible to this search.
-    pub session_id: crate::types::SessionId,
+    /// Canonical owner whose indexed memory is visible to this search.
+    pub owner: MemoryOwner,
 }
 
 impl MemorySearchScope {
     pub fn for_session(session_id: crate::types::SessionId) -> Self {
-        Self { session_id }
+        Self {
+            owner: MemoryOwner::canonical_session(session_id),
+        }
+    }
+
+    pub fn for_owner(owner: MemoryOwner) -> Self {
+        Self { owner }
+    }
+
+    pub fn session_id(&self) -> &crate::types::SessionId {
+        self.owner.session_id()
     }
 
     pub fn includes(&self, metadata: &MemoryMetadata) -> bool {
-        metadata.session_id == self.session_id
+        self.owner.includes(metadata)
     }
+}
+
+/// Typed owner/scope for semantic memory indexing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryIndexScope {
+    /// Canonical owner receiving the indexed memory projection.
+    pub owner: MemoryOwner,
+}
+
+impl MemoryIndexScope {
+    pub fn for_session(session_id: crate::types::SessionId) -> Self {
+        Self {
+            owner: MemoryOwner::canonical_session(session_id),
+        }
+    }
+
+    pub fn for_owner(owner: MemoryOwner) -> Self {
+        Self { owner }
+    }
+
+    pub fn session_id(&self) -> &crate::types::SessionId {
+        self.owner.session_id()
+    }
+
+    pub fn includes(&self, metadata: &MemoryMetadata) -> bool {
+        self.owner.includes(metadata)
+    }
+}
+
+/// One scoped semantic-memory indexing request.
+#[derive(Debug, Clone)]
+pub struct MemoryIndexRequest {
+    pub scope: MemoryIndexScope,
+    pub content: String,
+    pub metadata: MemoryMetadata,
+}
+
+impl MemoryIndexRequest {
+    pub fn new(
+        scope: MemoryIndexScope,
+        content: String,
+        metadata: MemoryMetadata,
+    ) -> Result<Self, MemoryStoreError> {
+        if !scope.includes(&metadata) {
+            return Err(MemoryStoreError::Scope(format!(
+                "memory metadata session {} is outside indexing scope {}",
+                metadata.session_id,
+                scope.session_id()
+            )));
+        }
+        Ok(Self {
+            scope,
+            content,
+            metadata,
+        })
+    }
+}
+
+/// Successful delivery receipt for a scoped memory index request.
+#[derive(Debug, Clone)]
+pub struct MemoryIndexReceipt {
+    pub scope: MemoryIndexScope,
+    pub indexed_entries: usize,
+}
+
+/// Typed compaction-to-memory delivery outcome.
+#[derive(Debug)]
+pub enum MemoryIndexDelivery {
+    NoStore {
+        scope: MemoryIndexScope,
+    },
+    Delivered(MemoryIndexReceipt),
+    Rejected {
+        scope: MemoryIndexScope,
+        attempted_entries: usize,
+        error: MemoryStoreError,
+    },
 }
 
 /// Semantic memory store for indexing and searching conversation history.
@@ -50,6 +158,24 @@ impl MemorySearchScope {
 pub trait MemoryStore: Send + Sync {
     /// Index text content with associated metadata.
     async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError>;
+
+    /// Index a typed, owner-scoped memory request.
+    async fn index_scoped(
+        &self,
+        request: MemoryIndexRequest,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let MemoryIndexRequest {
+            scope,
+            content,
+            metadata,
+        } = request;
+        let receipt_scope = scope.clone();
+        self.index(&content, metadata).await?;
+        Ok(MemoryIndexReceipt {
+            scope: receipt_scope,
+            indexed_entries: 1,
+        })
+    }
 
     /// Semantic search: return up to `limit` results ordered by relevance.
     async fn search(
@@ -63,6 +189,9 @@ pub trait MemoryStore: Send + Sync {
 /// Errors from memory store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStoreError {
+    #[error("Scope error: {0}")]
+    Scope(String),
+
     #[error("Embedding error: {0}")]
     Embedding(String),
 

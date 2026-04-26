@@ -158,7 +158,7 @@ impl CatalogControlDispatcher {
                 };
 
                 SearchResultItem {
-                    name: entry.tool.name.clone(),
+                    name: entry.tool.name.clone().into(),
                     description: entry.tool.description.clone(),
                     currently_callable: currently_loaded,
                     visibility_status,
@@ -341,7 +341,7 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                 let args =
                     call.parse_args::<SearchArgs>()
                         .map_err(|err| ToolError::InvalidArguments {
-                            name: call.name.to_string(),
+                            name: call.name.into(),
                             reason: err.to_string(),
                         })?;
                 let result = ToolResult::new(
@@ -355,7 +355,7 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                 let args =
                     call.parse_args::<LoadArgs>()
                         .map_err(|err| ToolError::InvalidArguments {
-                            name: call.name.to_string(),
+                            name: call.name.into(),
                             reason: err.to_string(),
                         })?;
                 let (response, effect) = self.load_response(args);
@@ -370,7 +370,7 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
                 Ok(outcome)
             }
             _ => Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             }),
         }
     }
@@ -444,13 +444,13 @@ fn matches_query(entry: &ToolCatalogEntry, query: &str) -> bool {
 fn control_provenance() -> Option<ToolProvenance> {
     Some(ToolProvenance {
         kind: ToolSourceKind::Builtin,
-        source_id: CONTROL_SOURCE_ID.to_string(),
+        source_id: CONTROL_SOURCE_ID.into(),
     })
 }
 
 fn search_tool_def() -> ToolDef {
     ToolDef {
-        name: SEARCH_TOOL_NAME.to_string(),
+        name: SEARCH_TOOL_NAME.into(),
         description:
             "Search the deferred session tool catalog by name or description. Returns deferred-eligible session tools without loading them."
                 .to_string(),
@@ -461,7 +461,7 @@ fn search_tool_def() -> ToolDef {
 
 fn load_tool_def() -> ToolDef {
     ToolDef {
-        name: LOAD_TOOL_NAME.to_string(),
+        name: LOAD_TOOL_NAME.into(),
         description:
             "Load one or more deferred session tools by canonical tool name so they become part of the staged session tool surface on the next boundary."
                 .to_string(),
@@ -511,19 +511,19 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             })
         }
     }
 
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
-            name: name.to_string(),
+            name: name.into(),
             description: description.to_string(),
             input_schema: json!({ "type": "object" }),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Callback,
-                source_id: "test".to_string(),
+                source_id: "test".into(),
             }),
         })
     }
@@ -710,19 +710,19 @@ mod tests {
             response.resolutions,
             vec![
                 ToolCatalogLoadResolution {
-                    name: "deferred_mcp_tool".to_string(),
+                    name: "deferred_mcp_tool".into(),
                     accepted: true,
                     accepted_noop: true,
                     rejected_reason: None,
                 },
                 ToolCatalogLoadResolution {
-                    name: "inline_tool".to_string(),
+                    name: "inline_tool".into(),
                     accepted: false,
                     accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::NotDeferredEligible),
                 },
                 ToolCatalogLoadResolution {
-                    name: "missing_tool".to_string(),
+                    name: "missing_tool".into(),
                     accepted: false,
                     accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(
             response.resolutions,
             vec![ToolCatalogLoadResolution {
-                name: "deferred_mcp_tool".to_string(),
+                name: "deferred_mcp_tool".into(),
                 accepted: false,
                 accepted_noop: false,
                 rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(
             response.resolutions,
             vec![ToolCatalogLoadResolution {
-                name: "deferred_mcp_tool".to_string(),
+                name: "deferred_mcp_tool".into(),
                 accepted: false,
                 accepted_noop: false,
                 rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),

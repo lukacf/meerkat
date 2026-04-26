@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `memory_search` tool. The agent can call this tool with a natural
     // language query and get back scored results.
 
-    let memory_dispatcher = MemorySearchDispatcher::new(
+    let memory_dispatcher = MemorySearchDispatcher::for_session(
         Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>,
         memory_session_id,
     );

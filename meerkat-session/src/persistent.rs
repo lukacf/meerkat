@@ -581,6 +581,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
+        if store_snapshot.is_some() {
+            return Ok(store_snapshot);
+        }
 
         let runtime_snapshot = if let Some(runtime_store) = self.runtime_store.as_ref() {
             let runtime_id = Self::runtime_id_for_session(id);
@@ -606,24 +609,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             None
         };
 
-        Ok(match (store_snapshot, runtime_snapshot) {
-            (Some(store_session), Some(mut runtime_session)) => {
-                if runtime_session.session_metadata().is_none()
-                    && let Some(metadata) = store_session.session_metadata()
-                    && let Err(err) = runtime_session.set_session_metadata(metadata)
-                {
-                    tracing::warn!(
-                        session_id = %id,
-                        error = %err,
-                        "failed to restore session metadata from durable session-store snapshot onto newer runtime snapshot"
-                    );
-                }
-                Some(runtime_session)
-            }
-            (Some(store_session), None) => Some(store_session),
-            (None, Some(runtime_session)) => Some(runtime_session),
-            (None, None) => None,
-        })
+        Ok(runtime_snapshot)
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -1030,6 +1016,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    fn no_terminal_run_result(session: &Session) -> RunResult {
+        RunResult {
+            text: String::new(),
+            session_id: session.id().clone(),
+            usage: meerkat_core::types::Usage::default(),
+            turns: 0,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        }
+    }
+
     async fn build_runtime_output(
         &self,
         id: &SessionId,
@@ -1074,7 +1073,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: None,
+                run_result: Some(Self::no_terminal_run_result(&persisted_session)),
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
@@ -2026,11 +2025,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Load the authoritative durable session view.
     ///
-    /// In runtime-backed mode, the runtime store can hold a newer canonical
-    /// boundary snapshot than the plain session-store row. Recovery and
-    /// post-turn inspection must therefore read through the same store/runtime
-    /// reconciliation seam instead of assuming the raw session-store row is
-    /// authoritative.
+    /// The raw `SessionStore` row is the durable session authority. Runtime
+    /// snapshots are boundary-commit companions retained for recovery
+    /// compatibility and are only consulted when no session-store row exists.
     pub async fn load_authoritative_session(
         &self,
         id: &SessionId,

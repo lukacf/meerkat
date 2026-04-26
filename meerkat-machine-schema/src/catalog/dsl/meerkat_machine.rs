@@ -309,16 +309,16 @@ machine! {
             StopRuntimeExecutor,
             Destroy { session_id: SessionId },
             RecoverInputLifecycle {
-                input_id: String,
+                input_id: InputId,
                 phase: Enum<InputPhase>,
                 terminal_kind: Option<Enum<InputTerminalKind>>,
-                superseded_by: Option<String>,
+                superseded_by: Option<InputId>,
                 aggregate_id: Option<String>,
                 abandon_reason: Option<Enum<InputAbandonReason>>,
                 abandon_attempt_count: u64,
                 attempt_count: u64,
-                run_id: Option<String>,
-                boundary_sequence: Option<u64>,
+                run_id: Option<RunId>,
+                boundary_sequence: Option<BoundarySequence>,
                 lane: Option<Enum<InputLane>>,
             },
             // Absorbed inputs
@@ -335,9 +335,9 @@ machine! {
             Wait { session_id: SessionId },
             Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
             PublishEvent { kind: String },
-            RuntimeState { runtime_id: String },
+            RuntimeState { runtime_id: AgentRuntimeId },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
-            LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
+            LoadBoundaryReceipt { runtime_id: AgentRuntimeId, sequence: BoundarySequence },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool, run_id: RunId },
             AcceptWithoutWake { input_id: InputId },
             Prepare { session_id: SessionId, run_id: RunId },
@@ -3083,9 +3083,21 @@ macro_rules! stub_newtype {
     };
 }
 
+macro_rules! stub_u64_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(pub u64);
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+    };
+}
+
 stub_newtype!(SessionId);
 stub_newtype!(AgentRuntimeId);
-stub_newtype!(FenceToken);
+stub_u64_newtype!(FenceToken);
 stub_newtype!(RunId);
 stub_newtype!(InputId);
 stub_newtype!(WorkId);
@@ -3115,11 +3127,12 @@ pub enum SurfaceDeltaOperation {
 }
 
 stub_newtype!(SurfaceId);
-stub_newtype!(TurnNumber);
+stub_u64_newtype!(TurnNumber);
+stub_u64_newtype!(BoundarySequence);
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
-stub_newtype!(Generation);
+stub_u64_newtype!(Generation);
 
 pub use crate::types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 

@@ -51,14 +51,14 @@ use meerkat_mcp::McpRouterAdapter;
 use meerkat_mob::{FlowId, MobDefinition, RunId};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::archive::MobpackArchive;
+#[cfg(all(feature = "mob", test))]
+use meerkat_mob_pack::pack::compute_archive_digest;
 #[cfg(feature = "mob")]
-use meerkat_mob_pack::pack::{
-    compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
-};
+use meerkat_mob_pack::pack::{inspect_archive_bytes, pack_directory_with_excludes};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
 #[cfg(feature = "mob")]
-use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
+use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_extracted_pack_trust};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
@@ -4929,11 +4929,12 @@ fn compose_external_tool_dispatchers(
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
         (Some(a), Some(b)) => {
-            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let primary_names: HashSet<String> =
+                a.tools().iter().map(|t| t.name.to_string()).collect();
             let secondary_tools = b.tools();
             let secondary_unique: Vec<String> = secondary_tools
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .filter(|name| !primary_names.contains(name))
                 .collect();
 
@@ -7349,9 +7350,15 @@ async fn handle_skills_command(
         source_uuid: SourceUuid,
         display_name: impl Into<String>,
     ) -> meerkat_contracts::SkillSourceProvenance {
+        let display_name = display_name.into();
         meerkat_contracts::SkillSourceProvenance {
-            source_uuid,
-            display_name: display_name.into(),
+            identity: meerkat_core::skills::SourceIdentityRecord {
+                source_uuid,
+                display_name: display_name.clone(),
+                transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
+                fingerprint: format!("cli:{display_name}"),
+                status: meerkat_core::skills::SourceIdentityStatus::Active,
+            },
         }
     }
 
@@ -8594,8 +8601,6 @@ async fn load_verified_mobpack(
     let files = extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
     let archive = MobpackArchive::from_extracted_files(&files)
         .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
-    let digest =
-        compute_archive_digest(&bytes).map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
     let config_trust = read_config_trust_policy(scope)?;
     let trust_policy = resolve_trust_policy(
         cli_trust_policy,
@@ -8607,13 +8612,13 @@ async fn load_verified_mobpack(
         &project_trust_store_path(scope),
     )
     .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
-    let trust_warnings = verify_pack_trust(&files, digest, trust_policy, &trusted_signers)
+    let trust_verification = verify_extracted_pack_trust(&files, trust_policy, &trusted_signers)
         .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
     Ok(VerifiedMobpack {
         bytes,
         archive,
-        digest,
-        trust_warnings,
+        digest: trust_verification.digest,
+        trust_warnings: trust_verification.warnings,
     })
 }
 
@@ -9457,7 +9462,7 @@ mod tests {
             .expect("test-realm is a valid realm id");
         let result = completion_outcome_to_cli_runtime_turn_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                tool_name: "external_mock".to_string(),
+                tool_name: "external_mock".into(),
                 args: serde_json::json!({ "value": "browser" }),
             },
             &session_id,
@@ -9493,7 +9498,7 @@ mod tests {
     impl StaticDispatcher {
         fn new(name: &str) -> Self {
             let tool = Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -9527,7 +9532,7 @@ mod tests {
     impl EchoDispatcher {
         fn new(name: &str, content: &str) -> Self {
             let tool = Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -9582,7 +9587,11 @@ mod tests {
             &'a self,
             request: &'a LlmRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-            let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+            let names: Vec<String> = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
             let mut captured = self
                 .captured_tool_names
                 .lock()
@@ -12302,7 +12311,7 @@ capabilities = ["definitely_missing_capability"]
             .expect("compose should succeed")
             .expect("merged dispatcher should be present");
         let names: std::collections::BTreeSet<String> =
-            merged.tools().iter().map(|t| t.name.clone()).collect();
+            merged.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains("alpha_tool"));
         assert!(names.contains("beta_tool"));
     }
@@ -12316,8 +12325,11 @@ capabilities = ["definitely_missing_capability"]
         let composed = compose_external_tool_dispatchers(None, Some(mob_dispatcher))
             .expect("compose should succeed")
             .expect("mob dispatcher should be present");
-        let names: std::collections::BTreeSet<String> =
-            composed.tools().iter().map(|t| t.name.clone()).collect();
+        let names: std::collections::BTreeSet<String> = composed
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
         assert!(names.contains("mob_create"));
         assert!(names.contains("mob_spawn_member"));
     }
@@ -12332,7 +12344,7 @@ capabilities = ["definitely_missing_capability"]
             .expect("compose should succeed")
             .expect("merged dispatcher should be present");
 
-        let names: Vec<String> = merged.tools().iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = merged.tools().iter().map(|t| t.name.to_string()).collect();
         assert_eq!(names, vec!["mob_list".to_string()]);
 
         let args =

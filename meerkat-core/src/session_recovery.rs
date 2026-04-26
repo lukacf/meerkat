@@ -400,7 +400,7 @@ mod tests {
                     max_tool_calls: Some(2),
                 }),
                 recoverable_tool_defs: vec![ToolDef {
-                    name: "inline_tool".to_string(),
+                    name: "inline_tool".into(),
                     description: "recoverable inline tool".to_string(),
                     input_schema: json!({"type":"object"}),
                     provenance: None,
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn build_recovered_session_can_override_metadata_and_tooling_fields() {
         let override_tools = vec![ToolDef {
-            name: "fresh_tool".to_string(),
+            name: "fresh_tool".into(),
             description: "fresh".to_string(),
             input_schema: json!({"type":"object"}),
             provenance: None,

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 # fact for mob-member channels via the `mob_member` variant. The server
 # resolves `(mob_id, agent_identity)` against the MobMachine's
 # canonical `member_session_bindings` map on every tick, so respawn
-# atomically rotates the bound session without any SDK round-trip and
+# atomically rotates the bridge session without any SDK round-trip and
 # without any client-side session-id pin. A terminal retire surfaces
 # as `RealtimeErrorCode::BindingReleased`.
 RealtimeSessionTarget = RealtimeChannelTargetSessionTarget
@@ -144,7 +144,7 @@ class RealtimeChannel:
     # The wire target that crosses the RPC boundary. Carries identity
     # directly for `mob_member` channels (W3-H); the server resolves the
     # current bridge session on every tick from the MobMachine's
-    # canonical binding map, so the SDK never pins a session id.
+    # canonical member-session map, so the SDK never pins a session id.
     target: RealtimeChannelTarget
     role: Literal["primary", "observer"] = "primary"
     turning_mode: Literal["provider_managed", "explicit_commit"] = "provider_managed"
@@ -182,8 +182,9 @@ class RealtimeChannel:
         # W3-H: identity is a first-class wire fact. The channel target
         # is `mob_member { mob_id, agent_identity }`; the server
         # resolves the current bridge session from the MobMachine's
-        # canonical binding map on every tick, so respawn rotates the
-        # bound session without any SDK round-trip or session-id pin.
+        # canonical member-session map on every tick, so respawn
+        # rotates the bridge session without any SDK round-trip or
+        # session-id pin.
         return cls(
             _client=client,
             target={

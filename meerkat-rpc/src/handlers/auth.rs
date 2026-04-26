@@ -48,6 +48,8 @@ struct RealmIdParams {
 struct BindingIdParams {
     realm_id: String,
     binding_id: String,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, RpcResponse> {
@@ -93,6 +95,7 @@ async fn resolve_binding_identity(
     runtime: &SessionRuntime,
     realm_id: &str,
     binding_id: &str,
+    profile_id: Option<&str>,
 ) -> Result<
     (
         ConnectionRef,
@@ -103,13 +106,6 @@ async fn resolve_binding_identity(
 > {
     let realm = resolve_realm(runtime, realm_id).await?;
     let resolved_realm_id = realm.realm_id.clone();
-    let (binding, _, auth_profile) = realm.lookup_binding(binding_id).map_err(|e| {
-        RpcResponse::error(
-            None,
-            error::INVALID_PARAMS,
-            format!("Unknown binding {realm_id}:{binding_id}: {e}"),
-        )
-    })?;
     let realm_typed = meerkat_core::connection::RealmId::parse(resolved_realm_id).map_err(|e| {
         RpcResponse::error(
             None,
@@ -117,23 +113,36 @@ async fn resolve_binding_identity(
             format!("Invalid realm id {realm_id}: {e}"),
         )
     })?;
-    let binding_typed =
-        meerkat_core::connection::BindingId::parse(binding.id.clone()).map_err(|e| {
+    let binding_typed = meerkat_core::connection::BindingId::parse(binding_id).map_err(|e| {
+        RpcResponse::error(
+            None,
+            error::INVALID_PARAMS,
+            format!("Invalid binding id {binding_id}: {e}"),
+        )
+    })?;
+    let profile_typed = profile_id
+        .map(meerkat_core::connection::ProfileId::parse)
+        .transpose()
+        .map_err(|e| {
             RpcResponse::error(
                 None,
                 error::INVALID_PARAMS,
-                format!("Invalid binding id {}: {e}", binding.id),
+                format!("Invalid profile id: {e}"),
             )
         })?;
-    Ok((
-        ConnectionRef {
-            realm: realm_typed,
-            binding: binding_typed,
-            profile: None,
-        },
-        binding.clone(),
-        auth_profile.clone(),
-    ))
+    let connection_ref = ConnectionRef {
+        realm: realm_typed,
+        binding: binding_typed,
+        profile: profile_typed,
+    };
+    let (binding, _, auth_profile) = realm.lookup_connection_ref(&connection_ref).map_err(|e| {
+        RpcResponse::error(
+            None,
+            error::INVALID_PARAMS,
+            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
+        )
+    })?;
+    Ok((connection_ref, binding.clone(), auth_profile.clone()))
 }
 
 async fn resolve_oauth_target(
@@ -141,6 +150,7 @@ async fn resolve_oauth_target(
     provider: Provider,
     realm_id: Option<&str>,
     binding_id: Option<&str>,
+    profile_id: Option<&str>,
 ) -> Result<ResolvedConnectionTarget, RpcResponse> {
     let config = load_config(runtime).await?;
     let explicit_realm = realm_id
@@ -151,11 +161,16 @@ async fn resolve_oauth_target(
         .map(meerkat_core::BindingId::parse)
         .transpose()
         .map_err(|e| RpcResponse::error(None, error::INVALID_PARAMS, e.to_string()))?;
+    let explicit_profile = profile_id
+        .map(meerkat_core::ProfileId::parse)
+        .transpose()
+        .map_err(|e| RpcResponse::error(None, error::INVALID_PARAMS, e.to_string()))?;
     meerkat_core::resolve_realm_binding_target_for_provider(
         &config,
         provider,
         explicit_realm.as_ref(),
         explicit_binding.as_ref(),
+        explicit_profile.as_ref(),
         runtime.realm_id(),
         false,
     )
@@ -338,13 +353,20 @@ pub async fn handle_auth_profile_get(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
+    match resolve_binding_identity(
+        runtime,
+        &parsed.realm_id,
+        &parsed.binding_id,
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
         Ok((connection_ref, binding, auth_profile)) => RpcResponse::success(
             id,
             serde_json::json!({
                 "connection_ref": &connection_ref,
                 "binding_id": &binding.id,
-                "profile_id": &binding.auth_profile,
+                "profile_id": &auth_profile.id,
                 "auth_profile": WireAuthProfile::from(&auth_profile),
             }),
         ),
@@ -356,6 +378,8 @@ pub async fn handle_auth_profile_get(
 struct CreateProfileParams {
     realm_id: String,
     binding_id: String,
+    #[serde(default)]
+    profile_id: Option<String>,
     auth_method: String,
     secret: String,
 }
@@ -384,11 +408,17 @@ pub async fn handle_auth_profile_create(
             );
         }
     };
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
-            Ok(v) => v,
-            Err(r) => return r.with_id(id),
-        };
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        runtime,
+        &parsed.realm_id,
+        &parsed.binding_id,
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
     if parsed.auth_method != auth_profile.auth_method {
         return RpcResponse::error(
             id,
@@ -434,7 +464,7 @@ pub async fn handle_auth_profile_create(
                     "realm_id": connection_ref.realm.as_str(),
                     "binding_id": connection_ref.binding.as_str(),
                     "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
+                    "profile_id": &auth_profile.id,
                     "provider": auth_profile.provider.as_str(),
                     "auth_method": &auth_profile.auth_method,
                     "stored": true,
@@ -458,11 +488,17 @@ pub async fn handle_auth_profile_delete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (connection_ref, binding, _) =
-        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
-            Ok(v) => v,
-            Err(r) => return r.with_id(id),
-        };
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        runtime,
+        &parsed.realm_id,
+        &parsed.binding_id,
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
@@ -482,7 +518,7 @@ pub async fn handle_auth_profile_delete(
                     "realm_id": connection_ref.realm.as_str(),
                     "binding_id": connection_ref.binding.as_str(),
                     "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
+                    "profile_id": &auth_profile.id,
                     "cleared": true,
                 }),
             )
@@ -560,6 +596,8 @@ struct LoginCompleteParams {
     realm_id: Option<String>,
     #[serde(default)]
     binding_id: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 pub async fn handle_auth_login_complete(
@@ -583,6 +621,7 @@ pub async fn handle_auth_login_complete(
         provider,
         parsed.realm_id.as_deref(),
         parsed.binding_id.as_deref(),
+        parsed.profile_id.as_deref(),
     )
     .await
     {
@@ -697,7 +736,7 @@ pub async fn handle_auth_login_complete(
             "realm_id": connection_ref.realm.as_str(),
             "binding_id": connection_ref.binding.as_str(),
             "connection_ref": &connection_ref,
-            "profile_id": &binding.auth_profile,
+            "profile_id": &auth_profile.id,
             "provider": parsed.provider,
             "expires_at": expires_at.map(|e| e.to_rfc3339()),
             "has_refresh_token": tokens.refresh_token.is_some(),
@@ -763,6 +802,8 @@ struct DeviceCompleteParams {
     realm_id: Option<String>,
     #[serde(default)]
     binding_id: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 /// Plan §1.5r.9 device-flow completion leg. Single-poll semantics — the
@@ -772,7 +813,7 @@ struct DeviceCompleteParams {
 ///   * `{ state: "slow_down" }`   (429-equivalent; bump caller's interval)
 ///   * `{ state: "access_denied" }` / `{ state: "expired" }` (terminal)
 ///   * `{ state: "ready", realm_id, binding_id, expires_at, ... }`
-///     (tokens persisted to TokenStore under `<realm_id>:<binding_id>`).
+///     (tokens persisted to TokenStore under the resolved `ConnectionRef`).
 pub async fn handle_auth_login_device_complete(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -802,6 +843,7 @@ pub async fn handle_auth_login_device_complete(
         provider,
         parsed.realm_id.as_deref(),
         parsed.binding_id.as_deref(),
+        parsed.profile_id.as_deref(),
     )
     .await
     {
@@ -894,7 +936,7 @@ pub async fn handle_auth_login_device_complete(
                     "realm_id": connection_ref.realm.as_str(),
                     "binding_id": connection_ref.binding.as_str(),
                     "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
+                    "profile_id": &auth_profile.id,
                     "provider": parsed.provider,
                     "expires_at": expires_at.map(|e| e.to_rfc3339()),
                     "has_refresh_token": tokens.refresh_token.is_some(),
@@ -913,6 +955,8 @@ struct ProvisionApiKeyParams {
     realm_id: Option<String>,
     #[serde(default)]
     binding_id: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 /// Plan §4b.5 closure: Console OAuth → API key provisioning. The
@@ -920,10 +964,10 @@ struct ProvisionApiKeyParams {
 /// `org:create_api_key user:profile`), then hands the resulting
 /// access_token to this method. We POST to
 /// `https://api.anthropic.com/api/oauth/claude_cli/create_api_key`
-/// and persist the returned API key as a stable credential under
-/// `<realm_id>:<binding_id>` with auth_mode=OauthToApiKey — so
-/// future `resolve_binding` for the `oauth_to_api_key` method reads
-/// the provisioned api_key without needing any refresh.
+/// and persist the returned API key as a stable credential under the
+/// resolved `ConnectionRef` with auth_mode=OauthToApiKey — so future
+/// `resolve_binding` for the `oauth_to_api_key` method reads the
+/// provisioned api_key without needing any refresh.
 pub async fn handle_auth_login_provision_api_key(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -939,6 +983,7 @@ pub async fn handle_auth_login_provision_api_key(
         Provider::Anthropic,
         parsed.realm_id.as_deref(),
         parsed.binding_id.as_deref(),
+        parsed.profile_id.as_deref(),
     )
     .await
     {
@@ -946,7 +991,7 @@ pub async fn handle_auth_login_provision_api_key(
         Err(r) => return r.with_id(id),
     };
     let connection_ref = target.connection_ref;
-    let binding = target.binding;
+    let auth_profile = target.auth_profile;
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
@@ -966,7 +1011,7 @@ pub async fn handle_auth_login_provision_api_key(
                 "realm_id": connection_ref.realm.as_str(),
                 "binding_id": connection_ref.binding.as_str(),
                 "connection_ref": &connection_ref,
-                "profile_id": &binding.auth_profile,
+                "profile_id": &auth_profile.id,
                 "provider": "anthropic",
                 "auth_mode": "oauth_to_api_key",
                 "has_api_key": tokens.primary_secret.is_some(),
@@ -990,11 +1035,17 @@ pub async fn handle_auth_status_get(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
-            Ok(v) => v,
-            Err(r) => return r.with_id(id),
-        };
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        runtime,
+        &parsed.realm_id,
+        &parsed.binding_id,
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
     let stored = if let Some(store) = runtime.token_store() {
         store
             .load(&TokenKey::from_connection_ref(&connection_ref))
@@ -1017,7 +1068,7 @@ pub async fn handle_auth_status_get(
             "realm_id": connection_ref.realm.as_str(),
             "binding_id": connection_ref.binding.as_str(),
             "connection_ref": &connection_ref,
-            "profile_id": &binding.auth_profile,
+            "profile_id": &auth_profile.id,
             "provider": auth_profile.provider.as_str(),
             "auth_method": &auth_profile.auth_method,
             "state": state_label,
@@ -1038,11 +1089,17 @@ pub async fn handle_auth_logout(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (connection_ref, binding, _) =
-        match resolve_binding_identity(runtime, &parsed.realm_id, &parsed.binding_id).await {
-            Ok(v) => v,
-            Err(r) => return r.with_id(id),
-        };
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        runtime,
+        &parsed.realm_id,
+        &parsed.binding_id,
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,
         Err(r) => return r,
@@ -1062,7 +1119,7 @@ pub async fn handle_auth_logout(
                     "realm_id": connection_ref.realm.as_str(),
                     "binding_id": connection_ref.binding.as_str(),
                     "connection_ref": &connection_ref,
-                    "profile_id": &binding.auth_profile,
+                    "profile_id": &auth_profile.id,
                     "cleared": true,
                 }),
             )

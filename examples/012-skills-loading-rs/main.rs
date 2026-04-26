@@ -31,7 +31,10 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillRuntime, SkillScope};
 use meerkat_core::skills::SkillEngine as _;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillKey, SkillName, SourceUuid};
+use meerkat_core::skills::{
+    SkillDescriptor, SkillDocument, SkillKey, SkillName, SourceIdentityRecord,
+    SourceIdentityStatus, SourceTransportKind, SourceUuid,
+};
 use meerkat_skills::source::SourceNode;
 use meerkat_skills::{
     CompositeSkillSource, DefaultSkillEngine, FilesystemSkillSource, InMemorySkillSource,
@@ -171,13 +174,23 @@ You are a security auditor reviewing code for vulnerabilities.
 
     let composite_source = CompositeSkillSource::from_named(vec![
         NamedSource {
-            name: "inline".to_string(),
-            source_uuid: SourceUuid::builtin(),
+            identity: SourceIdentityRecord {
+                source_uuid: SourceUuid::builtin(),
+                display_name: "inline".to_string(),
+                transport_kind: SourceTransportKind::Embedded,
+                fingerprint: "example:inline".to_string(),
+                status: SourceIdentityStatus::Active,
+            },
             source: SourceNode::Memory(inline_source),
         },
         NamedSource {
-            name: "filesystem".to_string(),
-            source_uuid: SourceUuid::project_local(),
+            identity: SourceIdentityRecord {
+                source_uuid: SourceUuid::project_local(),
+                display_name: "filesystem".to_string(),
+                transport_kind: SourceTransportKind::Filesystem,
+                fingerprint: format!("example:filesystem:{}", skill_dir.display()),
+                status: SourceIdentityStatus::Active,
+            },
             source: SourceNode::Filesystem(fs_source),
         },
     ]);

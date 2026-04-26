@@ -641,9 +641,15 @@ pub struct SkillIntrospectionEntry {
     /// The skill descriptor (flattened for ergonomics).
     #[serde(flatten)]
     pub descriptor: SkillDescriptor,
+    /// Typed source identity from the canonical identity registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<SourceIdentityRecord>,
     /// If this skill is shadowed, the name of the higher-precedence source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowed_by: Option<String>,
+    /// Typed source identity that shadows this skill, when shadowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_by_identity: Option<SourceIdentityRecord>,
     /// Canonical source UUID that shadows this skill, when shadowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowed_by_source_uuid: Option<SourceUuid>,
@@ -801,7 +807,9 @@ pub trait SkillSource: Send + Sync {
                 .into_iter()
                 .map(|descriptor| SkillIntrospectionEntry {
                     descriptor,
+                    source_identity: None,
                     shadowed_by: None,
+                    shadowed_by_identity: None,
                     shadowed_by_source_uuid: None,
                     is_active: true,
                 })
@@ -961,7 +969,9 @@ pub trait SkillEngine: Send + Sync {
                 .into_iter()
                 .map(|descriptor| SkillIntrospectionEntry {
                     descriptor,
+                    source_identity: None,
                     shadowed_by: None,
+                    shadowed_by_identity: None,
                     shadowed_by_source_uuid: None,
                     is_active: true,
                 })

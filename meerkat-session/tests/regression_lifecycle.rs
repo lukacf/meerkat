@@ -81,6 +81,7 @@ impl SessionAgent for MockAgent {
                     session_id: self.session_id.clone(),
                     error_class: meerkat_core::event::AgentErrorClass::Internal,
                     error: "simulated failure".to_string(),
+                    error_report: None,
                 })
                 .await;
             return Err(meerkat_core::error::AgentError::InternalError(

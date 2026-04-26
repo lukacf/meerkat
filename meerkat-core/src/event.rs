@@ -2,7 +2,7 @@
 //!
 //! These events form the streaming API for consumers.
 
-use crate::error::AgentError;
+use crate::error::{AgentError, LlmFailureReason};
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::retry::LlmRetrySchedule;
 use crate::time_compat::SystemTime;
@@ -53,6 +53,141 @@ pub enum AgentErrorClass {
     NoPendingBoundary,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason_type", rename_all = "snake_case")]
+pub enum AgentErrorReason {
+    LlmRateLimited {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
+    },
+    LlmContextExceeded {
+        max: u32,
+        requested: u32,
+    },
+    LlmAuthError,
+    LlmInvalidModel {
+        model: String,
+    },
+    LlmProviderError {
+        provider_error: Value,
+    },
+    LlmNetworkTimeout {
+        duration_ms: u64,
+    },
+    LlmCallTimeout {
+        duration_ms: u64,
+    },
+    HookDenied {
+        point: HookPoint,
+        reason_code: HookReasonCode,
+    },
+    HookTimeout {
+        hook_id: String,
+        timeout_ms: u64,
+    },
+    HookExecutionFailed {
+        hook_id: String,
+        reason: String,
+    },
+    HookConfigInvalid {
+        reason: String,
+    },
+    StructuredOutputValidationFailed {
+        attempts: u32,
+        reason: String,
+    },
+    InvalidOutputSchema {
+        reason: String,
+    },
+    AuthReauthRequired {
+        binding_key: String,
+        message: String,
+    },
+    CallbackPending {
+        tool_name: String,
+        args: Value,
+    },
+}
+
+impl AgentErrorReason {
+    fn from_llm_reason(reason: &LlmFailureReason) -> Self {
+        match reason {
+            LlmFailureReason::RateLimited { retry_after } => Self::LlmRateLimited {
+                retry_after_ms: retry_after
+                    .as_ref()
+                    .map(|duration| duration.as_millis() as u64),
+            },
+            LlmFailureReason::ContextExceeded { max, requested } => Self::LlmContextExceeded {
+                max: *max,
+                requested: *requested,
+            },
+            LlmFailureReason::AuthError => Self::LlmAuthError,
+            LlmFailureReason::InvalidModel(model) => Self::LlmInvalidModel {
+                model: model.clone(),
+            },
+            LlmFailureReason::ProviderError(value) => Self::LlmProviderError {
+                provider_error: value.clone(),
+            },
+            LlmFailureReason::NetworkTimeout { duration_ms } => Self::LlmNetworkTimeout {
+                duration_ms: *duration_ms,
+            },
+            LlmFailureReason::CallTimeout { duration_ms } => Self::LlmCallTimeout {
+                duration_ms: *duration_ms,
+            },
+        }
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        match error {
+            AgentError::Llm { reason, .. } => Some(Self::from_llm_reason(reason)),
+            AgentError::HookDenied {
+                point, reason_code, ..
+            } => Some(Self::HookDenied {
+                point: *point,
+                reason_code: *reason_code,
+            }),
+            AgentError::HookTimeout {
+                hook_id,
+                timeout_ms,
+            } => Some(Self::HookTimeout {
+                hook_id: hook_id.clone(),
+                timeout_ms: *timeout_ms,
+            }),
+            AgentError::HookExecutionFailed { hook_id, reason } => {
+                Some(Self::HookExecutionFailed {
+                    hook_id: hook_id.clone(),
+                    reason: reason.clone(),
+                })
+            }
+            AgentError::HookConfigInvalid { reason } => Some(Self::HookConfigInvalid {
+                reason: reason.clone(),
+            }),
+            AgentError::StructuredOutputValidationFailed {
+                attempts, reason, ..
+            } => Some(Self::StructuredOutputValidationFailed {
+                attempts: *attempts,
+                reason: reason.clone(),
+            }),
+            AgentError::InvalidOutputSchema(reason) => Some(Self::InvalidOutputSchema {
+                reason: reason.clone(),
+            }),
+            AgentError::AuthReauthRequired {
+                binding_key,
+                message,
+            } => Some(Self::AuthReauthRequired {
+                binding_key: binding_key.clone(),
+                message: message.clone(),
+            }),
+            AgentError::CallbackPending { tool_name, args } => Some(Self::CallbackPending {
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl From<&AgentError> for AgentErrorClass {
     fn from(error: &AgentError) -> Self {
         match error {
@@ -94,6 +229,8 @@ impl From<&AgentError> for AgentErrorClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentErrorReport {
     pub class: AgentErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AgentErrorReason>,
     pub message: String,
 }
 
@@ -101,6 +238,7 @@ impl AgentErrorReport {
     pub fn from_agent_error(error: &AgentError) -> Self {
         Self {
             class: AgentErrorClass::from(error),
+            reason: AgentErrorReason::from_agent_error(error),
             message: error.to_string(),
         }
     }
@@ -345,6 +483,7 @@ pub enum AgentEvent {
     RunFailed {
         session_id: SessionId,
         error_class: AgentErrorClass,
+        /// Display projection of `error_report.message`.
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_report: Option<AgentErrorReport>,
@@ -843,6 +982,7 @@ mod tests {
                 error: "Budget exceeded".to_string(),
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Budget,
+                    reason: None,
                     message: "Budget exceeded".to_string(),
                 }),
             },
@@ -945,6 +1085,26 @@ mod tests {
     }
 
     #[test]
+    fn agent_error_report_carries_typed_hook_reason() {
+        let error = crate::error::AgentError::HookDenied {
+            point: HookPoint::RunStarted,
+            reason_code: HookReasonCode::PolicyViolation,
+            message: "blocked".to_string(),
+            payload: None,
+        };
+        let report = AgentErrorReport::from_agent_error(&error);
+        assert_eq!(report.class, AgentErrorClass::Hook);
+        assert_eq!(
+            report.reason,
+            Some(AgentErrorReason::HookDenied {
+                point: HookPoint::RunStarted,
+                reason_code: HookReasonCode::PolicyViolation,
+            })
+        );
+        assert_eq!(report.message, error.to_string());
+    }
+
+    #[test]
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
@@ -962,6 +1122,7 @@ mod tests {
                 error: "failed".to_string(),
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Internal,
+                    reason: None,
                     message: "failed".to_string(),
                 }),
             },

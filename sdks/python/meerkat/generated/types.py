@@ -466,6 +466,14 @@ class AudioFormatMismatchContext:
 
 
 @dataclass
+class ToolCallTimeoutContext:
+    """Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`]."""
+    call_id: str
+    elapsed_ms: int
+    timeout_ms: int
+
+
+@dataclass
 class RealtimeChannelOpenFrame:
     """Payload for `channel.open`."""
     open_token: str
@@ -832,7 +840,7 @@ WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', '
 # - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 #   canonical anchor, and the server resolves the current bridge session
 #   on every tick from the MobMachine's `member_session_bindings` map.
-#   Respawn atomically rotates the bound session via the
+#   Respawn atomically rotates the bridge session via the
 #   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
 #   channel survives without any SDK round-trip. A terminal
 #   `MemberSessionBindingChanged { old: Some, new: None }` closes the
@@ -877,7 +885,10 @@ class RealtimeErrorDetailsAudioFormatMismatch(TypedDict, total=False):
     kind: Required[Literal['audio_format_mismatch']]
 
 class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
+    call_id: Required[str]
+    elapsed_ms: Required[int]
     kind: Required[Literal['tool_call_timeout']]
+    timeout_ms: Required[int]
 
 class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
     kind: Required[Literal['unsupported_protocol_version']]

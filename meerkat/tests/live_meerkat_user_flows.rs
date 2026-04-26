@@ -243,7 +243,7 @@ impl MockToolDispatcher {
 
     pub fn with_tool(mut self, name: &str, description: &str, result: &str) -> Self {
         self.tools.push(Arc::new(ToolDef {
-            name: name.to_string(),
+            name: name.into(),
             description: description.to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
             provenance: None,
@@ -1008,19 +1008,19 @@ mod parallel_tools {
             Self {
                 tools: vec![
                     Arc::new(ToolDef {
-                        name: "get_weather".to_string(),
+                        name: "get_weather".into(),
                         description: "Get current weather for a city".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetWeatherArgs>(),
                         provenance: None,
                     }),
                     Arc::new(ToolDef {
-                        name: "get_time".to_string(),
+                        name: "get_time".into(),
                         description: "Get current time for a timezone".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetTimeArgs>(),
                         provenance: None,
                     }),
                     Arc::new(ToolDef {
-                        name: "get_stock".to_string(),
+                        name: "get_stock".into(),
                         description: "Get stock price for a symbol".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetStockArgs>(),
                         provenance: None,
@@ -1251,19 +1251,19 @@ mod parallel_tools {
             fn tools(&self) -> Arc<[Arc<ToolDef>]> {
                 vec![
                     Arc::new(ToolDef {
-                        name: "working_tool".to_string(),
+                        name: "working_tool".into(),
                         description: "A tool that works correctly".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
                         provenance: None,
                     }),
                     Arc::new(ToolDef {
-                        name: "broken_tool".to_string(),
+                        name: "broken_tool".into(),
                         description: "A tool that always fails".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
                         provenance: None,
                     }),
                     Arc::new(ToolDef {
-                        name: "another_working_tool".to_string(),
+                        name: "another_working_tool".into(),
                         description: "Another tool that works correctly".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
                         provenance: None,

@@ -6676,6 +6676,68 @@ impl MobActor {
         Ok(())
     }
 
+    async fn admit_member_retire_for_destroy(
+        &mut self,
+        entry: &RosterEntry,
+    ) -> Result<(), MobError> {
+        let agent_identity = &entry.agent_identity;
+        let retire_event_already_present = self
+            .retire_event_exists(agent_identity, &entry.member_ref)
+            .await?;
+        if !retire_event_already_present {
+            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
+                .await?;
+        }
+
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let releasing = self
+            .dsl_authority
+            .state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let session_id_for_route = releasing
+            .clone()
+            .unwrap_or_else(mob_dsl::SessionId::default);
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::Retire {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                agent_identity: dsl_identity,
+                releasing: releasing.clone(),
+                session_id: session_id_for_route,
+            },
+            "destroy_mark_member_retiring",
+        )?;
+
+        let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let detach_obligation_open = self
+            .dsl_authority
+            .state
+            .pending_session_ingress_detach_runtime_ids
+            .contains(&runtime_id);
+        if detach_obligation_open {
+            let detach_session_id = entry
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .or_else(|| releasing.and_then(|session_id| SessionId::parse(&session_id.0).ok()))
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "destroy retire for member '{agent_identity}' opened a session ingress detach obligation without a bridge session id"
+                    ))
+                })?;
+            self.detach_session_ingress_for_mob_destroy(entry, &detach_session_id)
+                .await?;
+        }
+
+        {
+            let mut roster = self.roster.write().await;
+            roster.mark_retiring_by_identity(agent_identity);
+        }
+
+        self.flush_routed_effects().await
+    }
+
     async fn handle_retire_inner(
         &mut self,
         agent_identity: &MeerkatId,
@@ -7556,56 +7618,6 @@ impl MobActor {
             return outcome;
         };
 
-        match self
-            .retire_event_exists(&agent_identity, &entry.member_ref)
-            .await
-        {
-            Ok(false) => {
-                if let Err(error) = self
-                    .append_retire_event(&agent_identity, &entry.role, &entry.member_ref)
-                    .await
-                {
-                    outcome
-                        .errors
-                        .push(format!("retire event append failed: {error}"));
-                }
-            }
-            Ok(true) => {}
-            Err(error) => outcome
-                .errors
-                .push(format!("retire event lookup failed: {error}")),
-        }
-
-        // Mark as Retiring in the DSL (blocks re-spawn with same ID).
-        // See handle_retire_inner for the rationale; DSL guards reject Retire
-        // when the runtime_id is absent or the phase forbids it, which matches
-        // the existing idempotent semantics here.
-        //
-        // W3-H: populate `agent_identity` + `releasing` from the current DSL
-        // binding state (see handle_retire_inner for the guard-split story).
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
-        let releasing = self
-            .dsl_authority
-            .state
-            .member_session_bindings
-            .get(&dsl_identity)
-            .cloned();
-        let session_id_for_route = releasing
-            .clone()
-            .unwrap_or_else(mob_dsl::SessionId::default);
-        if let Err(e) = self.apply_dsl_input(
-            mob_dsl::MobMachineInput::Retire {
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                agent_identity: dsl_identity,
-                releasing,
-                session_id: session_id_for_route,
-            },
-            "destroy_remote_member_for_destroy_mark_retiring",
-        ) {
-            outcome.errors.push(format!("Retire DSL rejected: {e}"));
-            return outcome;
-        }
-
         let ctx = self
             .disposal_context_from_entry(&agent_identity, &entry)
             .await;
@@ -7834,26 +7846,25 @@ impl MobActor {
             roster.list_all().cloned().collect::<Vec<_>>()
         };
         if self.has_orchestrator {
-            let mut probe =
-                mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
-            if probe
-                .apply_signal(mob_dsl::MobMachineSignal::StopOrchestrator)
-                .is_ok()
-                && let Err(error) = self.apply_dsl_signal(
-                    mob_dsl::MobMachineSignal::StopOrchestrator,
-                    "stop_orchestrator_destroy",
-                )
-            {
-                return Err(MobError::Internal(format!(
-                    "orchestrator StopOrchestrator transition failed during destroy: {error}"
-                ))
-                .into());
-            }
+            self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::StopOrchestrator,
+                "stop_orchestrator_destroy",
+            )
+            .map_err(MobDestroyError::from)?;
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::DestroyOrchestrator,
                 "destroy_orchestrator",
             )
             .map_err(MobDestroyError::from)?;
+        }
+        for entry in &entries {
+            if let Err(error) = self.admit_member_retire_for_destroy(entry).await {
+                report.push_error(format!(
+                    "{}: destroy retire admission failed: {error}",
+                    entry.agent_identity
+                ));
+                return Err(MobDestroyError::Incomplete { report });
+            }
         }
         self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
             .map_err(MobDestroyError::from)?;

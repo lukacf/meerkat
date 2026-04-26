@@ -15,7 +15,7 @@ use meerkat::ToolDef;
 use serde_json::json;
 
 let tool = ToolDef {
-    name: "get_weather".to_string(),
+    name: "get_weather".into(),
     description: "Get current weather for a city".to_string(),
     input_schema: json!({
         "type": "object",
@@ -54,7 +54,7 @@ impl AgentToolDispatcher for MyToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
             Arc::new(ToolDef {
-                name: "search".to_string(),
+                name: "search".into(),
                 description: "Search the web".to_string(),
                 input_schema: json!({
                     "type": "object",

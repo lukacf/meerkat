@@ -9,6 +9,102 @@ use indexmap::IndexSet;
 use std::collections::BTreeMap;
 use std::fmt;
 
+macro_rules! define_metadata_string {
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+define_metadata_string!(
+    /// Repository-relative Rust module path consumed by composition codegen.
+    RustModulePath
+);
+
+impl AsRef<std::path::Path> for RustModulePath {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(self.as_str())
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for RustModulePath {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new(self.as_str())
+    }
+}
+
+define_metadata_string!(
+    /// Fully-qualified Rust type or trait path used by generated helper code.
+    RustTypePath
+);
+define_metadata_string!(
+    /// Rust item identifier emitted into generated driver/helper modules.
+    RustItemIdent
+);
+define_metadata_string!(
+    /// Rust method identifier emitted by HandleBridge helpers.
+    RustMethodName
+);
+define_metadata_string!(
+    /// Complete Rust `use ...;` import line inserted into generated code.
+    RustUseStatement
+);
+define_metadata_string!(
+    /// Rust expression suffix appended to an obligation-field reference.
+    RustArgAccessor
+);
+define_metadata_string!(
+    /// Rust module qualifier for kernel-codegen payload structs.
+    RustPayloadModulePath
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
     pub name: CompositionId,
@@ -137,12 +233,12 @@ pub enum FeedbackFieldSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleBridgeFeedbackBinding {
     pub input_variant: InputVariantId,
-    pub method_name: String,
+    pub method_name: RustMethodName,
     /// Per-call suffix applied to `obligation.<field>` references when
     /// constructing handle-method arguments. Keys are typed obligation
     /// field ids; values are suffixes like `.0`, `.clone()`, `.into()`.
     /// Absent entries emit bare `obligation.<field>`.
-    pub arg_accessors: BTreeMap<FieldId, String>,
+    pub arg_accessors: BTreeMap<FieldId, RustArgAccessor>,
     /// Positional list of obligation fields forwarded to the handle
     /// method. `None` falls back to every obligation-sourced feedback
     /// binding in declaration order. Use `Some(vec![...])` when the
@@ -155,32 +251,32 @@ pub struct HandleBridgeFeedbackBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolRustBinding {
     /// Output file path relative to the repo root.
-    pub module_path: String,
+    pub module_path: RustModulePath,
     /// How the helper is generated.
     pub generation_mode: ProtocolGenerationMode,
     /// `use ...;` lines inserted at the top of the helper module.
-    pub required_imports: Vec<String>,
+    pub required_imports: Vec<RustUseStatement>,
     /// Concrete authority type used by generated helpers.
-    pub authority_type_path: Option<String>,
+    pub authority_type_path: Option<RustTypePath>,
     /// Sealed mutator trait path used to call `apply`.
-    pub mutator_trait_path: Option<String>,
+    pub mutator_trait_path: Option<RustTypePath>,
     /// Typed input enum path for feedback/executor helpers.
-    pub input_enum_path: Option<String>,
+    pub input_enum_path: Option<RustTypePath>,
     /// Typed effect enum path for executor/effect-extractor helpers.
-    pub effect_enum_path: Option<String>,
+    pub effect_enum_path: Option<RustTypePath>,
     /// Concrete transition type returned by `authority.apply(...)`.
-    pub transition_type_path: Option<String>,
+    pub transition_type_path: Option<RustTypePath>,
     /// Concrete error type returned by `authority.apply(...)`.
-    pub error_type_path: Option<String>,
+    pub error_type_path: Option<RustTypePath>,
     /// Triggering producer input variant for `Executor` helpers.
     pub executor_trigger_input_variant: Option<InputVariantId>,
     /// Authority-owned source token type for `ShellBridge` helpers.
-    pub bridge_source_type_path: Option<String>,
+    pub bridge_source_type_path: Option<RustTypePath>,
     /// Shape of the primary generated helper return value.
     pub helper_return_shape: ProtocolHelperReturnShape,
     /// Handle trait path used by `HandleBridge` helpers. Required when
     /// `generation_mode` or `additional_modes` contains `HandleBridge`.
-    pub handle_trait_path: Option<String>,
+    pub handle_trait_path: Option<RustTypePath>,
     /// HandleBridge metadata per feedback input. Required for each
     /// feedback entry emitted through the `HandleBridge` mode.
     pub handle_feedback_bindings: Vec<HandleBridgeFeedbackBinding>,
@@ -192,7 +288,7 @@ pub struct ProtocolRustBinding {
     /// codegen emits the tuple-wrapping form and qualifies the payload
     /// struct by this module path (e.g. `inputs`). Absent → named-field
     /// form (the canonical DSL-emitted shape).
-    pub input_payload_module_path: Option<String>,
+    pub input_payload_module_path: Option<RustPayloadModulePath>,
     /// Additional generation modes stacked onto the primary mode. Each
     /// listed mode emits its own family of helpers into the same output
     /// file, letting a single protocol expose both (for example)
@@ -230,17 +326,17 @@ pub enum ProtocolHelperReturnShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriverRustBinding {
     /// Output file path relative to the repo root.
-    pub module_path: String,
+    pub module_path: RustModulePath,
     /// Primary generated driver type name.
-    pub driver_type: String,
+    pub driver_type: RustItemIdent,
     /// Generated store-plan enum type name.
-    pub store_plan_type: String,
+    pub store_plan_type: RustItemIdent,
     /// Generated follow-up work enum type name.
-    pub work_type: String,
+    pub work_type: RustItemIdent,
     /// Generated decision type name.
-    pub decision_type: String,
+    pub decision_type: RustItemIdent,
     /// `use ...;` lines inserted at the top of the generated driver module.
-    pub required_imports: Vec<String>,
+    pub required_imports: Vec<RustUseStatement>,
 }
 
 /// Declarative description of a composition-level driver.

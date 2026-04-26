@@ -1305,7 +1305,7 @@ mod scenario_10_memory {
         let memory_session_id = memory_session.id().clone();
 
         // Build memory_search tool dispatcher
-        let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::new(
+        let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::for_session(
             Arc::clone(&memory_store),
             memory_session_id,
         );

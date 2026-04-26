@@ -54,7 +54,7 @@ impl ParentToolScopeSnapshot {
     /// Create a snapshot from a set of visible tool definitions.
     pub fn from_tools(tools: &[Arc<ToolDef>]) -> Self {
         Self {
-            visible_tool_names: tools.iter().map(|t| t.name.clone()).collect(),
+            visible_tool_names: tools.iter().map(|t| t.name.to_string()).collect(),
             visible_tool_defs: tools.iter().map(|t| (**t).clone()).collect(),
             captured_at: chrono::Utc::now(),
         }
@@ -70,7 +70,7 @@ mod tests {
 
     fn make_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,

@@ -282,7 +282,10 @@ export interface RealtimeErrorDetailsAudioFormatMismatch {
 }
 
 export interface RealtimeErrorDetailsToolCallTimeout {
+  call_id: string;
+  elapsed_ms: number;
   kind: "tool_call_timeout";
+  timeout_ms: number;
 }
 
 export interface RealtimeErrorDetailsUnsupportedProtocolVersion {
@@ -651,6 +654,12 @@ export interface RealtimeBargeInTruncateFrame {
 export interface AudioFormatMismatchContext {
   actual: RealtimeAudioFormat;
   expected: RealtimeAudioFormat;
+}
+
+export interface ToolCallTimeoutContext {
+  call_id: string;
+  elapsed_ms: number;
+  timeout_ms: number;
 }
 
 export interface RealtimeChannelOpenFrame {

@@ -37,7 +37,7 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         self.inner
             .tools()
             .iter()
-            .filter(|t| !self.excluded.contains(&t.name))
+            .filter(|t| !self.excluded.contains(t.name.as_str()))
             .cloned()
             .collect::<Vec<_>>()
             .into()
@@ -128,13 +128,18 @@ pub(super) fn compose_external_tools_for_profile(
     if let Some(ext) = default_external_tools {
         let profile_names: HashSet<String> = dispatchers
             .iter()
-            .flat_map(|d| d.tools().iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+            .flat_map(|d| {
+                d.tools()
+                    .iter()
+                    .map(|t| t.name.to_string())
+                    .collect::<Vec<_>>()
+            })
             .collect();
         let collisions: HashSet<String> = ext
             .tools()
             .iter()
-            .filter(|t| profile_names.contains(&t.name))
-            .map(|t| t.name.clone())
+            .filter(|t| profile_names.contains(t.name.as_str()))
+            .map(|t| t.name.to_string())
             .collect();
         if collisions.is_empty() {
             dispatchers.push(ext);
@@ -517,7 +522,7 @@ fn tool_def(
     kind: ToolSourceKind,
 ) -> Arc<ToolDef> {
     Arc::new(ToolDef {
-        name: name.to_string(),
+        name: name.into(),
         description: description.to_string(),
         input_schema,
         provenance: Some(ToolProvenance {

@@ -87,7 +87,10 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
 
 
 def _promote_nested_schema_def(name: str) -> bool:
-    return name.startswith("Realtime") or name == "AudioFormatMismatchContext"
+    return name.startswith("Realtime") or name in {
+        "AudioFormatMismatchContext",
+        "ToolCallTimeoutContext",
+    }
 
 
 def _runtime_state_result_root(wire_schema: dict[str, Any]) -> dict[str, Any]:
@@ -607,6 +610,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeVideoChunk", wire_schema, "Opaque realtime video chunk.")
     append_python_dataclass("RealtimeBargeInTruncateFrame", wire_schema, "Payload for channel.barge_in_truncate.")
     append_python_dataclass("AudioFormatMismatchContext", wire_schema, "Typed context for audio format mismatch errors.")
+    append_python_dataclass("ToolCallTimeoutContext", wire_schema, "Typed context for tool timeout errors.")
     append_python_dataclass("RealtimeChannelOpenFrame", wire_schema, "Payload for channel.open.")
     append_python_dataclass("RealtimeChannelInputFrame", wire_schema, "Payload for channel.input.")
     append_python_dataclass("RealtimeChannelOpenedFrame", wire_schema, "Payload for channel.opened.")
@@ -937,6 +941,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("RealtimeVideoChunk", wire_schema)
     append_typescript_interface("RealtimeBargeInTruncateFrame", wire_schema)
     append_typescript_interface("AudioFormatMismatchContext", wire_schema)
+    append_typescript_interface("ToolCallTimeoutContext", wire_schema)
     append_typescript_interface("RealtimeChannelOpenFrame", wire_schema)
     append_typescript_interface("RealtimeChannelInputFrame", wire_schema)
     append_typescript_interface("RealtimeChannelOpenedFrame", wire_schema)

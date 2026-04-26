@@ -57,9 +57,9 @@ pub struct MemorySearchDispatcher {
 
 impl MemorySearchDispatcher {
     /// Create a new memory search dispatcher backed by the given store.
-    pub fn new(store: Arc<dyn MemoryStore>, session_id: meerkat_core::types::SessionId) -> Self {
+    pub fn new(store: Arc<dyn MemoryStore>, scope: MemorySearchScope) -> Self {
         let tool_def = Arc::new(ToolDef {
-            name: TOOL_NAME.to_string(),
+            name: TOOL_NAME.into(),
             description: "Search semantic memory for past conversation content. \
                 Memory contains text from earlier conversation turns that were \
                 compacted away to save context space. Use this to recall \
@@ -74,9 +74,17 @@ impl MemorySearchDispatcher {
 
         Self {
             store,
-            scope: MemorySearchScope::for_session(session_id),
+            scope,
             tool_defs: Arc::from(vec![tool_def]),
         }
+    }
+
+    /// Create a dispatcher scoped to the canonical memory owner for a session.
+    pub fn for_session(
+        store: Arc<dyn MemoryStore>,
+        session_id: meerkat_core::types::SessionId,
+    ) -> Self {
+        Self::new(store, MemorySearchScope::for_session(session_id))
     }
 
     /// Usage instructions for the system prompt.
@@ -100,12 +108,12 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         if call.name != TOOL_NAME {
             return Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             });
         }
         let input: MemorySearchInput =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
-                name: TOOL_NAME.to_string(),
+                name: TOOL_NAME.into(),
                 reason: e.to_string(),
             })?;
         let limit = input.limit.unwrap_or(DEFAULT_LIMIT).min(20);
@@ -174,7 +182,7 @@ mod tests {
     }
 
     fn dispatcher(store: Arc<dyn MemoryStore>, session_id: &SessionId) -> MemorySearchDispatcher {
-        MemorySearchDispatcher::new(store, session_id.clone())
+        MemorySearchDispatcher::for_session(store, session_id.clone())
     }
 
     // ==================== Tool Definition Tests ====================

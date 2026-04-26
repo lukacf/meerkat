@@ -1,6 +1,6 @@
 //! Wire types for skill introspection.
 
-use meerkat_core::skills::{SkillKey, SourceUuid};
+use meerkat_core::skills::{SkillKey, SourceIdentityRecord};
 use serde::{Deserialize, Serialize};
 
 /// Typed source provenance for a skill entry. `display_name` is presentation
@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillSourceProvenance {
-    pub source_uuid: SourceUuid,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub display_name: String,
+    #[serde(flatten)]
+    pub identity: SourceIdentityRecord,
 }
 
 /// Wire representation of a skill entry (for list responses).

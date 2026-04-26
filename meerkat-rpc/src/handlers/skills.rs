@@ -6,36 +6,31 @@
 
 use std::sync::Arc;
 
-use meerkat_core::skills::{SkillFilter, SkillIntrospectionEntry, SkillRuntime, SourceUuid};
+use meerkat_core::skills::{SkillFilter, SkillIntrospectionEntry, SkillRuntime};
 use serde::{Deserialize, Deserializer};
 
 use crate::protocol::{RpcId, RpcResponse};
 
 fn skill_source_provenance(
-    source_uuid: SourceUuid,
-    display_name: impl Into<String>,
+    identity: meerkat_core::skills::SourceIdentityRecord,
 ) -> meerkat_contracts::SkillSourceProvenance {
-    meerkat_contracts::SkillSourceProvenance {
-        source_uuid,
-        display_name: display_name.into(),
-    }
+    meerkat_contracts::SkillSourceProvenance { identity }
 }
 
-fn skill_entry(e: &SkillIntrospectionEntry) -> meerkat_contracts::SkillEntry {
-    meerkat_contracts::SkillEntry {
+fn skill_entry(e: &SkillIntrospectionEntry) -> Result<meerkat_contracts::SkillEntry, String> {
+    let source_identity = e
+        .source_identity
+        .clone()
+        .ok_or_else(|| format!("skill {} missing typed source identity", e.descriptor.key))?;
+    Ok(meerkat_contracts::SkillEntry {
         key: e.descriptor.key.clone(),
         name: e.descriptor.name.clone(),
         description: e.descriptor.description.clone(),
         scope: e.descriptor.scope.to_string(),
-        source: skill_source_provenance(
-            e.descriptor.key.source_uuid.clone(),
-            e.descriptor.source_name.clone(),
-        ),
+        source: skill_source_provenance(source_identity),
         is_active: e.is_active,
-        shadowed_by: e.shadowed_by_source_uuid.clone().map(|source_uuid| {
-            skill_source_provenance(source_uuid, e.shadowed_by.clone().unwrap_or_default())
-        }),
-    }
+        shadowed_by: e.shadowed_by_identity.clone().map(skill_source_provenance),
+    })
 }
 
 pub(crate) fn reject_retired_skill_references<'de, D>(
@@ -68,7 +63,10 @@ pub async fn handle_list(
     {
         Ok(entries) => {
             let wire: Vec<meerkat_contracts::SkillEntry> =
-                entries.iter().map(skill_entry).collect();
+                match entries.iter().map(skill_entry).collect::<Result<_, _>>() {
+                    Ok(wire) => wire,
+                    Err(e) => return RpcResponse::error(id, -32603, e),
+                };
             let response = meerkat_contracts::SkillListResponse { skills: wire };
             RpcResponse::success(id, &response)
         }

@@ -648,8 +648,11 @@ mod tests {
         ) -> Pin<
             Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
         > {
-            *self.seen_tools.lock().expect("capture lock") =
-                request.tools.iter().map(|tool| tool.name.clone()).collect();
+            *self.seen_tools.lock().expect("capture lock") = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
             self.inner.stream(request)
         }
 

@@ -589,7 +589,7 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        if self.control_snapshot().phase == RuntimeState::Stopped {
+        if self.phase() == RuntimeState::Stopped {
             return;
         }
         self.silent_comms_intents = intents;
@@ -1020,26 +1020,38 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.control_snapshot().phase == RuntimeState::Idle
+        self.phase() == RuntimeState::Idle
     }
     pub fn is_idle_or_attached(&self) -> bool {
-        self.control_snapshot().phase.is_idle_or_attached()
+        self.phase().is_idle_or_attached()
     }
 
     pub fn phase(&self) -> RuntimeState {
-        self.control_snapshot().phase
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority)
     }
 
     pub fn current_run_id(&self) -> Option<RunId> {
-        self.control_snapshot().current_run_id
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority)
     }
 
     pub fn pre_run_phase(&self) -> Option<RuntimeState> {
-        self.control_snapshot().pre_run_phase
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority)
     }
 
     pub fn can_process_queue(&self) -> bool {
-        self.control_snapshot().phase.can_process_queue()
+        self.phase().can_process_queue()
     }
 
     /// Low-level control projection shim for external contract tests.
@@ -2060,7 +2072,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         self.recover_ephemeral()
     }
     fn runtime_state(&self) -> RuntimeState {
-        self.control_snapshot().phase
+        self.phase()
     }
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.ledger.get(input_id)

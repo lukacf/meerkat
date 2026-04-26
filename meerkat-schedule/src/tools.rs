@@ -192,7 +192,7 @@ impl ScheduleToolDispatcher {
             .into_iter()
             .map(|tool| {
                 Arc::new(ToolDef {
-                    name: tool["name"].as_str().unwrap_or_default().to_string(),
+                    name: tool["name"].as_str().unwrap_or_default().into(),
                     description: tool["description"].as_str().unwrap_or_default().to_string(),
                     input_schema: tool["inputSchema"].clone(),
                     provenance: Some(ToolProvenance {
@@ -934,7 +934,7 @@ mod tests {
         let actual: Vec<String> = dispatcher
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         let expected: Vec<String> = schedule_tools_list()
             .into_iter()

@@ -100,7 +100,6 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
 | `GET` | `/skills` | List skills with provenance |
-| `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/models/catalog` | Curated model catalog with provider profiles |
 | `GET` | `/capabilities` | Runtime capabilities |
@@ -665,23 +664,6 @@ List all skills with provenance information. Returns active and shadowed entries
 ```
 
 Returns `404` if skills are not enabled.
-
-### GET /skills/\{id\}
-
-Inspect a skill's full content by its ID.
-
-```json Response
-{
-  "id": "task-workflow",
-  "name": "Task Workflow",
-  "description": "How to use task tools",
-  "scope": "builtin",
-  "source": "embedded",
-  "body": "# Task Workflow\n\nUse task_create to..."
-}
-```
-
-Returns `404` if the skill is not found or skills are not enabled.
 
 ### GET /health
 

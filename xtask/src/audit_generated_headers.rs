@@ -200,14 +200,14 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     compositions.extend(compat_composition_schemas());
     for composition in &compositions {
         for protocol in &composition.handoff_protocols {
-            set.insert(PathBuf::from(&protocol.rust.module_path));
+            set.insert(PathBuf::from(protocol.rust.module_path.as_str()));
         }
         // Track-B (R5): composition driver codegen writes one
         // descriptor module per declared composition driver. The
         // `module_path` on the driver's Rust binding is the emit
         // target.
         if let Some(driver) = &composition.driver {
-            set.insert(PathBuf::from(&driver.rust.module_path));
+            set.insert(PathBuf::from(driver.rust.module_path.as_str()));
         }
     }
 

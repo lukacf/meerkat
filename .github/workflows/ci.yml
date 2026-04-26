@@ -238,6 +238,11 @@ jobs:
         run: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run
 
       - name: Build external-auth resolver tests
+        if: >-
+          ${{
+            github.event_name != 'pull_request' ||
+            !contains(github.event.pull_request.labels.*.name, 'workflow/catalog-only')
+          }}
         env:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
         run: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test wasm_external_resolver --no-run
@@ -253,6 +258,11 @@ jobs:
         run: wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets
 
       - name: Run external-auth resolver tests under node
+        if: >-
+          ${{
+            github.event_name != 'pull_request' ||
+            !contains(github.event.pull_request.labels.*.name, 'workflow/catalog-only')
+          }}
         env:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
         run: wasm-pack test --node meerkat-web-runtime --test wasm_external_resolver

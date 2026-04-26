@@ -193,10 +193,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             vec![RestOperationDescriptor::new("get", "List available skills")],
         ),
         RestPathDescriptor::new(
-            "/skills/{id}",
-            vec![RestOperationDescriptor::new("get", "Inspect a skill")],
-        ),
-        RestPathDescriptor::new(
             "/capabilities",
             vec![RestOperationDescriptor::new(
                 "get",
@@ -353,17 +349,17 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             ],
         ),
         RestPathDescriptor::new(
-            "/auth/profiles/{id}",
+            "/auth/bindings/{binding_id}",
             vec![
-                RestOperationDescriptor::new("get", "Get one auth profile"),
-                RestOperationDescriptor::new("delete", "Delete an auth profile"),
+                RestOperationDescriptor::new("get", "Get binding-scoped auth profile"),
+                RestOperationDescriptor::new("delete", "Delete binding-scoped credentials"),
             ],
         ),
         RestPathDescriptor::new(
-            "/auth/profiles/{id}/test",
+            "/auth/bindings/{binding_id}/test",
             vec![RestOperationDescriptor::new(
                 "post",
-                "Dry-run the profile's resolve path",
+                "Test a binding resolve path",
             )],
         ),
         RestPathDescriptor::new(
@@ -388,15 +384,22 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/auth/status/{id}",
-            vec![RestOperationDescriptor::new("get", "Get auth status")],
-        ),
-        RestPathDescriptor::new(
-            "/auth/logout/{id}",
+            "/auth/login/device/complete",
             vec![RestOperationDescriptor::new(
                 "post",
-                "Revoke + remove persisted credentials",
+                "Complete device-code OAuth login",
             )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/bindings/{binding_id}/status",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get binding auth status",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/bindings/{binding_id}/logout",
+            vec![RestOperationDescriptor::new("post", "Log out a binding")],
         ),
         RestPathDescriptor::new(
             "/realms",
@@ -424,13 +427,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_keeps_live_config_and_member_routes() {
+    fn catalog_keeps_live_config_auth_and_member_routes() {
         let paths = rest_documented_paths();
         for expected in [
             "/config",
             "/schedules",
             "/schedules/{id}/occurrences",
             "/sessions/{id}/realtime-attachment-status",
+            "/auth/bindings/{binding_id}",
+            "/auth/bindings/{binding_id}/test",
+            "/auth/login/complete",
+            "/auth/login/device/complete",
+            "/auth/bindings/{binding_id}/status",
+            "/auth/bindings/{binding_id}/logout",
             "/mob/{id}/members/{agent_identity}/status",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",
@@ -440,10 +449,15 @@ mod tests {
         for retired in [
             "/mob/{id}/members/{agent_identity}/realtime/attach",
             "/mob/{id}/members/{agent_identity}/realtime/detach",
+            "/skills/{id}",
+            "/auth/profiles/{id}",
+            "/auth/profiles/{id}/test",
+            "/auth/status/{id}",
+            "/auth/logout/{id}",
         ] {
             assert!(
                 !paths.iter().any(|path| path == &retired),
-                "retired caller realtime route must not be catalogued: {retired}"
+                "retired REST route must not be catalogued: {retired}"
             );
         }
     }

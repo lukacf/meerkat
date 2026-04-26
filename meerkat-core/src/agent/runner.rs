@@ -1,7 +1,7 @@
 //! Agent runner interface.
 
 use crate::budget::Budget;
-use crate::error::AgentError;
+use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::ops::ToolDispatchOutcome;
@@ -18,7 +18,7 @@ use crate::tool_scope::{
     ToolScopeStageError,
 };
 use crate::turn_execution_authority::{ContentShape, TurnPrimitiveKind, TurnTerminalOutcome};
-use crate::types::{ContentInput, Message, RunResult, ToolCallView};
+use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
 use std::collections::HashSet;
@@ -26,13 +26,41 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    FilteredToolDispatcher,
-};
+use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
 fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
     Uuid::parse_str(value).ok().map(crate::ops::OperationId)
+}
+
+fn dispatcher_knows_tool<T>(dispatcher: &T, name: &str) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if dispatcher.tool_catalog_capabilities().exact_catalog {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .any(|entry| entry.tool.name == name)
+    } else {
+        dispatcher.tools().iter().any(|tool| tool.name == name)
+    }
+}
+
+fn precheck_visible_tool_call<T>(
+    dispatcher: &T,
+    visible_names: &ToolNameSet,
+    name: &str,
+) -> Result<(), ToolError>
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if visible_names.contains(name) {
+        return Ok(());
+    }
+    if dispatcher_knows_tool(dispatcher, name) {
+        return Err(ToolError::access_denied(name));
+    }
+    Err(ToolError::not_found(name))
 }
 
 fn runtime_execution_snapshot(
@@ -389,7 +417,9 @@ where
             .visible_tool_names()
             .map_err(|err| AgentError::InternalError(err.to_string()))?
             .into_iter()
-            .collect::<Vec<_>>();
+            .collect::<ToolNameSet>();
+        precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
+            .map_err(|error| AgentError::ToolError(error.to_string()))?;
         let args = to_raw_value(&call.args).map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to serialize external tool-call arguments: {err}"
@@ -400,9 +430,7 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let visible_dispatcher =
-            FilteredToolDispatcher::new(Arc::clone(&self.tools), visible_tool_names);
-        let dispatch_result = visible_dispatcher.dispatch(view).await;
+        let dispatch_result = self.tools.dispatch(view).await;
 
         match dispatch_result {
             Ok(mut outcome) => {
@@ -606,20 +634,7 @@ where
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunStarted,
-                    session_id: self.session.id().clone(),
-                    turn_number: None,
-                    prompt_input: Some(prompt.clone()),
-                    prompt: Some(prompt.text_content()),
-                    error_report: None,
-                    error_class: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_started(self.session.id().clone(), prompt.clone()),
                 event_tx,
             )
             .await?;
@@ -648,20 +663,7 @@ where
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunCompleted,
-                    session_id: self.session.id().clone(),
-                    turn_number: Some(result.turns),
-                    prompt_input: None,
-                    prompt: None,
-                    error_report: None,
-                    error_class: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_completed(self.session.id().clone(), result.turns),
                 event_tx,
             )
             .await?;
@@ -750,14 +752,15 @@ where
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
+        let error_report = crate::event::AgentErrorReport::from_agent_error(error);
         let _ = crate::event_tap::tap_emit(
             &self.event_tap,
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
-                error_class: crate::event::AgentErrorClass::from(error),
-                error: error.to_string(),
-                error_report: Some(crate::event::AgentErrorReport::from_agent_error(error)),
+                error_class: error_report.class,
+                error: error_report.message.clone(),
+                error_report: Some(error_report),
             },
         )
         .await;
@@ -802,20 +805,7 @@ where
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunFailed,
-                    session_id: self.session.id().clone(),
-                    turn_number: None,
-                    prompt_input: None,
-                    prompt: None,
-                    error_report: Some(crate::event::AgentErrorReport::from_agent_error(error)),
-                    error_class: Some(crate::event::AgentErrorClass::from(error)),
-                    error: Some(error.to_string()),
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_failed(self.session.id().clone(), error),
                 event_tx,
             )
             .await?;

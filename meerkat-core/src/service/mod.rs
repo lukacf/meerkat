@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn mob_tool_snapshot_context_parent_owned_returns_tools() {
         let tools = vec![Arc::new(ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "a test".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,

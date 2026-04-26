@@ -340,29 +340,29 @@ class MeerkatClient:
         return await self._request("auth/profile/list", {"realm_id": realm_id})
 
     async def get_auth_profile(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
-        """Fetch a single auth profile via `auth/profile/get`."""
-        return await self._request(
-            "auth/profile/get", {"realm_id": realm_id, "profile_id": profile_id}
-        )
+        """Fetch a binding-scoped auth profile via `auth/profile/get`."""
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/profile/get", params)
 
     async def create_auth_profile(
         self, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Create an auth profile via `auth/profile/create`. The server
-        requires a full profile payload (`{realm_id, provider,
-        auth_method, source, storage?, ...}`) — Python passes it
-        through unchanged so the wire schema governs the contract."""
+        """Create binding-scoped credentials via `auth/profile/create`."""
         return await self._request("auth/profile/create", params)
 
-    async def delete_auth_profile(self, realm_id: str, profile_id: str) -> None:
+    async def delete_auth_profile(
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
+    ) -> None:
         """Clear a profile's persisted credentials via
         `auth/profile/delete`."""
-        await self._request(
-            "auth/profile/delete",
-            {"realm_id": realm_id, "profile_id": profile_id},
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        await self._request("auth/profile/delete", params)
 
     async def auth_login_start(
         self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
@@ -384,6 +384,7 @@ class MeerkatClient:
         *,
         realm_id: str,
         binding_id: str,
+        profile_id: str | None = None,
         redirect_uri: str = "http://127.0.0.1:0/callback",
     ) -> dict[str, Any]:
         """Exchange an authorization code for tokens via
@@ -397,6 +398,8 @@ class MeerkatClient:
             "binding_id": binding_id,
             "redirect_uri": redirect_uri,
         }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
         return await self._request("auth/login/complete", params)
 
     async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
@@ -414,6 +417,7 @@ class MeerkatClient:
         *,
         realm_id: str,
         binding_id: str,
+        profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
@@ -424,6 +428,8 @@ class MeerkatClient:
             "realm_id": realm_id,
             "binding_id": binding_id,
         }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
         return await self._request("auth/login/device_complete", params)
 
     async def auth_provision_api_key(
@@ -432,6 +438,7 @@ class MeerkatClient:
         *,
         realm_id: str,
         binding_id: str,
+        profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Anthropic Console-OAuth → API key provisioning via
         `auth/login/provision_api_key` (plan §4b.5). The caller runs
@@ -443,25 +450,29 @@ class MeerkatClient:
             "realm_id": realm_id,
             "binding_id": binding_id,
         }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
         return await self._request("auth/login/provision_api_key", params)
 
     async def auth_status(
-        self, realm_id: str, binding_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Report persisted-credential status for a binding via
         `auth/status/get`."""
-        return await self._request(
-            "auth/status/get", {"realm_id": realm_id, "binding_id": binding_id}
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/status/get", params)
 
     async def auth_logout(
-        self, realm_id: str, binding_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
-        return await self._request(
-            "auth/logout", {"realm_id": realm_id, "binding_id": binding_id}
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/logout", params)
 
     # -- Session lifecycle -------------------------------------------------
 

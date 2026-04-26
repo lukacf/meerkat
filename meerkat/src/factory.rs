@@ -2786,9 +2786,11 @@ impl AgentFactory {
                     builder = builder.memory_store(Arc::clone(&store));
 
                     // Compose memory_search tool into the dispatcher
+                    let memory_scope =
+                        meerkat_core::memory::MemorySearchScope::for_session(session_id.clone());
                     let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::new(
                         Arc::clone(&store),
-                        session_id.clone(),
+                        memory_scope,
                     );
                     let gateway = meerkat_core::ToolGatewayBuilder::new()
                         .add_dispatcher(tools)
@@ -3146,7 +3148,7 @@ mod tests {
             SelfHostedModelConfig {
                 server: "local".to_string(),
                 remote_model: "gemma4:e2b".to_string(),
-                display_name: "Gemma 4 E2B".to_string(),
+                display_name: "Gemma 4 E2B".into(),
                 family: "gemma-4".to_string(),
                 tier: meerkat_models::ModelTier::Supported,
                 context_window: Some(128_000),
@@ -3423,7 +3425,7 @@ mod prompt_tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
                     provenance: None,
@@ -3483,13 +3485,13 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
-            name: "secret_lookup".to_string(),
+            name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
         });
         let secret_audit = Arc::new(ToolDef {
-            name: "secret_audit".to_string(),
+            name: "secret_audit".into(),
             description: "Audit a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
@@ -3529,7 +3531,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let visible = Arc::new(ToolDef {
-            name: "visible".to_string(),
+            name: "visible".into(),
             description: "Always-inline tool".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
@@ -3585,7 +3587,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
-            name: "secret_lookup".to_string(),
+            name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,

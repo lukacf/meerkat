@@ -515,17 +515,17 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
 async fn contract_mob_003_inproc_namespace_isolation() {
     let suffix = Uuid::new_v4().simple().to_string();
 
-    // Create two agents in namespace "mob:alpha"
+    // Create two agents in namespace "mob.alpha"
     let alpha_a_name = format!("c003-alpha-a-{suffix}");
     let alpha_b_name = format!("c003-alpha-b-{suffix}");
     let alpha_a =
-        CommsRuntime::inproc_only_scoped(&alpha_a_name, Some("mob:alpha".to_string())).unwrap();
+        CommsRuntime::inproc_only_scoped(&alpha_a_name, Some("mob.alpha".to_string())).unwrap();
     let alpha_b =
-        CommsRuntime::inproc_only_scoped(&alpha_b_name, Some("mob:alpha".to_string())).unwrap();
+        CommsRuntime::inproc_only_scoped(&alpha_b_name, Some("mob.alpha".to_string())).unwrap();
 
-    // Create one agent in namespace "mob:beta"
+    // Create one agent in namespace "mob.beta"
     let beta_name = format!("c003-beta-{suffix}");
-    let _beta = CommsRuntime::inproc_only_scoped(&beta_name, Some("mob:beta".to_string())).unwrap();
+    let _beta = CommsRuntime::inproc_only_scoped(&beta_name, Some("mob.beta".to_string())).unwrap();
 
     // alpha_a's peers should see alpha_b but NOT beta
     // (inproc_only_scoped does not require_peer_auth, but the router

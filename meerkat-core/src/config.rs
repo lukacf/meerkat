@@ -1556,15 +1556,75 @@ impl Default for HookEntryConfig {
             priority: 100,
             failure_policy: None,
             timeout_ms: None,
-            runtime: HookRuntimeConfig::new(
-                HookRuntimeKind::InProcess,
-                Some(serde_json::json!({"name":"noop"})),
-            )
-            .unwrap_or(HookRuntimeConfig {
+            runtime: HookRuntimeConfig::in_process("noop").unwrap_or(HookRuntimeConfig {
                 kind: HookRuntimeKind::InProcess,
                 config: None,
             }),
         }
+    }
+}
+
+/// Stable identity for an in-process hook handler registered with the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct HookInProcessHandlerId(String);
+
+impl HookInProcessHandlerId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for HookInProcessHandlerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<&str> for HookInProcessHandlerId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for HookInProcessHandlerId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl Default for HookInProcessHandlerId {
+    fn default() -> Self {
+        Self::new("noop")
+    }
+}
+
+/// Typed payload for [`HookRuntimeKind::InProcess`].
+///
+/// `name` remains accepted for existing configs, but runtime dispatch uses the
+/// typed handler id rather than fishing a string out of opaque adapter config.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct HookInProcessRuntimeConfig {
+    #[serde(alias = "name")]
+    pub handler: HookInProcessHandlerId,
+}
+
+impl HookInProcessRuntimeConfig {
+    pub fn new(handler: impl Into<HookInProcessHandlerId>) -> Self {
+        Self {
+            handler: handler.into(),
+        }
+    }
+}
+
+impl Default for HookInProcessRuntimeConfig {
+    fn default() -> Self {
+        Self::new("noop")
     }
 }
 
@@ -1608,8 +1668,9 @@ impl std::fmt::Display for HookRuntimeKind {
 
 /// Runtime configuration used by hook adapters.
 ///
-/// The dispatch kind is typed; `config` remains an opaque per-kind payload
-/// parsed by the adapter.
+/// The dispatch kind is typed. In-process handlers use
+/// [`HookInProcessRuntimeConfig`]; command and HTTP runtimes keep their
+/// adapter-specific payloads opaque at this boundary.
 #[derive(Debug, Clone)]
 pub struct HookRuntimeConfig {
     pub kind: HookRuntimeKind,
@@ -1634,6 +1695,25 @@ impl HookRuntimeConfig {
         Ok(Self { kind, config })
     }
 
+    pub fn in_process(
+        handler: impl Into<HookInProcessHandlerId>,
+    ) -> Result<Self, serde_json::Error> {
+        serde_json::to_value(HookInProcessRuntimeConfig::new(handler))
+            .and_then(|config| Self::new(HookRuntimeKind::InProcess, Some(config)))
+    }
+
+    pub fn in_process_config(
+        &self,
+    ) -> Result<Option<HookInProcessRuntimeConfig>, serde_json::Error> {
+        if self.kind != HookRuntimeKind::InProcess {
+            return Ok(None);
+        }
+
+        self.config_value()
+            .and_then(serde_json::from_value::<HookInProcessRuntimeConfig>)
+            .map(Some)
+    }
+
     pub fn config_value(&self) -> Result<Value, serde_json::Error> {
         match &self.config {
             Some(raw) => serde_json::from_str(raw.get()),
@@ -1644,11 +1724,7 @@ impl HookRuntimeConfig {
 
 impl Default for HookRuntimeConfig {
     fn default() -> Self {
-        Self::new(
-            HookRuntimeKind::InProcess,
-            Some(serde_json::json!({"name":"noop"})),
-        )
-        .unwrap_or(Self {
+        Self::in_process("noop").unwrap_or(Self {
             kind: HookRuntimeKind::InProcess,
             config: None,
         })
@@ -1740,6 +1816,8 @@ impl JsonSchema for HookRuntimeConfig {
             "required": ["type"],
             "properties": {
                 "type": { "type": "string" },
+                "handler": { "type": "string" },
+                "name": { "type": "string", "deprecated": true },
                 "config": {}
             },
             "additionalProperties": true

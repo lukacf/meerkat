@@ -48,6 +48,7 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         prompt: Some("legacy prompt projection".to_string()),
         error_report: Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
+            reason: None,
             message: "typed failure".to_string(),
         }),
         error_class: Some(AgentErrorClass::Llm),
@@ -91,6 +92,7 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         inv_rt.error_report,
         Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
+            reason: None,
             message: "typed failure".to_string(),
         })
     );

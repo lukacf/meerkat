@@ -73,7 +73,7 @@ impl SessionAgent for MockAgent {
 
         if self.callback_pending {
             return Err(meerkat_core::error::AgentError::CallbackPending {
-                tool_name: "external_mock".to_string(),
+                tool_name: "external_mock".into(),
                 args: json!({ "value": "browser" }),
             });
         }
@@ -297,7 +297,7 @@ impl StaticToolDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: json!({
                         "type": "object",
@@ -392,7 +392,7 @@ impl AgentLlmClient for RecordingLlmClient {
         _temperature: Option<f32>,
         _provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
-        let names = tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        let names = tools.iter().map(|t| t.name.to_string()).collect::<Vec<_>>();
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")

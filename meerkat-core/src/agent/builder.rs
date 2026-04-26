@@ -249,7 +249,7 @@ impl AgentBuilder {
                 let control_names = catalog
                     .iter()
                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                    .map(|entry| entry.tool.name.clone())
+                    .map(|entry| entry.tool.name.to_string())
                     .collect::<std::collections::HashSet<_>>();
                 let deferred_names = if !control_names.is_empty()
                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -263,7 +263,7 @@ impl AgentBuilder {
                                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
                             )
                         })
-                        .map(|entry| entry.tool.name.clone())
+                        .map(|entry| entry.tool.name.to_string())
                         .collect()
                 } else {
                     std::collections::HashSet::new()

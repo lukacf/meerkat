@@ -222,7 +222,7 @@ mod tool_dispatch {
 
         // Valid tool definition should be accepted
         let valid_tool = ToolDef {
-            name: "test_tool".to_string(),
+            name: "test_tool".into(),
             description: "A test tool".to_string(),
             input_schema: meerkat_tools::schema_for::<ToolInput>(),
             provenance: None,
@@ -694,7 +694,8 @@ mod tool_access_policy {
 
     #[test]
     fn test_allow_list_structure() {
-        let policy = ToolAccessPolicy::AllowList(vec!["safe_tool".into(), "another_safe".into()]);
+        let policy =
+            ToolAccessPolicy::AllowList(["safe_tool", "another_safe"].into_iter().collect());
 
         // Should serialize correctly
         let json = serde_json::to_value(&policy).expect("Should serialize");
@@ -707,8 +708,8 @@ mod tool_access_policy {
         match parsed {
             ToolAccessPolicy::AllowList(tools) => {
                 assert_eq!(tools.len(), 2);
-                assert!(tools.contains(&"safe_tool".into()));
-                assert!(tools.contains(&"another_safe".into()));
+                assert!(tools.contains("safe_tool"));
+                assert!(tools.contains("another_safe"));
             }
             _ => panic!("Wrong variant"),
         }
@@ -716,7 +717,7 @@ mod tool_access_policy {
 
     #[test]
     fn test_deny_list_structure() {
-        let policy = ToolAccessPolicy::DenyList(vec!["dangerous_tool".into()]);
+        let policy = ToolAccessPolicy::DenyList(["dangerous_tool"].into_iter().collect());
 
         // Should serialize correctly
         let json = serde_json::to_value(&policy).expect("Should serialize");
@@ -727,7 +728,7 @@ mod tool_access_policy {
         match parsed {
             ToolAccessPolicy::DenyList(tools) => {
                 assert_eq!(tools.len(), 1);
-                assert!(tools.contains(&"dangerous_tool".into()));
+                assert!(tools.contains("dangerous_tool"));
             }
             _ => panic!("Wrong variant"),
         }
@@ -1078,13 +1079,13 @@ mod combined {
     fn test_llm_request_with_tools() {
         let tools = vec![
             Arc::new(ToolDef {
-                name: "read_file".to_string(),
+                name: "read_file".into(),
                 description: "Read a file".to_string(),
                 input_schema: meerkat_tools::schema_for::<ReadFileArgs>(),
                 provenance: None,
             }),
             Arc::new(ToolDef {
-                name: "write_file".to_string(),
+                name: "write_file".into(),
                 description: "Write a file".to_string(),
                 input_schema: meerkat_tools::schema_for::<WriteFileArgs>(),
                 provenance: None,

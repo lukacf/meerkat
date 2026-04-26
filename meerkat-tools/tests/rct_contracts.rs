@@ -396,7 +396,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     impl AgentToolDispatcher for HangingDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([Arc::new(ToolDef {
-                name: "hang".to_string(),
+                name: "hang".into(),
                 description: "Hangs forever".to_string(),
                 input_schema: empty_object_schema(),
                 provenance: None,
@@ -474,14 +474,14 @@ async fn test_regression_composite_deduplicates_external_tools()
             Arc::from([
                 // Duplicate of builtin
                 Arc::new(ToolDef {
-                    name: "task_list".to_string(),
+                    name: "task_list".into(),
                     description: "External task_list (should be shadowed)".to_string(),
                     input_schema: json!({"type": "object", "properties": {"external": {"type": "boolean"}}}),
                     provenance: None,
                 }),
                 // Unique external tool
                 Arc::new(ToolDef {
-                    name: "external_only".to_string(),
+                    name: "external_only".into(),
                     description: "External-only tool".to_string(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
@@ -547,25 +547,25 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([
                 Arc::new(ToolDef {
-                    name: "shell".to_string(),
+                    name: "shell".into(),
                     description: "Execute shell commands (security sensitive)".to_string(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
                 }),
                 Arc::new(ToolDef {
-                    name: "shell_job_cancel".to_string(),
+                    name: "shell_job_cancel".into(),
                     description: "Cancel background shell jobs (privileged)".to_string(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
                 }),
                 Arc::new(ToolDef {
-                    name: "task_list".to_string(),
+                    name: "task_list".into(),
                     description: "List tasks (safe)".to_string(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
                 }),
                 Arc::new(ToolDef {
-                    name: "datetime".to_string(),
+                    name: "datetime".into(),
                     description: "Get current date and time (safe)".to_string(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
@@ -583,10 +583,15 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
 
     // Test 1: DenyList should block specified tools
     {
-        let policy = ToolAccessPolicy::DenyList(vec!["shell".into(), "shell_job_cancel".into()]);
+        let policy =
+            ToolAccessPolicy::DenyList(["shell", "shell_job_cancel"].into_iter().collect());
         let filtered = FilteredDispatcher::new(inner.clone(), &policy);
 
-        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<_> = filtered
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
 
         // Shell and shell_job_cancel should be blocked
         assert!(
@@ -611,10 +616,14 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
 
     // Test 2: AllowList should only permit specified tools
     {
-        let policy = ToolAccessPolicy::AllowList(vec!["task_list".into()]);
+        let policy = ToolAccessPolicy::AllowList(["task_list"].into_iter().collect());
         let filtered = FilteredDispatcher::new(inner.clone(), &policy);
 
-        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<_> = filtered
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
 
         // Only task_list should be available
         assert_eq!(
@@ -647,7 +656,11 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
         let policy = ToolAccessPolicy::Inherit;
         let filtered = FilteredDispatcher::new(inner, &policy);
 
-        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<_> = filtered
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
 
         assert_eq!(
             tool_names.len(),
@@ -674,7 +687,7 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_access_den
     impl AgentToolDispatcher for MockDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([Arc::new(ToolDef {
-                name: "shell".to_string(),
+                name: "shell".into(),
                 description: "Shell".to_string(),
                 input_schema: json!({"type": "object"}),
                 provenance: None,
@@ -691,7 +704,7 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_access_den
     }
 
     let inner = Arc::new(MockDispatcher);
-    let policy = ToolAccessPolicy::DenyList(vec!["shell".into()]);
+    let policy = ToolAccessPolicy::DenyList(["shell"].into_iter().collect());
     let filtered = FilteredDispatcher::new(inner, &policy);
 
     // Attempting to dispatch a blocked tool should return AccessDenied.

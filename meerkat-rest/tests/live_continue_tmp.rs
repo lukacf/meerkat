@@ -36,6 +36,7 @@ async fn integration_real_live_continue_hangs() {
         .builtins(true)
         .shell(true)
         .project_root(project_root.clone());
+    let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence =
@@ -106,7 +107,7 @@ async fn integration_real_live_continue_hangs() {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-        provider_registry: Arc::new(meerkat_providers::ProviderRuntimeRegistry::empty()),
+        provider_registry,
     };
 
     let app = router(state);

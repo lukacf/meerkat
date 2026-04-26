@@ -320,8 +320,10 @@ pub struct ApprovalService {
 impl ApprovalService {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_store(Arc::new(InMemoryApprovalStore::new()))
-            .expect("in-memory approval store cannot fail to load")
+        Self {
+            records: Arc::new(RwLock::new(BTreeMap::new())),
+            store: Arc::new(InMemoryApprovalStore::new()),
+        }
     }
 
     pub fn with_store(store: Arc<dyn ApprovalStore>) -> Result<Self, ApprovalError> {
@@ -483,7 +485,14 @@ impl ApprovalService {
     }
 }
 
+impl Default for ApprovalService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use chrono::Duration;

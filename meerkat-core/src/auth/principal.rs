@@ -229,6 +229,7 @@ pub fn metadata_grants_no_visibility(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -322,7 +323,7 @@ mod tests {
         let scope = GrantScope::Session {
             session_id: "session-1".into(),
         };
-        let bob_relationship = ActingOnBehalfOf::new(bob_agent.clone(), bob.clone());
+        let bob_relationship = ActingOnBehalfOf::new(bob_agent.clone(), bob);
         let alice_relationship = ActingOnBehalfOf::new(bob_agent.clone(), alice);
         let grant = AuthGrant {
             principal: bob_agent.clone(),

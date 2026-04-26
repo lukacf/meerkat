@@ -329,6 +329,7 @@ fn validate_media_type(media_type: &str) -> Result<(), ArtifactError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{BlobId, BlobRef, SurfaceMetadata};

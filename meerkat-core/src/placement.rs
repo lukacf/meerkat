@@ -140,7 +140,7 @@ fn validate_optional_id(
     {
         return Err(PlacementError::InvalidId {
             field,
-            value: value.to_string(),
+            value: value.clone(),
         });
     }
     Ok(Some(trimmed.to_string()))

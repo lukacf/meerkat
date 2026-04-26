@@ -12,6 +12,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
 - `active_run_count`: `u64`
 - `pending_spawn_count`: `u64`
+- `pending_spawn_sessions`: `Map<AgentIdentity, SessionId>`
 - `coordinator_bound`: `Bool`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
@@ -101,8 +102,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InitializeOrchestrator`
 - `BindCoordinator`
 - `UnbindCoordinator`
-- `StageSpawn`
-- `CompleteSpawn`
+- `StageSpawn`(agent_identity: AgentIdentity, session_id: SessionId)
+- `CompleteSpawn`(agent_identity: AgentIdentity)
 - `StartFlow`
 - `CompleteFlow`
 - `StopOrchestrator`
@@ -531,7 +532,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StageSpawnRunning`
 - From: `Running`
-- On: `StageSpawn`()
+- On: `StageSpawn`(agent_identity, session_id)
+- Guards:
+  - `pending_identity_unused`
 - Emits: `ExposePendingSpawn`
 - To: `Running`
 
@@ -817,9 +820,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CompleteSpawnRunning`
 - From: `Running`, `Stopped`
-- On: `CompleteSpawn`()
+- On: `CompleteSpawn`(agent_identity)
 - Guards:
   - `pending_spawns_present`
+  - `pending_identity_present`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 

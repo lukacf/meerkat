@@ -871,6 +871,7 @@ mod source {
                 loop_max_iterations: Map<LoopInstanceId, u64>,
                 loop_active_body_frame: Map<LoopInstanceId, Option<FrameId>>,
                 pending_spawn_count: u64,
+                pending_spawn_sessions: Map<AgentIdentity, SessionId>,
                 coordinator_bound: bool,
                 member_startup_binding_requested: Set<AgentRuntimeId>,
                 member_startup_runtime_ready: Set<AgentRuntimeId>,
@@ -973,6 +974,7 @@ mod source {
                 loop_max_iterations = EmptyMap,
                 loop_active_body_frame = EmptyMap,
                 pending_spawn_count = 0,
+                pending_spawn_sessions = EmptyMap,
                 coordinator_bound = true,
                 member_startup_binding_requested = EmptySet,
                 member_startup_runtime_ready = EmptySet,
@@ -1169,8 +1171,8 @@ mod source {
                 InitializeOrchestrator,
                 BindCoordinator,
                 UnbindCoordinator,
-                StageSpawn,
-                CompleteSpawn,
+                StageSpawn { agent_identity: AgentIdentity, session_id: SessionId },
+                CompleteSpawn { agent_identity: AgentIdentity },
                 StartFlow,
                 CompleteFlow,
                 StopOrchestrator,
@@ -1594,6 +1596,7 @@ mod source {
                 update {
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.live_runtime_ids.insert(agent_runtime_id);
                     if external_addressable {
                         self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -1617,6 +1620,7 @@ mod source {
                 update {
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.live_runtime_ids.insert(agent_runtime_id);
                     if external_addressable {
                         self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -1661,6 +1665,7 @@ mod source {
                     self.pending_session_ingress_detach_runtime_ids = EmptySet;
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.coordinator_bound = false;
                 }
                 to Destroyed
@@ -1683,6 +1688,7 @@ mod source {
                     self.member_state_markers = EmptyMap;
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.coordinator_bound = false;
                 }
                 to Destroyed
@@ -1789,6 +1795,7 @@ mod source {
                 update {
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.coordinator_bound = true;
                 }
                 to Running
@@ -2168,10 +2175,12 @@ mod source {
             }
 
             transition StageSpawnRunning {
-                on signal StageSpawn
+                on signal StageSpawn { agent_identity, session_id }
                 guard { self.lifecycle_phase == Phase::Running }
+                guard "pending_identity_unused" { self.pending_spawn_sessions.contains_key(agent_identity) == false }
                 update {
                     self.pending_spawn_count += 1;
+                    self.pending_spawn_sessions.insert(agent_identity, session_id);
                 }
                 to Running
                 emit ExposePendingSpawn
@@ -2781,11 +2790,13 @@ mod source {
             // =====================================================================
 
             transition CompleteSpawnRunning {
-                on signal CompleteSpawn
+                on signal CompleteSpawn { agent_identity }
                 guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
                 guard "pending_spawns_present" { self.pending_spawn_count > 0 }
+                guard "pending_identity_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
                 update {
                     self.pending_spawn_count -= 1;
+                    self.pending_spawn_sessions.remove(agent_identity);
                 }
                 to Running
                 emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
@@ -2809,6 +2820,7 @@ mod source {
                     self.pending_session_ingress_detach_runtime_ids = EmptySet;
                     self.active_run_count = 0;
                     self.pending_spawn_count = 0;
+                    self.pending_spawn_sessions = EmptyMap;
                     self.coordinator_bound = false;
                 }
                 to Destroyed

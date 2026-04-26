@@ -123,6 +123,10 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::SessionId,
     >,
+    pub pending_spawn_sessions: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SessionId,
+    >,
     pub pending_session_ingress_detach_runtime_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
 }

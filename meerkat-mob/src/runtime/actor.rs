@@ -18,7 +18,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::{PeerLifecycleKind, PeerRoute, TrustedPeerDescriptor};
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
 ///
@@ -102,6 +102,24 @@ fn normalize_runtime_mode_for_binding(
         crate::RuntimeBinding::External { .. } => crate::MobRuntimeMode::TurnDriven,
         crate::RuntimeBinding::Session => runtime_mode,
     }
+}
+
+fn admit_bridge_session_for_spawn(
+    req: &mut meerkat_core::service::CreateSessionRequest,
+) -> SessionId {
+    if req.build.is_none() {
+        req.build = Some(meerkat_core::service::SessionBuildOptions::default());
+    }
+    let build = req
+        .build
+        .as_mut()
+        .expect("build options were initialized above");
+    if let Some(session) = build.resume_session.as_ref() {
+        return session.id().clone();
+    }
+    let session_id = SessionId::new();
+    build.resume_session = Some(meerkat_core::session::Session::with_id(session_id.clone()));
+    session_id
 }
 
 /// Project a DSL `MobPhase` into the shell `MobState` enum. Used by
@@ -206,6 +224,7 @@ pub(super) struct McpServerEntry {
 pub(super) struct PendingSpawn {
     pub(super) profile_name: ProfileName,
     pub(super) agent_identity: MeerkatId,
+    pub(super) admitted_bridge_session_id: SessionId,
     pub(super) prompt: ContentInput,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
@@ -1851,7 +1870,25 @@ impl MobActor {
         } else {
             None
         };
-        self.pending_spawns.alignment_violation(expected)
+        if let Some(message) = self.pending_spawns.alignment_violation(expected) {
+            return Some(message);
+        }
+        if self.has_orchestrator {
+            let dsl_pending = self
+                .dsl_authority
+                .state
+                .pending_spawn_sessions
+                .iter()
+                .map(|(identity, session_id)| (identity.0.clone(), session_id.0.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let local_pending = self.pending_spawns.member_session_pairs();
+            if dsl_pending != local_pending {
+                return Some(format!(
+                    "pending admission mismatch: dsl={dsl_pending:?}, local={local_pending:?}"
+                ));
+            }
+        }
+        None
     }
 
     fn ensure_pending_spawn_alignment(&self, context: &str) -> Result<(), MobError> {
@@ -1877,14 +1914,17 @@ impl MobActor {
         task: tokio::task::JoinHandle<()>,
     ) {
         let impact = self.pending_spawns.insert(spawn_ticket, pending, task);
-        if matches!(impact, PendingSpawnInsertImpact::Collided) {
+        if let PendingSpawnInsertImpact::Collided { replaced_identity } = impact {
             // StageSpawn has already been accepted for the new slot in enqueue paths.
             // If we replaced a prior slot at the same ticket, close that prior
             // staged snapshot now so authority counters cannot drift silently.
-            self.complete_orchestrator_spawn(
-                Some(spawn_ticket),
-                "pending spawn slot collision replaced existing entry",
-            );
+            if let Some(replaced_identity) = replaced_identity.as_ref() {
+                self.complete_orchestrator_spawn(
+                    Some(spawn_ticket),
+                    replaced_identity,
+                    "pending spawn slot collision replaced existing entry",
+                );
+            }
             tracing::warn!(
                 spawn_ticket,
                 "pending spawn slot collision replaced existing entry"
@@ -1916,7 +1956,13 @@ impl MobActor {
     ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
         let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
         if pending.is_some() || task.is_some() {
-            self.complete_orchestrator_spawn(Some(spawn_ticket), context);
+            if let Some(pending) = pending.as_ref() {
+                self.complete_orchestrator_spawn(
+                    Some(spawn_ticket),
+                    &pending.agent_identity,
+                    context,
+                );
+            }
         }
         if let Some(message) = self.pending_spawn_alignment_violation() {
             tracing::error!(
@@ -1929,27 +1975,52 @@ impl MobActor {
         (pending, task)
     }
 
-    fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
+    fn stage_orchestrator_spawn(
+        &mut self,
+        agent_identity: &MeerkatId,
+        session_id: &SessionId,
+    ) -> Result<(), MobError> {
         if self.has_orchestrator {
-            self.apply_dsl_signal(mob_dsl::MobMachineSignal::StageSpawn, "stage_spawn")?;
+            self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::StageSpawn {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
+                        agent_identity.as_str(),
+                    )),
+                    session_id: mob_dsl::SessionId::from_domain(session_id),
+                },
+                "stage_spawn",
+            )?;
         }
         Ok(())
     }
 
-    fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
+    fn complete_orchestrator_spawn(
+        &mut self,
+        spawn_ticket: Option<u64>,
+        agent_identity: &MeerkatId,
+        context: &'static str,
+    ) {
         if self.has_orchestrator
-            && let Err(error) =
-                self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteSpawn, "complete_spawn")
+            && let Err(error) = self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::CompleteSpawn {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
+                        agent_identity.as_str(),
+                    )),
+                },
+                "complete_spawn",
+            )
         {
             if let Some(spawn_ticket) = spawn_ticket {
                 tracing::warn!(
                     spawn_ticket,
+                    agent_identity = %agent_identity,
                     error = %error,
                     context,
                     "failed to reconcile orchestrator pending-spawn snapshot"
                 );
             } else {
                 tracing::warn!(
+                    agent_identity = %agent_identity,
                     error = %error,
                     context,
                     "failed to reconcile orchestrator pending-spawn snapshot"
@@ -2817,6 +2888,7 @@ impl MobActor {
                         in_progress_task_ids: dsl.in_progress_task_ids.clone(),
                         completed_task_ids: dsl.completed_task_ids.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
+                        pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
                         pending_session_ingress_detach_runtime_ids: dsl
                             .pending_session_ingress_detach_runtime_ids
                             .clone(),
@@ -3371,6 +3443,7 @@ impl MobActor {
             let agent_identity = slot.spawn.agent_identity.clone();
             self.complete_orchestrator_spawn(
                 Some(spawn_ticket),
+                &agent_identity,
                 "lifecycle transition cleared pending spawn",
             );
             self.abort_pending_spawn_slot(&slot, reason).await;
@@ -3451,6 +3524,7 @@ impl MobActor {
         for slot in &slots {
             self.complete_orchestrator_spawn(
                 Some(slot.ticket),
+                &slot.spawn.agent_identity,
                 "member lifecycle command canceled pending spawn",
             );
         }
@@ -3965,12 +4039,14 @@ impl MobActor {
         }
 
         // Normal provisioning path — resume path already returned above.
-        let Some(provision_request) = maybe_provision_request else {
+        let Some(mut provision_request) = maybe_provision_request else {
             let _ = reply_tx.send(Err(MobError::Internal(
                 "provision_request missing for normal spawn path".into(),
             )));
             return;
         };
+        let admitted_bridge_session_id =
+            admit_bridge_session_for_spawn(&mut provision_request.create_session);
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
@@ -3979,7 +4055,9 @@ impl MobActor {
         let spawn_runtime_mode = selected_runtime_mode;
         let pending_progress = Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default()));
 
-        if let Err(error) = self.stage_orchestrator_spawn() {
+        if let Err(error) =
+            self.stage_orchestrator_spawn(&agent_identity, &admitted_bridge_session_id)
+        {
             let _ = reply_tx.send(Err(error));
             return;
         }
@@ -3987,6 +4065,7 @@ impl MobActor {
         let pending = PendingSpawn {
             profile_name,
             agent_identity,
+            admitted_bridge_session_id,
             prompt,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
@@ -4135,6 +4214,7 @@ impl MobActor {
             let PendingSpawn {
                 profile_name,
                 agent_identity,
+                admitted_bridge_session_id: _,
                 prompt,
                 runtime_mode,
                 labels,
@@ -4267,21 +4347,24 @@ impl MobActor {
             agent_identity,
         )?;
         let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
-        let provision_request = ProvisionMemberRequest {
+        let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: selected_binding,
             peer_name,
             owner_bridge_session_id: None,
             ops_registry: None,
         };
+        let admitted_bridge_session_id =
+            admit_bridge_session_for_spawn(&mut provision_request.create_session);
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        self.stage_orchestrator_spawn()?;
+        self.stage_orchestrator_spawn(agent_identity, &admitted_bridge_session_id)?;
         let (pending_reply_tx, _pending_reply_rx) = oneshot::channel();
         let pending = PendingSpawn {
             profile_name: profile_name.clone(),
             agent_identity: agent_identity.clone(),
+            admitted_bridge_session_id,
             prompt: prompt.clone(),
             runtime_mode,
             labels: labels.clone(),
@@ -6939,17 +7022,19 @@ impl MobActor {
             "{}/{}/{}",
             self.definition.id, snapshot.profile_name, agent_identity
         );
-        let provision_request = ProvisionMemberRequest {
+        let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: snapshot.binding.clone(),
             peer_name,
             owner_bridge_session_id: None,
             ops_registry: None,
         };
+        let admitted_bridge_session_id =
+            admit_bridge_session_for_spawn(&mut provision_request.create_session);
 
         let respawn_spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        self.stage_orchestrator_spawn()
+        self.stage_orchestrator_spawn(&agent_identity, &admitted_bridge_session_id)
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: format!("failed to stage respawn replacement spawn: {error}"),
@@ -6958,6 +7043,7 @@ impl MobActor {
         let respawn_pending = PendingSpawn {
             profile_name: snapshot.profile_name.clone(),
             agent_identity: agent_identity.clone(),
+            admitted_bridge_session_id,
             prompt: prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),

@@ -13317,6 +13317,17 @@ async fn test_stop_clears_pending_spawn_count_and_failed_member_projection() {
         staged.pending_spawn_count, 1,
         "pending spawn must contribute to orchestrator-owned lineage while provisioning is in flight"
     );
+    let staged_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("staged dsl snapshot");
+    assert!(
+        staged_dsl
+            .pending_spawn_sessions
+            .keys()
+            .any(|identity| identity.0 == "w-stop-lineage"),
+        "pending spawn admission must name the member identity before provisioning completes"
+    );
 
     handle.stop().await.expect("stop should succeed");
     let _ = pending_spawn
@@ -13332,6 +13343,14 @@ async fn test_stop_clears_pending_spawn_count_and_failed_member_projection() {
     assert_eq!(
         stopped.pending_spawn_count, 0,
         "stop must clear orchestrator-owned pending spawn lineage"
+    );
+    let stopped_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("stopped dsl snapshot");
+    assert!(
+        stopped_dsl.pending_spawn_sessions.is_empty(),
+        "stop must clear machine-owned pending spawn admissions"
     );
     assert!(
         handle
@@ -14273,6 +14292,22 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("staged snapshot");
     assert_eq!(staged.pending_spawn_count, 1);
+    let staged_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("staged dsl snapshot");
+    assert_eq!(
+        staged_dsl.pending_spawn_sessions.len(),
+        1,
+        "exactly one machine-owned pending spawn admission should be visible while provisioning is blocked"
+    );
+    assert!(
+        staged_dsl
+            .pending_spawn_sessions
+            .keys()
+            .any(|identity| identity.0 == "w-1"),
+        "pending admission should carry the member identity, not just an anonymous count"
+    );
     // topology_revision is orchestrator shell metadata not tracked by the DSL authority.
 
     spawn_handle
@@ -14284,6 +14319,14 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("settled snapshot");
     assert_eq!(settled.pending_spawn_count, 0);
+    let settled_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("settled dsl snapshot");
+    assert!(
+        settled_dsl.pending_spawn_sessions.is_empty(),
+        "successful spawn completion should clear pending admission"
+    );
 
     let events = handle.events().replay_all().await.expect("replay events");
     assert!(events.iter().any(|event| matches!(
@@ -21014,6 +21057,7 @@ struct MobRuntimeParitySnapshotSummary {
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
     member_session_bindings: BTreeMap<String, String>,
+    pending_spawn_sessions: BTreeMap<String, String>,
     pending_session_ingress_detach_runtime_ids: BTreeSet<String>,
     // Track-B (R5): monotonically increasing topology epoch. Incremented on
     // every mutation of `wiring_edges` or `member_session_bindings`. Stubbed
@@ -21689,6 +21733,7 @@ async fn mob_runtime_parity_snapshot_summary(
         in_progress_task_ids,
         completed_task_ids,
         member_session_bindings,
+        pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
     ) = dsl_t2
         .map(|snap| {
@@ -21722,6 +21767,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
                 snap.member_session_bindings
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.pending_spawn_sessions
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
@@ -21768,6 +21817,7 @@ async fn mob_runtime_parity_snapshot_summary(
         in_progress_task_ids,
         completed_task_ids,
         member_session_bindings,
+        pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
         // Track-B (R5): stubbed 0 here; full projection lands alongside
         // `member_session_bindings` wiring-through when the observer
@@ -21829,6 +21879,13 @@ fn mob_runtime_parity_field_value(
         "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_session_bindings
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "pending_spawn_sessions" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .pending_spawn_sessions
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),

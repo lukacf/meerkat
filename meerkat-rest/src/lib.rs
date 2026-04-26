@@ -55,8 +55,8 @@ use meerkat::{
     schedule_tools_list,
 };
 use meerkat_contracts::{
-    ErrorCode, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeChannelTarget,
-    RealtimeOpenInfo, RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    ErrorCode, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeOpenInfo,
+    RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
     RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult, SessionLocator, SkillsParams,
     WireError, format_session_ref,
 };
@@ -1356,24 +1356,14 @@ async fn realtime_status(
     State(state): State<AppState>,
     Json(body): Json<RealtimeStatusParams>,
 ) -> Result<Json<RealtimeStatusResult>, Response> {
-    // W3-H: resolve the channel target to a concrete bridge session id via
-    // the MobMcpState resolver. SessionTarget parses directly; MobMember
-    // reads the canonical binding map on the MobMachine.
-    let sid = resolve_realtime_target_session_rest(&state, &body.target).await?;
-    let adapter = get_runtime_adapter(&state);
-    let status = adapter.realtime_channel_status(&sid).await.map_err(|err| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": err.to_string()})),
-        )
-            .into_response()
-    })?;
-
-    Ok(Json(RealtimeStatusResult { status }))
+    call_realtime_rpc(&state, RestRealtimeRpcMethod::Status, &body)
+        .await
+        .map(Json)
 }
 
 #[derive(Debug, Clone, Copy)]
 enum RestRealtimeRpcMethod {
+    Status,
     Capabilities,
     OpenInfo,
 }
@@ -1381,6 +1371,7 @@ enum RestRealtimeRpcMethod {
 impl RestRealtimeRpcMethod {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Status => "realtime/status",
             Self::Capabilities => "realtime/capabilities",
             Self::OpenInfo => "realtime/open_info",
         }
@@ -1388,6 +1379,9 @@ impl RestRealtimeRpcMethod {
 
     const fn unavailable_message(self) -> &'static str {
         match self {
+            Self::Status => {
+                "realtime/status is unavailable until the realtime RPC host is configured"
+            }
             Self::Capabilities => {
                 "realtime/capabilities is unavailable until the realtime RPC host is configured"
             }
@@ -1526,51 +1520,6 @@ async fn realtime_open_info(
     call_realtime_rpc(&state, RestRealtimeRpcMethod::OpenInfo, &body)
         .await
         .map(Json)
-}
-
-/// W3-H: resolve a `RealtimeChannelTarget` to a `SessionId` inside a REST
-/// handler. Delegates to `MobMcpState::resolve_realtime_target_session`
-/// for `MobMember`; synchronous parse for `SessionTarget`.
-#[cfg(feature = "mob")]
-async fn resolve_realtime_target_session_rest(
-    state: &AppState,
-    target: &RealtimeChannelTarget,
-) -> Result<SessionId, Response> {
-    state
-        .mob_state
-        .resolve_realtime_target_session(target)
-        .await
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": err.to_string()})),
-            )
-                .into_response()
-        })
-}
-
-#[cfg(not(feature = "mob"))]
-async fn resolve_realtime_target_session_rest(
-    _state: &AppState,
-    target: &RealtimeChannelTarget,
-) -> Result<SessionId, Response> {
-    match target {
-        RealtimeChannelTarget::SessionTarget { session_id } => SessionId::parse(session_id)
-            .map_err(|err| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": err.to_string()})),
-                )
-                    .into_response()
-            }),
-        RealtimeChannelTarget::MobMember { .. } => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "mob-member realtime targets require the `mob` feature"
-            })),
-        )
-            .into_response()),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5479,6 +5428,102 @@ mod tests {
             status,
             StatusCode::OK,
             "realtime capabilities route failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(payload, expected);
+
+        let forwarded = captured_rx
+            .await
+            .expect("realtime proxy request should be captured");
+        assert_eq!(forwarded, request_body);
+        task.await.expect("realtime rpc stub should join");
+    }
+
+    #[tokio::test]
+    async fn test_realtime_status_route_reports_transport_unavailable_without_rpc_host() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state);
+        let request_body = json!({
+            "target": {
+                "type": "session_target",
+                "session_id": SessionId::new().to_string(),
+            }
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/status")
+            .header("content-type", "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "realtime status should require the realtime RPC host: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(payload["code"], "CAPABILITY_UNAVAILABLE");
+        assert_eq!(payload["category"], "capability");
+    }
+
+    #[tokio::test]
+    async fn test_realtime_status_route_proxies_to_realtime_rpc_host() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let session_id = SessionId::new();
+        let expected = json!({
+            "status": {
+                "state": "reconnecting",
+                "attempt_count": 5,
+                "next_retry_at": "2026-04-26T12:34:56Z",
+                "deadline_at": "2026-04-26T12:35:56Z",
+                "reason": "transport_rebind",
+            }
+        });
+        let (addr, captured_rx, task) =
+            spawn_realtime_rpc_stub("realtime/status", Ok(expected.clone())).await;
+        state.realtime_rpc_tcp_addr = Some(addr);
+
+        let app = router(state);
+        let request_body = json!({
+            "target": {
+                "type": "session_target",
+                "session_id": session_id.to_string(),
+            }
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/status")
+            .header("content-type", "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "realtime status proxy should succeed: {}",
             String::from_utf8_lossy(&body)
         );
         let payload: serde_json::Value =

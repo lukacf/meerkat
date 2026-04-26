@@ -147,6 +147,11 @@ pub enum CredentialSourceSpec {
     InlineSecret {
         secret: String,
     },
+    /// Binding-scoped credential material stored in the configured
+    /// [`TokenStore`](crate::auth::TokenStore). The storage key is the
+    /// resolved typed binding identity (`realm`, `binding`), not a
+    /// second free-form profile string.
+    ManagedStore,
     Env {
         env: String,
         /// Ordered fallback env var names consulted when `env` is
@@ -956,6 +961,7 @@ auth_profile = "default_profile"
             CredentialSourceSpec::InlineSecret {
                 secret: "sk-x".into(),
             },
+            CredentialSourceSpec::ManagedStore,
             CredentialSourceSpec::Env {
                 env: "OPENAI_API_KEY".into(),
                 fallback: Vec::new(),

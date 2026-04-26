@@ -3924,6 +3924,7 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
 fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static str {
     match source {
         meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        meerkat_core::CredentialSourceSpec::ManagedStore => "managed_store",
         meerkat_core::CredentialSourceSpec::Env { .. } => "env",
         meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",

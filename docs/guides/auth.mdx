@@ -67,12 +67,12 @@ backend_kind = "openai_api"
 [realm.prod.auth.anthropic_oauth]
 provider = "anthropic"
 auth_method = "claude_ai_oauth"
-source = { kind = "managed_store", profile = "anthropic_oauth" }
+source = { kind = "managed_store" }
 
 [realm.prod.auth.openai_apikey]
 provider = "openai"
 auth_method = "api_key"
-source = { kind = "managed_store", profile = "openai_apikey" }
+source = { kind = "managed_store" }
 
 [realm.prod.binding.default]
 backend_profile = "anthropic_primary"

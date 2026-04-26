@@ -25,7 +25,9 @@ use meerkat_contracts::{
     WireRealmList, WireRealmSummary,
 };
 use meerkat_core::connection::{BindingId, ConnectionTargetError, RealmId};
-use meerkat_core::{ConnectionRef, Provider, RealmConnectionSet, ResolvedConnectionTarget};
+use meerkat_core::{
+    ConnectionRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
+};
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
@@ -145,6 +147,36 @@ async fn resolve_oauth_target(
     .map_err(|error| (target_error_status(&error), error.to_string()))
 }
 
+fn require_managed_store_source(
+    binding_id: &BindingId,
+    auth_profile: &meerkat_core::AuthProfile,
+) -> Result<(), (StatusCode, String)> {
+    if matches!(&auth_profile.source, CredentialSourceSpec::ManagedStore) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "binding {binding_id} resolves auth profile '{}' with source '{}'; \
+             POST /auth/profiles can only persist credentials for source.kind = 'managed_store'",
+            auth_profile.id,
+            source_kind_label(&auth_profile.source),
+        ),
+    ))
+}
+
+fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        CredentialSourceSpec::ManagedStore => "managed_store",
+        CredentialSourceSpec::Env { .. } => "env",
+        CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
+        CredentialSourceSpec::PlatformDefault => "platform_default",
+        CredentialSourceSpec::Command { .. } => "command",
+        CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
 // --- Realm endpoints -------------------------------------------------
 
 pub async fn list_realms(State(state): State<AppState>) -> impl IntoResponse {
@@ -233,13 +265,9 @@ pub struct CreateAuthProfileBody {
 }
 
 /// Create an auth credential entry by writing the secret into the
-/// TokenStore under the binding-scoped `ConnectionRef`. The caller is
-/// expected to have already declared the corresponding
-/// `[realm.<id>.binding.<binding>]` entry in the config with an auth
-/// profile whose `source.kind = "managed_store"` so `resolve_binding`
-/// picks it up;
-/// for `inline_secret` sources the TOML itself carries the secret and
-/// this endpoint is a no-op (hence its 400 below).
+/// TokenStore under the binding-scoped `ConnectionRef`. The resolved
+/// auth profile must declare `source.kind = "managed_store"`; otherwise
+/// the provider runtime would read a different credential source.
 pub async fn create_auth_profile(
     State(state): State<AppState>,
     Json(body): Json<CreateAuthProfileBody>,
@@ -278,6 +306,9 @@ pub async fn create_auth_profile(
             })),
         )
             .into_response();
+    }
+    if let Err((status, msg)) = require_managed_store_source(&body.binding_id, &auth_profile) {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let auth_mode = match body.auth_method.as_str() {
         "api_key" => PersistedAuthMode::ApiKey,

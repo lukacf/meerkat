@@ -15,7 +15,8 @@ use meerkat_contracts::{
     WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::{
-    ConnectionRef, ConnectionTargetError, Provider, RealmConnectionSet, ResolvedConnectionTarget,
+    ConnectionRef, ConnectionTargetError, CredentialSourceSpec, Provider, RealmConnectionSet,
+    ResolvedConnectionTarget,
 };
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -181,6 +182,38 @@ fn require_token_store(
             "TokenStore not configured for this runtime",
         )
     })
+}
+
+fn require_managed_store_source(
+    id: Option<RpcId>,
+    binding_id: &str,
+    auth_profile: &meerkat_core::AuthProfile,
+) -> Option<RpcResponse> {
+    if matches!(&auth_profile.source, CredentialSourceSpec::ManagedStore) {
+        return None;
+    }
+    Some(RpcResponse::error(
+        id,
+        error::INVALID_PARAMS,
+        format!(
+            "binding {binding_id} resolves auth profile '{}' with source '{}'; \
+             auth/profile/create can only persist credentials for source.kind = 'managed_store'",
+            auth_profile.id,
+            source_kind_label(&auth_profile.source),
+        ),
+    ))
+}
+
+fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        CredentialSourceSpec::ManagedStore => "managed_store",
+        CredentialSourceSpec::Env { .. } => "env",
+        CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
+        CredentialSourceSpec::PlatformDefault => "platform_default",
+        CredentialSourceSpec::Command { .. } => "command",
+        CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
 }
 
 fn provider_endpoints(
@@ -365,6 +398,9 @@ pub async fn handle_auth_profile_create(
                 parsed.binding_id, auth_profile.auth_method, parsed.auth_method,
             ),
         );
+    }
+    if let Some(r) = require_managed_store_source(id.clone(), &parsed.binding_id, &auth_profile) {
+        return r;
     }
     let store = match require_token_store(runtime, id.clone()) {
         Ok(s) => s,

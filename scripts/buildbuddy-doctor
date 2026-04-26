@@ -271,15 +271,6 @@ else
   printf '%s\n' "${ci_workflow_gate_dry_run}" >&2
 fi
 
-fast_profile_filter="$(./scripts/repo-cargo nextest show-config test-groups --profile fast 2>&1 || true)"
-if grep -q '\[profile.fast\]' .config/nextest.toml &&
-  grep -q 'default-filter' .config/nextest.toml &&
-  [[ "${fast_profile_filter}" != *"error:"* ]]; then
-  pass "Cargo fast nextest profile is valid"
-else
-  bad "Cargo fast nextest profile is invalid"
-fi
-
 sample_a="${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-bazel/$(basename "${workspace_root}")-sample-workspace-fast-rbe-agent-a"
 sample_b="${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-bazel/$(basename "${workspace_root}")-sample-workspace-fast-rbe-agent-b"
 if [[ "${sample_a}" != "${sample_b}" ]]; then

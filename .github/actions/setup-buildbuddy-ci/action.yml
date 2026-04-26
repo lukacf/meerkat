@@ -41,12 +41,6 @@ runs:
       with:
         prefix-key: buildbuddy
 
-    - name: Install nextest
-      if: ${{ inputs.profile == 'doctor' }}
-      uses: taiki-e/install-action@v2
-      with:
-        tool: nextest
-
     - name: Install full Rust CI tools
       if: ${{ inputs.profile == 'full' }}
       uses: taiki-e/install-action@v2

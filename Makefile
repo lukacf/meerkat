@@ -236,7 +236,7 @@ buildbuddy-generate-check:
 	@echo "$(GREEN)Checking generated optional Bazel BUILD files...$(NC)"
 	@node scripts/generate-bazel-rust-builds.mjs --check
 
-buildbuddy-doctor: rust-lane-doctor
+buildbuddy-doctor:
 	@echo "$(GREEN)Checking optional BuildBuddy setup...$(NC)"
 	@scripts/buildbuddy-doctor
 

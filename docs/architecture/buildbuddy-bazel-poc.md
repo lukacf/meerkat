@@ -102,7 +102,8 @@ modes:
 - `workspace-test-rbe`: remote-compatible workspace suite excluding local-only
   fixtures.
 - `workspace-fast-rbe`: Cargo-fast-equivalent remote workspace suite excluding
-  local-only fixtures and dedicated e2e wrappers.
+  local-only fixtures plus e2e, system, live, integration, slow, snapshot,
+  fixture, trybuild, and required-feature test targets.
 - `workspace-test-local`: full Bazel workspace test suite with local spawns.
 - `warm-noop`: warm full fast-test and clippy checks.
 - `same-worktree`: two same-checkout agents using distinct lanes.
@@ -196,7 +197,7 @@ lane wrappers from both systems:
 | Scenario | Cargo | BuildBuddy/Bazel |
 | --- | ---: | ---: |
 | Fast deterministic tests, compile/no-run first pass | `122.71s` | `30.47s` first new Bazel lane run |
-| Fast deterministic tests, warm execution | `47.96s` (`5112` tests) | `4.36s` (`140` Bazel test targets, `0` executed) |
+| Fast deterministic tests, warm execution | `47.96s` (`5112` tests) | `4.36s` (now `117` Bazel fast test targets, `0` executed when cached) |
 | Workspace clippy, warm after fix | `48.13s` | `4s` split fast-test-clippy + build-clippy gate |
 
 The Cargo fast lane is now `./scripts/repo-cargo fast`, `cargo rct`, or
@@ -205,6 +206,10 @@ The Cargo fast lane is now `./scripts/repo-cargo fast`, `cargo rct`, or
 `cargo e2e-models`, and `cargo e2e-auth`. The BuildBuddy equivalent is
 `make buildbuddy-fast` or
 `BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc`.
+The workspace-fast BuildBuddy command uses the same non-fast tag exclusions as
+the generated root `//:fast_tests` suite, so newly generated required-feature
+targets are available for exact build/clippy gates without joining the default
+fast execution lane.
 The Cargo exclusion filter lives in `.config/nextest.toml` as the `fast`
 profile so `cargo fast`, `cargo rct`, `cargo int`, and
 `scripts/cargo-fast-nextest` do not maintain separate copies.
@@ -215,8 +220,8 @@ profile so `cargo fast`, `cargo rct`, `cargo int`, and
 | Full workspace test lane (`152` tests), warm remote/cache | `3.96-5.33s` wall |
 | Remote-compatible workspace lane (`151` tests), first touch | `22.27s` wall |
 | Remote-compatible workspace lane (`151` tests), warm | `4.10-4.38s` wall |
-| Cargo-fast-equivalent workspace lane (`140` Bazel targets), first new lane run | `30.47s` wall |
-| Cargo-fast-equivalent workspace lane (`140` Bazel targets), warm | `4.36s` wall |
+| Cargo-fast-equivalent workspace lane (`117` Bazel fast targets), first new lane run | `30.47s` wall |
+| Cargo-fast-equivalent workspace lane (`117` Bazel fast targets), warm | `4.36s` wall |
 | Full workspace test lane (`152` tests), local-spawn first pass | `67.01s` wall |
 | Full workspace test lane (`152` tests), warm local-spawn | `4.75s` wall |
 | Warm root fast suite (`117` tests) | `3.99s` wall |

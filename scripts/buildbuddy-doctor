@@ -91,6 +91,19 @@ else
   printf '%s\n' "${fast_parity_output}" >&2
 fi
 
+for tag in local e2e system live integration slow required-feature trybuild snapshot fixture; do
+  if ! grep -q -- "fast_test_tag_filters=.*-${tag}" scripts/buildbuddy-bazel-poc; then
+    bad "workspace-fast-rbe does not exclude ${tag} tests"
+  fi
+done
+if ! grep -q 'fast_test_tag_filters=' scripts/buildbuddy-bazel-poc; then
+  bad "workspace fast tag filters are not centralized"
+elif grep -q -- '--test_tag_filters="${fast_test_tag_filters}"' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy workspace fast lanes exclude non-fast test tags"
+else
+  bad "BuildBuddy workspace fast lanes do not use the centralized non-fast tag filter"
+fi
+
 build_label_count="$(./scripts/bazel-affected-fast-tests.mjs --all --build | wc -w | tr -d ' ')"
 if [[ "${build_label_count}" =~ ^[0-9]+$ && "${build_label_count}" -gt 0 ]]; then
   pass "Bazel selector can enumerate ${build_label_count} build labels"

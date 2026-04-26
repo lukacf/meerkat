@@ -45,6 +45,7 @@ config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy}"
 command="${BUILDBUDDY_BAZEL_COMMAND:-build}"
 requested_command="${command}"
 extra_args=()
+fast_test_tag_filters="-local,-e2e,-system,-live,-integration,-slow,-required-feature,-trybuild,-snapshot,-fixture"
 case "${command}" in
   workspace-test)
     command="test"
@@ -79,7 +80,7 @@ case "${command}" in
     default_target="//..."
     extra_args+=(
       --build_tests_only
-      --test_tag_filters=-local,-e2e
+      --test_tag_filters="${fast_test_tag_filters}"
       --test_output=errors
       --test_summary=terse
       --color=no
@@ -108,7 +109,7 @@ case "${command}" in
     default_target="//..."
     extra_args+=(
       --build_tests_only
-      --test_tag_filters=-local,-e2e
+      --test_tag_filters="${fast_test_tag_filters}"
       --test_output=errors
       --test_summary=terse
       --color=no

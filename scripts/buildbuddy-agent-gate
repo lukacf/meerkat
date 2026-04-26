@@ -141,7 +141,7 @@ collect_changed_paths() {
 
 is_relevant_path() {
   case "$1" in
-    *.rs|Cargo.toml|Cargo.lock|MODULE.bazel|MODULE.bazel.lock|Makefile|.bazelrc|BUILD.bazel|*/BUILD.bazel|.cargo/config.toml|.config/nextest.toml|.github/workflows/buildbuddy.yml)
+    *.rs|Cargo.toml|Cargo.lock|MODULE.bazel|MODULE.bazel.lock|Makefile|.bazelrc|BUILD.bazel|*/BUILD.bazel|.cargo/config.toml|.config/nextest.toml|.github/workflows/buildbuddy.yml|.github/workflows/ci.yml)
       return 0
       ;;
     scripts/agent-gate|scripts/buildbuddy*|scripts/bazel-*.mjs|scripts/generate-bazel-rust-builds.mjs|scripts/install-buildbuddy-cli|scripts/repo-cargo|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh)
@@ -155,7 +155,7 @@ is_relevant_path() {
 
 is_global_path() {
   case "$1" in
-    Cargo.toml|Cargo.lock|MODULE.bazel|MODULE.bazel.lock|Makefile|.bazelrc|.cargo/config.toml|.config/nextest.toml|.github/workflows/buildbuddy.yml|scripts/agent-gate|scripts/buildbuddy*|scripts/bazel-*.mjs|scripts/generate-bazel-rust-builds.mjs|scripts/install-buildbuddy-cli|scripts/repo-cargo|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh)
+    Cargo.toml|Cargo.lock|MODULE.bazel|MODULE.bazel.lock|Makefile|.bazelrc|.cargo/config.toml|.config/nextest.toml|.github/workflows/buildbuddy.yml|.github/workflows/ci.yml|scripts/agent-gate|scripts/buildbuddy*|scripts/bazel-*.mjs|scripts/generate-bazel-rust-builds.mjs|scripts/install-buildbuddy-cli|scripts/repo-cargo|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh)
       return 0
       ;;
     *)

@@ -151,13 +151,15 @@ It runs `workspace-fast-clippy-rbe` and `workspace-build-clippy-rbe` in parallel
 on isolated fresh lanes, writes compact summaries and per-lane logs outside the
 Bazel output root, and cleans up the temporary output roots. Use `--warm` to
 reuse a stable output root for repeated local or agent gates. The optional
-`.github/workflows/buildbuddy.yml` workflow is manual-only, requires a
-`BUILDBUDDY_API_KEY` secret, installs the pinned `bb` binary, dispatches through
-`scripts/buildbuddy-ci-dispatch`, and uploads the BuildBuddy log directory as a
-workflow artifact. The dispatcher writes `dispatch-context.txt` and
-`dispatch-inputs.txt` when `MEERKAT_BUILDBUDDY_LOG_ROOT` is set, so changed-path
-runs have commit/toolchain context even when they do not use the workspace CI
-summary writer. Normal GitHub CI remains Cargo-based.
+`.github/workflows/buildbuddy.yml` workflow can run manually or as a reusable
+workflow called by CI, requires a `BUILDBUDDY_API_KEY` secret, installs the
+pinned `bb` binary, dispatches through `scripts/buildbuddy-ci-dispatch`, and
+uploads the BuildBuddy log directory as a workflow artifact. The dispatcher
+writes `dispatch-context.txt` and `dispatch-inputs.txt` when
+`MEERKAT_BUILDBUDDY_LOG_ROOT` is set, so changed-path runs have
+commit/toolchain context even when they do not use the workspace CI summary
+writer. Normal GitHub CI remains Cargo-based unless the repository variable
+`MEERKAT_BUILDBUDDY_CI=true` enables the optional CI job.
 
 The dispatch modes are:
 
@@ -379,6 +381,13 @@ to roughly `4-6s` once those lanes were prepared.
   `scripts/buildbuddy-ci-dispatch --mode workspace-fresh`,
   `scripts/buildbuddy-ci-dispatch --mode changed-committed --base origin/main`,
   or `scripts/buildbuddy-ci-dispatch --mode changed-paths --paths '<paths>'`.
+- To enable the optional BuildBuddy job inside normal GitHub CI, add the
+  `BUILDBUDDY_API_KEY` repository secret and set the repository variable
+  `MEERKAT_BUILDBUDDY_CI=true`. The default reusable-workflow mode is
+  `changed-committed`; override it with `MEERKAT_BUILDBUDDY_CI_MODE`,
+  `MEERKAT_BUILDBUDDY_CHANGED_MODE`, `MEERKAT_BUILDBUDDY_BASE`, or
+  `MEERKAT_BUILDBUDDY_CHANGED_PATHS` when a branch or rollout needs a broader
+  gate.
 - For same-checkout multi-agent work, prefer a distinct `RUST_LANE_ID` per
   agent for stable warm lanes. `scripts/repo-cargo` also falls back to
   `MEERKAT_AGENT_LANE` and `CODEX_AGENT_ID`, so Codex-style agent processes get

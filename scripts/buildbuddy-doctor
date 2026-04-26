@@ -195,6 +195,23 @@ else
 fi
 rm -rf "${dispatch_log_root}"
 
+if grep -Fq 'workflow_call:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  grep -Fq 'MEERKAT_BUILDBUDDY_CI' .github/workflows/ci.yml; then
+  pass "GitHub CI wires the optional BuildBuddy workflow behind an opt-in variable"
+else
+  bad "GitHub CI is missing the optional reusable BuildBuddy workflow wiring"
+fi
+
+ci_workflow_gate_dry_run="$(./scripts/buildbuddy-agent-gate --dry-run .github/workflows/ci.yml 2>&1 || true)"
+if [[ "${ci_workflow_gate_dry_run}" == *"Global build/test configuration changed"* ]] &&
+  [[ "${ci_workflow_gate_dry_run}" == *"DRY-RUN make buildbuddy-ci-warm"* ]]; then
+  pass "BuildBuddy agent gate escalates normal CI workflow edits"
+else
+  bad "BuildBuddy agent gate does not escalate normal CI workflow edits"
+  printf '%s\n' "${ci_workflow_gate_dry_run}" >&2
+fi
+
 fast_profile_filter="$(./scripts/repo-cargo nextest show-config test-groups --profile fast 2>&1 || true)"
 if grep -q '\[profile.fast\]' .config/nextest.toml &&
   grep -q 'default-filter' .config/nextest.toml &&

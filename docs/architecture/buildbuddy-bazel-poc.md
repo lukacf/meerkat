@@ -256,8 +256,9 @@ profile so `cargo fast`, `cargo rct`, `cargo int`, and
 | Cargo agent gate for `meerkat_machine` test edit, tests only | `0.10s` Cargo work, `0.258s` nextest runtime, `37` tests pass |
 | Cargo agent gate for `meerkat_machine` test edit, clippy only | `0.20s` Cargo work |
 | Cargo agent gate for shared `test_session_store` support edit, first touch | `25.39s` Cargo work, `0.031s` nextest runtime, `6` tests pass |
-| Cargo agent gate for shared `test_session_store` support edit, warm | `0.12s` Cargo work, `0.023s` nextest runtime, `6` tests pass |
+| Cargo agent gate for shared `test_session_store` support edit, warm after shared selector extraction | `0.15s` Cargo work, `0.045s` nextest runtime, `6` tests pass |
 | Cargo agent gate for shared `test_session_store` support edit, exact clippy warm | `0.18s` Cargo work |
+| BuildBuddy changed gate for shared `test_session_store` support edit after shared selector extraction | `27s` wall, `2` exact Bazel tests + clippy combined |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel
@@ -294,7 +295,8 @@ to roughly `4-6s` once those lanes were prepared.
   `MEERKAT_AGENT_GATE_BACKEND=buildbuddy` opts into BuildBuddy. Direct
   integration test files and importable `tests/support` modules are narrowed to
   exact Cargo test binaries for both nextest and clippy when the mapping is
-  unambiguous.
+  unambiguous. Cargo and BuildBuddy selectors share the same Cargo metadata and
+  test-module import traversal logic in `scripts/rust-test-selector.mjs`.
 - For the common multi-agent case where the agent has local edits and just
   needs the right check, use `make buildbuddy-agent-gate`. It includes
   committed branch changes, staged changes, unstaged changes, and untracked

@@ -1,0 +1,109 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+RUST_TOOLCHAIN_DATA = [
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:cargo",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:cargo_clippy_bin",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:clippy_driver_bin",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustc",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustc_lib",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rust_std-aarch64-apple-darwin",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rust-objcopy",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rust-lld",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustdoc",
+    "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustfmt",
+]
+
+WASM_RUST_TOOLCHAIN_DATA = [
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:cargo",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:cargo_clippy_bin",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:clippy_driver_bin",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rustc",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rustc_lib",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rust_std-wasm32-unknown-unknown",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rust-objcopy",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rust-lld",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rustdoc",
+    "@@rules_rust++rust+rust_macos_aarch64__wasm32-unknown-unknown__stable_tools//:rustfmt",
+]
+
+SDK_TOOL_DATA = [
+    "@node_darwin_arm64//:node",
+    "@python_darwin_arm64//:python",
+]
+
+sh_test(
+    name = "cargo_available_test",
+    srcs = ["cargo_available_test.sh"],
+    data = RUST_TOOLCHAIN_DATA,
+    tags = ["buildbuddy"],
+)
+
+[
+    sh_test(
+        name = name,
+        srcs = ["cargo_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+        ] + RUST_TOOLCHAIN_DATA,
+        size = "enormous",
+        timeout = "long",
+        tags = ["buildbuddy", "cargo-equivalent"],
+    )
+    for name, lane in {
+        "minimal_feature_builds_cargo_equivalent_test": "test-minimal",
+        "feature_matrix_lib_cargo_equivalent_test": "test-feature-matrix-lib",
+        "feature_matrix_surface_cargo_equivalent_test": "test-feature-matrix-surface-checks",
+    }.items()
+]
+
+sh_test(
+    name = "security_audit_cargo_equivalent_test",
+    srcs = ["full_lane_test.sh"],
+    args = ["security-audit"],
+    data = [
+        "//:workspace_runfiles",
+        "@cargo_deny_darwin_arm64//:cargo-deny",
+    ] + RUST_TOOLCHAIN_DATA,
+    size = "large",
+    timeout = "long",
+    tags = ["buildbuddy", "cargo-equivalent"],
+)
+
+sh_test(
+    name = "sdk_suites_cargo_equivalent_test",
+    srcs = ["full_lane_test.sh"],
+    args = ["sdk-suites"],
+    data = [
+        "//:workspace_runfiles",
+    ] + RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+    size = "enormous",
+    timeout = "eternal",
+    tags = ["buildbuddy", "cargo-equivalent"],
+)
+
+sh_test(
+    name = "wasm_check_cargo_equivalent_test",
+    srcs = ["full_lane_test.sh"],
+    args = ["wasm-check"],
+    data = [
+        "//:workspace_runfiles",
+        "@wasm_pack_darwin_arm64//:wasm-pack",
+    ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA,
+    size = "enormous",
+    timeout = "eternal",
+    tags = ["buildbuddy", "cargo-equivalent"],
+)
+
+sh_test(
+    name = "wasm_contract_cargo_equivalent_test",
+    srcs = ["full_lane_test.sh"],
+    args = ["wasm-contract-tests"],
+    data = [
+        "//:workspace_runfiles",
+        "@wasm_pack_darwin_arm64//:wasm-pack",
+    ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+    size = "enormous",
+    timeout = "eternal",
+    tags = ["buildbuddy", "cargo-equivalent"],
+)

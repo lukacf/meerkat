@@ -186,15 +186,6 @@ run_bazel_lane() {
     ./scripts/buildbuddy-bazel-poc "$@"
 }
 
-run_compat_lane() {
-  local name="${lane}"
-  if [[ "${1:-}" == "--name" ]]; then
-    name="$2"
-    shift 2
-  fi
-  run_logged "${name}" env RUST_LANE_ID="buildbuddy-ci-${lane}" "$@"
-}
-
 case "${lane}" in
   native-build-clippy)
     run_bazel_lane workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
@@ -211,26 +202,27 @@ case "${lane}" in
   fmt-lint)
     run_bazel_lane --name fmt-static fmt-static-rbe --jobs=64
     run_bazel_lane --name native-build-clippy workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
-    run_compat_lane --name feature-clippy make lint-feature-matrix
-    run_compat_lane --name unused-deps ./scripts/repo-cargo machete --with-metadata
+    run_bazel_lane --name feature-clippy feature-clippy-rbe --jobs=64 --color=no --curses=no
+    run_bazel_lane --name unused-deps security-audit-rbe --jobs=64
     ;;
   fmt-static)
     run_bazel_lane fmt-static-rbe --jobs=64
     ;;
   cargo-all-features-clippy)
-    run_compat_lane make lint
+    run_bazel_lane workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
     ;;
   feature-clippy)
-    run_compat_lane make lint-feature-matrix
+    run_bazel_lane feature-clippy-rbe --jobs=64 --color=no --curses=no
     ;;
   unused-deps)
-    run_compat_lane ./scripts/repo-cargo machete --with-metadata
+    run_bazel_lane security-audit-rbe --jobs=64
     ;;
   sdk-suites)
-    run_compat_lane bash -lc './scripts/repo-cargo build -p meerkat-rpc && make test-sdk-python test-sdk-typescript verify-sdk-wrapper-freshness'
+    run_bazel_lane sdk-suites-rbe --jobs=64
     ;;
   rust-release-packaging)
-    run_compat_lane make check-rust-release-packaging
+    echo "rust-release-packaging is release-preflight/manual-only; use Cargo release-preflight for package archive verification" >&2
+    exit 2
     ;;
   machine-authority)
     run_bazel_lane machine-authority-rbe --jobs=64
@@ -242,10 +234,10 @@ case "${lane}" in
     run_bazel_lane seam-inventory-rbe --jobs=64
     ;;
   wasm-contract)
-    run_compat_lane bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets'
+    run_bazel_lane wasm-contract-rbe --jobs=64
     ;;
   wasm-contract-tests)
-    run_compat_lane bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets'
+    run_bazel_lane wasm-contract-rbe --jobs=64
     ;;
   test-unit)
     run_bazel_lane workspace-unit-rbe --jobs=64
@@ -266,31 +258,31 @@ case "${lane}" in
     run_bazel_lane e2e-smoke-rbe --jobs=64
     ;;
   minimal-feature-builds)
-    run_compat_lane make test-minimal
+    run_bazel_lane minimal-feature-builds-rbe --jobs=64
     ;;
   test-minimal)
-    run_compat_lane make test-minimal
+    run_bazel_lane minimal-feature-builds-rbe --jobs=64
     ;;
   feature-matrix-lib)
-    run_compat_lane make test-feature-matrix-lib
+    run_bazel_lane feature-matrix-lib-rbe --jobs=64
     ;;
   test-feature-matrix-lib)
-    run_compat_lane make test-feature-matrix-lib
+    run_bazel_lane feature-matrix-lib-rbe --jobs=64
     ;;
   feature-matrix-surface)
-    run_compat_lane make test-feature-matrix-surface
+    run_bazel_lane feature-matrix-surface-rbe --jobs=64
     ;;
   test-feature-matrix-surface-checks)
-    run_compat_lane make test-feature-matrix-surface
+    run_bazel_lane feature-matrix-surface-rbe --jobs=64
     ;;
   wasm-check)
-    run_compat_lane bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo check -p meerkat-web-runtime --target wasm32-unknown-unknown && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings'
+    run_bazel_lane wasm-check-rbe --jobs=64
     ;;
   security-audit)
-    run_compat_lane cargo-deny check
+    run_bazel_lane security-audit-rbe --jobs=64
     ;;
   audit)
-    run_compat_lane cargo-deny check
+    run_bazel_lane security-audit-rbe --jobs=64
     ;;
   *)
     echo "unknown BuildBuddy CI lane: ${lane}" >&2

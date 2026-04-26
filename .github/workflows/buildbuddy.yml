@@ -140,7 +140,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: fmt-lint
-          profile: lint
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   test-unit:
@@ -200,7 +200,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: sdk-suites
-          profile: sdk
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   rust-release-packaging:
@@ -215,7 +215,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: rust-release-packaging
-          profile: rust
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   machine-authority:
@@ -275,7 +275,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: wasm-contract-tests
-          profile: wasm
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   e2e-fast:
@@ -305,7 +305,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: test-minimal
-          profile: rust
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   test-feature-matrix-lib:
@@ -320,7 +320,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: test-feature-matrix-lib
-          profile: rust
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   test-feature-matrix-surface-checks:
@@ -335,7 +335,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: test-feature-matrix-surface-checks
-          profile: rust
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   wasm-check:
@@ -350,7 +350,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: wasm-check
-          profile: wasm
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   audit:
@@ -365,7 +365,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane
         with:
           lane: audit
-          profile: audit
+          profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
   changed-gate:

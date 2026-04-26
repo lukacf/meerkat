@@ -113,7 +113,7 @@ function targetRule(target) {
   if (target.kind.includes("proc-macro")) return "rust_proc_macro";
   if (target.kind.includes("test")) return "rust_test";
   if (target.kind.includes("bin")) return "rust_binary";
-  if (target.kind.includes("lib")) return "rust_library";
+  if (target.kind.includes("lib") || target.kind.includes("rlib") || target.kind.includes("cdylib")) return "rust_library";
   return null;
 }
 
@@ -270,6 +270,19 @@ function writeGenerated(path, contents) {
     staleFileCount += 1;
     console.error(`stale generated Bazel file: ${relative(root, path)}`);
   }
+}
+
+function ensureGeneratedBlock(path, marker, block) {
+  block = block.replace(/\n+$/u, "") + "\n";
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (existing.includes(marker)) return;
+  if (checkOnly) {
+    staleFileCount += 1;
+    console.error(`stale generated Bazel file: ${relative(root, path)}`);
+    return;
+  }
+  const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+  writeFileSync(path, `${existing}${separator}${block}`);
 }
 
 function needsWorkspaceRunfiles(target) {
@@ -431,6 +444,8 @@ const packageRunfileLabels = [...localPackages.values()]
   .filter((dir) => dir !== "")
   .sort()
   .map((dir) => `//${dir}:package_runfiles`);
+packageRunfileLabels.push("//vendor/oai-rt-rs:package_runfiles");
+packageRunfileLabels.sort();
 
 function writeRootBuild(fastTestLabels, e2eSystemTestLabels) {
   const lines = [
@@ -800,6 +815,21 @@ for (const pkg of localPackages.values()) {
     ].join("\n\n"),
   );
 }
+
+const vendorPackageRunfilesMarker = 'name = "package_runfiles"';
+const vendorPackageRunfilesBlock = `# Maintained by scripts/generate-bazel-rust-builds.mjs so root workspace_runfiles
+# can cross the vendored path-dependency Bazel package boundary.
+filegroup(
+    name = "package_runfiles",
+    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)`;
+
+ensureGeneratedBlock(
+  resolve(root, "vendor/oai-rt-rs/BUILD.bazel"),
+  vendorPackageRunfilesMarker,
+  vendorPackageRunfilesBlock,
+);
 
 writeRootBuild([...new Set(fastTestLabels)].sort(), [...new Set(e2eSystemTestLabels)].sort());
 if (checkOnly && staleFileCount > 0) {

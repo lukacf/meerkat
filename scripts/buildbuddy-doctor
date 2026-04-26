@@ -243,13 +243,46 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   grep -Fq 'machine-authority-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'rmat-audit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'seam-inventory-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'sdk-suites-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'wasm-contract-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'security-audit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'buildbuddy-ci-full:' Makefile &&
-  grep -Fq 'cargo-deny check' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live' scripts/buildbuddy-ci-lane &&
-  grep -Fq 'wasm-pack test --headless --chrome' scripts/buildbuddy-ci-lane; then
+  ! grep -Fq 'run_compat_lane' scripts/buildbuddy-ci-lane &&
+  ! grep -Fq './scripts/repo-cargo' scripts/buildbuddy-ci-lane &&
+  ! grep -Fq 'cargo-deny check' scripts/buildbuddy-ci-lane &&
+  ! grep -Fq 'wasm-pack test' scripts/buildbuddy-ci-lane; then
   pass "BuildBuddy workflow exposes standard CI as a 1:1 Cargo lane map"
 else
   bad "BuildBuddy workflow does not match the Cargo lane map"
+fi
+
+if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'default_target="//tools/buildbuddy:wasm_check_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'default_target="//tools/buildbuddy:security_audit_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'name = "sdk_suites_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq 'name = "wasm_contract_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq 'name = "wasm_check_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq 'name = "security_audit_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel; then
+  pass "BuildBuddy SDK, WASM, and audit lanes use real cargo-equivalent Bazel test targets"
+else
+  bad "BuildBuddy SDK, WASM, or audit lane is still static, host-only, or unmapped"
+fi
+
+if awk '
+  /sdk-suites-rbe\)/ { lane = "sdk" }
+  /wasm-contract-rbe\)/ { lane = "wasm-contract" }
+  /wasm-check-rbe\)/ { lane = "wasm-check" }
+  /security-audit-rbe\)/ { lane = "audit" }
+  lane != "" && /;;/ { lane = "" }
+  lane != "" && /buildbuddy_static_lanes_test/ { bad = 1 }
+  lane != "" && /meerkat-web-runtime:.*_test/ { bad = 1 }
+  END { exit bad ? 1 : 0 }
+' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy full lanes do not route through static or host-only placeholder tests"
+else
+  bad "BuildBuddy full lanes still contain placeholder test routing"
 fi
 
 if grep -Fq 'rust-release-packaging:' .github/workflows/ci.yml &&

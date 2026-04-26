@@ -28,6 +28,98 @@ filegroup(
 
 
 
+rust_library(
+    name = "meerkat_web_runtime",
+    aliases = aliases(package_name = "meerkat-web-runtime"),
+    crate_name = "meerkat_web_runtime",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-web-runtime",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-hooks:meerkat_hooks",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+    ] + all_crate_deps(
+        package_name = "meerkat-web-runtime",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_web_runtime_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_web_runtime",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-web-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-hooks:meerkat_hooks",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+    ] + all_crate_deps(
+        package_name = "meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 rust_test(
     name = "browser_contract_test",
     aliases = aliases(
@@ -203,6 +295,7 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":browser_contract_test",
+        ":meerkat_web_runtime_unit_test",
         ":release_targets_test",
         ":wasm_external_resolver_test",
     ],

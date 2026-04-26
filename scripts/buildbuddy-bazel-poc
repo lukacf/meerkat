@@ -26,6 +26,16 @@ Common commands:
   rmat-audit-rbe           Bazel-native RMAT + ownership audit lane.
   seam-inventory-rbe       Bazel-native strict seam inventory lane.
   fmt-static-rbe           Bazel-native formatting and static source gates.
+  feature-clippy-rbe       Bazel-native clippy lane for feature-covered build labels.
+  sdk-suites-rbe           Bazel-native SDK parity and wrapper coverage lane.
+  wasm-contract-rbe        Bazel-native WASM contract lane.
+  wasm-check-rbe           Bazel-native WASM compilation check lane.
+  security-audit-rbe       Bazel-native dependency/security audit lane.
+  minimal-feature-builds-rbe
+                            Cargo-equivalent minimal feature lane as a Bazel test action.
+  feature-matrix-lib-rbe    Cargo-equivalent library feature matrix as a Bazel test action.
+  feature-matrix-surface-rbe
+                            Cargo-equivalent surface feature matrix as a Bazel test action.
   fast-test                  Root //:fast_tests suite.
   owned-fast-test <path>     Owning fast suite or exact fast test for a path.
   owned-build <path>         Owning build label for a path.
@@ -303,6 +313,95 @@ case "${command}" in
       --curses=no
     )
     ;;
+  feature-clippy-rbe)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target=""
+    extra_args+=(
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
+      --output_groups="+clippy_checks"
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      --color=no
+      --curses=no
+    )
+    ;;
+  sdk-suites-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  wasm-contract-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  wasm-check-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:wasm_check_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  security-audit-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:security_audit_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  minimal-feature-builds-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:minimal_feature_builds_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  feature-matrix-lib-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:feature_matrix_lib_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  feature-matrix-surface-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:feature_matrix_surface_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
   e2e-system-local)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
@@ -487,9 +586,9 @@ case "${command}" in
     default_target="//meerkat-machine-dsl-core:meerkat_machine_dsl_core"
     ;;
 esac
-if [[ "${requested_command}" == affected-fast-test || "${requested_command}" == affected-fast-test-local || "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == affected-build || "${requested_command}" == affected-build-local || "${requested_command}" == affected-clippy || "${requested_command}" == affected-clippy-rbe || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe || "${requested_command}" == workspace-build-clippy-rbe ]]; then
+if [[ "${requested_command}" == affected-fast-test || "${requested_command}" == affected-fast-test-local || "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == affected-build || "${requested_command}" == affected-build-local || "${requested_command}" == affected-clippy || "${requested_command}" == affected-clippy-rbe || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe || "${requested_command}" == workspace-build-clippy-rbe || "${requested_command}" == feature-clippy-rbe ]]; then
   selector_args=()
-  if [[ "${requested_command}" == workspace-build-clippy-rbe ]]; then
+  if [[ "${requested_command}" == workspace-build-clippy-rbe || "${requested_command}" == feature-clippy-rbe ]]; then
     selector_args+=(--all --build)
   fi
   if [[ "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe ]]; then

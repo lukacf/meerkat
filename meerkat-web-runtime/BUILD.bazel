@@ -207,4 +207,3 @@ test_suite(
         ":wasm_external_resolver_test",
     ],
 )
-

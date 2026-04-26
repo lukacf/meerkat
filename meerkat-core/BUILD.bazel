@@ -578,4 +578,3 @@ test_suite(
         ":tool_notice_projection_test",
     ],
 )
-

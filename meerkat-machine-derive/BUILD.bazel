@@ -49,4 +49,3 @@ rust_proc_macro(
         normal = True,
     ),
 )
-

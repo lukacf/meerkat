@@ -175,6 +175,7 @@ function listExpr(values, indent = 8) {
 let staleFileCount = 0;
 
 function writeGenerated(path, contents) {
+  contents = contents.replace(/\n+$/u, "") + "\n";
   if (!checkOnly) {
     writeFileSync(path, contents);
     return;

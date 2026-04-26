@@ -1324,4 +1324,3 @@ test_suite(
         ":sdk_structured_output_test",
     ],
 )
-

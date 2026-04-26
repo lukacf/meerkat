@@ -88,4 +88,3 @@ rust_binary(
         normal = True,
     ),
 )
-

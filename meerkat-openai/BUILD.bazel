@@ -176,4 +176,3 @@ test_suite(
         ":oauth_resolve_test",
     ],
 )
-

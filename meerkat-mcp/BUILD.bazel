@@ -162,4 +162,3 @@ test_suite(
         ":lifecycle_contract_test",
     ],
 )
-

@@ -699,4 +699,3 @@ test_suite(
         ":shadow_state_absent_test",
     ],
 )
-

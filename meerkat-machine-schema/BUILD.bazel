@@ -370,4 +370,3 @@ test_suite(
         ":schema_contracts_test",
     ],
 )
-

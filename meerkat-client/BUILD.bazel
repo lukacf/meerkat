@@ -253,4 +253,3 @@ test_suite(
         ":rct_contracts_test",
     ],
 )
-

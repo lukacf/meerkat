@@ -377,4 +377,3 @@ test_suite(
         ":rmat_audit_test",
     ],
 )
-

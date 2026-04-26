@@ -1483,4 +1483,3 @@ test_suite(
         ":turn_metadata_single_construction_site_test",
     ],
 )
-

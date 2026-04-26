@@ -115,4 +115,3 @@ test_suite(
         ":kernel_typed_round_trip_test",
     ],
 )
-

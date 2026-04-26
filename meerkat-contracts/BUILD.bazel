@@ -502,4 +502,3 @@ test_suite(
         ":skill_ref_wire_no_legacy_test",
     ],
 )
-

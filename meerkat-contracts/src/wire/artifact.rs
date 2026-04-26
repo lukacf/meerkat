@@ -53,6 +53,7 @@ pub struct ArtifactDownloadResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_core::{ArtifactContentHandle, ArtifactType, BlobId, BlobRef};

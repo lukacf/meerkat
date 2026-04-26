@@ -26,6 +26,8 @@ pub enum RuntimeHostIdScope {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeHostHealthStatus {
     Ok,
+    Degraded,
+    Unhealthy,
 }
 
 /// Existing host capability facts exposed as typed booleans.
@@ -116,6 +118,7 @@ pub struct RuntimeHostInfo {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

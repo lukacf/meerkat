@@ -101,6 +101,7 @@ fn serialization_error(error: serde_json::Error) -> ApprovalStoreError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use chrono::Utc;

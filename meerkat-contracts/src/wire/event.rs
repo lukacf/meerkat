@@ -321,8 +321,7 @@ mod tests {
             prompt: meerkat_core::ContentInput::Text("hello".to_string()),
         };
 
-        let envelope =
-            EventReplayEnvelope::session(session_id.clone(), 7, UNIX_EPOCH, event.clone());
+        let envelope = EventReplayEnvelope::session(session_id.clone(), 7, UNIX_EPOCH, event);
         let value = serde_json::to_value(&envelope).expect("serialize replay envelope");
 
         assert_eq!(value["cursor"]["sequence"], 7);

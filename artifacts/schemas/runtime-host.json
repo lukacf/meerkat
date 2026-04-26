@@ -238,7 +238,9 @@
       "RuntimeHostHealthStatus": {
         "description": "Health state of the host process as observed by the reporting surface.",
         "enum": [
-          "ok"
+          "ok",
+          "degraded",
+          "unhealthy"
         ],
         "type": "string"
       }
@@ -270,7 +272,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Health state of the host process as observed by the reporting surface.",
     "enum": [
-      "ok"
+      "ok",
+      "degraded",
+      "unhealthy"
     ],
     "title": "RuntimeHostHealthStatus",
     "type": "string"
@@ -455,7 +459,9 @@
       "RuntimeHostHealthStatus": {
         "description": "Health state of the host process as observed by the reporting surface.",
         "enum": [
-          "ok"
+          "ok",
+          "degraded",
+          "unhealthy"
         ],
         "type": "string"
       },

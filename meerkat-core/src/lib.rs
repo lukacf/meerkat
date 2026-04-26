@@ -145,7 +145,7 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentErrorClass, AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta,
+    AgentErrorClass, AgentErrorReport, AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta,
     ExternalToolDeltaPhase, ScopedAgentEvent, StreamScopeFrame, ToolConfigChangeOperation,
     ToolConfigChangedPayload, VerboseEventConfig, agent_event_type, compare_event_envelopes,
     format_verbose_event, format_verbose_event_with_config,

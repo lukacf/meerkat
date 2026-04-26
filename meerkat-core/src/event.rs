@@ -89,6 +89,22 @@ impl From<&AgentError> for AgentErrorClass {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentErrorReport {
+    pub class: AgentErrorClass,
+    pub message: String,
+}
+
+impl AgentErrorReport {
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        Self {
+            class: AgentErrorClass::from(error),
+            message: error.to_string(),
+        }
+    }
+}
+
 impl<T> EventEnvelope<T> {
     /// Create a new envelope with a UUIDv7 id and current wall-clock timestamp.
     pub fn new(source_id: impl Into<String>, seq: u64, mob_id: Option<String>, payload: T) -> Self {
@@ -329,6 +345,8 @@ pub enum AgentEvent {
         session_id: SessionId,
         error_class: AgentErrorClass,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_report: Option<AgentErrorReport>,
     },
 
     // === Hook Lifecycle ===
@@ -817,6 +835,10 @@ mod tests {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Budget,
                 error: "Budget exceeded".to_string(),
+                error_report: Some(AgentErrorReport {
+                    class: AgentErrorClass::Budget,
+                    message: "Budget exceeded".to_string(),
+                }),
             },
             AgentEvent::CompactionStarted {
                 input_tokens: 120_000,
@@ -898,6 +920,10 @@ mod tests {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Internal,
                 error: "failed".to_string(),
+                error_report: Some(AgentErrorReport {
+                    class: AgentErrorClass::Internal,
+                    message: "failed".to_string(),
+                }),
             },
             AgentEvent::HookStarted {
                 hook_id: "hook-1".to_string(),

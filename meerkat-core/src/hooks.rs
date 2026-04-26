@@ -1,6 +1,7 @@
 //! Hook contracts and engine interfaces.
 
-use crate::types::{SessionId, StopReason, Usage};
+use crate::event::{AgentErrorClass, AgentErrorReport};
+use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -242,7 +243,13 @@ pub struct HookInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_input: Option<ContentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_report: Option<AgentErrorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<AgentErrorClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

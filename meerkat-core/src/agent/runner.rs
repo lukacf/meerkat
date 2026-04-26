@@ -601,7 +601,7 @@ where
 
     async fn run_started_hooks(
         &self,
-        prompt: &str,
+        prompt: &ContentInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         let report = self
@@ -610,7 +610,10 @@ where
                     point: HookPoint::RunStarted,
                     session_id: self.session.id().clone(),
                     turn_number: None,
-                    prompt: Some(prompt.to_string()),
+                    prompt_input: Some(prompt.clone()),
+                    prompt: Some(prompt.text_content()),
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -649,7 +652,10 @@ where
                     point: HookPoint::RunCompleted,
                     session_id: self.session.id().clone(),
                     turn_number: Some(result.turns),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -751,6 +757,7 @@ where
                 session_id: self.session.id().clone(),
                 error_class: crate::event::AgentErrorClass::from(error),
                 error: error.to_string(),
+                error_report: Some(crate::event::AgentErrorReport::from_agent_error(error)),
             },
         )
         .await;
@@ -799,7 +806,10 @@ where
                     point: HookPoint::RunFailed,
                     session_id: self.session.id().clone(),
                     turn_number: None,
+                    prompt_input: None,
                     prompt: None,
+                    error_report: Some(crate::event::AgentErrorReport::from_agent_error(error)),
+                    error_class: Some(crate::event::AgentErrorClass::from(error)),
                     error: Some(error.to_string()),
                     llm_request: None,
                     llm_response: None,
@@ -913,8 +923,8 @@ where
             ContentInput::Text(text)
         };
 
-        // Hooks/events always see the text projection.
-        let run_prompt = user_input.text_content();
+        // Hooks/events receive the typed content input; legacy hook fields
+        // still include the text projection for compatibility.
         let run_prompt_input = user_input.clone();
 
         // Add user message — preserve image blocks when present.
@@ -925,10 +935,13 @@ where
         };
         self.session.push(Message::User(user_message));
 
-        self.emit_run_started_event(run_prompt_input, event_tx.as_ref())
+        self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
             .await;
 
-        if let Err(err) = self.run_started_hooks(&run_prompt, event_tx.as_ref()).await {
+        if let Err(err) = self
+            .run_started_hooks(&run_prompt_input, event_tx.as_ref())
+            .await
+        {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }
@@ -996,7 +1009,10 @@ where
         self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
 
-        if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {
+        if let Err(err) = self
+            .run_started_hooks(&ContentInput::Text(prompt.clone()), event_tx.as_ref())
+            .await
+        {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }

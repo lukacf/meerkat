@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-doctor buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -228,6 +228,14 @@ buildbuddy-install:
 	@scripts/install-buildbuddy-cli
 
 # Optional BuildBuddy/remote-cache lanes. Cargo remains the default path.
+buildbuddy-generate:
+	@echo "$(GREEN)Regenerating optional Bazel BUILD files...$(NC)"
+	@node scripts/generate-bazel-rust-builds.mjs
+
+buildbuddy-generate-check:
+	@echo "$(GREEN)Checking generated optional Bazel BUILD files...$(NC)"
+	@node scripts/generate-bazel-rust-builds.mjs --check
+
 buildbuddy-doctor: rust-lane-doctor
 	@echo "$(GREEN)Checking optional BuildBuddy setup...$(NC)"
 	@scripts/buildbuddy-doctor
@@ -591,6 +599,8 @@ help:
 	@echo "  $(GREEN)agent-gate$(NC)    - Run default Cargo or opt-in BuildBuddy changed gate (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)cargo-agent-gate$(NC)- Run Cargo gate for changed agent files"
 	@echo "  $(GREEN)buildbuddy-install$(NC)- Install pinned optional BuildBuddy CLI"
+	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
+	@echo "  $(GREEN)buildbuddy-generate-check$(NC)- Check optional Bazel BUILD freshness"
 	@echo "  $(GREEN)buildbuddy-doctor$(NC)- Check optional BuildBuddy setup"
 	@echo "  $(GREEN)buildbuddy-agent-gate$(NC)- Run BuildBuddy gate for changed agent files (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-ci-dispatch$(NC)- Dispatch optional BuildBuddy CI mode (BUILDBUDDY_CI_ARGS=...)"

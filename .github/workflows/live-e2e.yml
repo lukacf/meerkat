@@ -1,0 +1,115 @@
+name: Live E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Which implementation to run
+        required: true
+        default: cargo
+        type: choice
+        options:
+          - cargo
+          - buildbuddy
+          - both
+      lane:
+        description: Which live lane to run
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - live
+          - smoke
+          - both
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /tmp/meerkat-cargo-home
+  BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  RKAT_ANTHROPIC_API_KEY: ${{ secrets.RKAT_ANTHROPIC_API_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  RKAT_OPENAI_API_KEY: ${{ secrets.RKAT_OPENAI_API_KEY }}
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  RKAT_GEMINI_API_KEY: ${{ secrets.RKAT_GEMINI_API_KEY }}
+  GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+  MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
+  MEERKAT_STRICT_E2E_PREREQS: "1"
+
+jobs:
+  cargo-e2e-live:
+    name: Cargo E2E live lane
+    if: ${{ (inputs.runner == 'cargo' || inputs.runner == 'both') && (inputs.lane == 'live' || inputs.lane == 'both') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: live-e2e-cargo-live
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: taiki-e/install-action@nextest
+      - run: ./scripts/repo-cargo e2e-live
+
+  cargo-e2e-smoke:
+    name: Cargo E2E smoke lane
+    if: ${{ (inputs.runner == 'cargo' || inputs.runner == 'both') && (inputs.lane == 'smoke' || inputs.lane == 'both') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: live-e2e-cargo-smoke
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: taiki-e/install-action@nextest
+      - run: ./scripts/repo-cargo e2e-smoke
+
+  buildbuddy-e2e-live:
+    name: BuildBuddy E2E live lane
+    if: ${{ (inputs.runner == 'buildbuddy' || inputs.runner == 'both') && (inputs.lane == 'live' || inputs.lane == 'both') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/run-buildbuddy-ci-lane
+        with:
+          lane: e2e-live
+          profile: native
+          mode: e2e-live
+
+  buildbuddy-e2e-smoke:
+    name: BuildBuddy E2E smoke lane
+    if: ${{ (inputs.runner == 'buildbuddy' || inputs.runner == 'both') && (inputs.lane == 'smoke' || inputs.lane == 'both') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/run-buildbuddy-ci-lane
+        with:
+          lane: e2e-smoke
+          profile: native
+          mode: e2e-smoke

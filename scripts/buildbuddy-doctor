@@ -228,7 +228,8 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   grep -Fq 'integration-fast:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'e2e-system:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'SDK suites + parity gates' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'e2e-smoke:' .github/workflows/buildbuddy.yml &&
+  ! grep -Fq 'e2e-smoke:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'BuildBuddy E2E smoke lane' .github/workflows/live-e2e.yml &&
   ! grep -Fq 'Build + clippy (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq '(compat)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'strategy:' .github/workflows/buildbuddy.yml &&
@@ -246,16 +247,17 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   grep -Fq 'cargo-deny check' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live' scripts/buildbuddy-ci-lane &&
   grep -Fq 'wasm-pack test --headless --chrome' scripts/buildbuddy-ci-lane; then
-  pass "BuildBuddy workflow exposes full CI as a 1:1 Cargo lane map"
+  pass "BuildBuddy workflow exposes standard CI as a 1:1 Cargo lane map"
 else
   bad "BuildBuddy workflow does not match the Cargo lane map"
 fi
 
 if grep -Fq 'rust-release-packaging' .github/workflows/ci.yml &&
   grep -Fq 'e2e-system' .github/workflows/ci.yml &&
-  grep -Fq 'e2e-live' .github/workflows/ci.yml &&
-  grep -Fq 'e2e-smoke' .github/workflows/ci.yml &&
-  grep -Fq "if: \${{ github.event_name == 'workflow_dispatch' }}" .github/workflows/ci.yml &&
+  ! grep -Fq 'e2e-live:' .github/workflows/ci.yml &&
+  ! grep -Fq 'e2e-smoke:' .github/workflows/ci.yml &&
+  grep -Fq 'Cargo E2E live lane' .github/workflows/live-e2e.yml &&
+  grep -Fq 'Cargo E2E smoke lane' .github/workflows/live-e2e.yml &&
   grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/ci.yml; then
   pass "Cargo CI gate depends on every standard Cargo CI lane"
 else

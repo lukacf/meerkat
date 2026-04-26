@@ -293,36 +293,6 @@ jobs:
           profile: native
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
 
-  e2e-live:
-    name: E2E live lane
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/run-buildbuddy-ci-lane
-        with:
-          lane: e2e-live
-          profile: native
-          mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
-
-  e2e-smoke:
-    name: E2E smoke lane
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/run-buildbuddy-ci-lane
-        with:
-          lane: e2e-smoke
-          profile: native
-          mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
-
   test-minimal:
     name: Minimal feature builds
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || (vars.MEERKAT_BUILDBUDDY_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}

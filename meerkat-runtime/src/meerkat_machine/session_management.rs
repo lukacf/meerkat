@@ -82,7 +82,6 @@ impl MeerkatMachine {
             phase: RegistrationPhase::Queuing,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
-            trust_reconciler: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -263,7 +262,6 @@ impl MeerkatMachine {
                             phase: RegistrationPhase::Queuing,
                             dsl_authority,
                             drain_slot: CommsDrainSlot::new(),
-                            trust_reconciler: None,
                         },
                     );
                     (driver, completions, recovered_ops)

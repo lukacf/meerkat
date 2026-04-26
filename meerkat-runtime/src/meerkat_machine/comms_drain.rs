@@ -913,7 +913,7 @@ impl std::error::Error for SupervisorBindingStageError {}
 
 impl MeerkatMachine {
     /// D-track-b: stage an `AddDirectPeerEndpoint` DSL input and drive
-    /// the session-scoped trust reconciler.
+    /// trust reconciliation against the caller-supplied runtime.
     ///
     /// Closes the emitter→consumer gap documented in
     /// `docs/wave-d-prep/track-b-producer-wiring.md`: the DSL owns the
@@ -923,13 +923,10 @@ impl MeerkatMachine {
     /// effect and mechanically reconciles the underlying
     /// [`meerkat_core::agent::CommsRuntime`] trust store.
     ///
-    /// The caller supplies the session's `CommsRuntime` because the
-    /// reconciler's lifetime is rooted in it; when the session's first
-    /// stager call runs, the machine installs a
-    /// [`crate::comms_trust_reconcile::CommsTrustReconciler`] on the
-    /// `RuntimeSessionEntry` bound to this runtime. Subsequent stager
-    /// calls on the same session re-use that reconciler so the applied
-    /// view watermark is monotonically advanced across calls.
+    /// The caller supplies the session's current `CommsRuntime`.
+    /// Reconciliation reads that runtime's canonical trust-store
+    /// snapshot every pass, so rebinds do not pin peer projection to
+    /// an older transport instance.
     pub async fn stage_add_direct_peer_endpoint(
         &self,
         session_id: &SessionId,
@@ -949,7 +946,7 @@ impl MeerkatMachine {
     }
 
     /// D-track-b: stage a `RemoveDirectPeerEndpoint` DSL input and
-    /// drive the session-scoped trust reconciler. See
+    /// drive trust reconciliation. See
     /// [`Self::stage_add_direct_peer_endpoint`] for the architectural
     /// contract.
     pub async fn stage_remove_direct_peer_endpoint(
@@ -971,7 +968,7 @@ impl MeerkatMachine {
     }
 
     /// D-track-b: stage an `ApplyMobPeerOverlay` DSL input and drive
-    /// the session-scoped trust reconciler. Used by composition drivers
+    /// trust reconciliation. Used by composition drivers
     /// that recompute the mob-overlay peer set from the MobMachine
     /// wiring graph.
     pub async fn stage_apply_mob_peer_overlay(
@@ -996,14 +993,14 @@ impl MeerkatMachine {
 
     /// Apply a peer-projection DSL input, sample the emitted
     /// `CommsTrustReconcileRequested` effect under the same DSL lock,
-    /// and return the session-scoped reconciler with the post-transition
+    /// and return a reconciler for the current runtime with the post-transition
     /// effective peer set `direct ∪ overlay`.
     ///
     /// The reconciler is driven OUTSIDE the `sessions` RwLock to avoid
-    /// blocking other adapter operations behind trust-store I/O; the
-    /// reconciler's own async mutex serializes concurrent reconcile
-    /// calls on the same session, so correctness holds without the
-    /// outer lock.
+    /// blocking other adapter operations behind trust-store I/O. There
+    /// is no helper-local applied truth: each reconcile pass diffs the
+    /// supplied runtime's canonical trust-store snapshot against the
+    /// DSL-owned effective peer set.
     async fn stage_peer_projection_input(
         &self,
         session_id: &SessionId,
@@ -1054,14 +1051,9 @@ impl MeerkatMachine {
             (epoch, effective)
         };
 
-        let reconciler = entry
-            .trust_reconciler
-            .get_or_insert_with(|| {
-                Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
-                    comms_runtime,
-                ))
-            })
-            .clone();
+        let reconciler = Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
+            comms_runtime,
+        ));
 
         Ok((reconciler, reconcile_epoch, effective_peers))
     }

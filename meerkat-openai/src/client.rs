@@ -942,7 +942,7 @@ mod tests {
     fn test_request_uses_responses_api_endpoint_format() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("Hello".to_string()))],
         );
 
@@ -970,7 +970,7 @@ mod tests {
     fn test_request_input_format_system_message() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::System(meerkat_core::SystemMessage {
                     content: "You are helpful".to_string(),
@@ -997,7 +997,7 @@ mod tests {
     fn test_request_input_format_degrades_video_user_content_to_text() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::with_blocks(vec![
                 ContentBlock::Video {
                     media_type: "video/mp4".to_string(),
@@ -1049,7 +1049,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let tool_args = serde_json::json!({"location": "Tokyo"});
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Weather?".to_string())),
                 Message::Assistant(meerkat_core::AssistantMessage {
@@ -1084,7 +1084,7 @@ mod tests {
     fn test_request_input_format_tool_result() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Weather?".to_string())),
                 Message::ToolResults {
@@ -1144,7 +1144,7 @@ mod tests {
     fn test_request_includes_reasoning_config() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
@@ -1160,7 +1160,7 @@ mod tests {
     fn test_request_reasoning_effort_override() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1237,7 +1237,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -1264,7 +1264,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -1302,7 +1302,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let args = RawValue::from_string(r#"{"location":"Tokyo"}"#.to_string()).unwrap();
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Weather?".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -1338,7 +1338,7 @@ mod tests {
     fn test_request_includes_seed_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| t.seed = Some(12345));
@@ -1352,7 +1352,7 @@ mod tests {
     fn test_request_includes_frequency_penalty_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| t.frequency_penalty = Some(0.5));
@@ -1367,7 +1367,7 @@ mod tests {
     fn test_request_includes_presence_penalty_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| t.presence_penalty = Some(0.8));
@@ -1398,7 +1398,7 @@ mod tests {
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4.1-mini",
+            "gpt-realtime",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);
@@ -1414,7 +1414,7 @@ mod tests {
     fn test_multiple_provider_params_combined() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1441,7 +1441,7 @@ mod tests {
 
         let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("What's the weather?".to_string())),
                 Message::Assistant(meerkat_core::AssistantMessage {
@@ -1496,7 +1496,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1526,7 +1526,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1548,7 +1548,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
@@ -1600,7 +1600,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1655,7 +1655,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -1697,7 +1697,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_openai_tag_merge(|t| {
@@ -2005,7 +2005,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 // Reasoning-only response (e.g., stream interrupted after reasoning)
@@ -2037,7 +2037,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("First question".to_string())),
                 // Reasoning without output, followed by next user turn
@@ -2072,7 +2072,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 // Reasoning-only at end of one assistant message
@@ -2113,7 +2113,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let args = RawValue::from_string(r#"{"q":"test"}"#.to_string()).unwrap();
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -2151,7 +2151,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -2189,7 +2189,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 // Two consecutive reasoning-only messages (e.g., repeated interruptions)
@@ -2266,7 +2266,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let args = RawValue::from_string(r#"{"q":"test"}"#.to_string()).unwrap();
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -2305,7 +2305,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -2461,7 +2461,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::with_blocks(vec![
                 ContentBlock::Text {
                     text: "describe this".to_string(),
@@ -2509,7 +2509,7 @@ mod tests {
     fn openai_text_only_user_message_stays_string() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![Message::User(UserMessage::text("just text"))],
         );
 
@@ -2530,7 +2530,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Take a screenshot")),
                 Message::ToolResults {

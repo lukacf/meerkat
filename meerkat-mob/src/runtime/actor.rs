@@ -1,7 +1,7 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
-use super::mob_member_lifecycle_authority::{
+use super::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
     MobMemberLifecycleInput, MobMemberLifecycleProjection,
 };
@@ -1726,8 +1726,8 @@ impl MobActor {
     /// Probe a DSL input against a clone of current state — returns
     /// `InvalidTransition` if the DSL rejects the input, without
     /// mutating the live authority. Used as the pre-admission gate for
-    /// lifecycle commands so side effects (notifications, cleanup) only
-    /// fire when the DSL would actually accept the transition.
+    /// simple lifecycle commands whose side effects can only run after the
+    /// target transition is known to be accepted.
     ///
     /// `target` is used purely for the `InvalidTransition` error hint
     /// (the phase the caller is trying to reach). The DSL rejects on the
@@ -3109,14 +3109,6 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    if let Err(error) = self.probe_mob_machine_input(
-                        mob_dsl::MobMachineInput::Destroy,
-                        MobState::Destroyed,
-                    ) {
-                        let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(error)));
-                        continue;
-                    }
-                    self.fail_all_pending_spawns("mob is destroying").await;
                     let result = self.handle_destroy().await;
                     let destroy_succeeded = result.is_ok();
                     let _ = reply_tx.send(result);
@@ -7841,6 +7833,7 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await
             .map_err(MobDestroyError::from)?;
+        self.fail_all_pending_spawns("mob is destroying").await;
         let entries = {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()

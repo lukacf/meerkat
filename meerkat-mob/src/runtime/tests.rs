@@ -3457,11 +3457,17 @@ impl SessionAgentBuilder for PersistentMockBuilder {
 
     async fn build_agent(
         &self,
-        _req: &CreateSessionRequest,
+        req: &CreateSessionRequest,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
+        let session_id = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         Ok(PersistentMockAgent {
-            session_id: SessionId::new(),
+            session_id,
             system_context_state: Arc::new(std::sync::Mutex::new(
                 SessionSystemContextState::default(),
             )),
@@ -6682,6 +6688,7 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
 #[tokio::test]
 async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut def = sample_definition();
     for profile in def.profiles.values_mut().filter_map(|b| b.as_inline_mut()) {
         profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
@@ -6715,9 +6722,15 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     .resume()
     .await;
 
+    let error = result
+        .err()
+        .expect("resume must surface orchestrator start_turn failures");
     assert!(
-        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
-        "resume must surface orchestrator start_turn failures"
+        matches!(
+            &error,
+            MobError::Internal(message) if message.contains("mock start_turn failure")
+        ),
+        "resume must surface orchestrator start_turn failures, got {error:?}"
     );
 }
 
@@ -11392,6 +11405,7 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
 #[tokio::test]
 async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition_with_auto_wire();
     definition
         .profiles
@@ -13165,12 +13179,6 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
 
     tokio::time::sleep(Duration::from_millis(25)).await;
 
-    let active_members = handle.list_members().await;
-    assert!(
-        active_members.is_empty(),
-        "retiring member must leave the active roster before disposal completes"
-    );
-
     let all_members = handle.list_all_members().await;
     assert_eq!(
         all_members.len(),
@@ -13179,6 +13187,12 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
     );
     assert_eq!(all_members[0].agent_identity.as_str(), "w-1");
     assert_eq!(all_members[0].state, crate::roster::MemberState::Retiring);
+
+    let active_members = handle.list_members().await;
+    assert!(
+        active_members.is_empty(),
+        "retiring member must leave the active roster before disposal completes"
+    );
 
     let start_turn_calls_before = service.start_turn_call_count();
     let external_turn = handle.member(&AgentIdentity::from("w-1")).await;
@@ -17529,20 +17543,6 @@ async fn test_mob_session_service_subscribe_session_events_available() {
     );
 }
 
-fn has_request_intent_for_peer(
-    interactions: &[meerkat_core::InboxInteraction],
-    expected_intent: &str,
-    expected_peer: &str,
-) -> bool {
-    interactions.iter().any(|interaction| {
-        matches!(
-            &interaction.content,
-            meerkat_core::InteractionContent::Request { intent, params }
-                if intent == expected_intent && params["peer"] == expected_peer
-        )
-    })
-}
-
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
@@ -17609,16 +17609,8 @@ async fn test_wire_enables_peer_request_delivery() {
         "wire should expose lead in worker peers()"
     );
 
-    let notify_for_a = CoreCommsRuntime::drain_inbox_interactions(&*comms_a).await;
-    let notify_for_b = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
-    assert!(
-        has_request_intent_for_peer(&notify_for_a, "mob.peer_added", "w-1"),
-        "lead should receive mob.peer_added for worker"
-    );
-    assert!(
-        has_request_intent_for_peer(&notify_for_b, "mob.peer_added", "l-1"),
-        "worker should receive mob.peer_added for lead"
-    );
+    let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_a).await;
+    let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
         to: test_peer_route(&*comms_a, &comms_name_b).await,

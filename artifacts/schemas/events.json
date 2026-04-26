@@ -30,6 +30,286 @@
         ],
         "type": "string"
       },
+      "AgentErrorReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_rate_limited",
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "max": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_context_exceeded",
+                "type": "string"
+              },
+              "requested": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "max",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_auth_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "llm_invalid_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "model"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider_error": true,
+              "reason_type": {
+                "const": "llm_provider_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider_error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_network_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_call_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason_code": {
+                "$ref": "#/$defs/HookReasonCode"
+              },
+              "reason_type": {
+                "const": "hook_denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "point",
+              "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "structured_output_validation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "invalid_output_schema",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding_key": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "auth_reauth_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "binding_key",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "args": true,
+              "reason_type": {
+                "const": "callback_pending",
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "tool_name",
+              "args"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "AgentErrorReport": {
         "properties": {
           "class": {
@@ -37,6 +317,16 @@
           },
           "message": {
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentErrorReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -724,6 +1014,7 @@
         "description": "Agent run failed",
         "properties": {
           "error": {
+            "description": "Display projection of `error_report.message`.",
             "type": "string"
           },
           "error_class": {
@@ -1525,6 +1816,286 @@
         ],
         "type": "string"
       },
+      "AgentErrorReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_rate_limited",
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "max": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_context_exceeded",
+                "type": "string"
+              },
+              "requested": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "max",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_auth_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "llm_invalid_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "model"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider_error": true,
+              "reason_type": {
+                "const": "llm_provider_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider_error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_network_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_call_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason_code": {
+                "$ref": "#/$defs/HookReasonCode"
+              },
+              "reason_type": {
+                "const": "hook_denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "point",
+              "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "structured_output_validation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "invalid_output_schema",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding_key": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "auth_reauth_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "binding_key",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "args": true,
+              "reason_type": {
+                "const": "callback_pending",
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "tool_name",
+              "args"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "AgentErrorReport": {
         "properties": {
           "class": {
@@ -1532,6 +2103,16 @@
           },
           "message": {
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentErrorReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -1593,6 +2174,7 @@
             "description": "Agent run failed",
             "properties": {
               "error": {
+                "description": "Display projection of `error_report.message`.",
                 "type": "string"
               },
               "error_class": {

@@ -581,9 +581,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
-        if store_snapshot.is_some() {
-            return Ok(store_snapshot);
-        }
 
         let runtime_snapshot = if let Some(runtime_store) = self.runtime_store.as_ref() {
             let runtime_id = Self::runtime_id_for_session(id);
@@ -609,7 +606,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             None
         };
 
-        Ok(runtime_snapshot)
+        Ok(match (store_snapshot, runtime_snapshot) {
+            (Some(store), Some(runtime)) => {
+                if metadata_marks_archived(store.metadata())
+                    || store.updated_at() >= runtime.updated_at()
+                {
+                    Some(store)
+                } else {
+                    Some(Self::runtime_session_with_store_metadata(runtime, &store))
+                }
+            }
+            (Some(store), None) => Some(store),
+            (None, Some(runtime)) => Some(runtime),
+            (None, None) => None,
+        })
+    }
+
+    fn runtime_session_with_store_metadata(mut runtime: Session, store: &Session) -> Session {
+        for (key, value) in store.metadata() {
+            if !runtime.metadata().contains_key(key) {
+                runtime.set_metadata(key, value.clone());
+            }
+        }
+        runtime
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -1016,19 +1035,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
-    fn no_terminal_run_result(session: &Session) -> RunResult {
-        RunResult {
-            text: String::new(),
-            session_id: session.id().clone(),
-            usage: meerkat_core::types::Usage::default(),
-            turns: 0,
-            tool_calls: 0,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        }
-    }
-
     async fn build_runtime_output(
         &self,
         id: &SessionId,
@@ -1073,7 +1079,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: Some(Self::no_terminal_run_result(&persisted_session)),
+                run_result: None,
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),

@@ -370,31 +370,13 @@ pub enum PeerConvention {
     },
 }
 
-/// Phase of a response progress update.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ResponseProgressPhase {
-    /// Request was accepted.
-    Accepted,
-    /// Work is in progress.
-    InProgress,
-    /// Partial result available.
-    PartialResult,
-}
+/// Phase of a response progress update. This is the core projection enum, not
+/// a runtime-local duplicate.
+pub type ResponseProgressPhase = PeerResponseProgressProjectionPhase;
 
-/// Terminal status of a response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ResponseTerminalStatus {
-    /// Request completed successfully.
-    Completed,
-    /// Request failed.
-    Failed,
-    /// Request was cancelled.
-    Cancelled,
-}
+/// Terminal status of a response. This is the core projection enum, not a
+/// runtime-local duplicate.
+pub type ResponseTerminalStatus = PeerResponseTerminalProjectionStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PeerResponseTerminalInputError {
@@ -407,11 +389,13 @@ pub fn response_terminal_status_from_wire(
 ) -> ResponseTerminalStatus {
     match status {
         meerkat_contracts::PeerResponseTerminalStatusWire::Completed => {
-            ResponseTerminalStatus::Completed
+            PeerResponseTerminalProjectionStatus::Completed
         }
-        meerkat_contracts::PeerResponseTerminalStatusWire::Failed => ResponseTerminalStatus::Failed,
+        meerkat_contracts::PeerResponseTerminalStatusWire::Failed => {
+            PeerResponseTerminalProjectionStatus::Failed
+        }
         meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled => {
-            ResponseTerminalStatus::Cancelled
+            PeerResponseTerminalProjectionStatus::Cancelled
         }
     }
 }
@@ -574,17 +558,7 @@ pub(crate) fn peer_projection_from_peer_input(
             Some(PeerConversationProjection::ResponseProgress {
                 peer_id: peer_id.clone(),
                 request_id: request_id.clone(),
-                phase: match phase {
-                    ResponseProgressPhase::Accepted => {
-                        PeerResponseProgressProjectionPhase::Accepted
-                    }
-                    ResponseProgressPhase::InProgress => {
-                        PeerResponseProgressProjectionPhase::InProgress
-                    }
-                    ResponseProgressPhase::PartialResult => {
-                        PeerResponseProgressProjectionPhase::PartialResult
-                    }
-                },
+                phase: *phase,
                 payload: peer.payload.clone(),
             })
         }
@@ -592,15 +566,7 @@ pub(crate) fn peer_projection_from_peer_input(
             Some(PeerConversationProjection::ResponseTerminal {
                 peer_id: peer_id.clone(),
                 request_id: request_id.clone(),
-                status: match status {
-                    ResponseTerminalStatus::Completed => {
-                        PeerResponseTerminalProjectionStatus::Completed
-                    }
-                    ResponseTerminalStatus::Failed => PeerResponseTerminalProjectionStatus::Failed,
-                    ResponseTerminalStatus::Cancelled => {
-                        PeerResponseTerminalProjectionStatus::Cancelled
-                    }
-                },
+                status: *status,
                 payload: peer.payload.clone(),
             })
         }

@@ -5073,7 +5073,7 @@
   },
   "RealtimeChannelTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
+    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bridge session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
     "oneOf": [
       {
         "properties": {
@@ -5964,7 +5964,7 @@
         "type": "object"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bridge session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -8856,10 +8856,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "$ref": "#/$defs/ToolName"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -8876,10 +8873,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "$ref": "#/$defs/ToolName"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -8893,6 +8887,14 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
       },
       "TriggerSpec": {
         "oneOf": [
@@ -10335,10 +10337,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "$ref": "#/$defs/ToolName"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -10355,10 +10354,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "$ref": "#/$defs/ToolName"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -10372,6 +10368,14 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
       },
       "TriggerSpec": {
         "oneOf": [

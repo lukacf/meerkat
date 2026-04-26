@@ -3,10 +3,64 @@
 
 export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
-export interface AgentErrorReport {
+export type AgentErrorReason = {
+  reason_type: "llm_rate_limited";
+  retry_after_ms?: number | null;
+} | {
+  max: number;
+  reason_type: "llm_context_exceeded";
+  requested: number;
+} | {
+  reason_type: "llm_auth_error";
+} | {
+  model: string;
+  reason_type: "llm_invalid_model";
+} | {
+  provider_error: unknown;
+  reason_type: "llm_provider_error";
+} | {
+  duration_ms: number;
+  reason_type: "llm_network_timeout";
+} | {
+  duration_ms: number;
+  reason_type: "llm_call_timeout";
+} | {
+  point: HookPoint;
+  reason_code: HookReasonCode;
+  reason_type: "hook_denied";
+} | {
+  hook_id: string;
+  reason_type: "hook_timeout";
+  timeout_ms: number;
+} | {
+  hook_id: string;
+  reason: string;
+  reason_type: "hook_execution_failed";
+} | {
+  reason: string;
+  reason_type: "hook_config_invalid";
+} | {
+  attempts: number;
+  reason: string;
+  reason_type: "structured_output_validation_failed";
+} | {
+  reason: string;
+  reason_type: "invalid_output_schema";
+} | {
+  binding_key: string;
+  message: string;
+  reason_type: "auth_reauth_required";
+} | {
+  args: unknown;
+  reason_type: "callback_pending";
+  tool_name: string;
+};
+
+export type AgentErrorReport = {
   class: AgentErrorClass;
   message: string;
-}
+  reason?: AgentErrorReason | null;
+};
 
 export type BlobId = string;
 

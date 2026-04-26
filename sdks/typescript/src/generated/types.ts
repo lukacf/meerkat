@@ -284,8 +284,8 @@ export interface RealtimeErrorDetailsAudioFormatMismatch {
 export interface RealtimeErrorDetailsToolCallTimeout {
   call_id: string;
   elapsed_ms: number;
-  kind: "tool_call_timeout";
   timeout_ms: number;
+  kind: "tool_call_timeout";
 }
 
 export interface RealtimeErrorDetailsUnsupportedProtocolVersion {

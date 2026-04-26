@@ -5,7 +5,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
 #[cfg(test)]
-use crate::runtime::mob_member_lifecycle_authority::{
+use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
 };
 use crate::runtime::reconcile::{
@@ -1658,17 +1658,36 @@ impl MobHandle {
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
     /// for deep per-member inspection including live comms reachability.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListMembersIncludingRetiring)
+        self.roster
+            .read()
             .await
-        {
-            Ok(MobMachineCommandResult::ListMembersIncludingRetiring(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
-        }
+            .list_all()
+            .map(|entry| {
+                let status = match entry.state {
+                    crate::roster::MemberState::Active => MobMemberStatus::Active,
+                    crate::roster::MemberState::Retiring => MobMemberStatus::Retiring,
+                };
+                MobMemberListEntry {
+                    agent_identity: entry.agent_identity.clone(),
+                    agent_runtime_id: entry.agent_runtime_id.clone(),
+                    fence_token: entry.fence_token,
+                    role: entry.role.clone(),
+                    runtime_mode: entry.runtime_mode,
+                    peer_id: entry.peer_id.clone(),
+                    state: entry.state,
+                    wired_to: entry.wired_to.clone(),
+                    external_peer_specs: entry.external_peer_specs.clone(),
+                    labels: entry.labels.clone(),
+                    status,
+                    error: None,
+                    is_final: false,
+                    current_session_id: None,
+                    current_bridge_session_id: None,
+                    kickoff: entry.kickoff.clone(),
+                }
+                .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned())
+            })
+            .collect()
     }
 
     /// List members currently eligible for runtime work dispatch.
@@ -1692,17 +1711,7 @@ impl MobHandle {
     /// `Retiring`. Use this for observability and membership inspection where
     /// in-flight retires should be visible.
     pub async fn list_all_members(&self) -> Vec<RosterEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListAllMembers)
-            .await
-        {
-            Ok(MobMachineCommandResult::ListAllMembers(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
-        }
+        self.roster.read().await.list_all().cloned().collect()
     }
 
     /// Get a specific member entry by identity.

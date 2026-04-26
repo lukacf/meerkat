@@ -338,12 +338,7 @@ fn request_key(id: &Value) -> String {
 }
 
 fn tool_call_request_semantics(tool_name: &str) -> SurfaceRequestSemantics {
-    match tool_name {
-        "meerkat_run" | "meerkat_resume" => {
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        }
-        _ => SurfaceRequestSemantics::long_running_observation(),
-    }
+    SurfaceRequestSemantics::for_mcp_tool_call(tool_name)
 }
 
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {

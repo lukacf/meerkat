@@ -380,6 +380,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         };
         TurnStateSnapshot {
             active_run_id,
+            loop_state: map_loop_state(state.turn_phase),
             turn_phase,
             primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.clone(),
@@ -419,6 +420,26 @@ fn map_turn_phase(phase: mm_dsl::TurnPhase) -> TurnPhase {
         mm_dsl::TurnPhase::Completed => TurnPhase::Completed,
         mm_dsl::TurnPhase::Failed => TurnPhase::Failed,
         mm_dsl::TurnPhase::Cancelled => TurnPhase::Cancelled,
+    }
+}
+
+/// Owner-side projection from DSL turn phase to the legacy observable loop
+/// state. Keep this beside `map_turn_phase` so the agent runner receives one
+/// coherent snapshot from the DSL authority instead of reclassifying phases.
+fn map_loop_state(phase: mm_dsl::TurnPhase) -> meerkat_core::LoopState {
+    match phase {
+        mm_dsl::TurnPhase::Ready
+        | mm_dsl::TurnPhase::ApplyingPrimitive
+        | mm_dsl::TurnPhase::CallingLlm => meerkat_core::LoopState::CallingLlm,
+        mm_dsl::TurnPhase::WaitingForOps => meerkat_core::LoopState::WaitingForOps,
+        mm_dsl::TurnPhase::DrainingBoundary | mm_dsl::TurnPhase::Extracting => {
+            meerkat_core::LoopState::DrainingEvents
+        }
+        mm_dsl::TurnPhase::ErrorRecovery => meerkat_core::LoopState::ErrorRecovery,
+        mm_dsl::TurnPhase::Cancelling => meerkat_core::LoopState::Cancelling,
+        mm_dsl::TurnPhase::Completed | mm_dsl::TurnPhase::Failed | mm_dsl::TurnPhase::Cancelled => {
+            meerkat_core::LoopState::Completed
+        }
     }
 }
 

@@ -104,6 +104,29 @@ impl SurfaceRequestSemantics {
         }
     }
 
+    /// Canonical RPC request semantics.
+    ///
+    /// The RPC surface supplies only the already-parsed "does session/create
+    /// run immediately?" fact. Method-to-publication policy lives here so RPC
+    /// transports do not each grow their own terminal classifier.
+    pub fn for_rpc_method(method: &str, session_create_runs_immediately: bool) -> Self {
+        match method {
+            "turn/start" | "mob/turn_start" => Self::long_running_publish_on_success(),
+            "session/create" if session_create_runs_immediately => {
+                Self::long_running_publish_on_success()
+            }
+            _ => Self::inline_observation(),
+        }
+    }
+
+    /// Canonical MCP tool-call request semantics.
+    pub fn for_mcp_tool_call(tool_name: &str) -> Self {
+        match tool_name {
+            "meerkat_run" | "meerkat_resume" => Self::long_running_publish_on_success(),
+            _ => Self::long_running_observation(),
+        }
+    }
+
     pub const fn requires_long_running_executor(self) -> bool {
         matches!(self.execution, SurfaceRequestExecution::LongRunning)
     }

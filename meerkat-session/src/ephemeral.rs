@@ -24,7 +24,7 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
     InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
-    Session, SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -601,19 +601,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
     }
 
-    fn no_terminal_run_result(session: &Session) -> RunResult {
-        RunResult {
-            text: String::new(),
-            session_id: session.id().clone(),
-            usage: Usage::default(),
-            turns: 0,
-            tool_calls: 0,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        }
-    }
-
     async fn build_runtime_output(
         &self,
         id: &SessionId,
@@ -646,7 +633,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: Some(Self::no_terminal_run_result(&session)),
+                run_result: None,
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),

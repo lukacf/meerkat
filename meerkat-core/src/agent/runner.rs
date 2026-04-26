@@ -96,7 +96,7 @@ fn runtime_execution_snapshot(
         .collect::<Option<Vec<_>>>()?;
 
     Some(crate::AgentExecutionSnapshot {
-        loop_state: turn_phase.to_loop_state(),
+        loop_state: snapshot.loop_state,
         turn_phase,
         active_run_id: snapshot.active_run_id,
         primitive_kind,

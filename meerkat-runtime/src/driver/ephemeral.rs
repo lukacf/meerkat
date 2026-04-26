@@ -1089,6 +1089,20 @@ impl EphemeralRuntimeDriver {
         current_run_id: Option<RunId>,
         pre_run_phase: Option<RuntimeState>,
     ) {
+        {
+            let authority = self.shared_dsl_authority();
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.state.lifecycle_phase =
+                crate::meerkat_machine::dsl_authority::project_phase(next_phase);
+            authority.state.current_run_id = current_run_id
+                .as_ref()
+                .map(crate::meerkat_machine::dsl::RunId::from_domain);
+            authority.state.pre_run_phase = pre_run_phase
+                .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state);
+        }
+
         if self.control_snapshot().phase == next_phase {
             self.write_control_projection().phase = next_phase;
         } else {

@@ -6,31 +6,45 @@
     },
     {
       "description": "Create session + run first turn",
-      "name": "session/create"
+      "name": "session/create",
+      "params_type": "CreateSessionParams",
+      "result_type": "WireRunResult | DeferredCreateResult"
     },
     {
       "description": "List active sessions",
-      "name": "session/list"
+      "name": "session/list",
+      "params_type": "ListSessionsParams",
+      "result_type": "ListSessionsResult"
     },
     {
       "description": "Get session state",
-      "name": "session/read"
+      "name": "session/read",
+      "params_type": "ReadSessionParams",
+      "result_type": "WireSessionInfo"
     },
     {
       "description": "Get full session history",
-      "name": "session/history"
+      "name": "session/history",
+      "params_type": "ReadSessionHistoryParams",
+      "result_type": "WireSessionHistory"
     },
     {
       "description": "Remove session",
-      "name": "session/archive"
+      "name": "session/archive",
+      "params_type": "ArchiveSessionParams",
+      "result_type": "Value"
     },
     {
       "description": "Start a new turn on existing session",
-      "name": "turn/start"
+      "name": "turn/start",
+      "params_type": "StartTurnParams",
+      "result_type": "WireRunResult"
     },
     {
       "description": "Cancel in-flight turn",
-      "name": "turn/interrupt"
+      "name": "turn/interrupt",
+      "params_type": "InterruptParams",
+      "result_type": "Value"
     },
     {
       "description": "Read config",
@@ -182,7 +196,9 @@
     },
     {
       "description": "Stage runtime system context for application at the next LLM boundary",
-      "name": "session/inject_context"
+      "name": "session/inject_context",
+      "params_type": "InjectSystemContextParams",
+      "result_type": "InjectSystemContextResult"
     },
     {
       "description": "Read the latest replay cursor for an event source",
@@ -272,42 +288,6 @@
     {
       "description": "List available skills",
       "name": "skills/list"
-    },
-    {
-      "description": "Get a session's current runtime state",
-      "name": "runtime/session_status",
-      "params_type": "RuntimeStateParams",
-      "result_type": "RuntimeStateResult"
-    },
-    {
-      "description": "Accept a runtime input for a session",
-      "name": "runtime/session_submit",
-      "params_type": "RuntimeAcceptParams",
-      "result_type": "RuntimeAcceptResult"
-    },
-    {
-      "description": "Retire a session runtime",
-      "name": "runtime/session_retire",
-      "params_type": "RuntimeRetireParams",
-      "result_type": "RuntimeRetireResult"
-    },
-    {
-      "description": "Reset a session runtime",
-      "name": "runtime/session_reset",
-      "params_type": "RuntimeResetParams",
-      "result_type": "RuntimeResetResult"
-    },
-    {
-      "description": "Get a runtime input state",
-      "name": "runtime/session_submission",
-      "params_type": "InputStateParams",
-      "result_type": "InputStateResult"
-    },
-    {
-      "description": "List active runtime inputs",
-      "name": "runtime/session_submissions",
-      "params_type": "InputListParams",
-      "result_type": "InputListResult"
     },
     {
       "description": "Get bootstrap metadata for opening a realtime channel",

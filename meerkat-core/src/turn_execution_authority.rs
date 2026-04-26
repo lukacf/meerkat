@@ -35,19 +35,6 @@ impl TurnPhase {
     pub fn is_extracting(self) -> bool {
         matches!(self, Self::Extracting)
     }
-
-    /// Convert turn phase to the observable `LoopState`.
-    pub fn to_loop_state(self) -> crate::state::LoopState {
-        use crate::state::LoopState;
-        match self {
-            Self::Ready | Self::ApplyingPrimitive | Self::CallingLlm => LoopState::CallingLlm,
-            Self::WaitingForOps => LoopState::WaitingForOps,
-            Self::DrainingBoundary | Self::Extracting => LoopState::DrainingEvents,
-            Self::ErrorRecovery => LoopState::ErrorRecovery,
-            Self::Cancelling => LoopState::Cancelling,
-            Self::Completed | Self::Failed | Self::Cancelled => LoopState::Completed,
-        }
-    }
 }
 
 impl std::fmt::Display for TurnPhase {

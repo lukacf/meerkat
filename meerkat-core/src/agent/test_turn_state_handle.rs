@@ -904,6 +904,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         let fields = &guard.fields;
         TurnStateSnapshot {
             active_run_id: fields.active_run.clone(),
+            loop_state: loop_state_from_turn_phase(guard.phase),
             turn_phase: guard.phase,
             primitive_kind: match fields.primitive_kind {
                 TurnPrimitiveKind::None => None,
@@ -939,6 +940,21 @@ impl TurnStateHandle for TestTurnStateHandle {
             llm_retry_attempt: fields.llm_retry_attempt,
             llm_retry_max_retries: fields.llm_retry_max_retries,
             llm_retry_selected_delay_ms: fields.llm_retry_selected_delay_ms,
+        }
+    }
+}
+
+fn loop_state_from_turn_phase(phase: TurnPhase) -> crate::LoopState {
+    match phase {
+        TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
+            crate::LoopState::CallingLlm
+        }
+        TurnPhase::WaitingForOps => crate::LoopState::WaitingForOps,
+        TurnPhase::DrainingBoundary | TurnPhase::Extracting => crate::LoopState::DrainingEvents,
+        TurnPhase::ErrorRecovery => crate::LoopState::ErrorRecovery,
+        TurnPhase::Cancelling => crate::LoopState::Cancelling,
+        TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
+            crate::LoopState::Completed
         }
     }
 }

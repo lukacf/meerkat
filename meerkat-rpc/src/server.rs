@@ -473,15 +473,10 @@ fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
 }
 
 fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
-    match request.method.as_str() {
-        "turn/start" | "mob/turn_start" => {
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        }
-        "session/create" if session_create_runs_immediately(request.params.as_deref()) => {
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        }
-        _ => SurfaceRequestSemantics::inline_observation(),
-    }
+    SurfaceRequestSemantics::for_rpc_method(
+        request.method.as_str(),
+        session_create_runs_immediately(request.params.as_deref()),
+    )
 }
 
 fn session_create_runs_immediately(params: Option<&serde_json::value::RawValue>) -> bool {

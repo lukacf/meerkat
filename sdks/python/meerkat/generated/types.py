@@ -887,8 +887,8 @@ class RealtimeErrorDetailsAudioFormatMismatch(TypedDict, total=False):
 class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
     call_id: Required[str]
     elapsed_ms: Required[int]
-    kind: Required[Literal['tool_call_timeout']]
     timeout_ms: Required[int]
+    kind: Required[Literal['tool_call_timeout']]
 
 class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
     kind: Required[Literal['unsupported_protocol_version']]

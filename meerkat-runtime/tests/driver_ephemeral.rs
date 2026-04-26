@@ -128,8 +128,9 @@ fn reset_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::ResetR
 }
 
 fn destroy_runtime(driver: &mut EphemeralRuntimeDriver) -> usize {
+    let abandoned = driver.contract_destroy_cleanup();
     driver.contract_set_control_projection(RuntimeState::Destroyed, None, None);
-    driver.contract_destroy_cleanup()
+    abandoned
 }
 
 fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {

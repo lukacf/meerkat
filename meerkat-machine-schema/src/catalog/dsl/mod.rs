@@ -208,6 +208,7 @@ runtime_internal_inputs!(
         RemoveDirectPeerEndpoint,
         ReplaceRealtimeBinding,
         RequireRealtimeReattach,
+        RequireRealtimeReattachForAuthority,
         RevokeSupervisor,
         SnapshotAligned,
         SupervisorTrustEdgePublishFailed,

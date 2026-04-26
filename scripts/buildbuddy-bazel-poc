@@ -1,6 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+usage: buildbuddy-bazel-poc [changed-path ...] [bazel args...]
+
+Runs the optional BuildBuddy/Bazel lane selected by BUILDBUDDY_BAZEL_COMMAND.
+Cargo remains the default developer path; this script is for opt-in remote
+execution/cache experiments and CI gates.
+
+Common commands:
+  workspace-test             Full Bazel workspace test lane.
+  workspace-test-rbe         Remote-compatible workspace test lane.
+  workspace-fast-rbe         Cargo-fast-equivalent remote workspace test lane.
+  workspace-fast-clippy-rbe  Fast tests plus clippy aspect.
+  workspace-build-clippy-rbe Build/clippy labels for the workspace build set.
+  fast-test                  Root //:fast_tests suite.
+  owned-fast-test <path>     Owning fast suite or exact fast test for a path.
+  owned-build <path>         Owning build label for a path.
+  owned-clippy-rbe <path>    Owning build/test labels with clippy -D warnings.
+  affected-*                 Reverse-dependency variants of owned-* commands.
+
+Examples:
+  BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc --jobs=64
+  BUILDBUDDY_BAZEL_COMMAND=owned-clippy-rbe scripts/buildbuddy-bazel-poc meerkat/src/lib.rs --jobs=64
+
+Use scripts/buildbuddy-changed-gate --dry-run <path> to inspect selected labels
+without running Bazel.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
 if [[ -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
   key_line="$(grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?BUILDBUDDY_API_KEY=' "${HOME}/.zshrc" || true)"
   if [[ -n "${key_line}" ]]; then

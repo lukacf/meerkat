@@ -43,7 +43,6 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 /// A high-level tool dispatcher that validates arguments and handles timeouts
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ToolDispatcher {
-    registry: ToolRegistry,
     router: Arc<dyn AgentToolDispatcher>,
     default_timeout: Duration,
 }
@@ -51,9 +50,8 @@ pub struct ToolDispatcher {
 #[cfg(not(target_arch = "wasm32"))]
 impl ToolDispatcher {
     /// Create a new tool dispatcher
-    pub fn new(registry: ToolRegistry, router: Arc<dyn AgentToolDispatcher>) -> Self {
+    pub fn new(router: Arc<dyn AgentToolDispatcher>) -> Self {
         Self {
-            registry,
             router,
             default_timeout: Duration::from_secs(30),
         }
@@ -65,22 +63,50 @@ impl ToolDispatcher {
         self
     }
 
+    fn live_tool_def(&self, name: &str) -> Result<Arc<ToolDef>, ToolError> {
+        if self.router.tool_catalog_capabilities().exact_catalog {
+            let Some(entry) = self
+                .router
+                .tool_catalog()
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .cloned()
+            else {
+                return Err(ToolError::NotFound {
+                    name: name.to_string(),
+                });
+            };
+            if let Some(reason) = entry.callability.unavailable_reason() {
+                return Err(ToolError::unavailable(name, reason.to_string()));
+            }
+            return Ok(entry.tool);
+        }
+
+        self.router
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .cloned()
+            .ok_or_else(|| ToolError::NotFound {
+                name: name.to_string(),
+            })
+    }
+
+    fn validate_args_for_tool(
+        tool: &ToolDef,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), ToolValidationError> {
+        ToolRegistry::validate_tool_def(tool, name, args)
+    }
+
     /// Dispatch a tool call
     pub async fn dispatch_call(&self, call: ToolCallView<'_>) -> Result<ToolResult, DispatchError> {
         let args: Value = serde_json::from_str(call.args.get())
             .map_err(|e| ToolValidationError::invalid_arguments(call.name, e.to_string()))?;
-        if self.router.tool_catalog_capabilities().exact_catalog
-            && let Some(entry) = self
-                .router
-                .tool_catalog()
-                .iter()
-                .find(|entry| entry.tool.name == call.name)
-            && let Some(reason) = entry.callability.unavailable_reason()
-        {
-            return Err(ToolError::unavailable(call.name, reason.to_string()).into());
-        }
+        let tool = self.live_tool_def(call.name)?;
         // 1. Validate arguments against schema
-        self.registry.validate(call.name, &args)?;
+        Self::validate_args_for_tool(tool.as_ref(), call.name, &args)?;
 
         // 2. Dispatch to router with timeout
         let outcome = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
@@ -107,7 +133,7 @@ impl AgentToolDispatcher for ToolDispatcher {
                 .collect::<Vec<_>>()
                 .into();
         }
-        Arc::from(self.registry.list())
+        self.router.tools()
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -116,25 +142,14 @@ impl AgentToolDispatcher for ToolDispatcher {
                 name: call.name.to_string(),
                 reason: e.to_string(),
             })?;
-        if self.router.tool_catalog_capabilities().exact_catalog
-            && let Some(entry) = self
-                .router
-                .tool_catalog()
-                .iter()
-                .find(|entry| entry.tool.name == call.name)
-            && let Some(reason) = entry.callability.unavailable_reason()
-        {
-            return Err(ToolError::unavailable(call.name, reason.to_string()));
-        }
+        let tool = self.live_tool_def(call.name)?;
         // Validate arguments against schema
-        self.registry
-            .validate(call.name, &args)
-            .map_err(|e| match e {
-                ToolValidationError::NotFound { name } => ToolError::NotFound { name },
-                ToolValidationError::InvalidArguments { name, reason } => {
-                    ToolError::InvalidArguments { name, reason }
-                }
-            })?;
+        Self::validate_args_for_tool(tool.as_ref(), call.name, &args).map_err(|e| match e {
+            ToolValidationError::NotFound { name } => ToolError::NotFound { name },
+            ToolValidationError::InvalidArguments { name, reason } => {
+                ToolError::InvalidArguments { name, reason }
+            }
+        })?;
 
         // Dispatch with timeout to prevent hanging tool calls
         tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
@@ -172,56 +187,55 @@ impl AgentToolDispatcher for ToolDispatcher {
 /// with an allow/deny list configuration.
 pub struct FilteredDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
-    allowed_names: HashSet<String>,
+    policy: ToolAccessPolicy,
 }
 
 impl FilteredDispatcher {
     /// Create a new filtered dispatcher by applying the given policy to the inner dispatcher.
     pub fn new(inner: Arc<dyn AgentToolDispatcher>, policy: &ToolAccessPolicy) -> Self {
-        let all_names: HashSet<String> = if inner.tool_catalog_capabilities().exact_catalog {
-            inner
-                .tool_catalog()
-                .iter()
-                .map(|entry| entry.tool.name.clone())
-                .collect()
-        } else {
-            inner.tools().iter().map(|t| t.name.clone()).collect()
-        };
-
-        let allowed_names = match policy {
-            ToolAccessPolicy::Inherit => all_names,
-            ToolAccessPolicy::AllowList(allow) => {
-                let allow_set: HashSet<&str> =
-                    allow.iter().map(meerkat_core::ToolName::as_str).collect();
-                all_names
-                    .into_iter()
-                    .filter(|n| allow_set.contains(n.as_str()))
-                    .collect()
-            }
-            ToolAccessPolicy::DenyList(deny) => {
-                let deny_set: HashSet<&str> =
-                    deny.iter().map(meerkat_core::ToolName::as_str).collect();
-                all_names
-                    .into_iter()
-                    .filter(|n| !deny_set.contains(n.as_str()))
-                    .collect()
-            }
-        };
-
         Self {
             inner,
-            allowed_names,
+            policy: policy.clone(),
         }
     }
 
     /// Check if a tool name is allowed by the policy.
     pub fn is_allowed(&self, name: &str) -> bool {
-        self.allowed_names.contains(name)
+        match &self.policy {
+            ToolAccessPolicy::Inherit => true,
+            ToolAccessPolicy::AllowList(allow) => allow.iter().any(|n| n.as_str() == name),
+            ToolAccessPolicy::DenyList(deny) => !deny.iter().any(|n| n.as_str() == name),
+        }
     }
 
     /// Get the set of allowed tool names.
-    pub fn allowed_names(&self) -> &HashSet<String> {
-        &self.allowed_names
+    pub fn allowed_names(&self) -> HashSet<String> {
+        if self.inner.tool_catalog_capabilities().exact_catalog {
+            self.inner
+                .tool_catalog()
+                .iter()
+                .map(|entry| entry.tool.name.clone())
+                .filter(|name| self.is_allowed(name))
+                .collect()
+        } else {
+            self.inner
+                .tools()
+                .iter()
+                .map(|t| t.name.clone())
+                .filter(|name| self.is_allowed(name))
+                .collect()
+        }
+    }
+
+    fn inner_knows_tool(&self, name: &str) -> bool {
+        if self.inner.tool_catalog_capabilities().exact_catalog {
+            self.inner
+                .tool_catalog()
+                .iter()
+                .any(|entry| entry.tool.name == name)
+        } else {
+            self.inner.tools().iter().any(|t| t.name == name)
+        }
     }
 }
 
@@ -236,14 +250,14 @@ impl AgentToolDispatcher for FilteredDispatcher {
                 .iter()
                 .filter(|entry| entry.currently_callable())
                 .map(|entry| Arc::clone(&entry.tool))
-                .filter(|tool| self.allowed_names.contains(&tool.name))
+                .filter(|tool| self.is_allowed(&tool.name))
                 .collect::<Vec<_>>()
                 .into();
         }
         self.inner
             .tools()
             .iter()
-            .filter(|t| self.allowed_names.contains(&t.name))
+            .filter(|t| self.is_allowed(&t.name))
             .cloned()
             .collect::<Vec<_>>()
             .into()
@@ -255,16 +269,8 @@ impl AgentToolDispatcher for FilteredDispatcher {
         // still returns `NotFound` from the inner dispatcher itself — this
         // wrapper only intervenes when the tool is visible upstream but
         // excluded by the active policy.
-        if !self.allowed_names.contains(call.name) {
-            let inner_knows_tool = if self.inner.tool_catalog_capabilities().exact_catalog {
-                self.inner
-                    .tool_catalog()
-                    .iter()
-                    .any(|entry| entry.tool.name == call.name)
-            } else {
-                self.inner.tools().iter().any(|t| t.name == call.name)
-            };
-            if inner_knows_tool {
+        if !self.is_allowed(call.name) {
+            if self.inner_knows_tool(call.name) {
                 return Err(ToolError::AccessDenied {
                     name: call.name.to_string(),
                 });
@@ -296,7 +302,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
         self.inner
             .tool_catalog()
             .iter()
-            .filter(|entry| self.allowed_names.contains(entry.tool.name.as_str()))
+            .filter(|entry| self.is_allowed(entry.tool.name.as_str()))
             .cloned()
             .collect::<Vec<_>>()
             .into()
@@ -312,6 +318,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex;
 
     /// A mock dispatcher with multiple tools for testing filtering
     struct MockDispatcher {
@@ -321,6 +328,22 @@ mod tests {
     impl MockDispatcher {
         fn new(names: Vec<&'static str>) -> Self {
             Self { tool_names: names }
+        }
+    }
+
+    struct MutableDispatcher {
+        tool_names: Mutex<Vec<&'static str>>,
+    }
+
+    impl MutableDispatcher {
+        fn new(names: Vec<&'static str>) -> Self {
+            Self {
+                tool_names: Mutex::new(names),
+            }
+        }
+
+        fn add_tool(&self, name: &'static str) {
+            self.tool_names.lock().unwrap().push(name);
         }
     }
 
@@ -376,6 +399,41 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tool_names.contains(&call.name) {
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    json!({"called": call.name}).to_string(),
+                    false,
+                )
+                .into())
+            } else {
+                Err(ToolError::NotFound {
+                    name: call.name.to_string(),
+                })
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for MutableDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tool_names
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|name| {
+                    Arc::new(ToolDef {
+                        name: (*name).to_string(),
+                        description: format!("{name} tool"),
+                        input_schema: json!({"type": "object"}),
+                        provenance: None,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            if self.tool_names.lock().unwrap().contains(&call.name) {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"called": call.name}).to_string(),
@@ -474,6 +532,69 @@ mod tests {
             .dispatch(make_call("denied_hidden", &args_raw))
             .await;
         assert!(matches!(denied_result, Err(ToolError::AccessDenied { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_uses_live_router_tools_for_listing_and_validation() {
+        let router = Arc::new(MutableDispatcher::new(vec!["initial"]));
+        let dispatcher = ToolDispatcher::new(router.clone());
+
+        let initial_names: Vec<_> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert_eq!(initial_names, vec!["initial".to_string()]);
+
+        router.add_tool("late");
+
+        let live_names: Vec<_> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert_eq!(
+            live_names,
+            vec!["initial".to_string(), "late".to_string()],
+            "dispatcher must not freeze the router's tool list at build time"
+        );
+
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let result = dispatcher.dispatch(make_call("late", &args_raw)).await;
+        assert!(
+            result.is_ok(),
+            "late-added router tool must validate and dispatch through the same live source"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_dispatcher_evaluates_policy_against_live_inner_tools() {
+        let inner = Arc::new(MutableDispatcher::new(vec!["initial"]));
+        let filtered = FilteredDispatcher::new(inner.clone(), &ToolAccessPolicy::Inherit);
+
+        let initial_names: Vec<_> = filtered
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert_eq!(initial_names, vec!["initial".to_string()]);
+
+        inner.add_tool("late");
+
+        let live_names: Vec<_> = filtered
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert_eq!(
+            live_names,
+            vec!["initial".to_string(), "late".to_string()],
+            "inherited policy must follow the live inner tool set"
+        );
+
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let result = filtered.dispatch(make_call("late", &args_raw)).await;
+        assert!(result.is_ok());
     }
 
     #[test]

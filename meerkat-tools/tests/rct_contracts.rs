@@ -386,7 +386,6 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     use async_trait::async_trait;
     use meerkat_core::types::ToolDef;
     use meerkat_tools::dispatcher::ToolDispatcher;
-    use meerkat_tools::registry::ToolRegistry;
     use meerkat_tools::schema::empty_object_schema;
     use std::time::Duration;
 
@@ -412,16 +411,9 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     }
 
     let router = Arc::new(HangingDispatcher);
-    let mut registry = ToolRegistry::new();
-    registry.register(ToolDef {
-        name: "hang".to_string(),
-        description: "Hangs forever".to_string(),
-        input_schema: empty_object_schema(),
-        provenance: None,
-    });
 
     // Very short timeout
-    let dispatcher = ToolDispatcher::new(registry, router).with_timeout(Duration::from_millis(50));
+    let dispatcher = ToolDispatcher::new(router).with_timeout(Duration::from_millis(50));
 
     let start = std::time::Instant::now();
     let result = dispatch_tool(&dispatcher, "hang", json!({})).await;

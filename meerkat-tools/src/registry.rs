@@ -51,6 +51,15 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| ToolValidationError::not_found(name))?;
 
+        Self::validate_tool_def(tool.as_ref(), name, args)
+    }
+
+    /// Validate tool arguments against a specific live tool definition.
+    pub fn validate_tool_def(
+        tool: &ToolDef,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<(), ToolValidationError> {
         // Basic schema validation using jsonschema
         let compiled = jsonschema::Validator::new(&tool.input_schema)
             .map_err(|e| ToolValidationError::invalid_arguments(name, e.to_string()))?;

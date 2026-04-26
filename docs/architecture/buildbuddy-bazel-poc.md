@@ -205,6 +205,7 @@ lane wrappers from both systems:
 | Fast deterministic tests, compile/no-run first pass | `122.71s` | `30.47s` first new Bazel lane run |
 | Fast deterministic tests, warm execution | `47.96s` (`5112` tests) | `4.36s` (now `117` Bazel fast test targets, `0` executed when cached) |
 | Fast deterministic tests, latest artifacted warm run | `29s` (`5114` tests) | `4s` (`117` Bazel fast targets, `0` executed when cached) |
+| Fast deterministic tests after disabling duplicate mini bin harnesses | `18s` (`4973` tests) | unchanged |
 | Workspace clippy, warm after fix | `48.13s` | `4s` split fast-test-clippy + build-clippy gate |
 
 The Cargo fast lane is now `./scripts/repo-cargo fast`, `cargo rct`, or

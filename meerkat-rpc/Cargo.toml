@@ -19,6 +19,7 @@ path = "src/main.rs"
 [[bin]]
 name = "rkat-rpc-mini"
 path = "src/main.rs"
+test = false
 
 [[test]]
 name = "live_smoke_rpc"

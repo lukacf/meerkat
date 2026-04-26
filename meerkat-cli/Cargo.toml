@@ -19,6 +19,7 @@ path = "src/main.rs"
 [[bin]]
 name = "rkat-mini"
 path = "src/main.rs"
+test = false
 
 [[test]]
 name = "system_cli_init"

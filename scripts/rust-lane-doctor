@@ -81,6 +81,26 @@ else
   bad "nextest fast profile is invalid"
 fi
 
+mini_bin_test_flags="$(
+  ./scripts/repo-cargo metadata --no-deps --format-version 1 |
+    node -e '
+const fs = require("fs");
+const metadata = JSON.parse(fs.readFileSync(0, "utf8"));
+for (const pkg of metadata.packages.filter((p) => p.name === "rkat" || p.name === "meerkat-rpc")) {
+  for (const target of pkg.targets.filter((t) => t.name === "rkat-mini" || t.name === "rkat-rpc-mini")) {
+    console.log(`${target.name}=${target.test}`);
+  }
+}
+'
+)"
+if grep -q '^rkat-mini=false$' <<<"${mini_bin_test_flags}" &&
+  grep -q '^rkat-rpc-mini=false$' <<<"${mini_bin_test_flags}"; then
+  pass "mini binary duplicate unit-test harnesses are disabled"
+else
+  bad "mini binary duplicate unit-test harnesses are still enabled"
+  printf '%s\n' "${mini_bin_test_flags}" >&2
+fi
+
 if grep -q '^e2e-build = ' .cargo/config.toml &&
   grep -q -- '--test e2e_build_lane' .cargo/config.toml &&
   grep -q -- '--run-ignored ignored-only' .cargo/config.toml; then

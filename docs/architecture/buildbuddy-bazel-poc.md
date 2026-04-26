@@ -152,7 +152,10 @@ reuse a stable output root for repeated local or agent gates. The optional
 `.github/workflows/buildbuddy.yml` workflow is manual-only, requires a
 `BUILDBUDDY_API_KEY` secret, installs the pinned `bb` binary, dispatches through
 `scripts/buildbuddy-ci-dispatch`, and uploads the BuildBuddy log directory as a
-workflow artifact. Normal GitHub CI remains Cargo-based.
+workflow artifact. The dispatcher writes `dispatch-context.txt` and
+`dispatch-inputs.txt` when `MEERKAT_BUILDBUDDY_LOG_ROOT` is set, so changed-path
+runs have commit/toolchain context even when they do not use the workspace CI
+summary writer. Normal GitHub CI remains Cargo-based.
 
 The dispatch modes are:
 

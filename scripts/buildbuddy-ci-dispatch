@@ -22,6 +22,7 @@ Environment equivalents:
   MEERKAT_BUILDBUDDY_CHANGED_MODE
   MEERKAT_BUILDBUDDY_BASE
   MEERKAT_BUILDBUDDY_CHANGED_PATHS
+  MEERKAT_BUILDBUDDY_LOG_ROOT
 EOF
 }
 
@@ -80,6 +81,20 @@ done
 
 workspace_root="$(git rev-parse --show-toplevel)"
 cd "${workspace_root}"
+
+if [[ -n "${MEERKAT_BUILDBUDDY_LOG_ROOT:-}" ]]; then
+  mkdir -p "${MEERKAT_BUILDBUDDY_LOG_ROOT}"
+  scripts/buildbuddy-write-context --mode "${mode}" >"${MEERKAT_BUILDBUDDY_LOG_ROOT}/dispatch-context.txt"
+  {
+    printf 'mode=%s\n' "${mode}"
+    printf 'changed_mode=%s\n' "${changed_mode}"
+    printf 'base=%s\n' "${base_ref}"
+    if [[ -n "${paths_text}" ]]; then
+      printf 'paths=%s\n' "${paths_text}"
+    fi
+    printf 'dry_run=%s\n' "${dry_run}"
+  } >"${MEERKAT_BUILDBUDDY_LOG_ROOT}/dispatch-inputs.txt"
+fi
 
 mode_args=("--${changed_mode}")
 if [[ "${dry_run}" -eq 1 ]]; then

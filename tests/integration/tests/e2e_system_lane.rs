@@ -10,6 +10,7 @@ fn system_lane_lock() -> &'static Mutex<()> {
 macro_rules! system_scenario {
     ($name:ident, $id:literal) => {
         #[tokio::test(flavor = "current_thread")]
+        #[ignore = "lane:e2e-system"]
         async fn $name() {
             let _guard = system_lane_lock().lock().await;
             run_catalog_scenario($id)
@@ -22,6 +23,7 @@ macro_rules! system_scenario {
 macro_rules! system_suite {
     ($name:ident, $suite:literal) => {
         #[tokio::test(flavor = "current_thread")]
+        #[ignore = "lane:e2e-system"]
         async fn $name() {
             let _guard = system_lane_lock().lock().await;
             run_named_suite($suite)

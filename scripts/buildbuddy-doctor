@@ -168,6 +168,24 @@ else
   printf '%s\n' "${mixed_changed_gate_dry_run}" >&2
 fi
 
+dispatch_log_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-buildbuddy-dispatch-doctor.XXXXXX")"
+dispatch_dry_run="$(
+  MEERKAT_BUILDBUDDY_LOG_ROOT="${dispatch_log_root}" \
+    ./scripts/buildbuddy-ci-dispatch --mode changed-paths --paths meerkat-runtime/src/input_ledger.rs --dry-run 2>&1 || true
+)"
+if [[ -s "${dispatch_log_root}/dispatch-context.txt" ]] &&
+  [[ -s "${dispatch_log_root}/dispatch-inputs.txt" ]] &&
+  grep -q '^mode=changed-paths$' "${dispatch_log_root}/dispatch-inputs.txt" &&
+  grep -q '^dry_run=1$' "${dispatch_log_root}/dispatch-inputs.txt" &&
+  [[ "${dispatch_dry_run}" == *"BuildBuddy changed gate dry-run (owned)"* ]]; then
+  pass "BuildBuddy CI dispatch writes changed-path context artifacts"
+else
+  bad "BuildBuddy CI dispatch did not write changed-path context artifacts"
+  printf '%s\n' "${dispatch_dry_run}" >&2
+  find "${dispatch_log_root}" -maxdepth 1 -type f -print >&2 || true
+fi
+rm -rf "${dispatch_log_root}"
+
 fast_profile_filter="$(./scripts/repo-cargo nextest show-config test-groups --profile fast 2>&1 || true)"
 if grep -q '\[profile.fast\]' .config/nextest.toml &&
   grep -q 'default-filter' .config/nextest.toml &&

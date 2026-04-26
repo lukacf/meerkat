@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${MEERKAT_BUILDBUDDY_CI_MODE:-workspace-fresh}"
+changed_mode="${MEERKAT_BUILDBUDDY_CHANGED_MODE:-owned}"
+base_ref="${MEERKAT_BUILDBUDDY_BASE:-origin/main}"
+paths_text="${MEERKAT_BUILDBUDDY_CHANGED_PATHS:-}"
+dry_run=0
+
+usage() {
+  cat <<'EOF'
+usage: buildbuddy-ci-dispatch [--mode <mode>] [--owned|--affected] [--base <rev>] [--paths <paths>] [--dry-run]
+
+Modes:
+  workspace-fresh    Run the fresh optional BuildBuddy workspace CI gate.
+  workspace-warm     Run the warmed optional BuildBuddy workspace CI gate.
+  changed-committed  Run the BuildBuddy changed-path gate for branch commits.
+  changed-paths      Run the BuildBuddy changed-path gate for explicit paths.
+
+Environment equivalents:
+  MEERKAT_BUILDBUDDY_CI_MODE
+  MEERKAT_BUILDBUDDY_CHANGED_MODE
+  MEERKAT_BUILDBUDDY_BASE
+  MEERKAT_BUILDBUDDY_CHANGED_PATHS
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --mode requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      mode="$2"
+      shift 2
+      ;;
+    --owned)
+      changed_mode="owned"
+      shift
+      ;;
+    --affected)
+      changed_mode="affected"
+      shift
+      ;;
+    --base)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --base requires a revision" >&2
+        usage >&2
+        exit 2
+      fi
+      base_ref="$2"
+      shift 2
+      ;;
+    --paths)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --paths requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      paths_text="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+workspace_root="$(git rev-parse --show-toplevel)"
+cd "${workspace_root}"
+
+mode_args=("--${changed_mode}")
+if [[ "${dry_run}" -eq 1 ]]; then
+  mode_args+=("--dry-run")
+fi
+
+case "${mode}" in
+  workspace-fresh)
+    if [[ "${dry_run}" -eq 1 ]]; then
+      echo "DRY-RUN make buildbuddy-ci"
+    else
+      exec make buildbuddy-ci
+    fi
+    ;;
+  workspace-warm)
+    if [[ "${dry_run}" -eq 1 ]]; then
+      echo "DRY-RUN make buildbuddy-ci-warm"
+    else
+      exec make buildbuddy-ci-warm
+    fi
+    ;;
+  changed-committed|changed)
+    exec ./scripts/buildbuddy-agent-gate "${mode_args[@]}" --committed --base "${base_ref}"
+    ;;
+  changed-paths|paths)
+    if [[ -z "${paths_text}" ]]; then
+      echo "error: changed-paths mode requires --paths or MEERKAT_BUILDBUDDY_CHANGED_PATHS" >&2
+      exit 2
+    fi
+    mapfile -t paths < <(printf '%s\n' "${paths_text}" | tr '[:space:]' '\n' | awk 'NF' | sort -u)
+    exec ./scripts/buildbuddy-agent-gate "${mode_args[@]}" --base "${base_ref}" "${paths[@]}"
+    ;;
+  *)
+    echo "unknown BuildBuddy CI mode: ${mode}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

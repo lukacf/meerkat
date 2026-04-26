@@ -149,6 +149,9 @@ changes to a workspace Cargo gate. Use `scripts/cargo-agent-gate --dry-run`
 to inspect the selected packages before paying the build cost. Both
 `scripts/cargo-agent-gate` and `scripts/buildbuddy-agent-gate` accept
 `--staged`, `--committed`, and `--working-tree` for hook and CI routing.
+The optional manual BuildBuddy workflow remains opt-in and uses
+`scripts/buildbuddy-ci-dispatch` to choose a full workspace gate or a changed
+branch/path gate.
 
 Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider lanes stay opt-in.
 

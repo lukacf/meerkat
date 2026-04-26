@@ -2,6 +2,34 @@ name: BuildBuddy
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: BuildBuddy gate to run
+        required: true
+        default: workspace-fresh
+        type: choice
+        options:
+          - workspace-fresh
+          - workspace-warm
+          - changed-committed
+          - changed-paths
+      changed_mode:
+        description: Changed-path selector breadth
+        required: true
+        default: owned
+        type: choice
+        options:
+          - owned
+          - affected
+      base:
+        description: Base revision for changed-committed mode
+        required: false
+        default: origin/main
+        type: string
+      paths:
+        description: Whitespace or newline separated paths for changed-paths mode
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,6 +43,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Require BuildBuddy API key
         run: |
@@ -31,5 +61,10 @@ jobs:
       - name: BuildBuddy doctor
         run: make buildbuddy-doctor
 
-      - name: Remote workspace gate
-        run: make buildbuddy-ci
+      - name: Remote gate
+        env:
+          MEERKAT_BUILDBUDDY_CI_MODE: ${{ inputs.mode }}
+          MEERKAT_BUILDBUDDY_CHANGED_MODE: ${{ inputs.changed_mode }}
+          MEERKAT_BUILDBUDDY_BASE: ${{ inputs.base }}
+          MEERKAT_BUILDBUDDY_CHANGED_PATHS: ${{ inputs.paths }}
+        run: scripts/buildbuddy-ci-dispatch

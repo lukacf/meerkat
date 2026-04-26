@@ -140,8 +140,22 @@ on isolated fresh lanes, prints compact summaries, and cleans up the temporary
 output roots. Use `--warm` to reuse a stable output root for repeated local or
 agent gates. The optional `.github/workflows/buildbuddy.yml` workflow is
 manual-only, requires a `BUILDBUDDY_API_KEY` secret, installs the pinned `bb`
-binary, and runs the same `make buildbuddy-ci` gate. Normal GitHub CI remains
-Cargo-based.
+binary, and dispatches through `scripts/buildbuddy-ci-dispatch`. Normal GitHub
+CI remains Cargo-based.
+
+The dispatch modes are:
+
+- `workspace-fresh`: full optional BuildBuddy workspace CI with fresh output
+  roots.
+- `workspace-warm`: full optional BuildBuddy workspace CI with a reusable output
+  root.
+- `changed-committed`: changed-path BuildBuddy gate for branch commits relative
+  to a base revision.
+- `changed-paths`: changed-path BuildBuddy gate for explicit whitespace or
+  newline separated paths.
+
+Use `owned` for the smallest honest changed-path closure, or `affected` when a
+change touches shared crates and you want reverse-dependency confidence.
 
 `scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
 
@@ -294,6 +308,10 @@ to roughly `4-6s` once those lanes were prepared.
   compact logs under the benchmark cache directory.
 - For the remote-compatible BuildBuddy gate, run `make buildbuddy-ci`, or
   `make buildbuddy-ci-warm` when repeated agents can reuse a stable output root.
+- To mirror the manual GitHub workflow locally, run
+  `scripts/buildbuddy-ci-dispatch --mode workspace-fresh`,
+  `scripts/buildbuddy-ci-dispatch --mode changed-committed --base origin/main`,
+  or `scripts/buildbuddy-ci-dispatch --mode changed-paths --paths '<paths>'`.
 - For same-checkout multi-agent work, always set a distinct `RUST_LANE_ID` per
   agent unless the commands are known to use different lanes already.
 

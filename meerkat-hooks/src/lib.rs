@@ -64,9 +64,41 @@ pub struct RuntimeHookResponse {
     pub patches: Vec<HookPatch>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InProcessHookHandlerId(String);
+
+impl InProcessHookHandlerId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for InProcessHookHandlerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<&str> for InProcessHookHandlerId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for InProcessHookHandlerId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct InProcessRuntimeConfig {
-    name: String,
+    name: InProcessHookHandlerId,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,7 +143,8 @@ pub struct DefaultHookEngine {
     base_entries: Arc<Vec<HookEntryConfig>>,
     base_validation_error: Option<String>,
     http_client: Arc<OnceLock<reqwest::Client>>,
-    in_process_handlers: Arc<std::sync::RwLock<HashMap<String, InProcessHookHandler>>>,
+    in_process_handlers:
+        Arc<std::sync::RwLock<HashMap<InProcessHookHandlerId, InProcessHookHandler>>>,
     published_patches: Arc<Mutex<Vec<PublishedHookPatch>>>,
     background_slots: Arc<Semaphore>,
     revision: Arc<AtomicU64>,
@@ -140,7 +173,7 @@ impl DefaultHookEngine {
 
     pub fn with_in_process_handler(
         self,
-        name: impl Into<String>,
+        name: impl Into<InProcessHookHandlerId>,
         handler: InProcessHookHandler,
     ) -> Self {
         let next = self;
@@ -158,7 +191,7 @@ impl DefaultHookEngine {
 
     pub async fn register_in_process_handler(
         &self,
-        name: impl Into<String>,
+        name: impl Into<InProcessHookHandlerId>,
         handler: InProcessHookHandler,
     ) {
         match self.in_process_handlers.write() {
@@ -837,6 +870,18 @@ mod tests {
             Some(serde_json::json!({"name": name})),
         )
         .unwrap_or_default()
+    }
+
+    #[test]
+    fn in_process_handler_id_preserves_string_wire_shape() {
+        let id: InProcessHookHandlerId = serde_json::from_value(serde_json::json!("handler-a"))
+            .expect("handler id should deserialize from string");
+
+        assert_eq!(id.as_str(), "handler-a");
+        assert_eq!(
+            serde_json::to_value(&id).expect("handler id should serialize"),
+            serde_json::json!("handler-a")
+        );
     }
 
     #[tokio::test]

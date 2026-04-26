@@ -38,7 +38,7 @@ use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
     HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HookRuntimeKind,
-    HooksConfig,
+    HooksConfig, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -98,6 +98,12 @@ type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, Str
 
 pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
 
+#[derive(Debug, Clone)]
+struct PublishedHookPatch {
+    session_id: SessionId,
+    envelope: HookPatchEnvelope,
+}
+
 /// Deterministic hook engine used by all control surfaces.
 #[derive(Clone)]
 pub struct DefaultHookEngine {
@@ -106,7 +112,7 @@ pub struct DefaultHookEngine {
     base_validation_error: Option<String>,
     http_client: Arc<OnceLock<reqwest::Client>>,
     in_process_handlers: Arc<std::sync::RwLock<HashMap<String, InProcessHookHandler>>>,
-    published_patches: Arc<Mutex<Vec<HookPatchEnvelope>>>,
+    published_patches: Arc<Mutex<Vec<PublishedHookPatch>>>,
     background_slots: Arc<Semaphore>,
     revision: Arc<AtomicU64>,
 }
@@ -233,17 +239,33 @@ impl DefaultHookEngine {
         Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()))
     }
 
-    async fn drain_published_patches(&self) -> Vec<HookPatchEnvelope> {
+    async fn drain_published_patches_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<HookPatchEnvelope> {
         let mut guard = self.published_patches.lock().await;
-        std::mem::take(&mut *guard)
+        let mut remaining = Vec::new();
+        let mut drained = Vec::new();
+        for published in guard.drain(..) {
+            if &published.session_id == session_id {
+                drained.push(published.envelope);
+            } else {
+                remaining.push(published);
+            }
+        }
+        *guard = remaining;
+        drained
     }
 
-    async fn publish_patches(&self, patches: Vec<HookPatchEnvelope>) {
+    async fn publish_patches(&self, session_id: SessionId, patches: Vec<HookPatchEnvelope>) {
         if patches.is_empty() {
             return;
         }
         let mut guard = self.published_patches.lock().await;
-        guard.extend(patches);
+        guard.extend(patches.into_iter().map(|envelope| PublishedHookPatch {
+            session_id: session_id.clone(),
+            envelope,
+        }));
     }
 
     fn validate_entry(entry: &HookEntryConfig) -> Result<(), HookEngineError> {
@@ -686,9 +708,7 @@ impl HookEngine for DefaultHookEngine {
             .collect::<Vec<_>>();
 
         if entries.is_empty() {
-            let mut report = HookExecutionReport::empty();
-            report.published_patches = self.drain_published_patches().await;
-            return Ok(report);
+            return Ok(HookExecutionReport::empty());
         }
 
         let mut foreground = Vec::new();
@@ -748,6 +768,7 @@ impl HookEngine for DefaultHookEngine {
                 let invocation_cloned = invocation.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let session_id = invocation_cloned.session_id.clone();
                     let outcome = engine
                         .execute_one(entry, registration_index, invocation_cloned)
                         .await;
@@ -760,14 +781,22 @@ impl HookEngine for DefaultHookEngine {
                         );
                     }
                     if !outcome.published_patches.is_empty() {
-                        engine.publish_patches(outcome.published_patches).await;
+                        engine
+                            .publish_patches(session_id, outcome.published_patches)
+                            .await;
                     }
                 });
             }
         }
-        merged.published_patches = self.drain_published_patches().await;
 
         Ok(merged)
+    }
+
+    async fn drain_published_patches(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
+        Ok(self.drain_published_patches_for_session(session_id).await)
     }
 }
 
@@ -965,11 +994,12 @@ mod tests {
             )
             .await;
 
+        let session_id = SessionId::new();
         let first = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PostToolExecution,
-                    session_id: SessionId::new(),
+                    session_id: session_id.clone(),
                     turn_number: Some(1),
                     prompt: None,
                     error: None,
@@ -990,26 +1020,70 @@ mod tests {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let follow_up = engine
-                .execute(
-                    HookInvocation {
-                        point: HookPoint::TurnBoundary,
-                        session_id: SessionId::new(),
-                        turn_number: Some(1),
-                        prompt: None,
-                        error: None,
-                        llm_request: None,
-                        llm_response: None,
-                        tool_call: None,
-                        tool_result: None,
-                    },
-                    None,
-                )
-                .await
-                .unwrap();
-            published.extend(follow_up.published_patches);
+            published.extend(engine.drain_published_patches(&session_id).await.unwrap());
         }
         assert_eq!(published.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_patches_are_drained_by_session() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("hook-post-bg-session"),
+            point: HookPoint::PostToolExecution,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Observe,
+            runtime: runtime_in_process("post-bg-session"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        engine
+            .register_in_process_handler(
+                "post-bg-session",
+                static_handler(RuntimeHookResponse {
+                    decision: None,
+                    patches: vec![HookPatch::ToolResult {
+                        content: "patched".to_string(),
+                        is_error: Some(false),
+                    }],
+                }),
+            )
+            .await;
+
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PostToolExecution,
+                    session_id: session_a.clone(),
+                    turn_number: Some(1),
+                    prompt: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut drained_b = Vec::new();
+        let mut drained_a = Vec::new();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drained_b.extend(engine.drain_published_patches(&session_b).await.unwrap());
+            drained_a.extend(engine.drain_published_patches(&session_a).await.unwrap());
+            if !drained_a.is_empty() {
+                break;
+            }
+        }
+
+        assert!(drained_b.is_empty());
+        assert_eq!(drained_a.len(), 1);
     }
 
     #[tokio::test]

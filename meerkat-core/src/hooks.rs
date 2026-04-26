@@ -357,6 +357,14 @@ pub trait HookEngine: Send + Sync {
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
+
+    /// Drain background patches explicitly published for one session.
+    async fn drain_published_patches(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

@@ -2089,17 +2089,17 @@ export class MeerkatClient {
     return this.request("auth/login/provision_api_key", params);
   }
 
-  async authStatusGet(realmId: string, profileId: string): Promise<unknown> {
+  async authStatusGet(realmId: string, bindingId: string): Promise<unknown> {
     return this.request("auth/status/get", {
       realm_id: realmId,
-      profile_id: profileId,
+      binding_id: bindingId,
     });
   }
 
-  async authLogout(realmId: string, profileId: string): Promise<unknown> {
+  async authLogout(realmId: string, bindingId: string): Promise<unknown> {
     return this.request("auth/logout", {
       realm_id: realmId,
-      profile_id: profileId,
+      binding_id: bindingId,
     });
   }
 

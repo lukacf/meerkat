@@ -231,6 +231,70 @@ async def test_create_session_with_extended_create_fields():
 
 
 @pytest.mark.asyncio
+async def test_python_auth_helpers_send_binding_scoped_params():
+    client = MeerkatClient()
+    client._process = MagicMock()
+    client._dispatcher = MagicMock()
+    client._request = AsyncMock(return_value={})
+
+    await client.auth_login_device_complete(
+        "anthropic",
+        "device-code",
+        realm_id="prod",
+        binding_id="claude-console",
+    )
+    client._request.assert_called_with(
+        "auth/login/device_complete",
+        {
+            "provider": "anthropic",
+            "device_code": "device-code",
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+        },
+    )
+
+    await client.auth_provision_api_key(
+        "access-token",
+        realm_id="prod",
+        binding_id="claude-console",
+    )
+    client._request.assert_called_with(
+        "auth/login/provision_api_key",
+        {
+            "access_token": "access-token",
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+        },
+    )
+
+    await client.auth_status("prod", "claude-console")
+    client._request.assert_called_with(
+        "auth/status/get",
+        {"realm_id": "prod", "binding_id": "claude-console"},
+    )
+
+    await client.auth_logout("prod", "claude-console")
+    client._request.assert_called_with(
+        "auth/logout",
+        {"realm_id": "prod", "binding_id": "claude-console"},
+    )
+
+
+def test_typescript_auth_status_logout_helpers_send_binding_scoped_params():
+    import pathlib
+
+    client_ts = pathlib.Path(__file__).parents[2] / "typescript" / "src" / "client.ts"
+    source = client_ts.read_text()
+    for method_name in ["authStatusGet", "authLogout"]:
+        start = source.index(f"async {method_name}")
+        end = source.index("\n  }\n", start)
+        body = source[start:end]
+        assert "bindingId" in body
+        assert "binding_id" in body
+        assert "profile_id" not in body
+
+
+@pytest.mark.asyncio
 async def test_spawn_many_uses_explicit_rpc_method():
     client = MeerkatClient()
     client._process = MagicMock()

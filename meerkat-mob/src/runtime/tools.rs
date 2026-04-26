@@ -444,43 +444,34 @@ impl MobOperatorToolDispatcher {
         })
     }
 
-    fn spawn_result_payload(result: &super::SpawnResult) -> serde_json::Value {
+    fn member_ref_payload(
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> meerkat_contracts::WireMemberRef {
+        meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str())
+    }
+
+    fn spawn_result_payload(mob_id: &MobId, result: &super::SpawnResult) -> serde_json::Value {
         json!({
             "agent_identity": result.agent_identity,
-            "agent_runtime_id": result.agent_runtime_id,
-            "fence_token": result.fence_token,
+            "member_ref": Self::member_ref_payload(mob_id, &result.agent_identity),
         })
     }
 
     fn member_list_entry_result_payload(
+        mob_id: &MobId,
         entry: &MobMemberListEntry,
     ) -> Result<serde_json::Value, ToolError> {
-        // The app-facing `serde_json::to_value(entry)` derive skips the
-        // binding-era atoms (`agent_runtime_id`, `fence_token`) per the
-        // struct contract, so operator-tool output would lose the
-        // identity-native runtime fields that `spawn_member` already
-        // surfaces via its manual JSON shape (see
-        // `spawn_result_payload`). Operator tools run with injected
-        // authority and legitimately need these atoms for member
-        // bookkeeping — they're not leaking into app-facing wire output,
-        // they're the operator-visibility wire shape. Mirror the
-        // `spawn_result_payload` pattern: start from the struct-derived
-        // shape and splice the atoms back in at the tool boundary.
         let mut value = serde_json::to_value(entry).map_err(|error| {
             ToolError::execution_failed(format!("encode member list entry: {error}"))
         })?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
-                "agent_runtime_id".to_string(),
-                serde_json::to_value(&entry.agent_runtime_id).map_err(|error| {
-                    ToolError::execution_failed(format!("encode agent_runtime_id: {error}"))
-                })?,
-            );
-            obj.insert(
-                "fence_token".to_string(),
-                serde_json::to_value(entry.fence_token).map_err(|error| {
-                    ToolError::execution_failed(format!("encode fence_token: {error}"))
-                })?,
+                "member_ref".to_string(),
+                serde_json::to_value(Self::member_ref_payload(mob_id, &entry.agent_identity))
+                    .map_err(|error| {
+                        ToolError::execution_failed(format!("encode member_ref: {error}"))
+                    })?,
             );
         }
         Ok(value)
@@ -495,11 +486,12 @@ impl MobOperatorToolDispatcher {
                 "spawn succeeded but roster entry missing for '{identity}'"
             ))
         })?;
-        Ok(Self::spawn_result_payload(&super::SpawnResult::new(
-            entry.agent_identity,
-            entry.agent_runtime_id,
-            entry.fence_token,
-        )))
+        let agent_identity = entry.agent_identity;
+        let member_ref = Self::member_ref_payload(&self.handle.definition().id, &agent_identity);
+        Ok(json!({
+            "agent_identity": agent_identity,
+            "member_ref": member_ref,
+        }))
     }
 
     async fn record_successful_operator_action(&self, tool_name: &str) {
@@ -720,7 +712,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .spawn_spec(spec)
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
-                        let result = Self::spawn_result_payload(&spawn_result);
+                        let result =
+                            Self::spawn_result_payload(&self.handle.definition().id, &spawn_result);
                         (result, Vec::new())
                     }
                 };
@@ -813,7 +806,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .into_iter()
                             .map(|result| match result {
                                 Ok(spawn_result) => {
-                                    let mut payload = Self::spawn_result_payload(&spawn_result);
+                                    let mut payload = Self::spawn_result_payload(
+                                        &self.handle.definition().id,
+                                        &spawn_result,
+                                    );
                                     payload["ok"] = json!(true);
                                     payload
                                 }
@@ -870,9 +866,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             }
             TOOL_LIST_MEMBERS => {
                 let members = self.handle.list_members().await;
+                let mob_id = self.handle.definition().id.clone();
                 let members = members
                     .into_iter()
-                    .map(|entry| Self::member_list_entry_result_payload(&entry))
+                    .map(|entry| Self::member_list_entry_result_payload(&mob_id, &entry))
                     .collect::<Result<Vec<_>, _>>()?;
                 Self::encode_result(call, json!({ "members": members }))
             }

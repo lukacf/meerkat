@@ -8081,6 +8081,38 @@ fn render_flow_status_json(run: Option<meerkat_mob::MobRun>) -> anyhow::Result<S
 }
 
 #[cfg(feature = "mob")]
+fn helper_result_json_value(
+    mob_id: &str,
+    output: &Option<String>,
+    tokens_used: u64,
+    agent_identity: &meerkat_mob::AgentIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "output": output,
+        "tokens_used": tokens_used,
+        "agent_identity": agent_identity.as_str(),
+        "member_ref": meerkat_contracts::WireMemberRef::encode(
+            mob_id,
+            agent_identity.as_str(),
+        ),
+    })
+}
+
+#[cfg(feature = "mob")]
+fn render_helper_result_json(
+    mob_id: &str,
+    result: &meerkat_mob::HelperResult,
+) -> anyhow::Result<String> {
+    serde_json::to_string_pretty(&helper_result_json_value(
+        mob_id,
+        &result.output,
+        result.tokens_used,
+        &result.agent_identity,
+    ))
+    .map_err(|e| anyhow::anyhow!("failed to encode helper result: {e}"))
+}
+
+#[cfg(feature = "mob")]
 async fn wait_for_terminal_flow_run(
     state: &meerkat_mob_mcp::MobMcpState,
     mob_id: &str,
@@ -8318,15 +8350,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "output": result.output,
-                        "tokens_used": result.tokens_used,
-                        "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.binding_atoms().1.get(),
-                    }))?
-                );
+                println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
                 println!("{output}");
             }
@@ -8377,15 +8401,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "output": result.output,
-                        "tokens_used": result.tokens_used,
-                        "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.binding_atoms().1.get(),
-                    }))?
-                );
+                println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
                 println!("{output}");
             }
@@ -9686,7 +9702,12 @@ mod tests {
             &self,
             req: CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
-            let sid = SessionId::new();
+            let sid = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default();
             let n = self
                 .counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -12486,6 +12507,29 @@ capabilities = ["definitely_missing_capability"]
             out.result.text_content()
         );
         serde_json::from_str(&out.result.text_content()).expect("tool content should be valid json")
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_helper_json_uses_member_ref_not_binding_atoms() {
+        let identity = meerkat_mob::AgentIdentity::from("helper-json");
+        let output = Some("done".to_string());
+        let value = helper_result_json_value("mob-json", &output, 7, &identity);
+
+        assert_eq!(value["agent_identity"], "helper-json");
+        assert_eq!(value["tokens_used"], 7);
+        assert_eq!(value["output"], "done");
+        assert!(value.get("agent_runtime_id").is_none());
+        assert!(value.get("fence_token").is_none());
+        let member_ref = value["member_ref"]
+            .as_str()
+            .expect("helper json should include member_ref");
+        let member_ref: meerkat_contracts::WireMemberRef =
+            serde_json::from_value(serde_json::Value::String(member_ref.to_string()))
+                .expect("member_ref should deserialize");
+        let (mob_id, member_id) = member_ref.decode().expect("member_ref should decode");
+        assert_eq!(mob_id, "mob-json");
+        assert_eq!(member_id, "helper-json");
     }
 
     #[cfg(feature = "mob")]

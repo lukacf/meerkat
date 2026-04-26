@@ -1621,7 +1621,12 @@ impl LocalSessionService {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionService for LocalSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let sid = SessionId::new();
+        let sid = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         let n = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3033,7 +3038,12 @@ mod tests {
             &self,
             req: CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
-            let sid = SessionId::new();
+            let sid = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
             let name = req

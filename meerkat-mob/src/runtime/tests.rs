@@ -5469,13 +5469,13 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         "spawn result should surface agent_identity"
     );
     assert!(
-        spawn_payload["agent_runtime_id"].is_object(),
-        "spawn result should surface agent_runtime_id"
+        spawn_payload["member_ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "spawn result should surface canonical member_ref"
     );
-    assert!(
-        spawn_payload["fence_token"].is_number(),
-        "spawn result should surface fence_token"
-    );
+    assert!(spawn_payload.get("agent_runtime_id").is_none());
+    assert!(spawn_payload.get("fence_token").is_none());
 
     let list_args = RawValue::from_string("{}".to_string()).expect("list args");
     let list_result = dispatcher
@@ -5496,15 +5496,14 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         .expect("spawned member should appear in list");
     assert_eq!(member["agent_identity"], "w-bridge");
     assert!(
-        member["agent_runtime_id"].is_object(),
-        "list output should surface agent_runtime_id"
+        member["member_ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "list output should surface canonical member_ref"
     );
-    assert!(
-        member["fence_token"].is_number(),
-        "list output should surface fence_token"
-    );
+    assert!(member.get("agent_runtime_id").is_none());
+    assert!(member.get("fence_token").is_none());
     assert_eq!(member["role"], "worker");
-    assert!(member.get("member_ref").is_none());
     assert!(member.get("session_id").is_none());
     assert!(member.get("bridge_session_id").is_none());
     assert!(member.get("current_session_id").is_none());

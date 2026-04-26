@@ -2108,7 +2108,12 @@ mod tests {
             &self,
             req: meerkat_core::service::CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
-            let sid = SessionId::new();
+            let sid = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let name = req
                 .build
@@ -2955,6 +2960,10 @@ mod tests {
         assert!(
             spawn_payload.get("agent_runtime_id").is_none(),
             "Mob-MCP operator results must not leak the binding-era agent_runtime_id"
+        );
+        assert!(
+            spawn_payload.get("fence_token").is_none(),
+            "Mob-MCP operator results must not leak the binding-era fence_token"
         );
 
         let handle = state.handle_for(&mob_id).await.expect("handle");

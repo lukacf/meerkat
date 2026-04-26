@@ -1118,6 +1118,7 @@ impl SessionService for MockSessionService {
                                 session_id,
                                 error_class: meerkat_core::event::AgentErrorClass::Internal,
                                 error: "mock flow turn failure".to_string(),
+                                error_report: None,
                             },
                         ))
                         .await;

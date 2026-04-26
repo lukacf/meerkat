@@ -1168,12 +1168,12 @@ impl MobActor {
             !matches!(
                 effect,
                 super::composition::MobSeamEffect::Mob(
-                    super::composition::MobProducerEffect::RequestRuntimeBinding {
+                    mob_dsl::MobMachineEffect::RequestRuntimeBinding {
                         session_id,
                         ..
                     }
-                    | super::composition::MobProducerEffect::RequestRuntimeRetire { session_id }
-                    | super::composition::MobProducerEffect::RequestRuntimeDestroy { session_id },
+                    | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
+                    | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id },
                 ) if session_id == &dsl_session_id
             )
         });

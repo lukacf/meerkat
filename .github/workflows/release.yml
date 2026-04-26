@@ -57,7 +57,7 @@ jobs:
           node-version: "22"
 
       - name: Build rkat-rpc for SDK smoke tests
-        run: cargo build -p meerkat-rpc
+        run: ./scripts/repo-cargo build -p meerkat-rpc
 
       # Release validation re-checks release-specific invariants plus SDK parity gates.
       - name: Verify version parity
@@ -127,15 +127,17 @@ jobs:
 
       - name: Build surface binaries
         shell: bash
+        env:
+          CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
           for pkg in "${PACKAGES[@]}"; do
-            cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+            ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
-          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
-          cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
+          ./scripts/repo-cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+          ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'

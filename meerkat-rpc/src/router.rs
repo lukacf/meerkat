@@ -5718,7 +5718,7 @@ mod tests {
         let resp = router.dispatch(req).await.unwrap();
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
         assert!(
-            error_message(&resp).contains("mob-managed sessions"),
+            error_message(&resp).contains("reserved for Meerkat-owned runtime facts"),
             "reserved mob label rejection should explain the trust boundary"
         );
     }

@@ -138,8 +138,8 @@ Representative measurements from the POC environment:
 | Prewarmed temp worktree source edit probe | `3.85s` wall |
 | Prewarmed temp worktree exact-test edit probe | `5.62s` wall |
 | Prewarmed temp worktree support-local edit probe | `5.62s` wall |
-| Direct-label dev prewarm, first touch | `46.13s` wall |
-| Direct-label dev prewarm, warm | `4.62s` wall |
+| Direct-label dev prewarm with changed-clippy lanes, first touch | `46.73s` wall |
+| Direct-label dev prewarm with changed-clippy lanes, warm | `4.729s` wall |
 | Direct-label CI prewarm, first touch | `29.88s` wall |
 | Direct-label CI prewarm, warm | `6.15s` wall |
 | Multi-worktree first-touch lanes | `38.35s` / `44.00s` wall |

@@ -17,12 +17,8 @@ Modes:
   workspace-fresh    Run the fresh optional BuildBuddy workspace CI gate.
   workspace-warm     Run the warmed optional BuildBuddy workspace CI gate.
   e2e-system         Run only the Bazel-native system e2e suite.
-  native-build-clippy
-  native-unit-tests
-  native-integration-fast
-                    Run one visible Bazel/RBE-native CI lane.
-  fmt-static, sdk-suites, e2e-fast, ...
-                    Run one visible BuildBuddy compatibility CI lane.
+  fmt-lint, test-unit, integration-fast, e2e-system, ...
+                    Run one visible BuildBuddy CI lane matching Cargo CI.
   changed-committed  Run the BuildBuddy changed-path gate for branch commits.
   changed-paths      Run the BuildBuddy changed-path gate for explicit paths.
 
@@ -146,7 +142,7 @@ case "${mode}" in
       exec scripts/buildbuddy-ci-lane native-e2e-system --mode e2e-system
     fi
     ;;
-  native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|fmt-static|cargo-all-features-clippy|feature-clippy|unused-deps|sdk-suites|rust-release-packaging|machine-authority|rmat-audit|seam-inventory|wasm-contract|e2e-fast|e2e-live|e2e-smoke|minimal-feature-builds|feature-matrix-lib|feature-matrix-surface|wasm-check|security-audit)
+  fmt-lint|sdk-suites|rust-release-packaging|machine-authority|rmat-audit|seam-inventory|wasm-contract-tests|test-unit|integration-fast|e2e-fast|e2e-system|e2e-live|e2e-smoke|test-minimal|test-feature-matrix-lib|test-feature-matrix-surface-checks|wasm-check|audit|native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|fmt-static|cargo-all-features-clippy|feature-clippy|unused-deps|wasm-contract|minimal-feature-builds|feature-matrix-lib|feature-matrix-surface|security-audit)
     lane_args=("${mode}" --mode "${mode}")
     if [[ "${dry_run}" -eq 1 ]]; then
       lane_args+=(--dry-run)

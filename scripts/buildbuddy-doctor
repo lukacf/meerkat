@@ -223,13 +223,14 @@ else
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'Build + clippy (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'Unit tests (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'Integration-fast lane (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'E2E system lane (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'SDK suites + parity gates (compat)' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'bb-unit-tests:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'bb-e2e-smoke:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'fmt-lint:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'test-unit:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'integration-fast:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'e2e-system:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'SDK suites + parity gates' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'e2e-smoke:' .github/workflows/buildbuddy.yml &&
+  ! grep -Fq 'Build + clippy (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
+  ! grep -Fq '(compat)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'strategy:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'run-buildbuddy-ci-lane' .github/workflows/buildbuddy.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane' .github/actions/run-buildbuddy-ci-lane/action.yml &&
@@ -239,9 +240,9 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   grep -Fq 'cargo-deny check' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live' scripts/buildbuddy-ci-lane &&
   grep -Fq 'wasm-pack test --headless --chrome' scripts/buildbuddy-ci-lane; then
-  pass "BuildBuddy workflow exposes full CI as visible native and compatibility lanes"
+  pass "BuildBuddy workflow exposes full CI as a 1:1 Cargo lane map"
 else
-  bad "BuildBuddy workflow is missing visible full-CI lane coverage"
+  bad "BuildBuddy workflow does not match the Cargo lane map"
 fi
 
 if grep -Fq 'rust-release-packaging' .github/workflows/ci.yml &&

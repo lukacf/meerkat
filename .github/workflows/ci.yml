@@ -1,4 +1,4 @@
-name: CI
+name: Cargo CI
 
 on:
   push:
@@ -495,7 +495,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
 
   gate:
-    name: CI gate
+    name: Cargo CI gate
     if: always()
     needs: [fmt-lint, sdk-suites, rust-release-packaging, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, e2e-live, e2e-smoke, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
     runs-on: ubuntu-latest

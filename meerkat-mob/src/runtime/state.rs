@@ -103,6 +103,8 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::MobMemberState,
     >,
     pub wiring_edges: std::collections::BTreeSet<crate::machines::mob_machine::WiringEdge>,
+    pub external_peer_edges:
+        std::collections::BTreeSet<crate::machines::mob_machine::ExternalPeerEdge>,
     pub identity_to_runtime: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,
@@ -350,22 +352,19 @@ pub(super) enum MobCommand {
     },
     /// Wire a local mob member to a peer target.
     ///
-    /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority
-    /// via `MobMachineInput::WireMembers { edge }`. This command is the
-    /// thin shell forward: the actor normalizes `(local, target)` into a
-    /// `WiringEdge`, applies the DSL input, and records
-    /// `MobEventKind::MembersWired` on acceptance. No shell-side
-    /// reconciliation of comms trust edges or peer-added notifications is
-    /// performed here (those were shell-authority patterns deleted in
-    /// Wave A and not restored in Wave D).
+    /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority.
+    /// Local member targets route through `WireMembers { edge }`; raw
+    /// external peer descriptors route through `WireExternalPeer { edge }`
+    /// so descriptor/key/address truth is not collapsed into a member
+    /// `WiringEdge`.
     Wire {
         local: MeerkatId,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
-    /// Unwire a local mob member from a peer target. Mirror of `Wire`.
-    /// Forwards to `MobMachineInput::UnwireMembers { edge }` and records
-    /// `MobEventKind::MembersUnwired` on acceptance.
+    /// Unwire a local mob member from a peer target. Mirror of `Wire`:
+    /// local member targets forward to `UnwireMembers`, while raw external
+    /// descriptors forward to `UnwireExternalPeer`.
     Unwire {
         local: MeerkatId,
         target: super::handle::PeerTarget,

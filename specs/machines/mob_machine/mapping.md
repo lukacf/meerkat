@@ -27,6 +27,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UnwireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `WireExternalPeerRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `task-flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `UnwireExternalPeerRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `task-flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `BindMemberSessionRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
@@ -372,6 +378,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `EmitWiringLifecycleNotice`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `EmitExternalPeerWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
 

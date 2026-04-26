@@ -156,6 +156,7 @@ pub const MEERKAT_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
     "RealtimeProjectionAdvanceObserved",
     "RealtimeProjectionRefreshed",
     "RealtimeProjectionReset",
+    "RecoverInputLifecycle",
     "RemoveDirectPeerEndpoint",
     "ReplaceRealtimeBinding",
     "RequireRealtimeReattach",
@@ -175,6 +176,14 @@ pub fn dsl_mob_machine() -> MachineSchema {
             NamedTypeBinding::u64("Generation"),
             NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::type_path(
+                "ExternalPeerEdge",
+                "crate::catalog::dsl::mob_machine::ExternalPeerEdge",
+            ),
+            NamedTypeBinding::type_path(
+                "ExternalPeerEndpoint",
+                "crate::catalog::dsl::mob_machine::ExternalPeerEndpoint",
+            ),
             NamedTypeBinding::string("MobId"),
             NamedTypeBinding::string("MobMemberState"),
             NamedTypeBinding::string("MobPhase"),
@@ -184,6 +193,16 @@ pub fn dsl_mob_machine() -> MachineSchema {
             NamedTypeBinding::string("TaskStatus"),
             NamedTypeBinding::string("WiringEdge"),
             NamedTypeBinding::string("WorkId"),
+            NamedTypeBinding::type_path(
+                "PeerAddress",
+                "crate::catalog::dsl::mob_machine::PeerAddress",
+            ),
+            NamedTypeBinding::type_path("PeerId", "crate::catalog::dsl::mob_machine::PeerId"),
+            NamedTypeBinding::type_path("PeerName", "crate::catalog::dsl::mob_machine::PeerName"),
+            NamedTypeBinding::type_path(
+                "PeerSigningKey",
+                "crate::catalog::dsl::mob_machine::PeerSigningKey",
+            ),
         ],
     )
 }
@@ -197,7 +216,9 @@ pub const MOB_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
     "RotateMemberSession",
     "SessionIngressDetachFailedForMobDestroy",
     "SessionIngressDetachedForMobDestroy",
+    "UnwireExternalPeer",
     "UnwireMembers",
+    "WireExternalPeer",
     "WireMembers",
 ];
 

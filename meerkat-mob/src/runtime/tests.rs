@@ -10002,6 +10002,25 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         trusted.iter().any(|n| n == external.name.as_str()),
         "trusted peer list should include external peer name"
     );
+
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    assert!(
+        dsl.wiring_edges
+            .iter()
+            .all(|edge| edge.a.0 != external.name.as_str() && edge.b.0 != external.name.as_str()),
+        "external peer descriptors must not be projected into member wiring_edges"
+    );
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert!(
+        dsl.external_peer_edges.contains(&external_edge),
+        "MobMachine should own the descriptor-bearing external peer edge"
+    );
 }
 
 #[tokio::test]
@@ -10113,6 +10132,25 @@ async fn test_unwire_external_removes_trust_and_projection() {
     assert!(
         !trusted.iter().any(|n| n == external.name.as_str()),
         "trusted peer list should not include the removed external peer"
+    );
+
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert!(
+        !dsl.external_peer_edges.contains(&external_edge),
+        "external unwire should remove the machine-owned descriptor edge"
+    );
+    assert!(
+        dsl.wiring_edges
+            .iter()
+            .all(|edge| edge.a.0 != external.name.as_str() && edge.b.0 != external.name.as_str()),
+        "external unwire should not touch member wiring_edges"
     );
 }
 
@@ -20967,6 +21005,7 @@ struct MobRuntimeParitySnapshotSummary {
     // formal-fields coverage gate passes; full projection is a follow-up.
     member_state_markers: BTreeMap<String, String>,
     wiring_edges: BTreeSet<String>,
+    external_peer_edges: BTreeSet<String>,
     identity_to_runtime: BTreeMap<String, String>,
     tasks: BTreeMap<String, String>,
     in_progress_task_ids: BTreeSet<String>,
@@ -21644,6 +21683,7 @@ async fn mob_runtime_parity_snapshot_summary(
     let (
         member_state_markers,
         wiring_edges,
+        external_peer_edges,
         identity_to_runtime,
         tasks_map,
         in_progress_task_ids,
@@ -21658,6 +21698,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
                 snap.wiring_edges
+                    .into_iter()
+                    .map(|edge| format!("{edge:?}"))
+                    .collect::<BTreeSet<_>>(),
+                snap.external_peer_edges
                     .into_iter()
                     .map(|edge| format!("{edge:?}"))
                     .collect::<BTreeSet<_>>(),
@@ -21718,6 +21762,7 @@ async fn mob_runtime_parity_snapshot_summary(
         formal_unavailable_fields,
         member_state_markers,
         wiring_edges,
+        external_peer_edges,
         identity_to_runtime,
         tasks: tasks_map,
         in_progress_task_ids,
@@ -21761,6 +21806,9 @@ fn mob_runtime_parity_field_value(
         )),
         "wiring_edges" => Some(MobRuntimeParityExprValue::Set(
             snapshot.wiring_edges.clone(),
+        )),
+        "external_peer_edges" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.external_peer_edges.clone(),
         )),
         "identity_to_runtime" => Some(MobRuntimeParityExprValue::Map(
             snapshot

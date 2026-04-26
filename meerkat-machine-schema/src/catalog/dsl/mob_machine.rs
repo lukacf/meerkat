@@ -23,6 +23,12 @@ machine! {
             // ordered pairs (smaller identity first) wrapped in WiringEdge
             // so the DSL sees a single opaque key type.
             wiring_edges: Set<WiringEdge>,
+            // Descriptor-bearing external peer trust edges. These are not
+            // member-to-member wiring edges: the endpoint carries the external
+            // peer's routing id, address, and signing key, so it has its own
+            // machine-owned fact instead of being projected into WiringEdge by
+            // peer name.
+            external_peer_edges: Set<ExternalPeerEdge>,
             // Identity → current runtime binding. Survives within a
             // generation; respawn replaces the runtime id for the same
             // identity.
@@ -61,6 +67,7 @@ machine! {
             coordinator_bound = true,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
+            external_peer_edges = EmptySet,
             identity_to_runtime = EmptyMap,
             tasks = EmptyMap,
             in_progress_task_ids = EmptySet,
@@ -89,6 +96,8 @@ machine! {
             RetireAll,
             WireMembers { edge: WiringEdge },
             UnwireMembers { edge: WiringEdge },
+            WireExternalPeer { edge: ExternalPeerEdge },
+            UnwireExternalPeer { edge: ExternalPeerEdge },
             BindMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
             RotateMemberSession { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
             ReleaseMemberSession { agent_identity: AgentIdentity, session_id: SessionId },
@@ -213,6 +222,10 @@ machine! {
             // unwired. Separate from `EmitMemberLifecycleNotice` because
             // wiring is pair-valued, not per-member.
             EmitWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: WiringEdge },
+            // Descriptor-bearing external peer trust notice. Carries the
+            // endpoint fields (`peer_id`, `address`, `signing_key`) that
+            // cannot be represented by a member `WiringEdge`.
+            EmitExternalPeerWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: ExternalPeerEdge },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -235,6 +248,7 @@ machine! {
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition EmitWiringLifecycleNotice => external,
+        disposition EmitExternalPeerWiringLifecycleNotice => external,
 
         // =====================================================================
         // Invariants
@@ -282,6 +296,32 @@ machine! {
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
+        }
+
+        transition WireExternalPeerRunning {
+            on input WireExternalPeer { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_not_already_wired" { self.external_peer_edges.contains(edge) == false }
+            update {
+                self.external_peer_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+        }
+
+        transition UnwireExternalPeerRunning {
+            on input UnwireExternalPeer { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            update {
+                self.external_peer_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
         // =====================================================================
@@ -1565,5 +1605,71 @@ impl WiringEdge {
         } else {
             Self { a: rhs, b: lhs }
         }
+    }
+}
+
+/// Descriptor-bearing external peer trust endpoint. Unlike `WiringEdge`, this
+/// preserves the routing id, transport address, and signing key that make an
+/// external trust edge authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ExternalPeerEndpoint {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
+}
+
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for ExternalPeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+        Self {
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+            signing_key: PeerSigningKey(spec.pubkey),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExternalPeerEdge {
+    pub local: AgentIdentity,
+    pub endpoint: ExternalPeerEndpoint,
+}
+
+impl ExternalPeerEdge {
+    pub fn new(local: AgentIdentity, endpoint: ExternalPeerEndpoint) -> Self {
+        Self { local, endpoint }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerName(pub String);
+impl<T: Into<String>> From<T> for PeerName {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerId(pub String);
+impl<T: Into<String>> From<T> for PeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerAddress(pub String);
+impl<T: Into<String>> From<T> for PeerAddress {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerSigningKey(pub [u8; 32]);
+impl From<[u8; 32]> for PeerSigningKey {
+    fn from(key: [u8; 32]) -> Self {
+        Self(key)
     }
 }

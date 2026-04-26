@@ -20,9 +20,34 @@ RUST_MIN_STACK = "16777216"
 # Machine-authority workflow entrypoint
 xtask = "run -p xtask --features machine-authority --"
 
-# Fast test suite (unit + integration-fast, skips doctests)
-fast = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
-rct = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
+# Fast test suite (unit + integration-fast, skips doctests). Dedicated e2e
+# lane binaries stay behind their explicit aliases below.
+fast = [
+  "nextest",
+  "run",
+  "--workspace",
+  "-E",
+  "not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)",
+  "--show-progress",
+  "none",
+  "--status-level",
+  "none",
+  "--final-status-level",
+  "fail",
+]
+rct = [
+  "nextest",
+  "run",
+  "--workspace",
+  "-E",
+  "not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)",
+  "--show-progress",
+  "none",
+  "--status-level",
+  "none",
+  "--final-status-level",
+  "fail",
+]
 
 # Unit tests only (no integration tests, skips doctests)
 unit = "nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail"
@@ -36,7 +61,7 @@ int = [
   "--workspace",
   "--tests",
   "-E",
-  "not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)",
+  "not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)",
   "--show-progress",
   "none",
   "--status-level",

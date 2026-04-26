@@ -43,9 +43,9 @@ case "${profile}" in
     wait_for_all "${pid_source}" "${pid_source_clippy}" "${pid_exact}" "${pid_support}" "${pid_support_clippy}"
     ;;
   ci)
-    run_lane workspace-test-rbe workspace-test-rbe --jobs=64 &
+    run_lane workspace-fast-clippy-rbe workspace-fast-clippy-rbe --jobs=64 &
     pid_workspace=$!
-    run_lane clippy-rbe clippy-rbe --jobs=64 --color=no --curses=no &
+    run_lane workspace-build-clippy-rbe workspace-build-clippy-rbe --jobs=64 --color=no --curses=no &
     pid_clippy=$!
     wait_for_all "${pid_workspace}" "${pid_clippy}"
     ;;
@@ -62,7 +62,7 @@ usage: buildbuddy-prewarm-lanes [dev|ci|ci-fast]
 
 Profiles:
   dev  Prewarm common source, changed-clippy, exact-test, and support-file feedback lanes.
-  ci   Prewarm/run workspace-test-rbe and clippy-rbe lanes in parallel.
+  ci   Prewarm/run split workspace test+clippy and build-clippy lanes in parallel.
   ci-fast
        Prewarm/run fast-test and clippy-rbe lanes in parallel.
 EOF

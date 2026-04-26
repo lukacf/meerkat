@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit buildbuddy-fast buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -31,23 +31,20 @@ release:
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	$(CARGO) nextest run --workspace --show-progress none --status-level none --final-status-level fail
+	$(CARGO) fast
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	$(CARGO) nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
 
-# Integration-fast tests only (no unit tests). Must stay in sync with the
-# `int` cargo alias in `.cargo/config.toml`: both exclude the e2e lane
-# binaries (`e2e_{fast,system,live,smoke,models}_lane`) since those have
-# their own Makefile targets and scenario-test timeouts incompatible with
-# the integration-fast lane's default 300s nextest deadline.
+# Integration-fast tests only (no unit tests). The `int` cargo alias excludes
+# the dedicated e2e lane binaries since those have their own Makefile targets
+# and scenario-test timeouts incompatible with the integration-fast lane's
+# default nextest deadline.
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	$(CARGO) nextest run --workspace --tests \
-		-E 'not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)' \
-		--show-progress none --status-level none --final-status-level fail
+	$(CARGO) int
 
 # Deterministic end-to-end lane (canonical integration harness)
 e2e-fast:
@@ -208,7 +205,11 @@ audit-alt:
 	@echo "$(GREEN)Running cargo-audit...$(NC)"
 	$(CARGO) audit
 
-# BuildBuddy remote-compatible workspace gate.
+# Optional BuildBuddy/remote-cache lanes. Cargo remains the default path.
+buildbuddy-fast:
+	@echo "$(GREEN)Running BuildBuddy fast workspace test lane...$(NC)"
+	@BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc --jobs=64
+
 buildbuddy-ci:
 	@echo "$(GREEN)Running BuildBuddy workspace CI gate...$(NC)"
 	@scripts/buildbuddy-ci-workspace --fresh
@@ -547,7 +548,8 @@ help:
 	@echo "  $(GREEN)fmt$(NC)           - Fix code formatting"
 	@echo "  $(GREEN)fmt-check$(NC)     - Check code formatting"
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"
-	@echo "  $(GREEN)buildbuddy-ci$(NC) - Run BuildBuddy workspace CI gate"
+	@echo "  $(GREEN)buildbuddy-fast$(NC)- Run optional BuildBuddy fast test lane"
+	@echo "  $(GREEN)buildbuddy-ci$(NC) - Run optional BuildBuddy workspace CI gate"
 	@echo "  $(GREEN)buildbuddy-ci-warm$(NC) - Run warmed BuildBuddy workspace CI gate"
 	@echo "  $(GREEN)ci$(NC)            - Run full CI pipeline"
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"

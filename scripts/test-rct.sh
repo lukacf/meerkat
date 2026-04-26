@@ -12,9 +12,9 @@ echo ""
 
 echo "Running fast suite (unit + integration-fast)..."
 if [ -n "${FAST_TARGET_DIR:-}" ]; then
-  CARGO_TARGET_DIR="$FAST_TARGET_DIR" "$CARGO" test --workspace --lib --bins --tests
+  CARGO_TARGET_DIR="$FAST_TARGET_DIR" "$CARGO" fast
 else
-  "$CARGO" test --workspace --lib --bins --tests
+  "$CARGO" fast
 fi
 
 echo ""

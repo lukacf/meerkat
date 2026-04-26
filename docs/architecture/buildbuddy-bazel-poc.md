@@ -1,6 +1,7 @@
 # BuildBuddy Bazel POC
 
-Status: Spike notes for the BuildBuddy/Bazel workspace experiment
+Status: Spike notes and rollout guidance for the opt-in BuildBuddy/Bazel
+workspace experiment. Cargo remains the default developer path.
 Baseline branch: `codex/buildbuddy-poc`
 Initial POC commit: `a58e2613f1a5f3cfb952b4035e8f0d38c0c35a71`
 
@@ -13,6 +14,7 @@ Initial POC commit: `a58e2613f1a5f3cfb952b4035e8f0d38c0c35a71`
   edit and test concurrently.
 - Keep CI-like runs useful on fresh local output bases by leaning on remote
   cache hits.
+- Preserve Cargo as the normal path for developers without BuildBuddy access.
 
 ## Entry Points
 
@@ -21,7 +23,14 @@ Use `scripts/buildbuddy-bazel-poc` with `BUILDBUDDY_BAZEL_COMMAND`:
 - `workspace-test`: run the full Bazel workspace test suite.
 - `workspace-test-rbe`: run the remote-compatible workspace test suite,
   excluding local-only Cargo/trybuild fixtures.
+- `workspace-fast-rbe`: run the Cargo-fast-equivalent remote workspace suite,
+  excluding local-only fixtures and dedicated e2e lane wrappers.
 - `workspace-test-local`: run the full workspace test suite with local spawns.
+- `workspace-fast-clippy-rbe`: run the Cargo-fast-equivalent remote workspace
+  suite with the clippy aspect attached.
+- `workspace-build-clippy-rbe`: run the clippy aspect for non-test build
+  targets; used with `workspace-fast-clippy-rbe` to cover the full workspace
+  clippy surface without rechecking test targets twice.
 - `clippy-rbe`: run the rules_rust clippy aspect with `-D warnings`,
   excluding local-only, manual, and `noclippy` targets.
 - `owned-clippy-rbe <path>`: run clippy for the owning build/test labels for a
@@ -80,6 +89,8 @@ modes:
 - `workspace-test`: full Bazel workspace test suite.
 - `workspace-test-rbe`: remote-compatible workspace suite excluding local-only
   fixtures.
+- `workspace-fast-rbe`: Cargo-fast-equivalent remote workspace suite excluding
+  local-only fixtures and dedicated e2e wrappers.
 - `workspace-test-local`: full Bazel workspace test suite with local spawns.
 - `warm-noop`: warm full fast-test and clippy checks.
 - `same-worktree`: two same-checkout agents using distinct lanes.
@@ -109,19 +120,20 @@ modes:
   gates in parallel.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
-- `ci-workspace`: parallel CI-like `workspace-test-rbe` and `clippy-rbe` on fresh
-  output bases.
+- `ci-workspace`: parallel CI-like `workspace-fast-clippy-rbe` and
+  `workspace-build-clippy-rbe` on fresh output bases.
 
 For an actual remote-compatible CI gate, use `scripts/buildbuddy-ci-workspace`.
-It runs `workspace-test-rbe` and `clippy-rbe` in parallel on isolated fresh
-lanes, prints compact summaries, and cleans up the temporary output roots.
-Use `--warm` to reuse a stable output root for repeated local/agent gates.
+It runs `workspace-fast-clippy-rbe` and `workspace-build-clippy-rbe` in parallel
+on isolated fresh lanes, prints compact summaries, and cleans up the temporary
+output roots. Use `--warm` to reuse a stable output root for repeated local or
+agent gates.
 
 `scripts/buildbuddy-prewarm-lanes` prepares common lanes for a new worktree:
 
 - `dev`: source-owned-build, changed-clippy, exact-test, and support-local
   feedback lanes.
-- `ci`: remote-compatible workspace-test and clippy lanes in parallel.
+- `ci`: split workspace fast test+clippy and build-clippy lanes in parallel.
 - `ci-fast`: fast-test and clippy-RBE lanes in parallel.
 
 The prewarm helper uses direct Bazel labels instead of path selectors so several
@@ -141,12 +153,30 @@ inspect workspace fixtures.
 
 Representative measurements from the POC environment:
 
+Apples-to-apples Cargo vs BuildBuddy fast lanes after excluding dedicated e2e
+lane wrappers from both systems:
+
+| Scenario | Cargo | BuildBuddy/Bazel |
+| --- | ---: | ---: |
+| Fast deterministic tests, compile/no-run first pass | `122.71s` | `30.47s` first new Bazel lane run |
+| Fast deterministic tests, warm execution | `47.96s` (`5112` tests) | `4.36s` (`140` Bazel test targets, `0` executed) |
+| Workspace clippy, warm after fix | `48.13s` | `4s` split fast-test-clippy + build-clippy gate |
+
+The Cargo fast lane is now `./scripts/repo-cargo fast`, `cargo rct`, or
+`make test`. It excludes `e2e_*_lane` wrappers; those remain explicit lanes via
+`cargo e2e-fast`, `cargo e2e-system`, `cargo e2e-live`, `cargo e2e-smoke`,
+`cargo e2e-models`, and `cargo e2e-auth`. The BuildBuddy equivalent is
+`make buildbuddy-fast` or
+`BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc`.
+
 | Scenario | Result |
 | --- | ---: |
 | Full workspace test lane (`152` tests), remote/cache | `23.25s` wall |
 | Full workspace test lane (`152` tests), warm remote/cache | `3.96-5.33s` wall |
 | Remote-compatible workspace lane (`151` tests), first touch | `22.27s` wall |
 | Remote-compatible workspace lane (`151` tests), warm | `4.10-4.38s` wall |
+| Cargo-fast-equivalent workspace lane (`140` Bazel targets), first new lane run | `30.47s` wall |
+| Cargo-fast-equivalent workspace lane (`140` Bazel targets), warm | `4.36s` wall |
 | Full workspace test lane (`152` tests), local-spawn first pass | `67.01s` wall |
 | Full workspace test lane (`152` tests), warm local-spawn | `4.75s` wall |
 | Warm root fast suite (`117` tests) | `3.99s` wall |
@@ -186,6 +216,8 @@ Representative measurements from the POC environment:
 | Dedicated `buildbuddy-ci-workspace` script, first after script/doc edits | `45s` script wall |
 | Dedicated `buildbuddy-ci-workspace` script, remote cache warm | `28-30s` script wall |
 | Dedicated `buildbuddy-ci-workspace --warm`, warm | `6-8s` script wall |
+| Split fast workspace CI after lane change, first warm-root run | `51s` script wall |
+| Split fast workspace CI after lane change, warm | `4s` script wall |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel
@@ -216,6 +248,7 @@ to roughly `4-6s` once those lanes were prepared.
   --owned <path>`; it overlaps the selected fast tests and selected clippy.
 - For deeper shared crates, use `affected-*` when you need reverse-dependency
   confidence, and expect broad closures for high-fanout crates.
+- For an opt-in BuildBuddy fast test pass, run `make buildbuddy-fast`.
 - For the remote-compatible BuildBuddy gate, run `make buildbuddy-ci`, or
   `make buildbuddy-ci-warm` when repeated agents can reuse a stable output root.
 - For same-checkout multi-agent work, always set a distinct `RUST_LANE_ID` per

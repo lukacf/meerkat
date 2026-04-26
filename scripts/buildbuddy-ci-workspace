@@ -76,23 +76,25 @@ run_lane() {
   ) >"${log}" 2>&1
 }
 
-test_log="${temp_root}/workspace-test-rbe.log"
-clippy_log="${temp_root}/clippy-rbe.log"
-test_status_file="${temp_root}/workspace-test-rbe.status"
-clippy_status_file="${temp_root}/clippy-rbe.status"
+test_command="workspace-fast-clippy-rbe"
+clippy_command="workspace-build-clippy-rbe"
+test_log="${temp_root}/${test_command}.log"
+clippy_log="${temp_root}/${clippy_command}.log"
+test_status_file="${temp_root}/${test_command}.status"
+clippy_status_file="${temp_root}/${clippy_command}.status"
 mkdir -p "${temp_root}"
 
 start_seconds="$(date +%s)"
 
 (
   set +e
-  run_lane ci-workspace-test-rbe workspace-test-rbe "${test_log}" --jobs=64
+  run_lane ci-workspace-fast-clippy-rbe "${test_command}" "${test_log}" --jobs=64
   echo "$?" >"${test_status_file}"
 ) &
 test_pid="$!"
 (
   set +e
-  run_lane ci-workspace-clippy-rbe clippy-rbe "${clippy_log}" --jobs=64 --color=no --curses=no
+  run_lane ci-workspace-build-clippy-rbe "${clippy_command}" "${clippy_log}" --jobs=64 --color=no --curses=no
   echo "$?" >"${clippy_status_file}"
 ) &
 clippy_pid="$!"
@@ -105,8 +107,8 @@ test_status="$(cat "${test_status_file}" 2>/dev/null || echo 1)"
 clippy_status="$(cat "${clippy_status_file}" 2>/dev/null || echo 1)"
 
 printf 'BuildBuddy workspace CI (%s) wall: %ss\n' "${mode}" "$((end_seconds - start_seconds))"
-summarize_log "workspace-test-rbe" "${test_status}" "${test_log}"
-summarize_log "clippy-rbe" "${clippy_status}" "${clippy_log}"
+summarize_log "${test_command}" "${test_status}" "${test_log}"
+summarize_log "${clippy_command}" "${clippy_status}" "${clippy_log}"
 
 if [[ "${test_status}" != "0" || "${clippy_status}" != "0" ]]; then
   exit 1

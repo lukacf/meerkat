@@ -31,7 +31,7 @@ Scenarios:
                      Run changed gates in two temporary Git worktrees.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
-  ci-workspace       Run workspace-test-rbe and clippy-rbe in parallel.
+  ci-workspace       Run split workspace fast test+clippy and build-clippy in parallel.
   all                Run the default scenario set.
 `);
 }
@@ -498,15 +498,15 @@ async function ciWorkspace(root) {
     const results = await Promise.all([
       repoCommand(
         root,
-        { ...commonEnv, RUST_LANE_ID: "ci-workspace-test-rbe" },
-        "workspace-test-rbe",
+        { ...commonEnv, RUST_LANE_ID: "ci-workspace-fast-clippy-rbe" },
+        "workspace-fast-clippy-rbe",
         [],
         ["--jobs=64"],
       ),
       repoCommand(
         root,
-        { ...commonEnv, RUST_LANE_ID: "ci-workspace-clippy" },
-        "clippy-rbe",
+        { ...commonEnv, RUST_LANE_ID: "ci-workspace-build-clippy" },
+        "workspace-build-clippy-rbe",
         [],
         ["--jobs=64", "--color=no", "--curses=no"],
       ),

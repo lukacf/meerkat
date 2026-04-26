@@ -71,6 +71,51 @@ case "${command}" in
       --curses=no
     )
     ;;
+  workspace-fast-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//..."
+    extra_args+=(
+      --build_tests_only
+      --test_tag_filters=-local,-e2e
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  workspace-test-clippy-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//..."
+    extra_args+=(
+      --build_tests_only
+      --test_tag_filters=-local
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
+      --output_groups="+clippy_checks"
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
+  workspace-fast-clippy-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//..."
+    extra_args+=(
+      --build_tests_only
+      --test_tag_filters=-local,-e2e
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
+      --output_groups="+clippy_checks"
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
   workspace-test-local)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
@@ -200,6 +245,16 @@ case "${command}" in
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
     )
     ;;
+  workspace-build-clippy-rbe)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target=""
+    extra_args+=(
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
+      --output_groups="+clippy_checks"
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
   owned-build)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
@@ -232,8 +287,11 @@ case "${command}" in
     default_target="//meerkat-machine-dsl-core:meerkat_machine_dsl_core"
     ;;
 esac
-if [[ "${requested_command}" == affected-fast-test || "${requested_command}" == affected-fast-test-local || "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == affected-build || "${requested_command}" == affected-build-local || "${requested_command}" == affected-clippy || "${requested_command}" == affected-clippy-rbe || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe ]]; then
+if [[ "${requested_command}" == affected-fast-test || "${requested_command}" == affected-fast-test-local || "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == affected-build || "${requested_command}" == affected-build-local || "${requested_command}" == affected-clippy || "${requested_command}" == affected-clippy-rbe || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe || "${requested_command}" == workspace-build-clippy-rbe ]]; then
   selector_args=()
+  if [[ "${requested_command}" == workspace-build-clippy-rbe ]]; then
+    selector_args+=(--all --build)
+  fi
   if [[ "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe ]]; then
     selector_args+=(--owned)
   fi

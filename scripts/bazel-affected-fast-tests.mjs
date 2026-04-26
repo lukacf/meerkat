@@ -18,11 +18,14 @@ function gitLines(args) {
 function parseArgs() {
   const paths = [];
   let emptyIfNoLabels = false;
+  let includeAll = false;
   let mode = "affected";
   let kind = "test";
   for (const arg of process.argv.slice(2)) {
     if (arg === "--empty-if-no-labels") {
       emptyIfNoLabels = true;
+    } else if (arg === "--all") {
+      includeAll = true;
     } else if (arg === "--owned") {
       mode = "owned";
     } else if (arg === "--affected") {
@@ -34,13 +37,13 @@ function parseArgs() {
     } else if (arg === "--test") {
       kind = "test";
     } else if (arg === "--help" || arg === "-h") {
-      console.log("usage: bazel-affected-fast-tests.mjs [--owned|--affected] [--test|--build|--clippy] [--empty-if-no-labels] [changed-path ...]");
+      console.log("usage: bazel-affected-fast-tests.mjs [--owned|--affected] [--test|--build|--clippy] [--all] [--empty-if-no-labels] [changed-path ...]");
       process.exit(0);
     } else {
       paths.push(arg);
     }
   }
-  return { emptyIfNoLabels, kind, mode, paths };
+  return { emptyIfNoLabels, includeAll, kind, mode, paths };
 }
 
 const args = parseArgs();
@@ -292,6 +295,18 @@ function affectedClosure(seedIds) {
 }
 
 const files = changedFiles();
+if (args.includeAll) {
+  const labels = args.kind === "build"
+    ? packages.flatMap(buildLabels).sort()
+    : args.kind === "clippy"
+    ? packages.flatMap(clippyLabels).sort()
+    : packages
+      .filter(hasFastSuite)
+      .map((pkg) => `//${packageDir(pkg)}:fast_tests`)
+      .sort();
+  console.log(labels.length ? labels.join(" ") : args.kind === "test" ? "//:fast_tests" : "//...");
+  process.exit(0);
+}
 if (files.length === 0) {
   console.log(args.kind === "test" ? "//:fast_tests" : "//...");
   process.exit(0);

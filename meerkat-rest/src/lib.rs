@@ -5182,7 +5182,7 @@ mod tests {
         assert!(
             payload["error"]
                 .as_str()
-                .is_some_and(|msg| msg.contains("mob-managed sessions")),
+                .is_some_and(|msg| msg.contains("reserved for Meerkat-owned runtime facts")),
             "reserved mob label rejection should explain the trust boundary: {}",
             String::from_utf8_lossy(&body)
         );

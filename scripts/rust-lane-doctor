@@ -120,6 +120,16 @@ else
   printf '%s\n' "${exact_test_probe}" >&2
 fi
 
+support_test_probe="$(./scripts/cargo-agent-gate --dry-run --working-tree meerkat/tests/support/test_session_store.rs 2>&1 || true)"
+if grep -q 'Cargo agent gate exact tests:' <<<"${support_test_probe}" &&
+  grep -q -- '--test sdk_agentfactory' <<<"${support_test_probe}" &&
+  grep -q -- '--test sdk_structured_output' <<<"${support_test_probe}"; then
+  pass "cargo-agent-gate narrows integration support edits to importing test binaries"
+else
+  bad "cargo-agent-gate did not select exact importing integration test binaries"
+  printf '%s\n' "${support_test_probe}" >&2
+fi
+
 if [[ -n "$(git status --short)" ]]; then
   note "working tree has local changes; doctor did not modify them"
 else

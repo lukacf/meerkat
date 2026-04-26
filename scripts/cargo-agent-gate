@@ -268,7 +268,29 @@ for pkg in "${sorted_packages[@]}"; do
 done
 
 test_flags=("${pkg_flags[@]}")
-if [[ "${exact_test_possible}" -eq 1 && "${#sorted_packages[@]}" -eq 1 && "${#exact_test_names[@]}" -gt 0 ]]; then
+exact_selector_package=""
+declare -A exact_selector_tests=()
+exact_selector_output="$(./scripts/cargo-exact-tests.mjs "${relevant[@]}" 2>/dev/null || true)"
+if [[ -n "${exact_selector_output}" ]]; then
+  while IFS= read -r line; do
+    case "${line}" in
+      package=*)
+        exact_selector_package="${line#package=}"
+        ;;
+      test=*)
+        exact_selector_tests["${line#test=}"]=1
+        ;;
+    esac
+  done <<<"${exact_selector_output}"
+fi
+
+if [[ -n "${exact_selector_package}" && "${#sorted_packages[@]}" -eq 1 && "${#exact_selector_tests[@]}" -gt 0 ]]; then
+  test_flags=("-p" "${exact_selector_package}")
+  mapfile -t sorted_exact_tests < <(printf '%s\n' "${!exact_selector_tests[@]}" | sort)
+  for test_name in "${sorted_exact_tests[@]}"; do
+    test_flags+=("--test" "${test_name}")
+  done
+elif [[ "${exact_test_possible}" -eq 1 && "${#sorted_packages[@]}" -eq 1 && "${#exact_test_names[@]}" -gt 0 ]]; then
   test_flags=("-p" "${exact_test_package}")
   mapfile -t sorted_exact_tests < <(printf '%s\n' "${!exact_test_names[@]}" | sort)
   for test_name in "${sorted_exact_tests[@]}"; do

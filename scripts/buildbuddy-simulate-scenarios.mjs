@@ -18,6 +18,7 @@ Scenarios:
   support-file       Run exact selectors for a shared integration-test support file.
   changed-clippy     Run changed-scope clippy lanes for source and support edits.
   changed-gate       Run the combined changed-path test+clippy gate.
+  source-gate        Run the combined changed-path build+clippy gate.
   parallel-gates     Run two same-worktree changed gates in parallel.
   edit-probes        Make real edits in a temporary worktree and time edit lanes.
   edit-probes-warmed Prewarm lanes in a temporary worktree before timing edits.
@@ -227,6 +228,17 @@ async function changedGate(root) {
     "./scripts/buildbuddy-changed-gate",
     ["--owned", "meerkat/tests/support/test_session_store.rs"],
     { cwd: root, env: { RUST_LANE_ID: "scenario-changed-gate" }, label: "buildbuddy-changed-gate support" },
+  );
+  printResult(result);
+  return result.code;
+}
+
+async function sourceGate(root) {
+  console.log("\n== source-gate ==");
+  const result = await run(
+    "./scripts/buildbuddy-changed-gate",
+    ["--owned", "meerkat-machine-dsl-core/src/lib.rs"],
+    { cwd: root, env: { RUST_LANE_ID: "scenario-source-gate" }, label: "buildbuddy-changed-gate source" },
   );
   printResult(result);
   return result.code;
@@ -472,6 +484,7 @@ const scenarios = requested.length === 0 || requested.includes("all")
       "support-file",
       "changed-clippy",
       "changed-gate",
+      "source-gate",
       "parallel-gates",
       "edit-probes",
       "edit-probes-warmed",
@@ -494,6 +507,7 @@ const runners = new Map([
   ["support-file", supportFile],
   ["changed-clippy", changedClippy],
   ["changed-gate", changedGate],
+  ["source-gate", sourceGate],
   ["parallel-gates", parallelGates],
   ["edit-probes", editProbes],
   ["edit-probes-warmed", (root) => editProbes(root, { prewarm: true })],

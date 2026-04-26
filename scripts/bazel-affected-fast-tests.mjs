@@ -17,10 +17,13 @@ function gitLines(args) {
 
 function parseArgs() {
   const paths = [];
+  let emptyIfNoLabels = false;
   let mode = "affected";
   let kind = "test";
   for (const arg of process.argv.slice(2)) {
-    if (arg === "--owned") {
+    if (arg === "--empty-if-no-labels") {
+      emptyIfNoLabels = true;
+    } else if (arg === "--owned") {
       mode = "owned";
     } else if (arg === "--affected") {
       mode = "affected";
@@ -31,13 +34,13 @@ function parseArgs() {
     } else if (arg === "--test") {
       kind = "test";
     } else if (arg === "--help" || arg === "-h") {
-      console.log("usage: bazel-affected-fast-tests.mjs [--owned|--affected] [--test|--build|--clippy] [changed-path ...]");
+      console.log("usage: bazel-affected-fast-tests.mjs [--owned|--affected] [--test|--build|--clippy] [--empty-if-no-labels] [changed-path ...]");
       process.exit(0);
     } else {
       paths.push(arg);
     }
   }
-  return { kind, mode, paths };
+  return { emptyIfNoLabels, kind, mode, paths };
 }
 
 const args = parseArgs();
@@ -337,4 +340,10 @@ const labels = args.kind === "build"
       .map((pkg) => `//${packageDir(pkg)}:fast_tests`),
   ].sort();
 
-console.log(labels.length ? labels.join(" ") : args.kind === "test" ? "//:fast_tests" : "//...");
+if (labels.length) {
+  console.log(labels.join(" "));
+} else if (args.emptyIfNoLabels) {
+  console.log("");
+} else {
+  console.log(args.kind === "test" ? "//:fast_tests" : "//...");
+}

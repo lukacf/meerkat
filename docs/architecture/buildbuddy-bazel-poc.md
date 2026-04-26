@@ -45,7 +45,9 @@ For a one-shot edit feedback gate, use `scripts/buildbuddy-changed-gate
 parallel. When both selectors resolve to the same test labels, it collapses the
 gate into one `bb test` invocation with the clippy aspect attached. Use
 `--affected` when the edit needs reverse-dependency confidence, and
-`--local-test` when the selected test lane is already warm locally.
+`--local-test` when the selected test lane is already warm locally. For source
+edits whose owning package has no fast tests, the gate runs the owning build and
+owning clippy labels instead of falling back to the full root fast suite.
 
 ## Lane Isolation
 
@@ -84,6 +86,8 @@ modes:
 - `changed-clippy`: changed-scope clippy for representative source and shared
   support-file edits.
 - `changed-gate`: combined changed-path test and clippy gate.
+- `source-gate`: combined changed-path build and clippy gate for a source edit
+  with no owning fast tests.
 - `parallel-gates`: two same-worktree agents running changed-path gates in
   parallel with distinct lanes.
 - `edit-probes`: creates a temporary detached worktree, makes harmless real
@@ -143,6 +147,8 @@ Representative measurements from the POC environment:
 | Shared support clippy, exact owned selector, warm | `0.91s` wall |
 | Changed support gate, combined exact tests + exact clippy, first touch | `20-20.88s` script wall |
 | Changed support gate, combined exact tests + exact clippy, warm | `3.85-3.856s` script wall |
+| Changed source gate, combined owning build + clippy, first touch | `16.97-17.16s` script wall |
+| Changed source gate, combined owning build + clippy, warm | `3.79-3.927s` script wall |
 | Two same-worktree changed gates, combined first touch | `24.91s` / `25.10s` wall |
 | Two same-worktree changed gates, combined warm | `4.47s` / `4.63s` wall |
 | Three cold parallel selectors with metadata cache lock | `0` Cargo lock waits |

@@ -4,6 +4,7 @@ set -euo pipefail
 mode="owned"
 test_command="owned-fast-test"
 clippy_command="owned-clippy-rbe"
+build_command="owned-build"
 paths=()
 
 usage() {
@@ -59,6 +60,7 @@ done
 
 if [[ "${mode}" == "affected" ]]; then
   clippy_command="affected-clippy-rbe"
+  build_command="affected-build"
   if [[ "${test_command}" == "owned-fast-test" ]]; then
     test_command="affected-fast-test"
   elif [[ "${test_command}" == "owned-fast-test-local" ]]; then
@@ -120,12 +122,13 @@ else
   selector_mode_args+=(--affected)
 fi
 
-test_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --test "${paths[@]}")"
+test_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --test --empty-if-no-labels "${paths[@]}")"
+build_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --build "${paths[@]}")"
 clippy_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --clippy "${paths[@]}")"
 
 start_seconds="$(date +%s)"
 
-if [[ "${test_command}" != *-local && "${test_targets}" == "${clippy_targets}" ]]; then
+if [[ "${test_command}" != *-local && -n "${test_targets}" && "${test_targets}" == "${clippy_targets}" ]]; then
   (
     set +e
     run_lane combined "${test_command}" "${combined_log}" \
@@ -153,12 +156,49 @@ if [[ "${test_command}" != *-local && "${test_targets}" == "${clippy_targets}" ]
   exit 0
 fi
 
-(
-  set +e
-  run_lane test "${test_command}" "${test_log}" --jobs=64
-  echo "$?" >"${test_status_file}"
-) &
-test_pid="$!"
+if [[ -z "${test_targets}" ]]; then
+  if [[ "${build_targets}" == "${clippy_targets}" ]]; then
+    (
+      set +e
+      run_lane combined-build "${build_command}" "${combined_log}" \
+        --jobs=64 \
+        --color=no \
+        --curses=no \
+        --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect" \
+        --output_groups="+clippy_checks" \
+        --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      echo "$?" >"${combined_status_file}"
+    ) &
+    combined_pid="$!"
+
+    wait "${combined_pid}" || true
+
+    end_seconds="$(date +%s)"
+    combined_status="$(cat "${combined_status_file}" 2>/dev/null || echo 1)"
+
+    printf 'BuildBuddy changed gate (%s, build+clippy) wall: %ss\n' "${mode}" "$((end_seconds - start_seconds))"
+    summarize_log "${build_command}+${clippy_command}" "${combined_status}" "${combined_log}"
+
+    if [[ "${combined_status}" != "0" ]]; then
+      exit 1
+    fi
+    exit 0
+  fi
+
+  (
+    set +e
+    run_lane build "${build_command}" "${test_log}" --jobs=64 --color=no --curses=no
+    echo "$?" >"${test_status_file}"
+  ) &
+  test_pid="$!"
+else
+  (
+    set +e
+    run_lane test "${test_command}" "${test_log}" --jobs=64
+    echo "$?" >"${test_status_file}"
+  ) &
+  test_pid="$!"
+fi
 
 (
   set +e
@@ -175,7 +215,11 @@ test_status="$(cat "${test_status_file}" 2>/dev/null || echo 1)"
 clippy_status="$(cat "${clippy_status_file}" 2>/dev/null || echo 1)"
 
 printf 'BuildBuddy changed gate (%s) wall: %ss\n' "${mode}" "$((end_seconds - start_seconds))"
-summarize_log "${test_command}" "${test_status}" "${test_log}"
+if [[ -z "${test_targets}" ]]; then
+  summarize_log "${build_command}" "${test_status}" "${test_log}"
+else
+  summarize_log "${test_command}" "${test_status}" "${test_log}"
+fi
 summarize_log "${clippy_command}" "${clippy_status}" "${clippy_log}"
 
 if [[ "${test_status}" != "0" || "${clippy_status}" != "0" ]]; then

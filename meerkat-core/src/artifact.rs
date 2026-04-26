@@ -172,6 +172,7 @@ pub struct ArtifactRecord {
     pub metadata: SurfaceMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub created_at: SystemTime,
     #[serde(default)]
     pub provenance: BTreeMap<String, String>,

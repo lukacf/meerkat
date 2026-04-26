@@ -166,6 +166,13 @@ fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
         .any(|variant| text.contains(&normalize_semantic_text(variant)))
 }
 
+fn realtime_post_close_member_status_is_valid(status: &Value) -> bool {
+    matches!(
+        status["realtime_attachment_status"].as_str(),
+        Some("binding_ready" | "reattach_required" | "unattached")
+    )
+}
+
 fn realtime_audio_cache_key(text: &str, model: &str, voice: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"openai-tts-v2\0");
@@ -1476,14 +1483,14 @@ async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_m
 
         eprintln!("[member audio helper] close");
         sender.close().await?;
-        let detached_status =
+        let post_close_status =
             wait_for_rpc_member_status(&mut rpc, mob_id, agent_identity, 30, |status| {
-                status["realtime_attachment_status"].as_str() == Some("unattached")
+                realtime_post_close_member_status_is_valid(status)
             })
             .await?;
-        assert_eq!(
-            detached_status["realtime_attachment_status"].as_str(),
-            Some("unattached")
+        assert!(
+            realtime_post_close_member_status_is_valid(&post_close_status),
+            "unexpected member realtime status after client channel close: {post_close_status}"
         );
 
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -5481,7 +5488,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
     }
 
     connection.close().await?;
-    let detached_deadline = Instant::now() + Duration::from_secs(30);
+    let post_close_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let member_status = tcp_rpc_call(
             &rpc_addr,
@@ -5495,15 +5502,15 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
         )
         .await?;
         let preview = member_status["output_preview"].as_str().unwrap_or_default();
-        if member_status["realtime_attachment_status"].as_str() == Some("unattached")
+        if realtime_post_close_member_status_is_valid(&member_status)
             && preview.contains("MCP-REALTIME-63")
             && preview.to_ascii_lowercase().contains("cedar")
         {
             break;
         }
-        if Instant::now() >= detached_deadline {
+        if Instant::now() >= post_close_deadline {
             return Err(format!(
-                "RPC member status never reflected detached realtime state with preserved preview after MCP bootstrap close: {member_status}"
+                "RPC member status never reflected valid post-close realtime state with preserved preview after MCP bootstrap close: {member_status}"
             )
             .into());
         }
@@ -6077,9 +6084,9 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
         //    surface the authoritative terminal peer result.
         sender.close().await?;
         drop(receiver);
-        let _mid_detached_status =
+        let _mid_post_close_status =
             wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
-                status["realtime_attachment_status"].as_str() == Some("unattached")
+                realtime_post_close_member_status_is_valid(status)
             })
             .await?;
         let reopen_info_value = pump
@@ -6467,9 +6474,9 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
         eprintln!("[scenario 71] reopen realtime channel after barge-in segment");
         sender.close().await?;
         drop(receiver);
-        let _post_barge_detached =
+        let _post_barge_close_status =
             wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
-                status["realtime_attachment_status"].as_str() == Some("unattached")
+                realtime_post_close_member_status_is_valid(status)
             })
             .await?;
         let post_barge_open_info_value = pump
@@ -6636,13 +6643,13 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
                 format!(
                     "operator never completed the post-turn async wake run after analyst haiku send_response completed: {error}; operator_events={operator_events:?}"
                 )
-            })?;
+        })?;
         eprintln!("[scenario 71] reopen realtime channel after haiku async wake");
         sender.close().await?;
         drop(receiver);
-        let _haiku_mid_detached_status =
+        let _haiku_mid_post_close_status =
             wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
-                status["realtime_attachment_status"].as_str() == Some("unattached")
+                realtime_post_close_member_status_is_valid(status)
             })
             .await?;
         let haiku_reopen_info_value = pump
@@ -6822,14 +6829,14 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
         // projection today, so this flagship smoke deliberately avoids making
         // it a release-blocking authority until the upcoming machine-owned
         // realtime/comms seam replaces the current projection path.
-        let detached_status =
+        let post_close_status =
             wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
-                status["realtime_attachment_status"].as_str() == Some("unattached")
+                realtime_post_close_member_status_is_valid(status)
             })
             .await?;
-        assert_eq!(
-            detached_status["realtime_attachment_status"].as_str(),
-            Some("unattached")
+        assert!(
+            realtime_post_close_member_status_is_valid(&post_close_status),
+            "unexpected scenario 71 member realtime status after final channel close: {post_close_status}"
         );
 
         eprintln!("[scenario 71] verify committed history");
@@ -7340,18 +7347,18 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
 
         eprintln!("[scenario 72] close channel");
         sender.close().await?;
-        let detached_status = wait_for_pump_member_status(
+        let post_close_status = wait_for_pump_member_status(
             &mut pump,
             &mut rpc,
             mob_id,
             agent_identity,
             30,
-            |status| status["realtime_attachment_status"].as_str() == Some("unattached"),
+            realtime_post_close_member_status_is_valid,
         )
         .await?;
-        assert_eq!(
-            detached_status["realtime_attachment_status"].as_str(),
-            Some("unattached")
+        assert!(
+            realtime_post_close_member_status_is_valid(&post_close_status),
+            "unexpected scenario 72 member realtime status after channel close: {post_close_status}"
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }

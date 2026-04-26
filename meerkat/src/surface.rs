@@ -51,7 +51,9 @@ use meerkat_contracts::{
     RuntimeHostEndpointProjection, RuntimeHostFeatureFlags, RuntimeHostHealth,
     RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo, RuntimeHostRealmProjection,
 };
-use meerkat_core::{AgentEvent, Config, ConfigStoreMetadata, PeerMeta};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ConfigStoreMetadata;
+use meerkat_core::{AgentEvent, Config, PeerMeta};
 
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -95,6 +97,33 @@ pub struct RuntimeHostSurfaceOptions {
     pub rest_paths: Vec<String>,
 }
 
+/// Config-store facts needed for runtime host projection.
+///
+/// This keeps the public surface helper independent of native-only config-store
+/// types so browser/WASM builds can still construct host projections.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeHostMetadataProjection {
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend: Option<String>,
+    pub state_root: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<&ConfigStoreMetadata> for RuntimeHostMetadataProjection {
+    fn from(metadata: &ConfigStoreMetadata) -> Self {
+        Self {
+            realm_id: metadata.realm_id.clone(),
+            instance_id: metadata.instance_id.clone(),
+            backend: metadata.backend.clone(),
+            state_root: metadata
+                .resolved_paths
+                .as_ref()
+                .map(|paths| paths.root.clone()),
+        }
+    }
+}
+
 impl RuntimeHostSurfaceOptions {
     /// Build a process-local default for callers that do not own a richer
     /// transport context.
@@ -122,7 +151,9 @@ impl RuntimeHostSurfaceOptions {
     }
 }
 
-fn runtime_host_id(metadata: Option<&ConfigStoreMetadata>) -> (String, RuntimeHostIdScope) {
+fn runtime_host_id(
+    metadata: Option<&RuntimeHostMetadataProjection>,
+) -> (String, RuntimeHostIdScope) {
     if let Some(metadata) = metadata
         && let (Some(realm_id), Some(instance_id)) =
             (metadata.realm_id.as_ref(), metadata.instance_id.as_ref())
@@ -150,7 +181,7 @@ fn runtime_host_process_id() -> u32 {
 }
 
 fn runtime_host_realm_projection(
-    metadata: Option<&ConfigStoreMetadata>,
+    metadata: Option<&RuntimeHostMetadataProjection>,
     context_root: Option<std::path::PathBuf>,
 ) -> RuntimeHostRealmProjection {
     let mut projection = RuntimeHostRealmProjection::default();
@@ -158,10 +189,7 @@ fn runtime_host_realm_projection(
         projection.realm_id = metadata.realm_id.clone();
         projection.instance_id = metadata.instance_id.clone();
         projection.backend = metadata.backend.clone();
-        projection.state_root = metadata
-            .resolved_paths
-            .as_ref()
-            .map(|paths| paths.root.clone());
+        projection.state_root = metadata.state_root.clone();
     }
     projection.context_root = context_root.map(|path| path.display().to_string());
     projection
@@ -210,7 +238,7 @@ pub fn build_runtime_host_health() -> RuntimeHostHealth {
 /// metadata and surface options.
 pub fn build_runtime_host_info(
     options: &RuntimeHostSurfaceOptions,
-    metadata: Option<&ConfigStoreMetadata>,
+    metadata: Option<&RuntimeHostMetadataProjection>,
     context_root: Option<std::path::PathBuf>,
 ) -> RuntimeHostInfo {
     let (host_id, host_id_scope) = runtime_host_id(metadata);

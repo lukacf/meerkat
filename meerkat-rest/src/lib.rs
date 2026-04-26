@@ -2390,9 +2390,13 @@ async fn get_runtime_host_info(
     State(state): State<AppState>,
 ) -> Json<meerkat_contracts::RuntimeHostInfo> {
     let options = rest_runtime_host_surface_options(&state);
+    let metadata = state.config_store.metadata();
+    let metadata = metadata
+        .as_ref()
+        .map(meerkat::surface::RuntimeHostMetadataProjection::from);
     Json(meerkat::surface::build_runtime_host_info(
         &options,
-        state.config_store.metadata().as_ref(),
+        metadata.as_ref(),
         state.context_root.clone(),
     ))
 }

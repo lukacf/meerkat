@@ -139,6 +139,45 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         beta_headers: &[],
         call_timeout_secs: Some(600),
     },
+    // GPT-5.4 mini
+    //
+    // Sources:
+    //   - Model page:
+    //     https://developers.openai.com/api/docs/models/gpt-5.4-mini
+    //     (model type reasoning; current snapshot gpt-5.4-mini-2026-03-17)
+    //   - Changelog:
+    //     https://developers.openai.com/api/docs/changelog
+    //     (Chat Completions + Responses API; supports tool search,
+    //      built-in computer use, and compaction)
+    ModelCapabilities {
+        id: "gpt-5.4-mini",
+        provider: "openai",
+        display_name: "GPT-5.4 Mini",
+        tier: ModelTier::Supported,
+        model_family: "gpt-5",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: false,
+        inline_video: false,
+        realtime: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT5_RECENT_EFFORT,
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: true,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
     // GPT-5.3 Codex
     //
     // Sources:

@@ -60,11 +60,11 @@ pub fn handle_info(
         runtime.approval_service().is_persistent(),
     );
     let (context_root, _) = runtime.skill_identity_roots();
-    let info = meerkat::surface::build_runtime_host_info(
-        &options,
-        config_store.metadata().as_ref(),
-        context_root,
-    );
+    let metadata = config_store.metadata();
+    let metadata = metadata
+        .as_ref()
+        .map(meerkat::surface::RuntimeHostMetadataProjection::from);
+    let info = meerkat::surface::build_runtime_host_info(&options, metadata.as_ref(), context_root);
     RpcResponse::success(id, &info)
 }
 

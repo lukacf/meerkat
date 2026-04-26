@@ -2384,7 +2384,15 @@ api_style = "chat_completions"
             Some(Provider::Anthropic)
         );
         assert_eq!(
+            Provider::infer_from_model("claude-haiku-4-5-20251001"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
             Provider::infer_from_model("gpt-5.4"),
+            Some(Provider::OpenAI)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gpt-5.4-mini"),
             Some(Provider::OpenAI)
         );
         assert_eq!(

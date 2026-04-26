@@ -409,11 +409,7 @@ impl ToolScope {
     pub fn visible_tools(&self) -> Arc<[Arc<ToolDef>]> {
         match self.visible_tools_result() {
             Ok(tools) => tools,
-            Err(_) => self
-                .state
-                .read()
-                .map(|state| Arc::clone(&state.base_tools))
-                .unwrap_or_else(|_| Vec::<Arc<ToolDef>>::new().into()),
+            Err(_) => Vec::<Arc<ToolDef>>::new().into(),
         }
     }
 

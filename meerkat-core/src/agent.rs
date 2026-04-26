@@ -42,12 +42,12 @@ use crate::turn_execution_authority::{
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
-    ToolDef, Usage,
+    ToolDef, ToolName, ToolNameSet, Usage,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub use builder::AgentBuilder;
@@ -401,14 +401,21 @@ pub enum OpsLifecycleBindError {
 /// exposed via tools() and dispatch() returns AccessDenied for filtered tools.
 pub struct FilteredToolDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
-    allowed_tools: HashSet<String>,
+    allowed_tools: ToolNameSet,
     /// Pre-computed filtered tool list for non-exact dispatchers.
     filtered_tools: Arc<[Arc<ToolDef>]>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
-    pub fn new(inner: Arc<T>, allowed_tools: Vec<String>) -> Self {
-        let allowed_set: HashSet<String> = allowed_tools.into_iter().collect();
+    pub fn new<I, N>(inner: Arc<T>, allowed_tools: I) -> Self
+    where
+        I: IntoIterator<Item = N>,
+        N: Into<ToolName>,
+    {
+        let allowed_set: ToolNameSet = allowed_tools
+            .into_iter()
+            .map(Into::into)
+            .collect::<ToolNameSet>();
 
         let filtered: Vec<Arc<ToolDef>> = if inner.tool_catalog_capabilities().exact_catalog {
             inner

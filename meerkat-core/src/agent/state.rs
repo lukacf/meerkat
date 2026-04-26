@@ -1083,33 +1083,28 @@ where
                             ),
                         };
                         let previous_visibility_state = self.tool_scope.visibility_state().ok();
-                        let visibility_state = match self.tool_scope.promote_staged_visibility() {
-                            Ok(state) => state,
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "failed to promote staged tool visibility state at boundary"
-                                );
-                                self.tool_scope.visibility_state().unwrap_or_default()
+                        let apply_result = match self.tool_scope.promote_staged_visibility() {
+                            Ok(visibility_state) => {
+                                if let Some(previous_visibility_state) =
+                                    previous_visibility_state.as_ref()
+                                {
+                                    self.tool_scope.apply_staged_projection_with_previous(
+                                        dispatcher_tools.clone(),
+                                        control_tool_names.into_iter().collect(),
+                                        deferred_tool_names.into_iter().collect(),
+                                        previous_visibility_state,
+                                        &visibility_state,
+                                    )
+                                } else {
+                                    self.tool_scope.apply_staged_projection(
+                                        dispatcher_tools.clone(),
+                                        control_tool_names,
+                                        deferred_tool_names,
+                                        &visibility_state,
+                                    )
+                                }
                             }
-                        };
-                        let apply_result = if let Some(previous_visibility_state) =
-                            previous_visibility_state.as_ref()
-                        {
-                            self.tool_scope.apply_staged_projection_with_previous(
-                                dispatcher_tools.clone(),
-                                control_tool_names.into_iter().collect(),
-                                deferred_tool_names.into_iter().collect(),
-                                previous_visibility_state,
-                                &visibility_state,
-                            )
-                        } else {
-                            self.tool_scope.apply_staged_projection(
-                                dispatcher_tools.clone(),
-                                control_tool_names,
-                                deferred_tool_names,
-                                &visibility_state,
-                            )
+                            Err(err) => Err(err),
                         };
                         match apply_result {
                             Ok(applied) => {
@@ -1247,10 +1242,10 @@ where
                                 applied.tools
                             }
                             Err(err) => {
-                                let status = format!("warning_fallback_all({err})");
+                                let status = format!("warning_failed_closed({err})");
                                 tracing::warn!(
                                     error = %err,
-                                    "tool scope boundary apply failed; falling back to full dispatcher tools"
+                                    "tool scope boundary apply failed; closing visible tool set for this boundary"
                                 );
                                 emit_event!(AgentEvent::ToolConfigChanged {
                                     payload: ToolConfigChangedPayload {
@@ -1266,10 +1261,10 @@ where
                                 self.session.push(synthetic_notice_message(
                                     SystemNoticeKind::ToolScopeWarning,
                                     format!(
-                                        "Tool scope apply failed ({err}); falling back to full tool set."
+                                        "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
                                     ),
                                 ));
-                                dispatcher_tools
+                                Vec::<Arc<crate::types::ToolDef>>::new().into()
                             }
                         }
                     };
@@ -4209,7 +4204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_loop_fails_safe_to_full_tools_with_warning_event_and_notice() {
+    async fn run_loop_fails_closed_on_tool_scope_boundary_failure() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
@@ -4228,22 +4223,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.text, "done");
-        assert_eq!(
-            client.seen_tools(),
-            vec![vec!["visible".to_string(), "secret".to_string()]]
-        );
+        assert_eq!(client.seen_tools(), vec![Vec::<String>::new()]);
 
         let mut saw_warning_event = false;
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
-                && payload.status.contains("warning_fallback_all")
+                && payload.status.contains("warning_failed_closed")
             {
                 saw_warning_event = true;
             }
         }
         assert!(
             saw_warning_event,
-            "expected warning ToolConfigChanged event during fail-safe fallback"
+            "expected warning ToolConfigChanged event during fail-closed boundary handling"
         );
 
         let notices: Vec<String> = agent

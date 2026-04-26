@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-      - ci/**
-      - feat/**
-      - feature/**
-      - codex/**
   pull_request:
   workflow_call:
     inputs:

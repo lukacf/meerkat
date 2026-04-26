@@ -219,7 +219,16 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
 }
 
 fn run_xtask(root: &Path, subcommand: &str, selection: &Selection) -> Result<std::process::Output> {
-    let mut cmd = Command::new("cargo");
+    let workspace = workspace_root()?;
+    let repo_cargo = workspace.join("scripts/repo-cargo");
+    let cargo = if repo_cargo.exists() {
+        repo_cargo
+    } else {
+        std::env::var_os("CARGO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("cargo"))
+    };
+    let mut cmd = Command::new(cargo);
     cmd.arg("run")
         .arg("-p")
         .arg("xtask")
@@ -228,7 +237,7 @@ fn run_xtask(root: &Path, subcommand: &str, selection: &Selection) -> Result<std
         .arg("--")
         .arg(subcommand)
         .env("MEERKAT_MACHINE_ROOT", root)
-        .current_dir(workspace_root()?);
+        .current_dir(&workspace);
 
     for machine in &selection.machines {
         cmd.arg("--machine").arg(&machine.slug);
@@ -239,7 +248,7 @@ fn run_xtask(root: &Path, subcommand: &str, selection: &Selection) -> Result<std
 
     let output = cmd.output().with_context(|| {
         format!(
-            "run cargo xtask {subcommand} for repo root override {}",
+            "run repo-cargo xtask {subcommand} for repo root override {}",
             root.display()
         )
     })?;

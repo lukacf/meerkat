@@ -276,6 +276,7 @@ profile so `cargo fast`, `cargo rct`, `cargo int`, and
 | BuildBuddy changed gate for required-feature `cli_mobpack_live_smoke` edit before Bazel required-feature test generation | `25s` wall, package build + clippy only, no unrelated fast tests |
 | BuildBuddy changed gate for required-feature `cli_mobpack_live_smoke` edit after Bazel required-feature test generation | `130s` first touch after graph change, `21-23s` warm; exact test target build + clippy, no live test execution |
 | BuildBuddy changed gate for required-feature `machines_contracts` edit with optional external deps | `39s` first successful exact build + clippy, `22s` warm |
+| BuildBuddy fast lane after non-fast tag hardening | `32.387s` first run after graph/filter changes; `117` fast targets pass, `7` executed |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache
 materialization cost. Once warmed, the wall-clock floor is mostly the `bb`/Bazel

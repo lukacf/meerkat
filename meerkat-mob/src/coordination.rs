@@ -847,7 +847,7 @@ mod tests {
         assert!(matches!(
             board.record_work_intent(draft, now()),
             Err(MobCoordinationError::MismatchedMobRef { expected, actual })
-                if expected == MobId::from("mob-k") && actual == MobId::from("other-mob")
+                if expected.as_str() == "mob-k" && actual.as_str() == "other-mob"
         ));
     }
 

@@ -2022,7 +2022,7 @@ pub async fn handle_list_members_matching(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_mob::{AgentIdentity, AgentRuntimeId, FenceToken};

@@ -83,6 +83,7 @@ pub fn validate_tcp_bind_policy(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

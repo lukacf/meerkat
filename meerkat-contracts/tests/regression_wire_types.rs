@@ -351,6 +351,7 @@ fn agent_event_all_variants_roundtrip() {
             session_id,
             error_class: AgentErrorClass::Internal,
             error: "boom".to_string(),
+            error_report: None,
         },
         AgentEvent::HookStarted {
             hook_id: "h1".to_string(),
@@ -448,6 +449,7 @@ fn agent_event_all_variants_roundtrip() {
             max_attempts: 3,
             error: "rate limited".to_string(),
             delay_ms: 1000,
+            retry: None,
         },
         AgentEvent::SkillsResolved {
             skills: vec![meerkat_core::skills::SkillKey::builtin(
@@ -570,6 +572,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             session_id: SessionId::new(),
             error_class: AgentErrorClass::Internal,
             error: "nope".to_string(),
+            error_report: None,
         },
         AgentEvent::HookStarted {
             hook_id: "hook-1".to_string(),
@@ -682,6 +685,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             max_attempts: 2,
             error: "retry".to_string(),
             delay_ms: 100,
+            retry: None,
         },
         AgentEvent::SkillsResolved {
             skills: vec![],

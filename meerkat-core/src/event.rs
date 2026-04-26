@@ -4,6 +4,7 @@
 
 use crate::error::AgentError;
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::retry::LlmRetrySchedule;
 use crate::time_compat::SystemTime;
 use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
@@ -490,6 +491,8 @@ pub enum AgentEvent {
         max_attempts: u32,
         error: String,
         delay_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<LlmRetrySchedule>,
     },
 
     // === Skill Events ===
@@ -709,6 +712,7 @@ pub fn format_verbose_event_with_config(
             max_attempts,
             error,
             delay_ms,
+            ..
         } => Some(format!(
             "  ⟳ Retry {attempt}/{max_attempts}: {error} (waiting {delay_ms}ms)"
         )),
@@ -782,6 +786,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
 
     #[test]
     fn test_agent_event_json_schema() {
@@ -820,6 +825,7 @@ mod tests {
                 max_attempts: 3,
                 error: "Rate limited".to_string(),
                 delay_ms: 1000,
+                retry: None,
             },
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
@@ -902,6 +908,40 @@ mod tests {
             let json2 = serde_json::to_value(&roundtrip).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn retry_event_carries_typed_schedule() {
+        let schedule = LlmRetrySchedule {
+            failure: LlmRetryFailure {
+                provider: "test".to_string(),
+                kind: LlmRetryFailureKind::RateLimited,
+                retry_after_ms: Some(30_000),
+                duration_ms: None,
+                message: "rate limited".to_string(),
+            },
+            plan: LlmRetryPlan {
+                attempt: 1,
+                max_retries: 3,
+                computed_delay_ms: 500,
+                selected_delay_ms: 30_000,
+                retry_after_hint_ms: Some(30_000),
+                rate_limit_floor_applied: true,
+                budget_capped: false,
+            },
+        };
+        let event = AgentEvent::Retrying {
+            attempt: schedule.plan.attempt,
+            max_attempts: schedule.plan.max_retries,
+            error: schedule.failure.message.clone(),
+            delay_ms: schedule.plan.selected_delay_ms,
+            retry: Some(schedule),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["retry"]["failure"]["kind"], "rate_limited");
+        assert_eq!(value["retry"]["plan"]["attempt"], 1);
+        assert_eq!(value["retry"]["plan"]["selected_delay_ms"], 30_000);
     }
 
     #[test]
@@ -1034,6 +1074,7 @@ mod tests {
                 max_attempts: 2,
                 error: "retry".to_string(),
                 delay_ms: 100,
+                retry: None,
             },
             AgentEvent::SkillsResolved {
                 skills: vec![],

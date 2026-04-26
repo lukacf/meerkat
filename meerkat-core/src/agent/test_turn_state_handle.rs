@@ -35,6 +35,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
 use crate::ops::OperationId;
+use crate::retry::LlmRetrySchedule;
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionInput, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
 };
@@ -62,6 +63,9 @@ struct LocalFields {
     terminal_outcome: TurnTerminalOutcome,
     extraction_attempts: u32,
     max_extraction_retries: u32,
+    llm_retry_attempt: u32,
+    llm_retry_max_retries: u32,
+    llm_retry_selected_delay_ms: u64,
 }
 
 impl LocalFields {
@@ -82,6 +86,9 @@ impl LocalFields {
             terminal_outcome: TurnTerminalOutcome::None,
             extraction_attempts: 0,
             max_extraction_retries: 0,
+            llm_retry_attempt: 0,
+            llm_retry_max_retries: 0,
+            llm_retry_selected_delay_ms: 0,
         }
     }
 
@@ -315,10 +322,16 @@ impl LocalState {
                     Failed
                 }
             }
-            (CallingLlm | WaitingForOps | DrainingBoundary, RecoverableFailure { run_id }) => {
+            (
+                CallingLlm | WaitingForOps | DrainingBoundary,
+                RecoverableFailure { run_id, retry },
+            ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
                 }
+                fields.llm_retry_attempt = retry.plan.attempt;
+                fields.llm_retry_max_retries = retry.plan.max_retries;
+                fields.llm_retry_selected_delay_ms = retry.plan.selected_delay_ms;
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_ids.clear();
                     fields.barrier_operation_ids.clear();
@@ -327,8 +340,14 @@ impl LocalState {
                 }
                 ErrorRecovery
             }
-            (ErrorRecovery, RetryRequested { run_id }) => {
-                if !self.guard_run_matches(run_id) {
+            (
+                ErrorRecovery,
+                RetryRequested {
+                    run_id,
+                    retry_attempt,
+                },
+            ) => {
+                if !self.guard_run_matches(run_id) || *retry_attempt != fields.llm_retry_attempt {
                     return Err(invalid(phase, &input));
                 }
                 CallingLlm
@@ -766,10 +785,10 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
     }
 
-    fn recoverable_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "recoverable_failure")?;
-        guard.apply(TurnExecutionInput::RecoverableFailure { run_id })
+        guard.apply(TurnExecutionInput::RecoverableFailure { run_id, retry })
     }
 
     fn fatal_failure(&self, _error: String) -> Result<(), DslTransitionError> {
@@ -778,10 +797,13 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::FatalFailure { run_id })
     }
 
-    fn retry_requested(&self) -> Result<(), DslTransitionError> {
+    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "retry_requested")?;
-        guard.apply(TurnExecutionInput::RetryRequested { run_id })
+        guard.apply(TurnExecutionInput::RetryRequested {
+            run_id,
+            retry_attempt,
+        })
     }
 
     fn cancel_now(&self) -> Result<(), DslTransitionError> {
@@ -891,6 +913,9 @@ impl TurnStateHandle for TestTurnStateHandle {
             },
             extraction_attempts: u64::from(fields.extraction_attempts),
             max_extraction_retries: u64::from(fields.max_extraction_retries),
+            llm_retry_attempt: fields.llm_retry_attempt,
+            llm_retry_max_retries: fields.llm_retry_max_retries,
+            llm_retry_selected_delay_ms: fields.llm_retry_selected_delay_ms,
         }
     }
 }

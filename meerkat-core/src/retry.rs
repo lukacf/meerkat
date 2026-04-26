@@ -1,9 +1,114 @@
-//! Retry policy for transient errors
+//! Retry policy for transient errors.
 //!
-//! Implements exponential backoff with jitter for LLM API calls.
+//! Implements exponential backoff with jitter for LLM API calls and owns the
+//! typed retry plan admitted by the turn authority.
 
+use crate::error::{AgentError, LlmFailureReason};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+/// Closed classifier for recoverable LLM failures.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmRetryFailureKind {
+    RateLimited,
+    NetworkTimeout,
+    CallTimeout,
+    RetryableProviderError,
+}
+
+/// Typed recoverable LLM failure carried through retry authority.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmRetryFailure {
+    pub provider: String,
+    pub kind: LlmRetryFailureKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Human-readable diagnostic. The `kind` and numeric fields are the
+    /// authority payload; this string is a display projection.
+    pub message: String,
+}
+
+impl LlmRetryFailure {
+    pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        match error {
+            AgentError::Llm {
+                provider,
+                reason,
+                message,
+            } => match reason {
+                LlmFailureReason::RateLimited { retry_after } => Some(Self {
+                    provider: (*provider).to_string(),
+                    kind: LlmRetryFailureKind::RateLimited,
+                    retry_after_ms: retry_after.map(duration_millis_u64),
+                    duration_ms: None,
+                    message: message.clone(),
+                }),
+                LlmFailureReason::NetworkTimeout { duration_ms } => Some(Self {
+                    provider: (*provider).to_string(),
+                    kind: LlmRetryFailureKind::NetworkTimeout,
+                    retry_after_ms: None,
+                    duration_ms: Some(*duration_ms),
+                    message: message.clone(),
+                }),
+                LlmFailureReason::CallTimeout { duration_ms } => Some(Self {
+                    provider: (*provider).to_string(),
+                    kind: LlmRetryFailureKind::CallTimeout,
+                    retry_after_ms: None,
+                    duration_ms: Some(*duration_ms),
+                    message: message.clone(),
+                }),
+                LlmFailureReason::ProviderError(value)
+                    if value.get("retryable").and_then(serde_json::Value::as_bool)
+                        == Some(true) =>
+                {
+                    Some(Self {
+                        provider: (*provider).to_string(),
+                        kind: LlmRetryFailureKind::RetryableProviderError,
+                        retry_after_ms: None,
+                        duration_ms: None,
+                        message: message.clone(),
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Typed retry delay plan selected for a recoverable LLM failure.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmRetryPlan {
+    /// One-based retry attempt being scheduled.
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub computed_delay_ms: u64,
+    pub selected_delay_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_hint_ms: Option<u64>,
+    pub rate_limit_floor_applied: bool,
+    pub budget_capped: bool,
+}
+
+impl LlmRetryPlan {
+    pub fn selected_delay(&self) -> Duration {
+        Duration::from_millis(self.selected_delay_ms)
+    }
+}
+
+/// Recoverable LLM retry lifecycle payload accepted by turn authority.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmRetrySchedule {
+    pub failure: LlmRetryFailure,
+    pub plan: LlmRetryPlan,
+}
 
 /// Configuration for retry behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +212,66 @@ impl RetryPolicy {
     pub fn should_retry(&self, attempt: u32) -> bool {
         attempt < self.max_retries
     }
+
+    /// Build the typed retry schedule for a recoverable LLM failure.
+    ///
+    /// `attempt_index` is zero-based for compatibility with the existing
+    /// agent loop; the returned plan carries the one-based attempt number
+    /// that users and machine state observe.
+    pub fn schedule_retry(
+        &self,
+        error: &AgentError,
+        attempt_index: u32,
+        remaining_budget: Option<Duration>,
+    ) -> Option<LlmRetrySchedule> {
+        if !self.should_retry(attempt_index) {
+            return None;
+        }
+
+        let failure = LlmRetryFailure::from_agent_error(error)?;
+        let attempt = attempt_index.saturating_add(1);
+        let hint = error.retry_after_hint();
+        let computed = self.delay_for_attempt(attempt);
+        let (selected, rate_limit_floor_applied) =
+            select_retry_delay(hint, computed, error.is_rate_limited());
+        let capped = match remaining_budget {
+            Some(remaining) => selected.min(remaining),
+            None => selected,
+        };
+
+        Some(LlmRetrySchedule {
+            failure,
+            plan: LlmRetryPlan {
+                attempt,
+                max_retries: self.max_retries,
+                computed_delay_ms: duration_millis_u64(computed),
+                selected_delay_ms: duration_millis_u64(capped),
+                retry_after_hint_ms: hint.map(duration_millis_u64),
+                rate_limit_floor_applied,
+                budget_capped: capped < selected,
+            },
+        })
+    }
+}
+
+/// Select retry delay using server hint, policy backoff, and rate-limit floor.
+pub fn select_retry_delay(
+    hint: Option<Duration>,
+    computed: Duration,
+    is_rate_limited: bool,
+) -> (Duration, bool) {
+    match hint {
+        Some(h) if h > computed => (h, false),
+        _ if is_rate_limited => {
+            let floor = Duration::from_secs(30);
+            (computed.max(floor), computed < floor)
+        }
+        _ => (computed, false),
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Simple pseudo-random jitter (0.0 to 1.0)
@@ -201,6 +366,42 @@ mod tests {
         assert!(policy.should_retry(2));
         assert!(!policy.should_retry(3));
         assert!(!policy.should_retry(4));
+    }
+
+    #[test]
+    fn retry_schedule_carries_typed_failure_and_delay_plan() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::RateLimited {
+                retry_after: Some(Duration::from_secs(60)),
+            },
+            message: "rate limited".to_string(),
+        };
+
+        let schedule = policy
+            .schedule_retry(&error, 0, Some(Duration::from_secs(45)))
+            .expect("rate limit should be retryable");
+
+        assert_eq!(schedule.failure.kind, LlmRetryFailureKind::RateLimited);
+        assert_eq!(schedule.failure.retry_after_ms, Some(60_000));
+        assert_eq!(schedule.plan.attempt, 1);
+        assert_eq!(schedule.plan.max_retries, 3);
+        assert_eq!(schedule.plan.retry_after_hint_ms, Some(60_000));
+        assert_eq!(schedule.plan.selected_delay_ms, 45_000);
+        assert!(schedule.plan.budget_capped);
+    }
+
+    #[test]
+    fn retry_schedule_rejects_non_retryable_errors() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::AuthError,
+            message: "auth".to_string(),
+        };
+
+        assert!(policy.schedule_retry(&error, 0, None).is_none());
     }
 
     #[test]

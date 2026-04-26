@@ -30,6 +30,21 @@
         ],
         "type": "string"
       },
+      "AgentErrorReport": {
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/AgentErrorClass"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "class",
+          "message"
+        ],
+        "type": "object"
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -375,6 +390,118 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LlmRetryFailure": {
+        "description": "Typed recoverable LLM failure carried through retry authority.",
+        "properties": {
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/$defs/LlmRetryFailureKind"
+          },
+          "message": {
+            "description": "Human-readable diagnostic. The `kind` and numeric fields are the\nauthority payload; this string is a display projection.",
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
+      "LlmRetryFailureKind": {
+        "description": "Closed classifier for recoverable LLM failures.",
+        "enum": [
+          "rate_limited",
+          "network_timeout",
+          "call_timeout",
+          "retryable_provider_error"
+        ],
+        "type": "string"
+      },
+      "LlmRetryPlan": {
+        "description": "Typed retry delay plan selected for a recoverable LLM failure.",
+        "properties": {
+          "attempt": {
+            "description": "One-based retry attempt being scheduled.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "budget_capped": {
+            "type": "boolean"
+          },
+          "computed_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate_limit_floor_applied": {
+            "type": "boolean"
+          },
+          "retry_after_hint_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "selected_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempt",
+          "max_retries",
+          "computed_delay_ms",
+          "selected_delay_ms",
+          "rate_limit_floor_applied",
+          "budget_capped"
+        ],
+        "type": "object"
+      },
+      "LlmRetrySchedule": {
+        "description": "Recoverable LLM retry lifecycle payload accepted by turn authority.",
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/LlmRetryFailure"
+          },
+          "plan": {
+            "$ref": "#/$defs/LlmRetryPlan"
+          }
+        },
+        "required": [
+          "failure",
+          "plan"
+        ],
+        "type": "object"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -601,6 +728,16 @@
           },
           "error_class": {
             "$ref": "#/$defs/AgentErrorClass"
+          },
+          "error_report": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentErrorReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -1155,6 +1292,16 @@
             "minimum": 0,
             "type": "integer"
           },
+          "retry": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LlmRetrySchedule"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "type": {
             "const": "retrying",
             "type": "string"
@@ -1378,6 +1525,21 @@
         ],
         "type": "string"
       },
+      "AgentErrorReport": {
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/AgentErrorClass"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "class",
+          "message"
+        ],
+        "type": "object"
+      },
       "AgentEvent": {
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
@@ -1435,6 +1597,16 @@
               },
               "error_class": {
                 "$ref": "#/$defs/AgentErrorClass"
+              },
+              "error_report": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentErrorReport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -1989,6 +2161,16 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "retry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LlmRetrySchedule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "retrying",
                 "type": "string"
@@ -2524,6 +2706,118 @@
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
+      },
+      "LlmRetryFailure": {
+        "description": "Typed recoverable LLM failure carried through retry authority.",
+        "properties": {
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/$defs/LlmRetryFailureKind"
+          },
+          "message": {
+            "description": "Human-readable diagnostic. The `kind` and numeric fields are the\nauthority payload; this string is a display projection.",
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
+      "LlmRetryFailureKind": {
+        "description": "Closed classifier for recoverable LLM failures.",
+        "enum": [
+          "rate_limited",
+          "network_timeout",
+          "call_timeout",
+          "retryable_provider_error"
+        ],
+        "type": "string"
+      },
+      "LlmRetryPlan": {
+        "description": "Typed retry delay plan selected for a recoverable LLM failure.",
+        "properties": {
+          "attempt": {
+            "description": "One-based retry attempt being scheduled.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "budget_capped": {
+            "type": "boolean"
+          },
+          "computed_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate_limit_floor_applied": {
+            "type": "boolean"
+          },
+          "retry_after_hint_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "selected_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempt",
+          "max_retries",
+          "computed_delay_ms",
+          "selected_delay_ms",
+          "rate_limit_floor_applied",
+          "budget_capped"
+        ],
+        "type": "object"
+      },
+      "LlmRetrySchedule": {
+        "description": "Recoverable LLM retry lifecycle payload accepted by turn authority.",
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/LlmRetryFailure"
+          },
+          "plan": {
+            "$ref": "#/$defs/LlmRetryPlan"
+          }
+        },
+        "required": [
+          "failure",
+          "plan"
+        ],
+        "type": "object"
       },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",

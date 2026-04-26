@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use meerkat_core::lifecycle::RunId;
+use meerkat_core::retry::LlmRetrySchedule;
 use meerkat_core::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
 
 use super::HandleDslAuthority;
@@ -223,10 +224,16 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn recoverable_failure(&self, error: String) -> Result<(), DslTransitionError> {
+    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RecoverableFailure { error },
+            mm_dsl::MeerkatMachineInput::RecoverableFailure {
+                failure_kind: retry.failure.kind.into(),
+                retry_attempt: u64::from(retry.plan.attempt),
+                max_retries: u64::from(retry.plan.max_retries),
+                selected_delay_ms: retry.plan.selected_delay_ms,
+                error: retry.failure.message,
+            },
             "TurnStateHandle::recoverable_failure",
         )
     }
@@ -239,10 +246,12 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn retry_requested(&self) -> Result<(), DslTransitionError> {
+    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RetryRequested,
+            mm_dsl::MeerkatMachineInput::RetryRequested {
+                retry_attempt: u64::from(retry_attempt),
+            },
             "TurnStateHandle::retry_requested",
         )
     }
@@ -378,6 +387,9 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             terminal_outcome: state.terminal_outcome.map(TurnTerminalOutcome::from),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
+            llm_retry_attempt: u32::try_from(state.llm_retry_attempt).unwrap_or(u32::MAX),
+            llm_retry_max_retries: u32::try_from(state.llm_retry_max_retries).unwrap_or(u32::MAX),
+            llm_retry_selected_delay_ms: state.llm_retry_selected_delay_ms,
         }
     }
 }
@@ -406,7 +418,31 @@ fn map_turn_phase(phase: mm_dsl::TurnPhase) -> TurnPhase {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::retry::{
+        LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule,
+    };
     use uuid::Uuid;
+
+    fn retry_schedule(attempt: u32) -> LlmRetrySchedule {
+        LlmRetrySchedule {
+            failure: LlmRetryFailure {
+                provider: "test".to_string(),
+                kind: LlmRetryFailureKind::RateLimited,
+                retry_after_ms: Some(1_000),
+                duration_ms: None,
+                message: "rate limited".to_string(),
+            },
+            plan: LlmRetryPlan {
+                attempt,
+                max_retries: 3,
+                computed_delay_ms: 500,
+                selected_delay_ms: 1_000,
+                retry_after_hint_ms: Some(1_000),
+                rate_limit_floor_applied: false,
+                budget_capped: false,
+            },
+        }
+    }
 
     #[test]
     fn snapshot_carries_active_run_id_for_runtime_backed_turns() {
@@ -455,5 +491,35 @@ mod tests {
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
         assert_eq!(snapshot.active_run_id, None);
+    }
+
+    #[test]
+    fn retry_schedule_is_recorded_and_attempt_guarded() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(9));
+
+        handle
+            .start_conversation_run(
+                run_id,
+                TurnPrimitiveKind::ConversationTurn,
+                "conversation".into(),
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied().unwrap();
+
+        handle.recoverable_failure(retry_schedule(2)).unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
+        assert_eq!(snapshot.llm_retry_attempt, 2);
+        assert_eq!(snapshot.llm_retry_max_retries, 3);
+        assert_eq!(snapshot.llm_retry_selected_delay_ms, 1_000);
+
+        assert!(handle.retry_requested(1).is_err());
+        handle.retry_requested(2).unwrap();
+        assert_eq!(handle.snapshot().turn_phase, TurnPhase::CallingLlm);
     }
 }

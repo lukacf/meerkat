@@ -30,6 +30,7 @@ use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };
+use crate::retry::LlmRetrySchedule;
 use crate::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
@@ -319,6 +320,9 @@ pub struct TurnStateSnapshot {
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
+    pub llm_retry_attempt: u32,
+    pub llm_retry_max_retries: u32,
+    pub llm_retry_selected_delay_ms: u64,
 }
 
 /// Turn-execution DSL handle.
@@ -376,11 +380,11 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
 
-    fn recoverable_failure(&self, error: String) -> Result<(), DslTransitionError>;
+    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 
     fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError>;
 
-    fn retry_requested(&self) -> Result<(), DslTransitionError>;
+    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError>;
 
     fn cancel_now(&self) -> Result<(), DslTransitionError>;
 

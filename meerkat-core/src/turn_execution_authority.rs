@@ -6,6 +6,7 @@
 
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
+use crate::retry::LlmRetrySchedule;
 
 /// Canonical phases for turn execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,12 +137,14 @@ pub enum TurnExecutionInput {
     },
     RecoverableFailure {
         run_id: RunId,
+        retry: LlmRetrySchedule,
     },
     FatalFailure {
         run_id: RunId,
     },
     RetryRequested {
         run_id: RunId,
+        retry_attempt: u32,
     },
     CancelNow {
         run_id: RunId,

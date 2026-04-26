@@ -69,9 +69,9 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::OpsBarrierSatisfied { run_id, .. }
         | TurnExecutionInput::BoundaryContinue { run_id }
         | TurnExecutionInput::BoundaryComplete { run_id }
-        | TurnExecutionInput::RecoverableFailure { run_id }
+        | TurnExecutionInput::RecoverableFailure { run_id, .. }
         | TurnExecutionInput::FatalFailure { run_id }
-        | TurnExecutionInput::RetryRequested { run_id }
+        | TurnExecutionInput::RetryRequested { run_id, .. }
         | TurnExecutionInput::CancelNow { run_id }
         | TurnExecutionInput::CancelAfterBoundary { run_id }
         | TurnExecutionInput::CancellationObserved { run_id }
@@ -406,23 +406,21 @@ where
             match call_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
-                        let hint = e.retry_after_hint();
-                        let computed = self.retry_policy.delay_for_attempt(attempt + 1);
-                        let delay = compute_retry_delay(hint, computed, e.is_rate_limited());
-                        let capped = match self.budget.remaining_duration() {
-                            Some(remaining) => delay.min(remaining),
-                            None => delay,
-                        };
+                    if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                        &e,
+                        attempt,
+                        self.budget.remaining_duration(),
+                    ) {
                         tracing::warn!(
                             "LLM call failed (attempt {}), retrying in {}ms: {}",
-                            attempt + 1,
-                            capped.as_millis(),
+                            retry_schedule.plan.attempt,
+                            retry_schedule.plan.selected_delay_ms,
                             e
                         );
                         let recover =
                             self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
                                 run_id: run_id.clone(),
+                                retry: retry_schedule.clone(),
                             })?;
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await;
@@ -430,18 +428,20 @@ where
                             &self.event_tap,
                             event_tx.as_ref(),
                             AgentEvent::Retrying {
-                                attempt: attempt + 1,
-                                max_attempts: self.retry_policy.max_retries,
+                                attempt: retry_schedule.plan.attempt,
+                                max_attempts: retry_schedule.plan.max_retries,
                                 error: e.to_string(),
-                                delay_ms: capped.as_millis() as u64,
+                                delay_ms: retry_schedule.plan.selected_delay_ms,
+                                retry: Some(retry_schedule.clone()),
                             },
                         )
                         .await;
                         attempt += 1;
-                        tokio::time::sleep(capped).await;
+                        tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
                         self.budget.check()?;
                         let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
                             run_id: run_id.clone(),
+                            retry_attempt: retry_schedule.plan.attempt,
                         })?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
                             .await;
@@ -565,8 +565,8 @@ where
                 .ops_barrier_satisfied(operation_ids.iter().map(ToString::to_string).collect()),
             TurnExecutionInput::BoundaryContinue { .. } => handle.boundary_continue(),
             TurnExecutionInput::BoundaryComplete { .. } => handle.boundary_complete(),
-            TurnExecutionInput::RecoverableFailure { .. } => {
-                handle.recoverable_failure("recoverable_failure".to_string())
+            TurnExecutionInput::RecoverableFailure { retry, .. } => {
+                handle.recoverable_failure(retry.clone())
             }
             TurnExecutionInput::FatalFailure { .. } => handle.fatal_failure(
                 self.pending_fatal_diagnostic
@@ -574,7 +574,9 @@ where
                     .map(ToString::to_string)
                     .unwrap_or_else(|| "fatal_failure".to_string()),
             ),
-            TurnExecutionInput::RetryRequested { .. } => handle.retry_requested(),
+            TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
+                handle.retry_requested(*retry_attempt)
+            }
             TurnExecutionInput::CancelNow { .. } => handle.cancel_now(),
             TurnExecutionInput::CancelAfterBoundary { .. } => {
                 handle.request_cancel_after_boundary()
@@ -2178,8 +2180,10 @@ where
                 }
                 TurnPhase::ErrorRecovery => {
                     // Attempt recovery
+                    let retry_attempt = self.runtime_turn_authority_snapshot()?.llm_retry_attempt;
                     let t = self.apply_turn_input(TurnExecutionInput::RetryRequested {
                         run_id: run_id.clone(),
+                        retry_attempt,
                     })?;
                     self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
@@ -2303,19 +2307,6 @@ fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
-/// Compute retry delay using server hint, policy, and rate-limit floor.
-fn compute_retry_delay(
-    hint: Option<std::time::Duration>,
-    computed: std::time::Duration,
-    is_rate_limited: bool,
-) -> std::time::Duration {
-    match hint {
-        Some(h) if h > computed => h,
-        _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
-        _ => computed,
-    }
-}
-
 /// Map a terminal outcome to a stable status string for display.
 fn completion_outcome_status_str(
     outcome: &crate::ops_lifecycle::OperationTerminalOutcome,
@@ -2345,6 +2336,7 @@ mod tests {
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
+    use crate::retry::select_retry_delay;
     use crate::skills::{
         ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillKey,
         SkillName, SourceUuid,
@@ -4516,44 +4508,46 @@ mod tests {
 
     #[test]
     fn compute_retry_delay_uses_computed_for_non_rate_limited() {
-        let delay = super::compute_retry_delay(None, Duration::from_millis(500), false);
+        let (delay, floor_applied) = select_retry_delay(None, Duration::from_millis(500), false);
         assert_eq!(delay, Duration::from_millis(500));
+        assert!(!floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_30s_floor_for_rate_limited_without_hint() {
-        let delay = super::compute_retry_delay(None, Duration::from_millis(500), true);
+        let (delay, floor_applied) = select_retry_delay(None, Duration::from_millis(500), true);
         assert_eq!(delay, Duration::from_secs(30));
+        assert!(floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_hint_when_greater_than_computed() {
-        let delay = super::compute_retry_delay(
+        let (delay, floor_applied) = select_retry_delay(
             Some(Duration::from_secs(60)),
             Duration::from_millis(500),
             true,
         );
         assert_eq!(delay, Duration::from_secs(60));
+        assert!(!floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_30s_floor_when_hint_below_floor() {
-        let delay = super::compute_retry_delay(
+        let (delay, floor_applied) = select_retry_delay(
             Some(Duration::from_millis(100)),
             Duration::from_millis(500),
             true,
         );
         assert_eq!(delay, Duration::from_secs(30));
+        assert!(floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_computed_when_greater_than_hint() {
-        let delay = super::compute_retry_delay(
-            Some(Duration::from_secs(60)),
-            Duration::from_secs(90),
-            true,
-        );
+        let (delay, floor_applied) =
+            select_retry_delay(Some(Duration::from_secs(60)), Duration::from_secs(90), true);
         assert_eq!(delay, Duration::from_secs(90));
+        assert!(!floor_applied);
     }
 
     /// Mock LLM client that returns RateLimited with a retry_after hint on

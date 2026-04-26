@@ -1387,6 +1387,31 @@ pub enum TurnCancellationReason {
     Observed,
 }
 
+/// Typed recoverable LLM retry failure classifier. Closed mirror of
+/// [`meerkat_core::retry::LlmRetryFailureKind`] so retry authority records the
+/// retry cause as data, not as a parsed diagnostic string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LlmRetryFailureKind {
+    #[default]
+    RateLimited,
+    NetworkTimeout,
+    CallTimeout,
+    RetryableProviderError,
+}
+
+impl From<meerkat_core::retry::LlmRetryFailureKind> for LlmRetryFailureKind {
+    fn from(kind: meerkat_core::retry::LlmRetryFailureKind) -> Self {
+        match kind {
+            meerkat_core::retry::LlmRetryFailureKind::RateLimited => Self::RateLimited,
+            meerkat_core::retry::LlmRetryFailureKind::NetworkTimeout => Self::NetworkTimeout,
+            meerkat_core::retry::LlmRetryFailureKind::CallTimeout => Self::CallTimeout,
+            meerkat_core::retry::LlmRetryFailureKind::RetryableProviderError => {
+                Self::RetryableProviderError
+            }
+        }
+    }
+}
+
 /// Typed admission-signal classifier for the `PostAdmissionSignal` effect.
 /// Closed set of post-admission wake/interrupt intents emitted by the
 /// ingress authority so the shell dispatcher matches exhaustively on a
@@ -1884,6 +1909,10 @@ machine! {
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
+            llm_retry_attempt: u64,
+            llm_retry_max_retries: u64,
+            llm_retry_selected_delay_ms: u64,
+            llm_retry_last_failure_kind: Option<Enum<LlmRetryFailureKind>>,
             silent_intent_overrides: Set<String>,
 
             // --- Registration substate ---
@@ -2186,6 +2215,10 @@ machine! {
             terminal_outcome = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
+            llm_retry_attempt = 0,
+            llm_retry_max_retries = 0,
+            llm_retry_selected_delay_ms = 0,
+            llm_retry_last_failure_kind = None,
             silent_intent_overrides = EmptySet,
             // Registration substate
             registration_phase = RegistrationPhase::Queuing,
@@ -2374,9 +2407,15 @@ machine! {
             ExtractionStart,
             ExtractionValidationPassed,
             ExtractionValidationFailed { error: String },
-            RecoverableFailure { error: String },
+            RecoverableFailure {
+                failure_kind: Enum<LlmRetryFailureKind>,
+                retry_attempt: u64,
+                max_retries: u64,
+                selected_delay_ms: u64,
+                error: String,
+            },
             FatalFailure { error: String },
-            RetryRequested,
+            RetryRequested { retry_attempt: u64 },
             CancelNow,
             RequestCancelAfterBoundary,
             CancellationObserved,
@@ -3927,6 +3966,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -3958,6 +4001,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -3988,6 +4035,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4020,6 +4071,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4051,6 +4106,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4081,6 +4140,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4113,6 +4176,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4144,6 +4211,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4174,6 +4245,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4387,7 +4462,13 @@ machine! {
         }
 
         transition RecoverableFailure {
-            on input RecoverableFailure { error }
+            on input RecoverableFailure {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+                selected_delay_ms,
+                error
+            }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_non_terminal" {
                 self.turn_phase == TurnPhase::CallingLlm
@@ -4395,8 +4476,13 @@ machine! {
                 || self.turn_phase == TurnPhase::DrainingBoundary
                 || self.turn_phase == TurnPhase::Extracting
             }
+            guard "retry_attempt_present" { retry_attempt > 0 }
             update {
                 self.turn_phase = TurnPhase::ErrorRecovery;
+                self.llm_retry_attempt = retry_attempt;
+                self.llm_retry_max_retries = max_retries;
+                self.llm_retry_selected_delay_ms = selected_delay_ms;
+                self.llm_retry_last_failure_kind = Some(failure_kind);
             }
             to Running
         }
@@ -4414,9 +4500,10 @@ machine! {
         }
 
         transition RetryRequested {
-            on input RetryRequested
+            on input RetryRequested { retry_attempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_error_recovery" { self.turn_phase == TurnPhase::ErrorRecovery }
+            guard "retry_attempt_matches" { retry_attempt == self.llm_retry_attempt }
             update {
                 self.turn_phase = TurnPhase::CallingLlm;
             }
@@ -4490,6 +4577,10 @@ machine! {
                 self.terminal_outcome = Some(outcome);
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
         }

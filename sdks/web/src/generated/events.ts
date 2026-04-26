@@ -3,6 +3,11 @@
 
 export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
+export interface AgentErrorReport {
+  class: AgentErrorClass;
+  message: string;
+}
+
 export type BlobId = string;
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
@@ -67,6 +72,31 @@ export type HookRevision = number;
 
 export type InteractionId = string;
 
+export type LlmRetryFailure = {
+  duration_ms?: number | null;
+  kind: LlmRetryFailureKind;
+  message: string;
+  provider: string;
+  retry_after_ms?: number | null;
+};
+
+export type LlmRetryFailureKind = "rate_limited" | "network_timeout" | "call_timeout" | "retryable_provider_error";
+
+export type LlmRetryPlan = {
+  attempt: number;
+  budget_capped: boolean;
+  computed_delay_ms: number;
+  max_retries: number;
+  rate_limit_floor_applied: boolean;
+  retry_after_hint_ms?: number | null;
+  selected_delay_ms: number;
+};
+
+export interface LlmRetrySchedule {
+  failure: LlmRetryFailure;
+  plan: LlmRetryPlan;
+}
+
 export type SessionId = string;
 
 export interface SkillKey {
@@ -86,8 +116,8 @@ export type ToolConfigChangeOperation = "add" | "remove" | "reload";
 
 export type ToolConfigChangedPayload = {
   applied_at_turn?: number | null;
-  deferred_catalog_delta?: DeferredCatalogDelta | unknown;
-  domain?: ToolConfigChangeDomain | unknown;
+  deferred_catalog_delta?: DeferredCatalogDelta | null;
+  domain?: ToolConfigChangeDomain | null;
   operation: ToolConfigChangeOperation;
   persisted: boolean;
   status: string;
@@ -117,6 +147,7 @@ export interface RunCompletedEvent {
 export interface RunFailedEvent {
   error: string;
   error_class: AgentErrorClass;
+  error_report?: AgentErrorReport | null;
   session_id: SessionId;
   type: "run_failed";
 }
@@ -264,6 +295,7 @@ export interface RetryingEvent {
   delay_ms: number;
   error: string;
   max_attempts: number;
+  retry?: LlmRetrySchedule | null;
   type: "retrying";
 }
 

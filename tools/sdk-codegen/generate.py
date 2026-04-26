@@ -1060,6 +1060,8 @@ def _web_events_ts_type(root: dict[str, Any], schema: Any) -> str:
         return "number"
     if schema_type == "boolean":
         return "boolean"
+    if schema_type == "null":
+        return "null"
     if schema_type == "array":
         item_type = _web_events_ts_type(root, schema.get("items"))
         return f"{item_type}[]"

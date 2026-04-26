@@ -200,7 +200,10 @@ pub use ops_lifecycle::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
-pub use retry::RetryPolicy;
+pub use retry::{
+    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
+    select_retry_delay,
+};
 pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
     RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,

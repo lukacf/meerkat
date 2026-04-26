@@ -12,7 +12,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
         let path = PathBuf::from(path);
         if path.exists() {
-            return Some(path);
+            return Some(path.canonicalize().unwrap_or(path));
         }
     }
 
@@ -81,11 +81,13 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("integration_real_cli_resume_tools")
         .arg("--ignored")
         .env("RUN_TEST_CLI_RESUME_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)

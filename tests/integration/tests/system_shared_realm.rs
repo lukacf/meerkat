@@ -45,14 +45,14 @@ fn binary_path(name: &str) -> PathBuf {
     )) {
         let path = PathBuf::from(path);
         if path.exists() {
-            return path;
+            return path.canonicalize().unwrap_or(path);
         }
     }
 
     if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")) {
         let path = PathBuf::from(path);
         if path.exists() {
-            return path;
+            return path.canonicalize().unwrap_or(path);
         }
     }
 

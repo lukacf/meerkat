@@ -757,6 +757,84 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "e2e_system_rest_resume_metadata_bazel_test",
+    aliases = aliases(
+        package_name = "meerkat-rest",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "system_rest_resume",
+    crate_root = "tests/system_rest_resume.rs",
+    crate_features = [
+        "comms",
+        "integration-real-tests",
+        "mcp",
+        "mob",
+        "schedule",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//:live_smoke_support",
+    ],
+    srcs = [
+        "tests/system_rest_resume.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "system_rest_resume",
+        "CARGO_MANIFEST_DIR": "./meerkat-rest",
+    },
+    args = [
+        "--exact",
+        "integration_real_rest_resume_metadata",
+        "--ignored",
+        "--nocapture",
+    ],
+    tags = [
+        "e2e",
+        "integration",
+        "required-feature",
+        "system",
+    ],
+    size = "large",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-rest",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-anthropic:meerkat_anthropic",
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-gemini:meerkat_gemini",
+        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-openai:meerkat_openai",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-rest:meerkat_rest",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+    ] + all_crate_deps(
+        package_name = "meerkat-rest",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [

@@ -172,6 +172,91 @@ function listExpr(values, indent = 8) {
   return `[\n${values.map((v) => `${pad}${q(v)},`).join("\n")}\n${" ".repeat(indent - 4)}]`;
 }
 
+const nativeE2eSystemTests = [
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "live_smoke_cli",
+    name: "e2e_system_cli_capabilities_and_config_bazel_test",
+    testName: "e2e_scenario_28_cli_capabilities_and_config",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "system_cli_init",
+    name: "e2e_system_cli_init_snapshot_bazel_test",
+    testName: "integration_real_rkat_init_snapshot",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "system_cli_resume",
+    name: "e2e_system_cli_resume_tools_bazel_test",
+    testName: "integration_real_cli_resume_tools",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "cli_mobpack_live_smoke",
+    name: "e2e_system_cli_mobpack_pack_inspect_validate_bazel_test",
+    testName: "e2e_smoke_mobpack_pack_inspect_validate",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "cli_mobpack_live_smoke",
+    name: "e2e_system_cli_wasm_surface_gate_bazel_test",
+    testName: "e2e_smoke_wasm_surface_gate",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "cli_mobpack_live_smoke",
+    name: "e2e_system_cli_wasm_forbidden_capability_bazel_test",
+    testName: "e2e_smoke_wasm_forbidden_capability_rejected",
+  },
+  {
+    packageKey: "meerkat-rest",
+    cargoTestTarget: "system_rest_resume",
+    name: "e2e_system_rest_resume_metadata_bazel_test",
+    testName: "integration_real_rest_resume_metadata",
+  },
+  {
+    packageKey: "tests/integration",
+    cargoTestTarget: "system_shared_realm",
+    name: "e2e_system_sqlite_shared_realm_rpc_rest_rpc_bazel_test",
+    testName: "rpc_rest_rpc_default_sqlite_shared_realm_roundtrip",
+    data: ["//meerkat-rpc:rkat_rpc_bin", "//meerkat-rest:rkat_rest_bin"],
+    env: [
+      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`,
+      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",`,
+    ],
+  },
+  {
+    packageKey: "tests/integration",
+    cargoTestTarget: "system_shared_realm",
+    name: "e2e_system_sqlite_shared_realm_cli_rpc_cli_bazel_test",
+    testName: "cli_rpc_cli_default_sqlite_shared_realm_roundtrip",
+    data: ["//meerkat-cli:rkat", "//meerkat-rpc:rkat_rpc_bin"],
+    env: [
+      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",`,
+      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`,
+    ],
+  },
+  {
+    packageKey: "tests/integration",
+    cargoTestTarget: "system_shared_realm",
+    name: "e2e_system_sqlite_shared_realm_cli_rest_cli_bazel_test",
+    testName: "cli_rest_cli_default_sqlite_shared_realm_roundtrip",
+    data: ["//meerkat-cli:rkat", "//meerkat-rest:rkat_rest_bin"],
+    env: [
+      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",`,
+      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",`,
+    ],
+  },
+];
+
+function nativeE2eSystemSpecsFor(pkg, target) {
+  const key = packageKey(pkg);
+  return nativeE2eSystemTests.filter((spec) =>
+    spec.packageKey === key && spec.cargoTestTarget === target.name
+  );
+}
+
 let staleFileCount = 0;
 
 function writeGenerated(path, contents) {
@@ -347,7 +432,7 @@ const packageRunfileLabels = [...localPackages.values()]
   .sort()
   .map((dir) => `//${dir}:package_runfiles`);
 
-function writeRootBuild(fastTestLabels) {
+function writeRootBuild(fastTestLabels, e2eSystemTestLabels) {
   const lines = [
     `# Root package marker for Bazel module extension labels.`,
     ``,
@@ -444,10 +529,20 @@ function writeRootBuild(fastTestLabels) {
       ``,
     );
   }
+  if (e2eSystemTestLabels.length) {
+    lines.push(
+      `test_suite(`,
+      `    name = "e2e_system_tests",`,
+      `    tests = ${listExpr(e2eSystemTestLabels, 8)},`,
+      `)`,
+      ``,
+    );
+  }
   writeGenerated(resolve(root, "BUILD.bazel"), lines.join("\n"));
 }
 
 const fastTestLabels = [];
+const e2eSystemTestLabels = [];
 
 for (const pkg of localPackages.values()) {
   const dir = packageDir(pkg);
@@ -538,7 +633,10 @@ for (const pkg of localPackages.values()) {
       }
       attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`);
     }
+    let rustTestBaseAttrs = null;
+    let filteredNativeTests = [];
     if (rule === "rust_test") {
+      rustTestBaseAttrs = [...attrs];
       const tags = testTags(pkg, target);
       if (usesTrybuild) tags.push("local");
       if (tags.includes("fast")) {
@@ -592,9 +690,31 @@ for (const pkg of localPackages.values()) {
       if (env.length) {
         attrs.splice(attrs.length - 1, 0, `    env = {\n${env.join("\n")}\n    },`);
       }
+      filteredNativeTests = nativeE2eSystemSpecsFor(pkg, target).map((spec) => ({
+        ...spec,
+        data: [...new Set([...data, ...(spec.data ?? [])])].sort(),
+        env: [...env, ...(spec.env ?? [])],
+        tags: [...new Set([...tags, "e2e", "integration", "system"])].sort(),
+      }));
     }
     attrs.splice(attrs.length - 1, 0, `    proc_macro_deps = ${procExpr},`);
     rules.push(`${rule}(\n${attrs.join("\n")}\n)`);
+    for (const spec of filteredNativeTests) {
+      const filteredAttrs = [...rustTestBaseAttrs];
+      filteredAttrs[0] = `    name = ${q(spec.name)},`;
+      filteredAttrs.splice(
+        filteredAttrs.length - 1,
+        0,
+        `    args = ${listExpr(["--exact", spec.testName, "--ignored", "--nocapture"])},`,
+        `    tags = ${listExpr(spec.tags)},`,
+        `    size = "large",`,
+        `    data = ${listExpr(spec.data)},`,
+        `    env = {\n${spec.env.join("\n")}\n    },`,
+        `    proc_macro_deps = ${procExpr},`,
+      );
+      rules.push(`${rule}(\n${filteredAttrs.join("\n")}\n)`);
+      e2eSystemTestLabels.push(`//${relative(root, dir)}:${spec.name}`);
+    }
   }
 
   if (rules.length === 0) continue;
@@ -626,7 +746,7 @@ for (const pkg of localPackages.values()) {
   );
 }
 
-writeRootBuild([...new Set(fastTestLabels)].sort());
+writeRootBuild([...new Set(fastTestLabels)].sort(), [...new Set(e2eSystemTestLabels)].sort());
 if (checkOnly && staleFileCount > 0) {
   console.error(`${staleFileCount} generated Bazel file(s) are stale; run node scripts/generate-bazel-rust-builds.mjs`);
   process.exit(1);

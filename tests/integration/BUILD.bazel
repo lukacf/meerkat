@@ -1134,3 +1134,237 @@ rust_test(
         normal_dev = True,
     ),
 )
+
+rust_test(
+    name = "e2e_system_sqlite_shared_realm_rpc_rest_rpc_bazel_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "system_shared_realm",
+    crate_root = "tests/system_shared_realm.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/system_shared_realm.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "system_shared_realm",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    args = [
+        "--exact",
+        "rpc_rest_rpc_default_sqlite_shared_realm_roundtrip",
+        "--ignored",
+        "--nocapture",
+    ],
+    tags = [
+        "e2e",
+        "integration",
+        "system",
+    ],
+    size = "large",
+    data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//meerkat-rest:rkat_rest_bin",
+        "//meerkat-rpc:rkat_rpc_bin",
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
+        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-rpc:meerkat_rpc",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+        "//tests/integration:meerkat_integration_tests",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "e2e_system_sqlite_shared_realm_cli_rpc_cli_bazel_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "system_shared_realm",
+    crate_root = "tests/system_shared_realm.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/system_shared_realm.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "system_shared_realm",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    args = [
+        "--exact",
+        "cli_rpc_cli_default_sqlite_shared_realm_roundtrip",
+        "--ignored",
+        "--nocapture",
+    ],
+    tags = [
+        "e2e",
+        "integration",
+        "system",
+    ],
+    size = "large",
+    data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//meerkat-cli:rkat",
+        "//meerkat-rpc:rkat_rpc_bin",
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",
+        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-rpc:meerkat_rpc",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+        "//tests/integration:meerkat_integration_tests",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "e2e_system_sqlite_shared_realm_cli_rest_cli_bazel_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "system_shared_realm",
+    crate_root = "tests/system_shared_realm.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/system_shared_realm.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "system_shared_realm",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    args = [
+        "--exact",
+        "cli_rest_cli_default_sqlite_shared_realm_roundtrip",
+        "--ignored",
+        "--nocapture",
+    ],
+    tags = [
+        "e2e",
+        "integration",
+        "system",
+    ],
+    size = "large",
+    data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//meerkat-cli:rkat",
+        "//meerkat-rest:rkat_rest_bin",
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",
+        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-rpc:meerkat_rpc",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+        "//tests/integration:meerkat_integration_tests",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)

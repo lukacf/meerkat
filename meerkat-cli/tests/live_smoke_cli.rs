@@ -16,7 +16,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
         let path = PathBuf::from(path);
         if path.exists() {
-            return Some(path);
+            return Some(path.canonicalize().unwrap_or(path));
         }
     }
 
@@ -132,11 +132,13 @@ async fn e2e_scenario_26_cli_run_resume_persistence() -> Result<(), Box<dyn std:
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_scenario_26_cli_run_resume_persistence")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_11_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
@@ -253,11 +255,13 @@ async fn e2e_scenario_27_cli_shell_and_structured_output() -> Result<(), Box<dyn
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_scenario_27_cli_shell_and_structured_output")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_12_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
@@ -376,11 +380,13 @@ async fn e2e_scenario_28_cli_capabilities_and_config() -> Result<(), Box<dyn std
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_scenario_28_cli_capabilities_and_config")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_13_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
@@ -584,11 +590,13 @@ async fn e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_cli_structured_output")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_14_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
@@ -682,11 +690,13 @@ async fn e2e_001_background_job_active_turn_completion() -> Result<(), Box<dyn s
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_001_background_job_active_turn_completion")
         .arg("--ignored")
         .env("RUN_TEST_E2E_BG_001_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
@@ -784,11 +794,13 @@ async fn e2e_002_background_job_idle_keepalive_completion() -> Result<(), Box<dy
 
     let data_dir = temp_dir.path().join("data");
     tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let status = Command::new(std::env::current_exe()?)
         .arg("e2e_002_background_job_idle_keepalive_completion")
         .arg("--ignored")
         .env("RUN_TEST_E2E_BG_002_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)

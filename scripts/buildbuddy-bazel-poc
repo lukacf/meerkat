@@ -15,6 +15,7 @@ Common commands:
   workspace-fast-rbe         Cargo-fast-equivalent remote workspace test lane.
   workspace-fast-clippy-rbe  Fast tests plus clippy aspect.
   workspace-build-clippy-rbe Build/clippy labels for the workspace build set.
+  e2e-system-rbe           Bazel-native system e2e suite with runfile binaries.
   fast-test                  Root //:fast_tests suite.
   owned-fast-test <path>     Owning fast suite or exact fast test for a path.
   owned-build <path>         Owning build label for a path.
@@ -153,6 +154,31 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
+  e2e-system-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//:e2e_system_tests"
+    extra_args+=(
+      --build_tests_only
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  e2e-system-local)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//:e2e_system_tests"
+    extra_args+=(
+      --spawn_strategy=local
+      --jobs="${BUILDBUDDY_LOCAL_JOBS:-8}"
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
     )
     ;;
   workspace-test-local)

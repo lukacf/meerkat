@@ -219,6 +219,16 @@ else
   bad "GitHub CI is missing the optional reusable BuildBuddy workflow wiring"
 fi
 
+if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&
+  grep -Fq 'BUILDBUDDY_BAZEL_COMMAND=e2e-system-rbe' scripts/buildbuddy-ci-dispatch &&
+  grep -Fq 'system_e2e_command="e2e-system-rbe"' scripts/buildbuddy-ci-workspace &&
+  grep -Fq 'RKAT_TEST_BIN_RKAT_RPC' tests/integration/BUILD.bazel &&
+  grep -Fq 'CARGO_BIN_EXE_rkat' meerkat-cli/BUILD.bazel; then
+  pass "BuildBuddy CI has a native system e2e suite with runfile binary wiring"
+else
+  bad "BuildBuddy CI is missing the native system e2e runfile suite"
+fi
+
 ci_workflow_gate_dry_run="$(./scripts/buildbuddy-agent-gate --dry-run .github/workflows/ci.yml 2>&1 || true)"
 if [[ "${ci_workflow_gate_dry_run}" == *"Global build/test configuration changed"* ]] &&
   [[ "${ci_workflow_gate_dry_run}" == *"DRY-RUN make buildbuddy-ci-warm"* ]]; then

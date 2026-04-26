@@ -36,6 +36,7 @@ on:
         options:
           - workspace-fresh
           - workspace-warm
+          - e2e-system
           - changed-committed
           - changed-paths
       changed_mode:

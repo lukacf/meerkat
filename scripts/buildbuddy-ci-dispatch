@@ -14,6 +14,7 @@ usage: buildbuddy-ci-dispatch [--mode <mode>] [--owned|--affected] [--base <rev>
 Modes:
   workspace-fresh    Run the fresh optional BuildBuddy workspace CI gate.
   workspace-warm     Run the warmed optional BuildBuddy workspace CI gate.
+  e2e-system         Run only the Bazel-native system e2e suite.
   changed-committed  Run the BuildBuddy changed-path gate for branch commits.
   changed-paths      Run the BuildBuddy changed-path gate for explicit paths.
 
@@ -114,6 +115,13 @@ case "${mode}" in
       echo "DRY-RUN make buildbuddy-ci-warm"
     else
       exec make buildbuddy-ci-warm
+    fi
+    ;;
+  e2e-system)
+    if [[ "${dry_run}" -eq 1 ]]; then
+      echo "DRY-RUN BUILDBUDDY_BAZEL_COMMAND=e2e-system-rbe scripts/buildbuddy-bazel-poc --jobs=64"
+    else
+      exec env BUILDBUDDY_BAZEL_COMMAND=e2e-system-rbe scripts/buildbuddy-bazel-poc --jobs=64
     fi
     ;;
   changed-committed|changed)

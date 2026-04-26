@@ -88,12 +88,16 @@ run_lane() {
 
 test_command="workspace-fast-clippy-rbe"
 clippy_command="workspace-build-clippy-rbe"
+system_e2e_command="e2e-system-rbe"
 test_log="${log_root}/${test_command}.log"
 clippy_log="${log_root}/${clippy_command}.log"
+system_e2e_log="${log_root}/${system_e2e_command}.log"
 test_status_file="${log_root}/${test_command}.status"
 clippy_status_file="${log_root}/${clippy_command}.status"
+system_e2e_status_file="${log_root}/${system_e2e_command}.status"
 test_wall_file="${log_root}/${test_command}.wall"
 clippy_wall_file="${log_root}/${clippy_command}.wall"
+system_e2e_wall_file="${log_root}/${system_e2e_command}.wall"
 mkdir -p "${output_root}" "${log_root}"
 write_context
 
@@ -119,26 +123,41 @@ test_pid="$!"
   echo "$((lane_end_seconds - lane_start_seconds))" >"${clippy_wall_file}"
 ) &
 clippy_pid="$!"
+(
+  set +e
+  lane_start_seconds="$(date +%s)"
+  run_lane ci-e2e-system-rbe "${system_e2e_command}" "${system_e2e_log}" --jobs=64
+  lane_status="$?"
+  lane_end_seconds="$(date +%s)"
+  echo "${lane_status}" >"${system_e2e_status_file}"
+  echo "$((lane_end_seconds - lane_start_seconds))" >"${system_e2e_wall_file}"
+) &
+system_e2e_pid="$!"
 
 wait "${test_pid}" || true
 wait "${clippy_pid}" || true
+wait "${system_e2e_pid}" || true
 
 end_seconds="$(date +%s)"
 test_status="$(cat "${test_status_file}" 2>/dev/null || echo 1)"
 clippy_status="$(cat "${clippy_status_file}" 2>/dev/null || echo 1)"
+system_e2e_status="$(cat "${system_e2e_status_file}" 2>/dev/null || echo 1)"
 wall_seconds="$((end_seconds - start_seconds))"
 test_wall="$(cat "${test_wall_file}" 2>/dev/null || echo "${wall_seconds}")"
 clippy_wall="$(cat "${clippy_wall_file}" 2>/dev/null || echo "${wall_seconds}")"
+system_e2e_wall="$(cat "${system_e2e_wall_file}" 2>/dev/null || echo "${wall_seconds}")"
 printf '%s\t%s\t%s\t%s\t%s\n' "${test_command}" "${test_status}" "${test_wall}" "${test_log}" "BUILDBUDDY_BAZEL_COMMAND=${test_command} ./scripts/buildbuddy-bazel-poc --jobs=64" >>"${summary_path}"
 printf '%s\t%s\t%s\t%s\t%s\n' "${clippy_command}" "${clippy_status}" "${clippy_wall}" "${clippy_log}" "BUILDBUDDY_BAZEL_COMMAND=${clippy_command} ./scripts/buildbuddy-bazel-poc --jobs=64 --color=no --curses=no" >>"${summary_path}"
+printf '%s\t%s\t%s\t%s\t%s\n' "${system_e2e_command}" "${system_e2e_status}" "${system_e2e_wall}" "${system_e2e_log}" "BUILDBUDDY_BAZEL_COMMAND=${system_e2e_command} ./scripts/buildbuddy-bazel-poc --jobs=64" >>"${summary_path}"
 
 printf 'BuildBuddy workspace CI (%s) wall: %ss\n' "${mode}" "${wall_seconds}"
 summarize_log "${test_command}" "${test_status}" "${test_log}"
 summarize_log "${clippy_command}" "${clippy_status}" "${clippy_log}"
+summarize_log "${system_e2e_command}" "${system_e2e_status}" "${system_e2e_log}"
 printf 'logs: %s\n' "${log_root}"
 printf 'summary: %s\n' "${summary_path}"
 printf 'context: %s\n' "${context_path}"
 
-if [[ "${test_status}" != "0" || "${clippy_status}" != "0" ]]; then
+if [[ "${test_status}" != "0" || "${clippy_status}" != "0" || "${system_e2e_status}" != "0" ]]; then
   exit 1
 fi

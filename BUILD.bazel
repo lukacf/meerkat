@@ -246,3 +246,19 @@ test_suite(
         "//xtask:rmat_audit_test",
     ],
 )
+
+test_suite(
+    name = "e2e_system_tests",
+    tests = [
+        "//meerkat-cli:e2e_system_cli_capabilities_and_config_bazel_test",
+        "//meerkat-cli:e2e_system_cli_init_snapshot_bazel_test",
+        "//meerkat-cli:e2e_system_cli_mobpack_pack_inspect_validate_bazel_test",
+        "//meerkat-cli:e2e_system_cli_resume_tools_bazel_test",
+        "//meerkat-cli:e2e_system_cli_wasm_forbidden_capability_bazel_test",
+        "//meerkat-cli:e2e_system_cli_wasm_surface_gate_bazel_test",
+        "//meerkat-rest:e2e_system_rest_resume_metadata_bazel_test",
+        "//tests/integration:e2e_system_sqlite_shared_realm_cli_rest_cli_bazel_test",
+        "//tests/integration:e2e_system_sqlite_shared_realm_cli_rpc_cli_bazel_test",
+        "//tests/integration:e2e_system_sqlite_shared_realm_rpc_rest_rpc_bazel_test",
+    ],
+)

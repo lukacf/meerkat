@@ -8,7 +8,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
         let path = PathBuf::from(path);
         if path.exists() {
-            return Some(path);
+            return Some(path.canonicalize().unwrap_or(path));
         }
     }
 

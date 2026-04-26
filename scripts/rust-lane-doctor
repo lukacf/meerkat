@@ -100,6 +100,17 @@ else
   pass "shell build/test entrypoints use the repo Cargo wrapper"
 fi
 
+raw_cargo_ci_hits="$(
+  rg -n 'run: cargo|^\s+cargo (check|test|nextest|run|xtask|build|unit|int|e2e|clippy|machete)\b' \
+    .github/workflows/ci.yml 2>/dev/null || true
+)"
+if [[ -n "${raw_cargo_ci_hits}" ]]; then
+  bad "CI Rust entrypoints bypass scripts/repo-cargo"
+  printf '%s\n' "${raw_cargo_ci_hits}" >&2
+else
+  pass "CI Rust entrypoints use the repo Cargo wrapper"
+fi
+
 agent_gate_probe="$(./scripts/agent-gate --dry-run --working-tree meerkat-runtime/src/input_ledger.rs 2>&1 || true)"
 if [[ -x scripts/agent-gate ]] &&
   grep -q 'Cargo agent gate packages:' <<<"${agent_gate_probe}" &&

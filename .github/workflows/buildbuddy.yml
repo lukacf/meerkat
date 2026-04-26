@@ -46,6 +46,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: buildbuddy
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Require BuildBuddy API key
         run: |
           if [[ -z "${BUILDBUDDY_API_KEY}" ]]; then

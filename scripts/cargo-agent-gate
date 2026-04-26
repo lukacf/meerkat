@@ -212,6 +212,9 @@ if [[ "${global}" -eq 1 ]]; then
 fi
 
 declare -A package_names=()
+declare -A exact_test_names=()
+exact_test_possible=1
+exact_test_package=""
 for path in "${relevant[@]}"; do
   if [[ "${path}" == */* ]]; then
     dir="${path%/*}"
@@ -223,6 +226,26 @@ for path in "${relevant[@]}"; do
       pkg="$(package_name_for_dir "${dir}")"
       if [[ -n "${pkg}" ]]; then
         package_names["${pkg}"]=1
+        test_dir="${dir}/tests"
+        if [[ "${dir}" == "." ]]; then
+          test_dir="tests"
+        fi
+        if [[ "${path}" == "${test_dir}/"*.rs ]]; then
+          test_name="${path#"${test_dir}/"}"
+          if [[ "${test_name}" == *.rs && "${test_name}" != */* ]]; then
+            test_name="${test_name%.rs}"
+            exact_test_names["${test_name}"]=1
+            if [[ -z "${exact_test_package}" ]]; then
+              exact_test_package="${pkg}"
+            elif [[ "${exact_test_package}" != "${pkg}" ]]; then
+              exact_test_possible=0
+            fi
+          else
+            exact_test_possible=0
+          fi
+        else
+          exact_test_possible=0
+        fi
       fi
       break
     fi
@@ -244,8 +267,23 @@ for pkg in "${sorted_packages[@]}"; do
   pkg_flags+=("-p" "${pkg}")
 done
 
+test_flags=("${pkg_flags[@]}")
+if [[ "${exact_test_possible}" -eq 1 && "${#sorted_packages[@]}" -eq 1 && "${#exact_test_names[@]}" -gt 0 ]]; then
+  test_flags=("-p" "${exact_test_package}")
+  mapfile -t sorted_exact_tests < <(printf '%s\n' "${!exact_test_names[@]}" | sort)
+  for test_name in "${sorted_exact_tests[@]}"; do
+    test_flags+=("--test" "${test_name}")
+  done
+else
+  sorted_exact_tests=()
+fi
+
 printf 'Cargo agent gate packages:\n'
 printf '  %s\n' "${sorted_packages[@]}"
+if [[ "${#sorted_exact_tests[@]}" -gt 0 ]]; then
+  printf 'Cargo agent gate exact tests:\n'
+  printf '  %s\n' "${sorted_exact_tests[@]}"
+fi
 
 if [[ "${dry_run}" -eq 1 ]]; then
   if [[ "${run_clippy}" -eq 1 ]]; then
@@ -255,7 +293,7 @@ if [[ "${dry_run}" -eq 1 ]]; then
   fi
   if [[ "${run_tests}" -eq 1 ]]; then
     printf 'DRY-RUN %s nextest run' "$CARGO"
-    printf ' %q' "${pkg_flags[@]}"
+    printf ' %q' "${test_flags[@]}"
     printf ' --profile fast --no-tests=pass --show-progress none --status-level none --final-status-level fail\n'
   fi
   exit 0
@@ -265,6 +303,6 @@ if [[ "${run_clippy}" -eq 1 ]]; then
   "$CARGO" clippy "${pkg_flags[@]}" --all-targets --all-features -- -D warnings
 fi
 if [[ "${run_tests}" -eq 1 ]]; then
-  "$CARGO" nextest run "${pkg_flags[@]}" --profile fast --no-tests=pass \
+  "$CARGO" nextest run "${test_flags[@]}" --profile fast --no-tests=pass \
     --show-progress none --status-level none --final-status-level fail
 fi

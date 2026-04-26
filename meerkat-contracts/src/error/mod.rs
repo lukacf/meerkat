@@ -62,6 +62,28 @@ impl ErrorCode {
         }
     }
 
+    /// Convert a JSON-RPC error code back to the canonical wire code.
+    pub const fn from_jsonrpc_code(code: i32) -> Option<Self> {
+        match code {
+            -32001 => Some(Self::SessionNotFound),
+            -32023 => Some(Self::ScheduleNotFound),
+            -32002 => Some(Self::SessionBusy),
+            -32003 => Some(Self::SessionNotRunning),
+            -32005 => Some(Self::RequestCancelled),
+            -32010 => Some(Self::ProviderError),
+            -32011 => Some(Self::BudgetExhausted),
+            -32012 => Some(Self::HookDenied),
+            -32013 => Some(Self::AgentError),
+            -32020 => Some(Self::CapabilityUnavailable),
+            -32021 => Some(Self::SkillNotFound),
+            -32022 => Some(Self::SkillResolutionFailed),
+            -32602 => Some(Self::InvalidParams),
+            -32603 => Some(Self::InternalError),
+            -32004 => Some(Self::DuplicateInput),
+            _ => None,
+        }
+    }
+
     /// Map to HTTP status code.
     pub const fn http_status(self) -> u16 {
         match self {
@@ -266,9 +288,10 @@ mod tests {
             ErrorCode::InternalError,
             ErrorCode::DuplicateInput,
         ] {
-            let _rpc = code.jsonrpc_code();
+            let rpc = code.jsonrpc_code();
             let http = code.http_status();
             let cli = code.cli_exit_code();
+            assert_eq!(ErrorCode::from_jsonrpc_code(rpc), Some(code));
             assert!(
                 (400..600).contains(&http),
                 "HTTP status should be 4xx or 5xx"

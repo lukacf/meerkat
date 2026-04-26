@@ -16,8 +16,9 @@ use crate::lifecycle::RunId;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
-    TurnPrimitiveKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
@@ -71,7 +72,7 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::BoundaryContinue { run_id }
         | TurnExecutionInput::BoundaryComplete { run_id }
         | TurnExecutionInput::RecoverableFailure { run_id, .. }
-        | TurnExecutionInput::FatalFailure { run_id }
+        | TurnExecutionInput::FatalFailure { run_id, .. }
         | TurnExecutionInput::RetryRequested { run_id, .. }
         | TurnExecutionInput::CancelNow { run_id }
         | TurnExecutionInput::CancelAfterBoundary { run_id }
@@ -86,6 +87,32 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
         | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
         TurnExecutionInput::ForceCancelNoRun => None,
+    }
+}
+
+fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureReason> {
+    match input {
+        TurnExecutionInput::FatalFailure { reason, .. } => Some(reason.clone()),
+        TurnExecutionInput::TurnLimitReached { .. } => Some(TurnFailureReason::new(
+            crate::event::AgentErrorClass::MaxTurns,
+            "turn limit reached",
+        )),
+        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::terminal_outcome(
+            TurnTerminalOutcome::BudgetExhausted,
+        )),
+        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::terminal_outcome(
+            TurnTerminalOutcome::TimeBudgetExceeded,
+        )),
+        TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
+            Some(TurnFailureReason::budget_exceeded(*exceeded))
+        }
+        TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
+            Some(TurnFailureReason::new(
+                crate::event::AgentErrorClass::StructuredOutput,
+                error.clone(),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -589,12 +616,7 @@ where
             TurnExecutionInput::RecoverableFailure { retry, .. } => {
                 handle.recoverable_failure(retry.clone())
             }
-            TurnExecutionInput::FatalFailure { .. } => handle.fatal_failure(
-                self.pending_fatal_diagnostic
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "fatal_failure".to_string()),
-            ),
+            TurnExecutionInput::FatalFailure { reason, .. } => handle.fatal_failure(reason.clone()),
             TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
                 handle.retry_requested(*retry_attempt)
             }
@@ -662,7 +684,13 @@ where
             && next_phase == TurnPhase::Failed
             && let Some(run_id) = turn_input_run_id(&input)
         {
-            effects.push(TurnExecutionEffect::RunFailed { run_id });
+            let reason = turn_input_failure_reason(&input).unwrap_or_else(|| {
+                TurnFailureReason::terminal_outcome(
+                    self.turn_terminal_outcome()
+                        .unwrap_or(TurnTerminalOutcome::Failed),
+                )
+            });
+            effects.push(TurnExecutionEffect::RunFailed { run_id, reason });
         }
         if prev_phase != TurnPhase::Cancelled
             && next_phase == TurnPhase::Cancelled
@@ -698,10 +726,9 @@ where
                         );
                     }
                 }
-                TurnExecutionEffect::RunFailed { run_id } => {
+                TurnExecutionEffect::RunFailed { run_id, reason } => {
                     if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) =
-                            handle.run_failed(run_id.clone(), "run failed".to_string())
+                        && let Err(error) = handle.run_failed(run_id.clone(), reason.clone())
                     {
                         tracing::warn!(
                             error = %error,
@@ -1356,15 +1383,18 @@ where
                         ..
                     }) = pre_llm_report.decision
                     {
-                        self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                            run_id: run_id.clone(),
-                        })?;
-                        return Err(AgentError::HookDenied {
+                        let error = AgentError::HookDenied {
                             point: HookPoint::PreLlmRequest,
                             reason_code,
                             message,
                             payload,
-                        });
+                        };
+                        let reason = TurnFailureReason::from_agent_error(&error);
+                        self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                            run_id: run_id.clone(),
+                            reason,
+                        })?;
+                        return Err(error);
                     }
 
                     for outcome in &pre_llm_report.outcomes {
@@ -1459,9 +1489,11 @@ where
                             if matches!(&e, AgentError::Llm { .. }) {
                                 // Exhausted hard LLM-call failure — route through
                                 // machine-owned FatalFailure and preserve diagnostics.
+                                let reason = TurnFailureReason::from_agent_error(&e);
                                 self.pending_fatal_diagnostic = Some(e);
                                 self.apply_turn_input(TurnExecutionInput::FatalFailure {
                                     run_id: run_id.clone(),
+                                    reason,
                                 })?;
                                 return self.build_result(turn_count, tool_call_count).await;
                             }

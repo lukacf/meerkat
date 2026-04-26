@@ -6,7 +6,9 @@ use std::sync::Arc;
 use meerkat_core::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::retry::LlmRetrySchedule;
-use meerkat_core::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
+use meerkat_core::turn_execution_authority::{
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+};
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -238,10 +240,12 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError> {
+    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::FatalFailure { error },
+            mm_dsl::MeerkatMachineInput::FatalFailure {
+                error: reason.to_dsl_error(),
+            },
             "TurnStateHandle::fatal_failure",
         )
     }
@@ -333,12 +337,16 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         self.close_direct_run(&run_id, "TurnStateHandle::run_completed:commit")
     }
 
-    fn run_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError> {
+    fn run_failed(
+        &self,
+        run_id: RunId,
+        reason: TurnFailureReason,
+    ) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunFailed {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                error,
+                error: reason.to_dsl_error(),
             },
             "TurnStateHandle::run_failed",
         )?;

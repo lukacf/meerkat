@@ -35,7 +35,9 @@ use crate::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
 };
-use crate::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
+use crate::turn_execution_authority::{
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+};
 use crate::types::SessionId;
 
 // ---------------------------------------------------------------------------
@@ -382,7 +384,7 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 
-    fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError>;
+    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError>;
 
     fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError>;
 
@@ -404,7 +406,11 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn run_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError>;
+    fn run_failed(
+        &self,
+        run_id: RunId,
+        reason: TurnFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
     fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 

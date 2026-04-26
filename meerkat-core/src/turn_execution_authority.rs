@@ -5,6 +5,8 @@
 //! payloads shared by the standalone core fallback and runtime-backed handles.
 
 use crate::budget::{BudgetDimension, BudgetExceeded};
+use crate::error::AgentError;
+use crate::event::AgentErrorClass;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
 use crate::retry::LlmRetrySchedule;
@@ -88,6 +90,75 @@ pub enum TurnTerminalOutcome {
     StructuredOutputValidationFailed,
 }
 
+/// Typed reason for a turn failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailureReason {
+    pub class: AgentErrorClass,
+    pub message: String,
+}
+
+impl TurnFailureReason {
+    pub fn new(class: AgentErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        Self::new(AgentErrorClass::from(error), error.to_string())
+    }
+
+    pub fn budget_exceeded(exceeded: BudgetExceeded) -> Self {
+        let class = AgentErrorClass::Budget;
+        let message = match exceeded.dimension {
+            BudgetDimension::Tokens => {
+                format!(
+                    "token budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+            BudgetDimension::Time => {
+                format!(
+                    "time budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+            BudgetDimension::ToolCalls => {
+                format!(
+                    "tool call budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+        };
+        Self::new(class, message)
+    }
+
+    pub fn terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
+        match outcome {
+            TurnTerminalOutcome::BudgetExhausted => {
+                Self::new(AgentErrorClass::Budget, "budget exhausted")
+            }
+            TurnTerminalOutcome::TimeBudgetExceeded => {
+                Self::new(AgentErrorClass::Budget, "time budget exceeded")
+            }
+            TurnTerminalOutcome::StructuredOutputValidationFailed => Self::new(
+                AgentErrorClass::StructuredOutput,
+                "structured output validation failed",
+            ),
+            TurnTerminalOutcome::Cancelled => Self::new(AgentErrorClass::Cancelled, "cancelled"),
+            TurnTerminalOutcome::Completed | TurnTerminalOutcome::None => {
+                Self::new(AgentErrorClass::Terminal, "terminal outcome")
+            }
+            TurnTerminalOutcome::Failed => Self::new(AgentErrorClass::Terminal, "turn failed"),
+        }
+    }
+
+    pub fn to_dsl_error(&self) -> String {
+        format!("{:?}: {}", self.class, self.message)
+    }
+}
+
 /// Content shape admitted by the primitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentShape(pub String);
@@ -142,6 +213,7 @@ pub enum TurnExecutionInput {
     },
     FatalFailure {
         run_id: RunId,
+        reason: TurnFailureReason,
     },
     RetryRequested {
         run_id: RunId,
@@ -204,6 +276,7 @@ pub enum TurnExecutionEffect {
     },
     RunFailed {
         run_id: RunId,
+        reason: TurnFailureReason,
     },
     RunCancelled {
         run_id: RunId,

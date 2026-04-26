@@ -37,8 +37,8 @@ use crate::lifecycle::RunId;
 use crate::ops::OperationId;
 use crate::retry::LlmRetrySchedule;
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionInput, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
-    terminal_outcome_for_budget_exceeded,
+    ContentShape, TurnExecutionInput, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 #[derive(Debug, Clone)]
@@ -356,7 +356,7 @@ impl LocalState {
             (
                 ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
                 | ErrorRecovery,
-                FatalFailure { run_id },
+                FatalFailure { run_id, .. },
             ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
@@ -810,10 +810,10 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::RecoverableFailure { run_id, retry })
     }
 
-    fn fatal_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "fatal_failure")?;
-        guard.apply(TurnExecutionInput::FatalFailure { run_id })
+        guard.apply(TurnExecutionInput::FatalFailure { run_id, reason })
     }
 
     fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
@@ -884,7 +884,11 @@ impl TurnStateHandle for TestTurnStateHandle {
         Ok(())
     }
 
-    fn run_failed(&self, _run_id: RunId, _error: String) -> Result<(), DslTransitionError> {
+    fn run_failed(
+        &self,
+        _run_id: RunId,
+        _reason: TurnFailureReason,
+    ) -> Result<(), DslTransitionError> {
         Ok(())
     }
 

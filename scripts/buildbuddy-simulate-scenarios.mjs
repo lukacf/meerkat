@@ -18,6 +18,10 @@ Scenarios:
   support-file       Run exact selectors for a shared integration-test support file.
   changed-clippy     Run changed-scope clippy lanes for source and support edits.
   changed-gate       Run the combined changed-path test+clippy gate.
+  required-feature-gate
+                     Run exact build+clippy for a non-fast required-feature test.
+  optional-required-feature-gate
+                     Run exact build+clippy for a required-feature test with optional deps.
   agent-gate         Run the auto-detected agent changed-path gate for a source path.
   agent-gate-global  Run the auto-detected agent gate escalation for global config.
   source-gate        Run the combined changed-path build+clippy gate.
@@ -234,6 +238,36 @@ async function changedGate(root) {
     "./scripts/buildbuddy-changed-gate",
     ["--owned", "meerkat/tests/support/test_session_store.rs"],
     { cwd: root, env: { RUST_LANE_ID: "scenario-changed-gate" }, label: "buildbuddy-changed-gate support" },
+  );
+  printResult(result);
+  return result.code;
+}
+
+async function requiredFeatureGate(root) {
+  console.log("\n== required-feature-gate ==");
+  const result = await run(
+    "./scripts/buildbuddy-changed-gate",
+    ["--owned", "--local-test", "meerkat-cli/tests/cli_mobpack_live_smoke.rs"],
+    {
+      cwd: root,
+      env: { RUST_LANE_ID: "scenario-required-feature-gate" },
+      label: "buildbuddy-changed-gate required-feature live test",
+    },
+  );
+  printResult(result);
+  return result.code;
+}
+
+async function optionalRequiredFeatureGate(root) {
+  console.log("\n== optional-required-feature-gate ==");
+  const result = await run(
+    "./scripts/buildbuddy-changed-gate",
+    ["--owned", "--local-test", "xtask/tests/machines_contracts.rs"],
+    {
+      cwd: root,
+      env: { RUST_LANE_ID: "scenario-optional-required-feature-gate" },
+      label: "buildbuddy-changed-gate optional required-feature test",
+    },
   );
   printResult(result);
   return result.code;
@@ -567,6 +601,8 @@ const scenarios = requested.length === 0 || requested.includes("all")
       "support-file",
       "changed-clippy",
       "changed-gate",
+      "required-feature-gate",
+      "optional-required-feature-gate",
       "agent-gate",
       "agent-gate-global",
       "source-gate",
@@ -594,6 +630,8 @@ const runners = new Map([
   ["support-file", supportFile],
   ["changed-clippy", changedClippy],
   ["changed-gate", changedGate],
+  ["required-feature-gate", requiredFeatureGate],
+  ["optional-required-feature-gate", optionalRequiredFeatureGate],
   ["agent-gate", agentGate],
   ["agent-gate-global", agentGateGlobal],
   ["source-gate", sourceGate],

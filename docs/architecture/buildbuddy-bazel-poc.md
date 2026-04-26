@@ -108,6 +108,10 @@ modes:
 - `changed-clippy`: changed-scope clippy for representative source and shared
   support-file edits.
 - `changed-gate`: combined changed-path test and clippy gate.
+- `required-feature-gate`: exact build+clippy for a non-fast required-feature
+  test, without executing the live/system lane.
+- `optional-required-feature-gate`: exact build+clippy for a required-feature
+  test whose feature enables an optional external crate.
 - `agent-gate`: auto-detected changed-path agent gate for a representative
   source edit.
 - `agent-gate-global`: auto-detected global-change escalation to the warmed

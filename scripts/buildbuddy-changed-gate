@@ -102,7 +102,8 @@ run_lane() {
   local log="$3"
   shift 3
   (
-    export RUST_LANE_ID="${RUST_LANE_ID:-changed-gate}-${lane}"
+    lane_prefix="${RUST_LANE_ID:-${BUILDBUDDY_AGENT_LANE:-${CODEX_AGENT_ID:-changed-gate-$$}}}"
+    export RUST_LANE_ID="${lane_prefix}-${lane}"
     export BUILDBUDDY_BAZEL_COMMAND="${command}"
     ./scripts/buildbuddy-bazel-poc "${paths[@]}" "$@"
   ) >"${log}" 2>&1

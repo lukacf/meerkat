@@ -64,9 +64,13 @@ The lane key includes:
 - `BUILDBUDDY_AGENT_LANE`, `RUST_LANE_ID`, or `CODEX_AGENT_ID`, when present.
 
 This matters for same-worktree multi-agent runs. Two agents running the same
-command in the same checkout should set distinct `RUST_LANE_ID` values. Separate
-Git worktrees automatically get different workspace hashes, so they do not share
-local Bazel output bases.
+command in the same checkout should set distinct `RUST_LANE_ID` values for
+stable warm lanes. `scripts/buildbuddy-changed-gate` falls back to a
+process-scoped lane when no `RUST_LANE_ID`, `BUILDBUDDY_AGENT_LANE`, or
+`CODEX_AGENT_ID` is set, which avoids same-checkout lock contention at the cost
+of less cache warmth between repeated manual runs. Separate Git worktrees
+automatically get different workspace hashes, so they do not share local Bazel
+output bases.
 
 ## Simulation Harness
 
@@ -90,6 +94,8 @@ modes:
   with no owning fast tests.
 - `parallel-gates`: two same-worktree agents running changed-path gates in
   parallel with distinct lanes.
+- `parallel-gates-auto`: two same-worktree changed-path gates without explicit
+  lanes; each gate chooses a process-scoped fallback lane.
 - `edit-probes`: creates a temporary detached worktree, makes harmless real
   edits to representative source/test/support files, runs the matching lanes,
   and removes the worktree.
@@ -99,6 +105,8 @@ modes:
 - `prewarm-dev`: runs the shared dev prewarm profile.
 - `prewarm-ci`: runs the shared CI prewarm profile.
 - `multi-worktree`: two temporary Git worktrees, each with its own lane.
+- `multi-worktree-gates`: two temporary Git worktrees running changed-path
+  gates in parallel.
 - `ci-cold`: sequential CI-like fast-test and clippy on fresh output bases.
 - `ci-parallel`: parallel CI-like fast-test and clippy on fresh output bases.
 - `ci-workspace`: parallel CI-like `workspace-test-rbe` and `clippy-rbe` on fresh
@@ -151,6 +159,8 @@ Representative measurements from the POC environment:
 | Changed source gate, combined owning build + clippy, warm | `3.79-3.927s` script wall |
 | Two same-worktree changed gates, combined first touch | `24.91s` / `25.10s` wall |
 | Two same-worktree changed gates, combined warm | `4.47s` / `4.63s` wall |
+| Two same-worktree changed gates, auto fallback lanes | `28.37s` / `28.59s` wall |
+| Two temp worktree changed gates, source/support | `27.61s` / `33.29s` wall |
 | Three cold parallel selectors with metadata cache lock | `0` Cargo lock waits |
 | Fresh temp worktree source edit probe | `23.98s` wall |
 | Fresh temp worktree exact-test edit probe | `48.31s` wall |

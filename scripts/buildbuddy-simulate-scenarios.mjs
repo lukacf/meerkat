@@ -20,11 +20,15 @@ Scenarios:
   changed-gate       Run the combined changed-path test+clippy gate.
   source-gate        Run the combined changed-path build+clippy gate.
   parallel-gates     Run two same-worktree changed gates in parallel.
+  parallel-gates-auto
+                     Run two same-worktree changed gates with automatic lanes.
   edit-probes        Make real edits in a temporary worktree and time edit lanes.
   edit-probes-warmed Prewarm lanes in a temporary worktree before timing edits.
   prewarm-dev        Run the shared dev-lane prewarm helper.
   prewarm-ci         Run the shared CI-lane prewarm helper.
   multi-worktree     Create two temporary git worktrees and run parallel agents.
+  multi-worktree-gates
+                     Run changed gates in two temporary Git worktrees.
   ci-cold            Run CI-like checks with fresh output bases.
   ci-parallel        Run CI-like fast-test and clippy checks in parallel.
   ci-workspace       Run workspace-test-rbe and clippy-rbe in parallel.
@@ -262,6 +266,24 @@ async function parallelGates(root) {
   return results.some((result) => result.code !== 0) ? 1 : 0;
 }
 
+async function parallelGatesAuto(root) {
+  console.log("\n== parallel-gates-auto ==");
+  const results = await Promise.all([
+    run(
+      "./scripts/buildbuddy-changed-gate",
+      ["--owned", "meerkat/tests/support/test_session_store.rs"],
+      { cwd: root, label: "changed-gate support auto-lane" },
+    ),
+    run(
+      "./scripts/buildbuddy-changed-gate",
+      ["--owned", "meerkat-mob/tests/member_session_bindings.rs"],
+      { cwd: root, label: "changed-gate test auto-lane" },
+    ),
+  ]);
+  for (const result of results) printResult(result);
+  return results.some((result) => result.code !== 0) ? 1 : 0;
+}
+
 function editProbeCases() {
   return [
     {
@@ -361,6 +383,43 @@ async function multiWorktree(root) {
   } finally {
     await run("git", ["worktree", "remove", "--force", a], { cwd: root, label: "remove-worktree-a" });
     await run("git", ["worktree", "remove", "--force", b], { cwd: root, label: "remove-worktree-b" });
+    await removeTempTree(temp);
+  }
+}
+
+async function multiWorktreeGates(root) {
+  console.log("\n== multi-worktree-gates ==");
+  const temp = mkdtempSync(join(tmpdir(), "meerkat-bb-gate-worktrees-"));
+  const base = basename(root);
+  const a = join(temp, `${base}-gate-a`);
+  const b = join(temp, `${base}-gate-b`);
+  const head = (await run("git", ["rev-parse", "HEAD"], { cwd: root, label: "rev-parse" })).output.trim();
+  try {
+    for (const result of [
+      await run("git", ["worktree", "add", "--detach", a, head], { cwd: root, label: "gate-worktree-a" }),
+      await run("git", ["worktree", "add", "--detach", b, head], { cwd: root, label: "gate-worktree-b" }),
+    ]) {
+      printResult(result);
+      if (result.code !== 0) return result.code;
+    }
+
+    const results = await Promise.all([
+      run(
+        "./scripts/buildbuddy-changed-gate",
+        ["--owned", "meerkat-machine-dsl-core/src/lib.rs"],
+        { cwd: a, label: "worktree-a source gate" },
+      ),
+      run(
+        "./scripts/buildbuddy-changed-gate",
+        ["--owned", "meerkat/tests/support/test_session_store.rs"],
+        { cwd: b, label: "worktree-b support gate" },
+      ),
+    ]);
+    for (const result of results) printResult(result);
+    return results.some((result) => result.code !== 0) ? 1 : 0;
+  } finally {
+    await run("git", ["worktree", "remove", "--force", a], { cwd: root, label: "remove-gate-worktree-a" });
+    await run("git", ["worktree", "remove", "--force", b], { cwd: root, label: "remove-gate-worktree-b" });
     await removeTempTree(temp);
   }
 }
@@ -486,11 +545,13 @@ const scenarios = requested.length === 0 || requested.includes("all")
       "changed-gate",
       "source-gate",
       "parallel-gates",
+      "parallel-gates-auto",
       "edit-probes",
       "edit-probes-warmed",
       "prewarm-dev",
       "prewarm-ci",
       "multi-worktree",
+      "multi-worktree-gates",
       "ci-cold",
       "ci-parallel",
       "ci-workspace",
@@ -509,11 +570,13 @@ const runners = new Map([
   ["changed-gate", changedGate],
   ["source-gate", sourceGate],
   ["parallel-gates", parallelGates],
+  ["parallel-gates-auto", parallelGatesAuto],
   ["edit-probes", editProbes],
   ["edit-probes-warmed", (root) => editProbes(root, { prewarm: true })],
   ["prewarm-dev", (root) => prewarmProfile(root, "dev")],
   ["prewarm-ci", (root) => prewarmProfile(root, "ci")],
   ["multi-worktree", multiWorktree],
+  ["multi-worktree-gates", multiWorktreeGates],
   ["ci-cold", ciCold],
   ["ci-parallel", ciParallel],
   ["ci-workspace", ciWorkspace],

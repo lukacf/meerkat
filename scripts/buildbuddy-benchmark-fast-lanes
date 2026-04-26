@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel)"
+cd "${workspace_root}"
+
+mode="all"
+case "${1:-}" in
+  "" | --all)
+    mode="all"
+    ;;
+  --cargo)
+    mode="cargo"
+    ;;
+  --buildbuddy)
+    mode="buildbuddy"
+    ;;
+  -h | --help)
+    cat <<'EOF'
+usage: buildbuddy-benchmark-fast-lanes [--all|--cargo|--buildbuddy]
+
+Runs the apples-to-apples fast deterministic test lanes:
+  Cargo:      ./scripts/repo-cargo fast
+  BuildBuddy: BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc
+
+The lanes both exclude dedicated e2e wrappers. BuildBuddy is opt-in and is
+preflighted with make buildbuddy-doctor before timing.
+EOF
+    exit 0
+    ;;
+  *)
+    echo "unknown argument: $1" >&2
+    exit 2
+    ;;
+esac
+
+temp_root="${MEERKAT_BENCHMARK_LOG_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/benchmarks/fast-lanes/$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "${temp_root}"
+
+summarize_log() {
+  local log="$1"
+  grep -E 'Finished |Summary |INFO: Elapsed time:|INFO: Build completed|Executed |error:|FAIL|PASS ' "${log}" | tail -12 || true
+}
+
+run_timed() {
+  local name="$1"
+  shift
+  local log="${temp_root}/${name//[^A-Za-z0-9_.-]/_}.log"
+  local start_seconds end_seconds status
+  start_seconds="$(date +%s)"
+  set +e
+  "$@" >"${log}" 2>&1
+  status="$?"
+  set -e
+  end_seconds="$(date +%s)"
+
+  printf '\n== %s ==\n' "${name}"
+  printf 'status: %s\n' "${status}"
+  printf 'wall: %ss\n' "$((end_seconds - start_seconds))"
+  summarize_log "${log}"
+  printf 'log: %s\n' "${log}"
+
+  if [[ "${status}" != "0" ]]; then
+    return "${status}"
+  fi
+}
+
+if [[ "${mode}" == "all" || "${mode}" == "cargo" ]]; then
+  run_timed "cargo-fast" ./scripts/repo-cargo fast
+fi
+
+if [[ "${mode}" == "all" || "${mode}" == "buildbuddy" ]]; then
+  make buildbuddy-doctor >/dev/null
+  run_timed "buildbuddy-fast" env BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe ./scripts/buildbuddy-bazel-poc --jobs=64
+fi
+
+printf '\nlogs kept under: %s\n' "${temp_root}"

@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit buildbuddy-doctor buildbuddy-fast buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit buildbuddy-doctor buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -210,15 +210,19 @@ buildbuddy-doctor:
 	@echo "$(GREEN)Checking optional BuildBuddy setup...$(NC)"
 	@scripts/buildbuddy-doctor
 
-buildbuddy-fast:
+buildbuddy-fast: buildbuddy-doctor
 	@echo "$(GREEN)Running BuildBuddy fast workspace test lane...$(NC)"
 	@BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc --jobs=64
 
-buildbuddy-ci:
+buildbuddy-benchmark:
+	@echo "$(GREEN)Benchmarking Cargo and BuildBuddy fast lanes...$(NC)"
+	@scripts/buildbuddy-benchmark-fast-lanes
+
+buildbuddy-ci: buildbuddy-doctor
 	@echo "$(GREEN)Running BuildBuddy workspace CI gate...$(NC)"
 	@scripts/buildbuddy-ci-workspace --fresh
 
-buildbuddy-ci-warm:
+buildbuddy-ci-warm: buildbuddy-doctor
 	@echo "$(GREEN)Running warmed BuildBuddy workspace CI gate...$(NC)"
 	@scripts/buildbuddy-ci-workspace --warm
 
@@ -554,6 +558,7 @@ help:
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"
 	@echo "  $(GREEN)buildbuddy-doctor$(NC)- Check optional BuildBuddy setup"
 	@echo "  $(GREEN)buildbuddy-fast$(NC)- Run optional BuildBuddy fast test lane"
+	@echo "  $(GREEN)buildbuddy-benchmark$(NC)- Compare Cargo and BuildBuddy fast lanes"
 	@echo "  $(GREEN)buildbuddy-ci$(NC) - Run optional BuildBuddy workspace CI gate"
 	@echo "  $(GREEN)buildbuddy-ci-warm$(NC) - Run warmed BuildBuddy workspace CI gate"
 	@echo "  $(GREEN)ci$(NC)            - Run full CI pipeline"

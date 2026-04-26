@@ -255,6 +255,9 @@ to roughly `4-6s` once those lanes were prepared.
 - To check whether a machine is ready for the optional BuildBuddy lanes, run
   `make buildbuddy-doctor`. It checks credentials, `bb`, Bazel config, selector
   health, and lane isolation without running a build or printing secrets.
+- To compare the apples-to-apples fast lanes, run `make buildbuddy-benchmark`.
+  It times Cargo fast tests and the equivalent BuildBuddy fast lane, then keeps
+  compact logs under the benchmark cache directory.
 - For the remote-compatible BuildBuddy gate, run `make buildbuddy-ci`, or
   `make buildbuddy-ci-warm` when repeated agents can reuse a stable output root.
 - For same-checkout multi-agent work, always set a distinct `RUST_LANE_ID` per

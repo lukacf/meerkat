@@ -35,6 +35,31 @@ pub mod schedule_lifecycle;
 use crate::identity::InputVariantId;
 use crate::{MachineSchema, NamedTypeBinding};
 
+trait RuntimeInternalInputVariant: Copy {
+    fn input_variant_id(self) -> InputVariantId;
+}
+
+macro_rules! runtime_internal_inputs {
+    ($type_name:ident, $const_name:ident, [$($variant:ident),+ $(,)?]) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum $type_name {
+            $($variant),+
+        }
+
+        const $const_name: &[$type_name] = &[
+            $($type_name::$variant),+
+        ];
+
+        impl RuntimeInternalInputVariant for $type_name {
+            fn input_variant_id(self) -> InputVariantId {
+                InputVariantId::from_trusted_catalog_literal(match self {
+                    $(Self::$variant => stringify!($variant),)+
+                })
+            }
+        }
+    };
+}
+
 /// Attach authoritative [`NamedTypeBinding`]s to a DSL-generated schema.
 ///
 /// The `machine!` macro does not yet emit `named_types` entries, so the
@@ -46,10 +71,13 @@ fn with_named_types(mut schema: MachineSchema, bindings: Vec<NamedTypeBinding>) 
     schema
 }
 
-fn input_variant_ids(names: &'static [&'static str]) -> Vec<InputVariantId> {
-    names
+fn input_variant_ids<T: RuntimeInternalInputVariant>(
+    variants: &'static [T],
+) -> Vec<InputVariantId> {
+    variants
         .iter()
-        .map(|name| InputVariantId::from_trusted_catalog_literal(name))
+        .copied()
+        .map(RuntimeInternalInputVariant::input_variant_id)
         .collect()
 }
 
@@ -119,71 +147,75 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
     )
 }
 
-const MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS: &[&str] = &[
-    "AbortLiveTopologyBeforeDetach",
-    "AddDirectPeerEndpoint",
-    "AdvanceSessionContext",
-    "ApplyLiveTopologyIdentity",
-    "ApplyLiveTopologyVisibility",
-    "ApplyMobPeerOverlay",
-    "AttachMobIngress",
-    "AttachSessionIngress",
-    "AuthorizeSupervisor",
-    "BeginLiveTopologyReconfigure",
-    "BeginRealtimeBinding",
-    "BindSupervisor",
-    "ClassifyRealtimeClientInputSubmitted",
-    "ClassifyRealtimeMidTurnActivity",
-    "ClassifyRealtimeTurnTerminated",
-    "ClearLocalEndpoint",
-    "ClearRealtimeReconnectProgress",
-    "CompleteLiveTopology",
-    "DetachIngress",
-    "DetachRealtimeBinding",
-    "FailLiveTopologyAfterDetach",
-    "InteractionStreamAttached",
-    "InteractionStreamClosedEarly",
-    "InteractionStreamCompleted",
-    "InteractionStreamExpired",
-    "InteractionStreamReserved",
-    "MarkLiveTopologyDetached",
-    "McpServerConnectPending",
-    "McpServerConnected",
-    "McpServerDisconnected",
-    "McpServerFailed",
-    "McpServerReload",
-    "OpsBarrierSatisfied",
-    "PeerRequestReceived",
-    "PeerRequestSent",
-    "PeerRequestTimedOut",
-    "PeerResponseProgressArrived",
-    "PeerResponseReplied",
-    "PeerResponseTerminalArrived",
-    "PendingFailed",
-    "PendingSucceeded",
-    "ProductOutputStarted",
-    "ProductTurnCommitted",
-    "ProductTurnInFlight",
-    "ProductTurnInterrupted",
-    "ProductTurnTerminal",
-    "ProjectRealtimeIntent",
-    "ProjectRealtimeReconnectProgress",
-    "PublishLocalEndpoint",
-    "PublishRealtimeSignal",
-    "RealtimeProjectionAdvanceObserved",
-    "RealtimeProjectionRefreshed",
-    "RealtimeProjectionReset",
-    "RecoverInputLifecycle",
-    "RemoveDirectPeerEndpoint",
-    "ReplaceRealtimeBinding",
-    "RequireRealtimeReattach",
-    "RevokeSupervisor",
-    "SnapshotAligned",
-    "SupervisorTrustEdgePublishFailed",
-    "SupervisorTrustEdgePublished",
-    "SupervisorTrustEdgeRevokeFailed",
-    "SupervisorTrustEdgeRevoked",
-];
+runtime_internal_inputs!(
+    MeerkatMachineRuntimeInternalInput,
+    MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS,
+    [
+        AbortLiveTopologyBeforeDetach,
+        AddDirectPeerEndpoint,
+        AdvanceSessionContext,
+        ApplyLiveTopologyIdentity,
+        ApplyLiveTopologyVisibility,
+        ApplyMobPeerOverlay,
+        AttachMobIngress,
+        AttachSessionIngress,
+        AuthorizeSupervisor,
+        BeginLiveTopologyReconfigure,
+        BeginRealtimeBinding,
+        BindSupervisor,
+        ClassifyRealtimeClientInputSubmitted,
+        ClassifyRealtimeMidTurnActivity,
+        ClassifyRealtimeTurnTerminated,
+        ClearLocalEndpoint,
+        ClearRealtimeReconnectProgress,
+        CompleteLiveTopology,
+        DetachIngress,
+        DetachRealtimeBinding,
+        FailLiveTopologyAfterDetach,
+        InteractionStreamAttached,
+        InteractionStreamClosedEarly,
+        InteractionStreamCompleted,
+        InteractionStreamExpired,
+        InteractionStreamReserved,
+        MarkLiveTopologyDetached,
+        McpServerConnectPending,
+        McpServerConnected,
+        McpServerDisconnected,
+        McpServerFailed,
+        McpServerReload,
+        OpsBarrierSatisfied,
+        PeerRequestReceived,
+        PeerRequestSent,
+        PeerRequestTimedOut,
+        PeerResponseProgressArrived,
+        PeerResponseReplied,
+        PeerResponseTerminalArrived,
+        PendingFailed,
+        PendingSucceeded,
+        ProductOutputStarted,
+        ProductTurnCommitted,
+        ProductTurnInFlight,
+        ProductTurnInterrupted,
+        ProductTurnTerminal,
+        ProjectRealtimeIntent,
+        ProjectRealtimeReconnectProgress,
+        PublishLocalEndpoint,
+        PublishRealtimeSignal,
+        RealtimeProjectionAdvanceObserved,
+        RealtimeProjectionRefreshed,
+        RealtimeProjectionReset,
+        RecoverInputLifecycle,
+        RemoveDirectPeerEndpoint,
+        ReplaceRealtimeBinding,
+        RequireRealtimeReattach,
+        RevokeSupervisor,
+        SnapshotAligned,
+        SupervisorTrustEdgePublishFailed,
+        SupervisorTrustEdgePublished,
+        SupervisorTrustEdgeRevokeFailed,
+        SupervisorTrustEdgeRevoked,
+    ]
+);
 
 pub fn dsl_mob_machine() -> MachineSchema {
     let schema = with_named_types(
@@ -228,17 +260,21 @@ pub fn dsl_mob_machine() -> MachineSchema {
     )
 }
 
-const MOB_MACHINE_RUNTIME_INTERNAL_INPUTS: &[&str] = &[
-    "BindMemberSession",
-    "ReleaseMemberSession",
-    "RotateMemberSession",
-    "SessionIngressDetachFailedForMobDestroy",
-    "SessionIngressDetachedForMobDestroy",
-    "UnwireExternalPeer",
-    "UnwireMembers",
-    "WireExternalPeer",
-    "WireMembers",
-];
+runtime_internal_inputs!(
+    MobMachineRuntimeInternalInput,
+    MOB_MACHINE_RUNTIME_INTERNAL_INPUTS,
+    [
+        BindMemberSession,
+        ReleaseMemberSession,
+        RotateMemberSession,
+        SessionIngressDetachFailedForMobDestroy,
+        SessionIngressDetachedForMobDestroy,
+        UnwireExternalPeer,
+        UnwireMembers,
+        WireExternalPeer,
+        WireMembers,
+    ]
+);
 
 pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
     with_named_types(

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=""
+output_root=""
+
+usage() {
+  cat <<'EOF'
+usage: buildbuddy-write-context [--mode <name>] [--output-root <path>]
+
+Writes machine-readable BuildBuddy benchmark/CI context to stdout.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --mode requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      mode="$2"
+      shift 2
+      ;;
+    --output-root)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --output-root requires a path" >&2
+        usage >&2
+        exit 2
+      fi
+      output_root="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+workspace_root="$(git rev-parse --show-toplevel)"
+cd "${workspace_root}"
+
+buildbuddy_cli_version() {
+  local bb_bin=""
+  if command -v bb >/dev/null 2>&1; then
+    bb_bin="$(command -v bb)"
+  elif [[ -x "${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb" ]]; then
+    bb_bin="${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb"
+  fi
+
+  if [[ -n "${bb_bin}" ]]; then
+    "${bb_bin}" version 2>/dev/null | head -1 || true
+  fi
+}
+
+printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'repo=%s\n' "${workspace_root}"
+printf 'head=%s\n' "$(git rev-parse HEAD)"
+printf 'origin_main=%s\n' "$(git rev-parse origin/main 2>/dev/null || true)"
+printf 'branch=%s\n' "$(git branch --show-current || true)"
+if [[ -n "${mode}" ]]; then
+  printf 'mode=%s\n' "${mode}"
+fi
+if [[ -n "${output_root}" ]]; then
+  printf 'output_root=%s\n' "${output_root}"
+fi
+printf 'uname=%s\n' "$(uname -a)"
+printf 'rustc=%s\n' "$(rustc --version 2>/dev/null || true)"
+printf 'cargo=%s\n' "$(./scripts/repo-cargo --version 2>/dev/null || true)"
+printf 'bb=%s\n' "$(buildbuddy_cli_version)"

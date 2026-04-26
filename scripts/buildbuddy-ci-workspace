@@ -51,33 +51,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-buildbuddy_cli_version() {
-  local bb_bin=""
-  if command -v bb >/dev/null 2>&1; then
-    bb_bin="$(command -v bb)"
-  elif [[ -x "${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb" ]]; then
-    bb_bin="${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb"
-  fi
-
-  if [[ -n "${bb_bin}" ]]; then
-    "${bb_bin}" version 2>/dev/null | head -1 || true
-  fi
-}
-
 write_context() {
-  {
-    printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'repo=%s\n' "${workspace_root}"
-    printf 'head=%s\n' "$(git rev-parse HEAD)"
-    printf 'origin_main=%s\n' "$(git rev-parse origin/main 2>/dev/null || true)"
-    printf 'branch=%s\n' "$(git branch --show-current || true)"
-    printf 'mode=%s\n' "${mode}"
-    printf 'output_root=%s\n' "${output_root}"
-    printf 'uname=%s\n' "$(uname -a)"
-    printf 'rustc=%s\n' "$(rustc --version 2>/dev/null || true)"
-    printf 'cargo=%s\n' "$(./scripts/repo-cargo --version 2>/dev/null || true)"
-    printf 'bb=%s\n' "$(buildbuddy_cli_version)"
-  } >"${context_path}"
+  scripts/buildbuddy-write-context --mode "${mode}" --output-root "${output_root}" >"${context_path}"
   printf 'name\tstatus\twall_seconds\tlog\tcommand\n' >"${summary_path}"
 }
 

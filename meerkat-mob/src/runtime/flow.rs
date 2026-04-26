@@ -2264,23 +2264,23 @@ fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobE
 }
 
 fn effect_step_status(effect: &flow_run::Effect) -> Result<StepRunStatus, MobError> {
-    let status = match effect {
-        flow_run::Effect::EmitStepNotice(payload) => payload.step_status.as_str(),
-        other => {
-            return Err(MobError::Internal(format!(
-                "flow_run effect {other:?} does not carry step_status"
-            )));
+    match effect {
+        flow_run::Effect::EmitStepNotice(payload) => {
+            Ok(step_status_from_flow_run(payload.step_status))
         }
-    };
-    match status {
-        "Dispatched" => Ok(StepRunStatus::Dispatched),
-        "Completed" => Ok(StepRunStatus::Completed),
-        "Failed" => Ok(StepRunStatus::Failed),
-        "Skipped" => Ok(StepRunStatus::Skipped),
-        "Canceled" => Ok(StepRunStatus::Canceled),
         other => Err(MobError::Internal(format!(
-            "flow_run effect carried unknown StepRunStatus `{other}`"
+            "flow_run effect {other:?} does not carry step_status"
         ))),
+    }
+}
+
+fn step_status_from_flow_run(status: flow_run::StepRunStatus) -> StepRunStatus {
+    match status {
+        flow_run::StepRunStatus::Dispatched => StepRunStatus::Dispatched,
+        flow_run::StepRunStatus::Completed => StepRunStatus::Completed,
+        flow_run::StepRunStatus::Failed => StepRunStatus::Failed,
+        flow_run::StepRunStatus::Skipped => StepRunStatus::Skipped,
+        flow_run::StepRunStatus::Canceled => StepRunStatus::Canceled,
     }
 }
 
@@ -2940,5 +2940,22 @@ mod strip_code_fences_tests {
         let input =
             "Here is the raw JSON response:\n\n```json\n{\"final_message\":\"joined\"}\n```";
         assert_eq!(strip_code_fences(input), r#"{"final_message":"joined"}"#);
+    }
+}
+
+#[cfg(test)]
+mod status_projection_tests {
+    use super::{StepRunStatus, flow_run, step_status_from_flow_run};
+
+    #[test]
+    fn flow_run_step_status_projects_from_typed_variant() {
+        assert_eq!(
+            step_status_from_flow_run(flow_run::StepRunStatus::Failed),
+            StepRunStatus::Failed
+        );
+        assert_eq!(
+            step_status_from_flow_run(flow_run::StepRunStatus::Canceled),
+            StepRunStatus::Canceled
+        );
     }
 }

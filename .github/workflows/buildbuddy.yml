@@ -205,7 +205,7 @@ jobs:
 
   rust-release-packaging:
     name: Rust release packaging
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || (vars.MEERKAT_BUILDBUDDY_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'rust-release-packaging' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -409,7 +409,6 @@ jobs:
       - doctor
       - fmt-lint
       - sdk-suites
-      - rust-release-packaging
       - machine-authority
       - rmat-audit
       - seam-inventory

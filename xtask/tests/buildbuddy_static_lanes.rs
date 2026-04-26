@@ -169,7 +169,7 @@ fn public_version_surfaces_are_in_sync() {
             .unwrap_or_else(|| panic!("missing {key}"));
         let digits: String = current[idx + needle.len()..]
             .chars()
-            .skip_while(|ch| ch.is_ascii_whitespace())
+            .skip_while(char::is_ascii_whitespace)
             .take_while(char::is_ascii_digit)
             .collect();
         assert!(!digits.is_empty(), "missing numeric {key}");
@@ -225,14 +225,14 @@ fn rpc_catalog_router_docs_and_sdk_wrappers_are_aligned() {
 
     let mut router_methods = BTreeSet::new();
     for line in router.lines().filter(|line| line.contains("=>")) {
-        if let Some(first) = line.find('"') {
-            if let Some(second) = line[first + 1..].find('"') {
-                let method = &line[first + 1..first + 1 + second];
-                if method == "initialize"
-                    || (method.starts_with(char::is_alphabetic) && method.contains('/'))
-                {
-                    router_methods.insert(method.to_string());
-                }
+        if let Some(first) = line.find('"')
+            && let Some(second) = line[first + 1..].find('"')
+        {
+            let method = &line[first + 1..first + 1 + second];
+            if method == "initialize"
+                || (method.starts_with(char::is_alphabetic) && method.contains('/'))
+            {
+                router_methods.insert(method.to_string());
             }
         }
     }
@@ -260,12 +260,12 @@ fn rpc_catalog_router_docs_and_sdk_wrappers_are_aligned() {
         if !line.starts_with("| `") {
             continue;
         }
-        if let Some(first) = line.find('`') {
-            if let Some(second) = line[first + 1..].find('`') {
-                let method = &line[first + 1..first + 1 + second];
-                if method == "initialize" || method.contains('/') {
-                    docs_methods.insert(method.to_string());
-                }
+        if let Some(first) = line.find('`')
+            && let Some(second) = line[first + 1..].find('`')
+        {
+            let method = &line[first + 1..first + 1 + second];
+            if method == "initialize" || method.contains('/') {
+                docs_methods.insert(method.to_string());
             }
         }
     }

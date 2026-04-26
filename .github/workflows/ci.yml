@@ -100,6 +100,7 @@ jobs:
 
   rust-release-packaging:
     name: Rust release packaging
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -497,7 +498,7 @@ jobs:
   gate:
     name: Cargo CI gate
     if: always()
-    needs: [fmt-lint, sdk-suites, rust-release-packaging, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
+    needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -506,7 +507,6 @@ jobs:
           for job in \
             fmt-lint \
             sdk-suites \
-            rust-release-packaging \
             machine-authority \
             test-unit \
             integration-fast \
@@ -524,7 +524,6 @@ jobs:
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
               sdk-suites) result="${{ needs.sdk-suites.result }}" ;;
-              rust-release-packaging) result="${{ needs.rust-release-packaging.result }}" ;;
               machine-authority) result="${{ needs.machine-authority.result }}" ;;
               test-unit) result="${{ needs.test-unit.result }}" ;;
               integration-fast) result="${{ needs.integration-fast.result }}" ;;

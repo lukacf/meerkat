@@ -108,10 +108,50 @@ run_lane() {
 
 test_log="${temp_root}/test.log"
 clippy_log="${temp_root}/clippy.log"
+combined_log="${temp_root}/combined.log"
 test_status_file="${temp_root}/test.status"
 clippy_status_file="${temp_root}/clippy.status"
+combined_status_file="${temp_root}/combined.status"
+
+selector_mode_args=()
+if [[ "${mode}" == "owned" ]]; then
+  selector_mode_args+=(--owned)
+else
+  selector_mode_args+=(--affected)
+fi
+
+test_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --test "${paths[@]}")"
+clippy_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --clippy "${paths[@]}")"
 
 start_seconds="$(date +%s)"
+
+if [[ "${test_command}" != *-local && "${test_targets}" == "${clippy_targets}" ]]; then
+  (
+    set +e
+    run_lane combined "${test_command}" "${combined_log}" \
+      --jobs=64 \
+      --color=no \
+      --curses=no \
+      --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect" \
+      --output_groups="+clippy_checks" \
+      --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    echo "$?" >"${combined_status_file}"
+  ) &
+  combined_pid="$!"
+
+  wait "${combined_pid}" || true
+
+  end_seconds="$(date +%s)"
+  combined_status="$(cat "${combined_status_file}" 2>/dev/null || echo 1)"
+
+  printf 'BuildBuddy changed gate (%s, combined) wall: %ss\n' "${mode}" "$((end_seconds - start_seconds))"
+  summarize_log "${test_command}+${clippy_command}" "${combined_status}" "${combined_log}"
+
+  if [[ "${combined_status}" != "0" ]]; then
+    exit 1
+  fi
+  exit 0
+fi
 
 (
   set +e

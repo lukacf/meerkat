@@ -42,8 +42,10 @@ downloading large remote-cache inputs before rustc can run.
 
 For a one-shot edit feedback gate, use `scripts/buildbuddy-changed-gate
 --owned <path>`. It runs the selected fast test lane and selected clippy lane in
-parallel. Use `--affected` when the edit needs reverse-dependency confidence,
-and `--local-test` when the selected test lane is already warm locally.
+parallel. When both selectors resolve to the same test labels, it collapses the
+gate into one `bb test` invocation with the clippy aspect attached. Use
+`--affected` when the edit needs reverse-dependency confidence, and
+`--local-test` when the selected test lane is already warm locally.
 
 ## Lane Isolation
 
@@ -139,8 +141,8 @@ Representative measurements from the POC environment:
 | Changed source clippy, owned selector, warm | `0.50s` wall |
 | Shared support clippy, exact owned selector, first touch | `21.77s` wall |
 | Shared support clippy, exact owned selector, warm | `0.91s` wall |
-| Changed support gate, exact tests + exact clippy, first touch | `25s` script wall |
-| Changed support gate, exact tests + exact clippy, warm | `4s` script wall |
+| Changed support gate, combined exact tests + exact clippy, first touch | `20-20.88s` script wall |
+| Changed support gate, combined exact tests + exact clippy, warm | `3.85-3.856s` script wall |
 | Two same-worktree changed gates, first touch | `26.44s` / `26.35s` wall |
 | Two same-worktree changed gates, warm | `5.12s` / `5.12s` wall |
 | Three cold parallel selectors with metadata cache lock | `0` Cargo lock waits |

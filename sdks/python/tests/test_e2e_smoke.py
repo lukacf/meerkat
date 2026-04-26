@@ -304,7 +304,7 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await client_b.status(session_id)
+            runtime_state = await client_b.runtime_status(session_id)
             assert runtime_state.state in {
                 "attached",
                 "idle",
@@ -312,7 +312,7 @@ if include_scenario(39):
                 "initializing",
             }
 
-            accepted = await client_b.submit(
+            accepted = await client_b.runtime_submit(
                 session_id,
                 make_prompt_input(
                     f"Reply with PY-RUNTIME-39, PY-RUNTIME-OK, and the marker {marker}.",
@@ -329,7 +329,7 @@ if include_scenario(39):
 
             input_state = await wait_for(
                 "runtime input to be consumed",
-                lambda: client_b.submission(session_id, input_id),
+                lambda: client_b.runtime_submission(session_id, input_id),
                 lambda state: state is not None and state.current_state == "consumed",
                 timeout_secs=120.0,
             )

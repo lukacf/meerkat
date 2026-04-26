@@ -96,8 +96,15 @@ impl From<RealmBackendArg> for RealmBackend {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional on-disk trace sink: when `RKAT_RPC_TRACE_FILE` is set,
     // append-write every tracing event to the given path in addition to
     // the usual stderr writer. Targeted debugging helper for live smoke

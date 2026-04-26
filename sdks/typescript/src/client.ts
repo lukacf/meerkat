@@ -2017,26 +2017,22 @@ export class MeerkatClient {
   async authStatusGet(
     realmId: string,
     bindingId: string,
-    profileId?: string,
   ): Promise<unknown> {
     const params: Record<string, unknown> = {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
     return this.request("auth/status/get", params);
   }
 
   async authLogout(
     realmId: string,
     bindingId: string,
-    profileId?: string,
   ): Promise<unknown> {
     const params: Record<string, unknown> = {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
     return this.request("auth/logout", params);
   }
 

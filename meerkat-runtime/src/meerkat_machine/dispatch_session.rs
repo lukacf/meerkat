@@ -210,8 +210,12 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                self.set_session_silent_intents_inner(&session_id, intents)
-                    .await;
+                if previous_dsl_state.lifecycle_phase
+                    != crate::meerkat_machine::dsl::MeerkatPhase::Stopped
+                {
+                    self.set_session_silent_intents_inner(&session_id, intents)
+                        .await;
+                }
                 // set_session_silent_intents_inner is infallible — no rollback needed.
                 let _ = previous_dsl_state;
                 Ok(MeerkatMachineCommandResult::Unit)

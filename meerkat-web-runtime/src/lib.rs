@@ -829,7 +829,7 @@ pub fn register_tool_callback(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
-            name,
+            name: name.into(),
             description,
             input_schema: schema,
             provenance: Some(meerkat_core::types::ToolProvenance {
@@ -891,7 +891,7 @@ pub fn register_js_tool(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
-            name,
+            name: name.into(),
             description,
             input_schema: schema,
             provenance: Some(meerkat_core::types::ToolProvenance {

@@ -589,9 +589,6 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        if self.phase() == RuntimeState::Stopped {
-            return;
-        }
         self.silent_comms_intents = intents;
     }
 
@@ -1020,13 +1017,17 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.phase() == RuntimeState::Idle
+        self.runtime_phase_snapshot() == RuntimeState::Idle
     }
     pub fn is_idle_or_attached(&self) -> bool {
-        self.phase().is_idle_or_attached()
+        self.runtime_phase_snapshot().is_idle_or_attached()
     }
 
     pub fn phase(&self) -> RuntimeState {
+        self.runtime_phase_snapshot()
+    }
+
+    fn runtime_phase_snapshot(&self) -> RuntimeState {
         let authority = self.shared_dsl_authority();
         let authority = authority
             .lock()
@@ -1051,7 +1052,7 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn can_process_queue(&self) -> bool {
-        self.phase().can_process_queue()
+        self.runtime_phase_snapshot().can_process_queue()
     }
 
     /// Low-level control projection shim for external contract tests.
@@ -2086,7 +2087,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         self.recover_ephemeral()
     }
     fn runtime_state(&self) -> RuntimeState {
-        self.phase()
+        self.runtime_phase_snapshot()
     }
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.ledger.get(input_id)

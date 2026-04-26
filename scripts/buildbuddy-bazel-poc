@@ -382,7 +382,17 @@ if [[ -n "${BUILDBUDDY_MAX_IDLE_SECS:-}" ]]; then
   startup_args+=(--max_idle_secs="${BUILDBUDDY_MAX_IDLE_SECS}")
 fi
 
+module_lock_args=()
+lockfile="${workspace_root}/MODULE.bazel.lock"
+local_oai_vendor="${workspace_root}/vendor/oai-rt-rs"
+if [[ -f "${lockfile}" ]] &&
+  grep -Fq '/vendor/oai-rt-rs' "${lockfile}" &&
+  ! grep -Fq "${local_oai_vendor}" "${lockfile}"; then
+  module_lock_args+=(--lockfile_mode=refresh)
+fi
+
 exec "${bb_bin}" "${startup_args[@]}" "${command}" \
+  "${module_lock_args[@]}" \
   --config="${config}" \
   --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}" \
   "${extra_args[@]}" \

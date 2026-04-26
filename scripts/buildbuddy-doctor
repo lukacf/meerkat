@@ -177,6 +177,13 @@ else
   printf '%s\n' "${broad_changed_gate_dry_run}" >&2
 fi
 
+if grep -Fq '/vendor/oai-rt-rs' scripts/buildbuddy-bazel-poc &&
+  grep -Fq -- '--lockfile_mode=refresh' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy launcher refreshes stale local path dependency locks"
+else
+  bad "BuildBuddy launcher does not refresh stale local path dependency locks"
+fi
+
 dispatch_log_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-buildbuddy-dispatch-doctor.XXXXXX")"
 dispatch_dry_run="$(
   MEERKAT_BUILDBUDDY_LOG_ROOT="${dispatch_log_root}" \

@@ -412,7 +412,8 @@ impl ApprovalService {
         let now = Utc::now();
         let mut records = self.records.write();
         let record = records
-            .get_mut(approval_id)
+            .get(approval_id)
+            .cloned()
             .ok_or_else(|| ApprovalError::NotFound {
                 approval_id: approval_id.clone(),
             })?;
@@ -422,8 +423,14 @@ impl ApprovalService {
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= now)
         {
-            record.status = ApprovalStatus::Expired;
-            record.updated_at = now;
+            let mut expired_record = record;
+            expired_record.status = ApprovalStatus::Expired;
+            expired_record.updated_at = now;
+            self.store.put(&expired_record)?;
+            records.insert(approval_id.clone(), expired_record);
+            return Err(ApprovalError::Expired {
+                approval_id: approval_id.clone(),
+            });
         }
 
         match record.status {
@@ -444,34 +451,38 @@ impl ApprovalService {
             return Err(ApprovalError::InvalidDecision { decision });
         }
 
-        record.status = match decision {
+        let mut decided_record = record;
+        decided_record.status = match decision {
             ApprovalDecision::Approve => ApprovalStatus::Approved,
             ApprovalDecision::Deny => ApprovalStatus::Denied,
         };
-        record.updated_at = now;
-        record.decision = Some(ApprovalDecisionRecord {
+        decided_record.updated_at = now;
+        decided_record.decision = Some(ApprovalDecisionRecord {
             decision,
             actor,
             decided_at: now,
             reason,
             provenance,
         });
-        self.store.put(record)?;
-        Ok(record.clone())
+        self.store.put(&decided_record)?;
+        records.insert(approval_id.clone(), decided_record.clone());
+        Ok(decided_record)
     }
 
     fn refresh_expiry(&self, approval_id: &ApprovalId) -> Result<(), ApprovalError> {
         let now = Utc::now();
         let mut records = self.records.write();
-        if let Some(record) = records.get_mut(approval_id)
+        if let Some(record) = records.get(approval_id).cloned()
             && record.status == ApprovalStatus::Pending
             && record
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= now)
         {
-            record.status = ApprovalStatus::Expired;
-            record.updated_at = now;
-            self.store.put(record)?;
+            let mut expired_record = record;
+            expired_record.status = ApprovalStatus::Expired;
+            expired_record.updated_at = now;
+            self.store.put(&expired_record)?;
+            records.insert(approval_id.clone(), expired_record);
         }
         Ok(())
     }
@@ -497,6 +508,54 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct TestApprovalStore {
+        records: RwLock<BTreeMap<ApprovalId, ApprovalRecord>>,
+        put_calls: AtomicUsize,
+        fail_on_put_call: Option<usize>,
+    }
+
+    impl TestApprovalStore {
+        fn new(fail_on_put_call: Option<usize>) -> Self {
+            Self {
+                records: RwLock::new(BTreeMap::new()),
+                put_calls: AtomicUsize::new(0),
+                fail_on_put_call,
+            }
+        }
+
+        fn record(&self, approval_id: &ApprovalId) -> Option<ApprovalRecord> {
+            self.records.read().get(approval_id).cloned()
+        }
+    }
+
+    impl ApprovalStore for TestApprovalStore {
+        fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
+            Ok(self.records.read().values().cloned().collect())
+        }
+
+        fn put(&self, record: &ApprovalRecord) -> Result<(), ApprovalStoreError> {
+            let put_call = self.put_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self
+                .fail_on_put_call
+                .is_some_and(|fail_on_put_call| fail_on_put_call == put_call)
+            {
+                return Err(ApprovalStoreError::Backend(
+                    "injected approval store failure".to_string(),
+                ));
+            }
+            self.records
+                .write()
+                .insert(record.approval_id.clone(), record.clone());
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            true
+        }
+    }
 
     fn principal(value: &str) -> ApprovalPrincipalId {
         ApprovalPrincipalId::new(value).expect("valid principal")
@@ -618,6 +677,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_decision_persist_keeps_approval_pending_for_retry() {
+        let store = Arc::new(TestApprovalStore::new(Some(2)));
+        let service = ApprovalService::with_store(store.clone()).expect("service");
+        let record = service.request(request()).expect("request accepted");
+
+        let err = service
+            .decide(
+                &record.approval_id,
+                ApprovalDecision::Approve,
+                principal("human:bob"),
+                None,
+                None,
+            )
+            .expect_err("decision write should fail");
+
+        assert!(matches!(err, ApprovalError::Store(_)));
+        let cached = service.get(&record.approval_id).expect("cached record");
+        assert_eq!(cached.status, ApprovalStatus::Pending);
+        assert!(cached.decision.is_none());
+        let persisted = store.record(&record.approval_id).expect("persisted record");
+        assert_eq!(persisted.status, ApprovalStatus::Pending);
+        assert!(persisted.decision.is_none());
+
+        let retried = service
+            .decide(
+                &record.approval_id,
+                ApprovalDecision::Deny,
+                principal("human:bob"),
+                Some("changed my mind".to_string()),
+                None,
+            )
+            .expect("retry should decide approval");
+        assert_eq!(retried.status, ApprovalStatus::Denied);
+    }
+
+    #[test]
     fn expired_approval_cannot_be_decided() {
         let service = ApprovalService::new();
         let mut request = request();
@@ -637,6 +732,30 @@ mod tests {
             service.get(&record.approval_id).expect("record").status,
             ApprovalStatus::Expired
         );
+    }
+
+    #[test]
+    fn deciding_expired_approval_persists_expiry_transition() {
+        let store = Arc::new(TestApprovalStore::new(None));
+        let service = ApprovalService::with_store(store.clone()).expect("service");
+        let mut request = request();
+        request.expires_at = Some(Utc::now() - Duration::seconds(1));
+        let record = service.request(request).expect("request accepted");
+
+        let err = service
+            .decide(
+                &record.approval_id,
+                ApprovalDecision::Approve,
+                principal("human:bob"),
+                None,
+                None,
+            )
+            .expect_err("expired approval rejected");
+
+        assert!(matches!(err, ApprovalError::Expired { .. }));
+        let persisted = store.record(&record.approval_id).expect("persisted record");
+        assert_eq!(persisted.status, ApprovalStatus::Expired);
+        assert!(persisted.decision.is_none());
     }
 
     #[test]

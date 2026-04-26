@@ -30,8 +30,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{
-    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
-    select_tool_catalog_mode,
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, FilteredToolDispatcher,
+    LlmStreamResult, select_tool_catalog_mode,
 };
 
 /// Pre-selected timeout source — determined before the LLM await, not inferred after.
@@ -1681,27 +1681,20 @@ where
                             executable_tool_calls.push(tc);
                         }
 
-                        // Build a set of currently visible tool names for dispatch-time gating.
-                        // This prevents models from executing tools hidden by ToolScope
-                        // external filters (e.g. view_image on non-image-capable models).
-                        let visible_tool_names: std::collections::HashSet<String> =
-                            tool_defs.iter().map(|t| t.name.clone()).collect();
+                        let visible_tool_names =
+                            tool_defs.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+                        let visible_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(
+                            FilteredToolDispatcher::new(Arc::clone(&tools_ref), visible_tool_names),
+                        );
 
                         // Execute all allowed tool calls in parallel using join_all
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|tc| {
-                                let tools_ref = Arc::clone(&tools_ref);
-                                let visible = visible_tool_names.contains(&tc.name);
+                                let tools_ref = Arc::clone(&visible_dispatcher);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = if visible {
-                                        tools_ref.dispatch(tc.as_view()).await
-                                    } else {
-                                        Err(crate::error::ToolError::NotFound {
-                                            name: tc.name.clone(),
-                                        })
-                                    };
+                                    let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tc, dispatch_result, duration_ms)
                                 }

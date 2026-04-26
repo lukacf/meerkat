@@ -26,7 +26,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+use super::{
+    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    FilteredToolDispatcher,
+};
 
 fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
     Uuid::parse_str(value).ok().map(crate::ops::OperationId)
@@ -148,7 +151,7 @@ pub trait AgentRunner: Send {
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized,
-    T: AgentToolDispatcher + ?Sized,
+    T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized,
 {
     /// Stage an external tool visibility filter update for subsequent turns.
@@ -383,11 +386,10 @@ where
     ) -> Result<ToolDispatchOutcome, AgentError> {
         let visible_tool_names = self
             .tool_scope
-            .visible_tools_result()
+            .visible_tool_names()
             .map_err(|err| AgentError::InternalError(err.to_string()))?
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<HashSet<_>>();
+            .into_iter()
+            .collect::<Vec<_>>();
         let args = to_raw_value(&call.args).map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to serialize external tool-call arguments: {err}"
@@ -398,13 +400,9 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let dispatch_result = if visible_tool_names.contains(call.name.as_str()) {
-            self.tools.dispatch(view).await
-        } else {
-            Err(crate::error::ToolError::NotFound {
-                name: call.name.clone(),
-            })
-        };
+        let visible_dispatcher =
+            FilteredToolDispatcher::new(Arc::clone(&self.tools), visible_tool_names);
+        let dispatch_result = visible_dispatcher.dispatch(view).await;
 
         match dispatch_result {
             Ok(mut outcome) => {

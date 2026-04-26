@@ -158,6 +158,16 @@ else
   printf '%s\n' "${changed_gate_dry_run}" >&2
 fi
 
+mixed_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run meerkat/tests/support/test_session_store.rs xtask/tests/machines_contracts.rs 2>&1 || true)"
+if [[ "${mixed_changed_gate_dry_run}" == *"test-targets: //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test"* ]] &&
+  [[ "${mixed_changed_gate_dry_run}" == *"clippy-targets: //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test //xtask:machines_contracts_test"* ]] &&
+  [[ "${mixed_changed_gate_dry_run}" == *"plan: split test + clippy"* ]]; then
+  pass "BuildBuddy mixed fast/non-fast edits keep exact clippy coverage"
+else
+  bad "BuildBuddy mixed fast/non-fast edit routing lost exact coverage"
+  printf '%s\n' "${mixed_changed_gate_dry_run}" >&2
+fi
+
 fast_profile_filter="$(./scripts/repo-cargo nextest show-config test-groups --profile fast 2>&1 || true)"
 if grep -q '\[profile.fast\]' .config/nextest.toml &&
   grep -q 'default-filter' .config/nextest.toml &&

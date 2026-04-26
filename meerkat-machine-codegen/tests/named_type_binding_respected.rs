@@ -64,6 +64,7 @@ fn schema_with_single_named_type(field_name: &str, named: &str) -> MachineSchema
             variants: vec![],
         },
         surface_only_inputs: vec![],
+        runtime_internal_inputs: vec![],
         signals: EnumSchema {
             name: "AtomProbeSignal".into(),
             variants: vec![],

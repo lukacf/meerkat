@@ -141,6 +141,17 @@ define_identity!(
     /// Input-variant name.
     InputVariantId
 );
+
+impl InputVariantId {
+    /// Construct from a crate-owned catalog literal.
+    ///
+    /// This is intentionally crate-private: schema catalog metadata can use
+    /// typed identities without fallible runtime parsing, while external
+    /// callers still go through [`Self::parse`].
+    pub(crate) fn from_trusted_catalog_literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
 define_identity!(
     /// Signal-variant name.
     SignalVariantId

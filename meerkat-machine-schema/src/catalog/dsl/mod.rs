@@ -32,6 +32,7 @@ pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
 
+use crate::identity::InputVariantId;
 use crate::{MachineSchema, NamedTypeBinding};
 
 /// Attach authoritative [`NamedTypeBinding`]s to a DSL-generated schema.
@@ -45,6 +46,21 @@ fn with_named_types(mut schema: MachineSchema, bindings: Vec<NamedTypeBinding>) 
     schema
 }
 
+fn input_variant_ids(names: &'static [&'static str]) -> Vec<InputVariantId> {
+    names
+        .iter()
+        .map(|name| InputVariantId::from_trusted_catalog_literal(name))
+        .collect()
+}
+
+fn with_runtime_internal_inputs(
+    mut schema: MachineSchema,
+    inputs: Vec<InputVariantId>,
+) -> MachineSchema {
+    schema.runtime_internal_inputs = inputs;
+    schema
+}
+
 pub fn dsl_auth_machine() -> MachineSchema {
     with_named_types(
         auth_machine::AuthMachineState::schema(),
@@ -53,7 +69,7 @@ pub fn dsl_auth_machine() -> MachineSchema {
 }
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
-    with_named_types(
+    let schema = with_named_types(
         meerkat_machine::MeerkatMachineState::schema(),
         vec![
             NamedTypeBinding::u64("BoundarySequence"),
@@ -96,13 +112,14 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
                 "crate::catalog::dsl::meerkat_machine::PeerAddress",
             ),
         ],
+    );
+    with_runtime_internal_inputs(
+        schema,
+        input_variant_ids(MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
 }
 
-/// Schema inputs that are intentionally internal to the MeerkatMachine DSL
-/// authority and therefore do not appear on the public runtime command
-/// manifest.
-pub const MEERKAT_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
+const MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS: &[&str] = &[
     "AbortLiveTopologyBeforeDetach",
     "AddDirectPeerEndpoint",
     "AdvanceSessionContext",
@@ -169,7 +186,7 @@ pub const MEERKAT_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
 ];
 
 pub fn dsl_mob_machine() -> MachineSchema {
-    with_named_types(
+    let schema = with_named_types(
         mob_machine::MobMachineState::schema(),
         vec![
             NamedTypeBinding::u64("FenceToken"),
@@ -204,13 +221,14 @@ pub fn dsl_mob_machine() -> MachineSchema {
                 "crate::catalog::dsl::mob_machine::PeerSigningKey",
             ),
         ],
+    );
+    with_runtime_internal_inputs(
+        schema,
+        input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
 }
 
-/// Schema inputs that are intentionally internal to the MobMachine DSL
-/// authority and therefore do not appear on the public runtime command
-/// manifest.
-pub const MOB_MACHINE_DSL_INTERNAL_INPUTS: &[&str] = &[
+const MOB_MACHINE_RUNTIME_INTERNAL_INPUTS: &[&str] = &[
     "BindMemberSession",
     "ReleaseMemberSession",
     "RotateMemberSession",

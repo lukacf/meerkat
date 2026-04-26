@@ -493,10 +493,34 @@ pub(crate) enum MeerkatMachineCommandResult {
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
-    MeerkatMachineCommand::command_manifest()
+    let mut variants: IndexSet<&'static str> = MeerkatMachineCommand::command_manifest()
         .iter()
         .copied()
-        .collect()
+        .collect();
+    for exemption in MEERKAT_MACHINE_COMMAND_MANIFEST_EXEMPTIONS {
+        variants.shift_remove(exemption.variant_name());
+    }
+    variants
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeerkatMachineCommandManifestExemption {
+    RuntimeRealtimeChannelStatus,
+    PrepareLocalSessionBindings,
+}
+
+const MEERKAT_MACHINE_COMMAND_MANIFEST_EXEMPTIONS: &[MeerkatMachineCommandManifestExemption] = &[
+    MeerkatMachineCommandManifestExemption::RuntimeRealtimeChannelStatus,
+    MeerkatMachineCommandManifestExemption::PrepareLocalSessionBindings,
+];
+
+impl MeerkatMachineCommandManifestExemption {
+    const fn variant_name(self) -> &'static str {
+        match self {
+            Self::RuntimeRealtimeChannelStatus => "RuntimeRealtimeChannelStatus",
+            Self::PrepareLocalSessionBindings => "PrepareLocalSessionBindings",
+        }
+    }
 }
 
 /// Snapshot of completion waiters registered for one input.

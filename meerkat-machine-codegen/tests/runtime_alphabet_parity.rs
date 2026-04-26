@@ -2,7 +2,6 @@
 
 use meerkat_machine_schema::TriggerKind;
 use meerkat_machine_schema::catalog::dsl::{
-    MEERKAT_MACHINE_DSL_INTERNAL_INPUTS, MOB_MACHINE_DSL_INTERNAL_INPUTS,
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
 use meerkat_mob::canonical_mob_machine_command_manifest;
@@ -55,23 +54,13 @@ fn assert_runtime_manifest_matches_schema(
 fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
     let schema = meerkat_machine();
     let schema_inputs: BTreeSet<&str> = variant_names(&schema.inputs.variants);
-    let dsl_internal_inputs: BTreeSet<&str> = MEERKAT_MACHINE_DSL_INTERNAL_INPUTS
+    let dsl_internal_inputs: BTreeSet<&str> = schema
+        .runtime_internal_inputs
         .iter()
-        .copied()
+        .map(AsRef::as_ref)
         .collect();
     let runtime_commands: BTreeSet<&str> = canonical_meerkat_machine_command_manifest()
         .into_iter()
-        .filter(|name| {
-            !matches!(
-                *name,
-                // Diagnostic/status helper, not a DSL semantic input.
-                "RuntimeRealtimeChannelStatus"
-                    // Local resource preparation deliberately does not route
-                    // through DSL authority; authoritative binding remains
-                    // `PrepareBindings`.
-                    | "PrepareLocalSessionBindings"
-            )
-        })
         .collect();
 
     assert_runtime_manifest_matches_schema(
@@ -86,8 +75,11 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
 fn mob_machine_inputs_equal_runtime_manifest_exactly() {
     let schema = mob_machine();
     let schema_inputs: BTreeSet<&str> = variant_names(&schema.inputs.variants);
-    let dsl_internal_inputs: BTreeSet<&str> =
-        MOB_MACHINE_DSL_INTERNAL_INPUTS.iter().copied().collect();
+    let dsl_internal_inputs: BTreeSet<&str> = schema
+        .runtime_internal_inputs
+        .iter()
+        .map(AsRef::as_ref)
+        .collect();
     let runtime_commands: BTreeSet<&str> = canonical_mob_machine_command_manifest()
         .into_iter()
         .collect();

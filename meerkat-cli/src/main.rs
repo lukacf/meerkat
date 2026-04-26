@@ -13032,7 +13032,7 @@ supports_reasoning = true
         let perms = std::fs::Permissions::from_mode(0o555);
         std::fs::set_permissions(&state_root, perms).expect("set read-only root");
 
-        let outcome = prune_realms_inner(&state_root, true, 0, true)
+        let outcome = prune_realms_inner(&state_root, true, 0, false)
             .await
             .expect("prune outcome");
         assert_eq!(outcome.removed, 0);

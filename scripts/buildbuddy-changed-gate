@@ -6,16 +6,19 @@ test_command="owned-fast-test"
 clippy_command="owned-clippy-rbe"
 build_command="owned-build"
 dry_run=0
+split_mode="${BUILDBUDDY_CHANGED_GATE_SPLIT:-auto}"
 paths=()
 
 usage() {
   cat <<'EOF'
-usage: buildbuddy-changed-gate [--owned|--affected] [--local-test] [--dry-run] <changed-path>...
+usage: buildbuddy-changed-gate [--owned|--affected] [--local-test] [--parallel-split|--serial-split] [--dry-run] <changed-path>...
 
-Runs the selected BuildBuddy test and clippy lanes in parallel for the supplied
-changed paths. Use --affected for reverse-dependency confidence and --local-test
-when the selected test lane is already warm locally. Use --dry-run to print
-the selected Bazel targets without running Bazel.
+Runs the selected BuildBuddy test/build and clippy lanes for the supplied
+changed paths. Small exact lanes run in parallel; broad package-suite lanes run
+serially by default to avoid duplicating first-touch remote work. Use --affected
+for reverse-dependency confidence and --local-test when the selected test lane is
+already warm locally. Use --dry-run to print the selected Bazel targets without
+running Bazel.
 EOF
 }
 
@@ -39,6 +42,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --parallel-split)
+      split_mode="parallel"
+      shift
+      ;;
+    --serial-split)
+      split_mode="serial"
       shift
       ;;
     -h | --help)
@@ -79,6 +90,14 @@ if [[ "${#paths[@]}" -eq 0 ]]; then
   usage >&2
   exit 2
 fi
+
+case "${split_mode}" in
+  auto|parallel|serial) ;;
+  *)
+    echo "error: BUILDBUDDY_CHANGED_GATE_SPLIT must be auto, parallel, or serial" >&2
+    exit 2
+    ;;
+esac
 
 workspace_root="$(git rev-parse --show-toplevel)"
 cd "${workspace_root}"
@@ -133,6 +152,26 @@ test_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]
 build_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --build "${paths[@]}")"
 clippy_targets="$(./scripts/bazel-affected-fast-tests.mjs "${selector_mode_args[@]}" --clippy "${paths[@]}")"
 
+target_count() {
+  if [[ -z "$1" ]]; then
+    printf '0\n'
+  else
+    wc -w <<<"$1" | tr -d ' '
+  fi
+}
+
+split_execution="parallel"
+if [[ "${split_mode}" == "serial" ]]; then
+  split_execution="serial"
+elif [[ "${split_mode}" == "auto" ]]; then
+  clippy_target_count="$(target_count "${clippy_targets}")"
+  if [[ "${test_targets}" == *":fast_tests"* ||
+    "${build_targets}" == *":fast_tests"* ||
+    "${clippy_target_count}" -ge "${BUILDBUDDY_CHANGED_GATE_SERIAL_THRESHOLD:-8}" ]]; then
+    split_execution="serial"
+  fi
+fi
+
 if [[ "${dry_run}" -eq 1 ]]; then
   printf 'BuildBuddy changed gate dry-run (%s)\n' "${mode}"
   printf 'paths:\n'
@@ -149,8 +188,10 @@ if [[ "${dry_run}" -eq 1 ]]; then
     printf 'plan: combined build+clippy\n'
   elif [[ -z "${test_targets}" ]]; then
     printf 'plan: split build + clippy\n'
+    printf 'split-execution: %s\n' "${split_execution}"
   else
     printf 'plan: split test + clippy\n'
+    printf 'split-execution: %s\n' "${split_execution}"
   fi
   exit 0
 fi
@@ -214,36 +255,46 @@ if [[ -z "${test_targets}" ]]; then
     exit 0
   fi
 
-  (
-    set +e
+  run_primary_lane() {
     run_lane build "${build_command}" "${test_log}" --jobs=64 --color=no --curses=no
-    echo "$?" >"${test_status_file}"
-  ) &
-  test_pid="$!"
+  }
+else
+  run_primary_lane() {
+    run_lane test "${test_command}" "${test_log}" --jobs=64
+  }
+fi
+
+if [[ "${split_execution}" == "serial" ]]; then
+  set +e
+  run_primary_lane
+  echo "$?" >"${test_status_file}"
+  run_lane clippy "${clippy_command}" "${clippy_log}" --jobs=64 --color=no --curses=no
+  echo "$?" >"${clippy_status_file}"
+  set -e
 else
   (
     set +e
-    run_lane test "${test_command}" "${test_log}" --jobs=64
+    run_primary_lane
     echo "$?" >"${test_status_file}"
   ) &
   test_pid="$!"
+
+  (
+    set +e
+    run_lane clippy "${clippy_command}" "${clippy_log}" --jobs=64 --color=no --curses=no
+    echo "$?" >"${clippy_status_file}"
+  ) &
+  clippy_pid="$!"
+
+  wait "${test_pid}" || true
+  wait "${clippy_pid}" || true
 fi
-
-(
-  set +e
-  run_lane clippy "${clippy_command}" "${clippy_log}" --jobs=64 --color=no --curses=no
-  echo "$?" >"${clippy_status_file}"
-) &
-clippy_pid="$!"
-
-wait "${test_pid}" || true
-wait "${clippy_pid}" || true
 
 end_seconds="$(date +%s)"
 test_status="$(cat "${test_status_file}" 2>/dev/null || echo 1)"
 clippy_status="$(cat "${clippy_status_file}" 2>/dev/null || echo 1)"
 
-printf 'BuildBuddy changed gate (%s) wall: %ss\n' "${mode}" "$((end_seconds - start_seconds))"
+printf 'BuildBuddy changed gate (%s, split-%s) wall: %ss\n' "${mode}" "${split_execution}" "$((end_seconds - start_seconds))"
 if [[ -z "${test_targets}" ]]; then
   summarize_log "${build_command}" "${test_status}" "${test_log}"
 else

@@ -168,6 +168,15 @@ else
   printf '%s\n' "${mixed_changed_gate_dry_run}" >&2
 fi
 
+broad_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run meerkat-cli/src/main.rs meerkat-store/src/realm.rs 2>&1 || true)"
+if [[ "${broad_changed_gate_dry_run}" == *"plan: split test + clippy"* ]] &&
+  [[ "${broad_changed_gate_dry_run}" == *"split-execution: serial"* ]]; then
+  pass "BuildBuddy broad source edits use serial split cache warmup"
+else
+  bad "BuildBuddy broad source edit routing is not cache-aware"
+  printf '%s\n' "${broad_changed_gate_dry_run}" >&2
+fi
+
 dispatch_log_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-buildbuddy-dispatch-doctor.XXXXXX")"
 dispatch_dry_run="$(
   MEERKAT_BUILDBUDDY_LOG_ROOT="${dispatch_log_root}" \

@@ -206,6 +206,7 @@ lane wrappers from both systems:
 | Fast deterministic tests, warm execution | `47.96s` (`5112` tests) | `4.36s` (now `117` Bazel fast test targets, `0` executed when cached) |
 | Fast deterministic tests, latest artifacted warm run | `29s` (`5114` tests) | `4s` (`117` Bazel fast targets, `0` executed when cached) |
 | Fast deterministic tests after disabling duplicate mini bin harnesses | `18s` (`4973` tests) | unchanged |
+| Fast deterministic tests after pruning retry-backoff hotspots | `12s` (`4973` tests) | unchanged |
 | Workspace clippy, warm after fix | `48.13s` | `4s` split fast-test-clippy + build-clippy gate |
 
 The Cargo fast lane is now `./scripts/repo-cargo fast`, `cargo rct`, or
@@ -282,6 +283,8 @@ profile so `cargo fast`, `cargo rct`, `cargo int`, and
 | Cargo agent gate for shared `test_session_store` support edit, warm after shared selector extraction | `0.15s` Cargo work, `0.045s` nextest runtime, `6` tests pass |
 | Cargo agent gate for shared `test_session_store` support edit, exact clippy warm | `0.18s` Cargo work |
 | BuildBuddy changed gate for shared `test_session_store` support edit after shared selector extraction | `27s` wall, `2` exact Bazel tests + clippy combined |
+| BuildBuddy broad CLI/store source changed gate, parallel split first-touch | `154s` wall; test/clippy duplicated ~1300 first-touch actions |
+| BuildBuddy broad CLI/store source changed gate, serial split after cache-aware routing | `48s` wall; test lane warms remote cache before clippy |
 | BuildBuddy changed gate for required-feature `cli_mobpack_live_smoke` edit before Bazel required-feature test generation | `25s` wall, package build + clippy only, no unrelated fast tests |
 | BuildBuddy changed gate for required-feature `cli_mobpack_live_smoke` edit after Bazel required-feature test generation | `130s` first touch after graph change, `21-23s` warm; exact test target build + clippy, no live test execution |
 | BuildBuddy changed gate for required-feature `machines_contracts` edit with optional external deps | `39s` first successful exact build + clippy, `22s` warm |
@@ -319,6 +322,10 @@ to roughly `4-6s` once those lanes were prepared.
   one second for the representative shared support-file case.
 - For a normal post-edit agent gate, use `scripts/buildbuddy-changed-gate
   --owned <path>`; it overlaps the selected fast tests and selected clippy.
+  Exact small lanes still run together or combine test+clippy. Broad package
+  suite lanes run serially by default so the test/build lane can populate remote
+  cache before clippy starts; use `--parallel-split` or `--serial-split` to
+  override that auto choice while benchmarking.
 - For the default developer entrypoint, use `scripts/agent-gate`. It runs the
   Cargo changed-path gate unless `--buildbuddy` or
   `MEERKAT_AGENT_GATE_BACKEND=buildbuddy` opts into BuildBuddy. Direct

@@ -631,7 +631,9 @@ async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError
         match tokio::fs::read(path).await {
             Ok(bytes) => match parse_manifest_bytes(&bytes) {
                 Ok(manifest) => return Ok(manifest),
-                Err(_err) if Instant::now() < deadline => {
+                Err(err)
+                    if manifest_parse_error_may_be_transient(&err) && Instant::now() < deadline =>
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
@@ -644,6 +646,10 @@ async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError
             Err(err) => return Err(StoreError::Io(err)),
         }
     }
+}
+
+fn manifest_parse_error_may_be_transient(err: &StoreError) -> bool {
+    matches!(err, StoreError::Serialization(_))
 }
 
 fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {

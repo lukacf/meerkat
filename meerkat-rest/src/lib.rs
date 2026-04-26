@@ -56,8 +56,9 @@ use meerkat::{
 };
 use meerkat_contracts::{
     RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget, RealtimeOpenRequest,
-    RealtimeStatusParams, RealtimeStatusResult, SessionLocator, SkillsParams, format_session_ref,
+    RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult, SessionLocator, SkillsParams,
+    format_session_ref,
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
@@ -1270,51 +1271,6 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
-fn realtime_channel_status(
-    state: RealtimeChannelState,
-    reason: Option<&str>,
-    attempt_count: u32,
-) -> RealtimeChannelStatus {
-    RealtimeChannelStatus {
-        state,
-        attempt_count,
-        next_retry_at: None,
-        deadline_at: None,
-        reason: reason.map(str::to_string),
-    }
-}
-
-fn realtime_status_from_runtime(
-    status: meerkat_runtime::RealtimeAttachmentStatus,
-) -> RealtimeChannelStatus {
-    match status {
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached => realtime_channel_status(
-            RealtimeChannelState::Closed,
-            Some("no realtime channel is open for this target"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound
-        | meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => realtime_channel_status(
-            RealtimeChannelState::Opening,
-            Some("realtime attachment is pending"),
-            0,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
-            realtime_channel_status(RealtimeChannelState::Ready, None, 0)
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => realtime_channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment replacement is pending"),
-            1,
-        ),
-        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => realtime_channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment requires reattach"),
-            1,
-        ),
-    }
-}
-
 fn runtime_state_to_wire(
     state: meerkat_runtime::RuntimeState,
 ) -> meerkat_contracts::WireRuntimeState {
@@ -1335,7 +1291,7 @@ fn runtime_state_to_wire(
 async fn get_runtime_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<RuntimeStateResult>, Response> {
     let session_id =
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
     let adapter = get_runtime_adapter(&state);
@@ -1346,15 +1302,15 @@ async fn get_runtime_status(
         )
             .into_response()
     })?;
-    Ok(Json(json!({
-        "state": runtime_state_to_wire(runtime_state),
-    })))
+    Ok(Json(RuntimeStateResult {
+        state: runtime_state_to_wire(runtime_state),
+    }))
 }
 
 async fn get_realtime_attachment_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<RuntimeRealtimeAttachmentStatusResult>, Response> {
     let session_id =
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
     let adapter = get_runtime_adapter(&state);
@@ -1388,7 +1344,7 @@ async fn get_realtime_attachment_status(
             meerkat_contracts::WireRealtimeAttachmentStatus::ReattachRequired
         }
     };
-    Ok(Json(json!({ "status": wire })))
+    Ok(Json(RuntimeRealtimeAttachmentStatusResult { status: wire }))
 }
 
 // `realtime_status_from_mob_serialized` and
@@ -1404,17 +1360,13 @@ async fn realtime_status(
     // reads the canonical binding map on the MobMachine.
     let sid = resolve_realtime_target_session_rest(&state, &body.target).await?;
     let adapter = get_runtime_adapter(&state);
-    let live_status = adapter
-        .realtime_attachment_status(&sid)
-        .await
-        .map_err(|err| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": err.to_string()})),
-            )
-                .into_response()
-        })?;
-    let status = realtime_status_from_runtime(live_status);
+    let status = adapter.realtime_channel_status(&sid).await.map_err(|err| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response()
+    })?;
 
     Ok(Json(RealtimeStatusResult { status }))
 }

@@ -45,6 +45,60 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
+async fn wait_for_atomic_bool(flag: &AtomicBool, context: &'static str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context);
+}
+
+async fn wait_for_atomic_usize_at_least(
+    value: &AtomicUsize,
+    expected: usize,
+    context: &'static str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if value.load(Ordering::SeqCst) >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context);
+}
+
+async fn wait_for_input_state(
+    adapter: &MeerkatMachine,
+    sid: &SessionId,
+    input_id: &InputId,
+    context: &'static str,
+    matches: impl Fn(&StoredInputState) -> bool,
+) -> StoredInputState {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(state) = adapter
+                .input_state(sid, input_id)
+                .await
+                .expect("input state read should succeed")
+                && matches(&state)
+            {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context)
+}
+
 struct HarnessRuntimeStore {
     inner: meerkat_runtime::store::InMemoryRuntimeStore,
     fail_atomic_apply: bool,
@@ -743,13 +797,11 @@ async fn accept_with_executor_triggers_loop() {
     let outcome = adapter.accept_input(&sid, input).await.unwrap();
     assert!(outcome.is_accepted());
 
-    // Give the loop time to process
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    assert!(
-        apply_called.load(Ordering::SeqCst),
-        "CoreExecutor::apply() should have been called by the RuntimeLoop"
-    );
+    wait_for_atomic_bool(
+        &apply_called,
+        "CoreExecutor::apply() should have been called by the RuntimeLoop",
+    )
+    .await;
 
     // After processing, the input should be consumed and the runtime back to Attached
     // (executor is still connected, so Attached not Idle).
@@ -799,8 +851,19 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     let input_id = input.id().clone();
     adapter.accept_input(&sid, input).await.unwrap();
 
-    // Give the loop time to process and fail
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let is = wait_for_input_state(
+        &adapter,
+        &sid,
+        &input_id,
+        "failed executor should leave the input in a non-in-flight state",
+        |state| {
+            !matches!(
+                state.seed.phase,
+                InputLifecycleState::Staged | InputLifecycleState::AppliedPendingConsumption
+            )
+        },
+    )
+    .await;
 
     // Runtime should be back to Attached (executor still connected, not stuck in Running)
     let state = adapter.runtime_state(&sid).await.unwrap();
@@ -808,7 +871,6 @@ async fn failed_executor_does_not_strand_input_in_apc() {
 
     // Input should roll back or abandon after retry exhaustion, but never
     // remain stuck in an in-flight lifecycle state.
-    let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         matches!(
             is.seed.phase,
@@ -865,15 +927,30 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     let input_id = input.id().clone();
     adapter.accept_input(&sid, input).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
+    wait_for_atomic_usize_at_least(
+        &calls,
+        1,
+        "failing executor should be called before retry-budget assertions",
+    )
+    .await;
+    let state = wait_for_input_state(
+        &adapter,
+        &sid,
+        &input_id,
+        "failed input should leave in-flight lifecycle state after retry exhaustion",
+        |state| {
+            !matches!(
+                state.seed.phase,
+                InputLifecycleState::Staged | InputLifecycleState::AppliedPendingConsumption
+            )
+        },
+    )
+    .await;
     let call_count = calls.load(Ordering::SeqCst);
     assert!(
         (1..=3).contains(&call_count),
         "retry budget should remain bounded; expected 1-3 attempts, saw {call_count}"
     );
-
-    let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         !matches!(
             state.seed.phase,
@@ -882,7 +959,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
         "failed inputs must not remain stuck in an in-flight lifecycle state"
     );
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -903,6 +980,7 @@ async fn failed_executor_continues_processing_backlog() {
 
     struct FailThenSucceedExecutor {
         calls: Arc<AtomicUsize>,
+        first_apply_started: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -913,6 +991,9 @@ async fn failed_executor_continues_processing_backlog() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                self.first_apply_started.notify_one();
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
             if call == 0 {
                 return Err(CoreExecutorError::ApplyFailed {
@@ -942,11 +1023,13 @@ async fn failed_executor_continues_processing_backlog() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
+    let first_apply_started = Arc::new(tokio::sync::Notify::new());
     adapter
         .register_session_with_executor(
             sid.clone(),
             Box::new(FailThenSucceedExecutor {
                 calls: Arc::clone(&calls),
+                first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
         .await;
@@ -956,16 +1039,19 @@ async fn failed_executor_continues_processing_backlog() {
     let second = make_prompt("second");
     let second_id = second.id().clone();
     adapter.accept_input(&sid, first).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::timeout(Duration::from_secs(1), first_apply_started.notified())
+        .await
+        .expect("first apply should start before the backlog input is queued");
     adapter.accept_input(&sid, second).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(220)).await;
-
-    let second_state = adapter
-        .input_state(&sid, &second_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let second_state = wait_for_input_state(
+        &adapter,
+        &sid,
+        &second_id,
+        "runtime loop should keep draining queued backlog after a failed run",
+        |state| state.seed.phase == InputLifecycleState::Consumed,
+    )
+    .await;
     assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
@@ -1048,12 +1134,11 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
         )
         .await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    assert!(
-        apply_called.load(Ordering::SeqCst),
-        "upgrading an already-registered session should attach a live loop"
-    );
+    wait_for_atomic_bool(
+        &apply_called,
+        "upgrading an already-registered session should attach a live loop",
+    )
+    .await;
 
     let state = adapter.runtime_state(&sid).await.unwrap();
     assert_eq!(state, RuntimeState::Attached);
@@ -1061,7 +1146,14 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     let active = adapter.list_active_inputs(&sid).await.unwrap();
     assert!(active.is_empty(), "queued work should drain after upgrade");
 
-    let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+    let is = wait_for_input_state(
+        &adapter,
+        &sid,
+        &input_id,
+        "the pre-upgrade queued input should be processed once the loop is attached",
+        |state| state.seed.phase == InputLifecycleState::Consumed,
+    )
+    .await;
     assert_eq!(
         is.seed.phase,
         InputLifecycleState::Consumed,
@@ -1142,13 +1234,20 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     let input = make_prompt("race upgrade");
     let input_id = input.id().clone();
     adapter.accept_input(&sid, input).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
 
-    assert!(
-        apply_called.load(Ordering::SeqCst),
-        "the racy registration path should still attach a live runtime loop"
-    );
-    let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+    wait_for_atomic_bool(
+        &apply_called,
+        "the racy registration path should still attach a live runtime loop",
+    )
+    .await;
+    let state = wait_for_input_state(
+        &adapter,
+        &sid,
+        &input_id,
+        "racy registration path should process accepted input",
+        |state| state.seed.phase == InputLifecycleState::Consumed,
+    )
+    .await;
     assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
 }
 
@@ -1505,12 +1604,12 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     let input = make_prompt("loop boundary failure");
     let input_id = input.id().clone();
     adapter.accept_input(&sid, input).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
 
-    assert!(
-        stop_called.load(Ordering::SeqCst),
-        "boundary commit failures should stop the dead executor path"
-    );
+    wait_for_atomic_bool(
+        &stop_called,
+        "boundary commit failures should stop the dead executor path",
+    )
+    .await;
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -1646,12 +1745,12 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
         .accept_input(&sid, make_prompt("terminal snapshot failure"))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
 
-    assert!(
-        stop_called.load(Ordering::SeqCst),
-        "terminal snapshot persistence failures should stop the runtime loop"
-    );
+    wait_for_atomic_bool(
+        &stop_called,
+        "terminal snapshot persistence failures should stop the runtime loop",
+    )
+    .await;
     let state_result = adapter.runtime_state(&sid).await;
     assert!(
         state_result.is_err(),

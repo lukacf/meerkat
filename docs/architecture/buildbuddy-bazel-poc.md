@@ -23,7 +23,7 @@ Use `scripts/buildbuddy-bazel-poc` with `BUILDBUDDY_BAZEL_COMMAND`:
   excluding local-only Cargo/trybuild fixtures.
 - `workspace-test-local`: run the full workspace test suite with local spawns.
 - `clippy-rbe`: run the rules_rust clippy aspect with `-D warnings`,
-  excluding local-only Cargo/trybuild fixtures.
+  excluding local-only, manual, and `noclippy` targets.
 - `owned-build <path>`: build the owning package target for a changed path.
 - `affected-build <path>`: build the reverse-dependency closure for a changed path.
 - `owned-fast-test <path>`: run the owning fast suite, or the exact test target
@@ -130,7 +130,7 @@ Representative measurements from the POC environment:
 | CI-like sequential fresh output bases | `25.48s` fast-test + `26.89s` clippy |
 | CI-like parallel fresh output bases | `33.28s` max wall |
 | CI-like workspace-RBE + clippy-RBE, fresh output bases | `26-37.14s` max wall |
-| Dedicated `buildbuddy-ci-workspace` script | `30s` script wall |
+| Dedicated `buildbuddy-ci-workspace` script | `28-30s` script wall |
 | Dedicated `buildbuddy-ci-workspace --warm`, warm | `6-8s` script wall |
 
 The first touch of a new local lane pays Bazel analysis and remote-cache

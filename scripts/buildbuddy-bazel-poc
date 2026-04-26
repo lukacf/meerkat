@@ -159,7 +159,7 @@ case "${command}" in
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//..."
     extra_args+=(
-      --build_tag_filters=-local
+      --build_tag_filters=-local,-manual,-noclippy
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings

@@ -168,15 +168,13 @@ impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver 
             .await
             .map_err(|e| {
                 meerkat_core::AuthError::Other(format!(
-                    "{} resolver rejected: {}",
-                    WASM_EXTERNAL_AUTH_RESOLVER_ID,
-                    js_value_display(&e),
+                    "{WASM_EXTERNAL_AUTH_RESOLVER_ID} resolver rejected: {}",
+                    js_value_display(&e)
                 ))
             })?;
         let token = js_value.as_string().ok_or_else(|| {
             meerkat_core::AuthError::Other(format!(
-                "{} resolver must resolve its Promise to a string bearer token",
-                WASM_EXTERNAL_AUTH_RESOLVER_ID,
+                "{WASM_EXTERNAL_AUTH_RESOLVER_ID} resolver must resolve its Promise to a string bearer token",
             ))
         })?;
         if token.trim().is_empty() {

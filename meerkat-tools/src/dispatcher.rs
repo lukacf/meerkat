@@ -9,9 +9,9 @@ use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::types::ToolResult;
 use meerkat_core::types::{ToolCallView, ToolDef};
-use meerkat_core::{
-    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::{ToolCallability, ToolUnavailableReason};
+use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use std::collections::HashSet;
 use std::sync::Arc;
 

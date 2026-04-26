@@ -492,6 +492,14 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "EmitExternalPeerWiringLifecycleNotice",
+            SeamClassification::SurfaceResultAlignment,
+            "External peer wiring-lifecycle notices must align with the canonical \
+             `WireExternalPeerRunning` / `UnwireExternalPeerRunning` DSL transitions so event \
+             consumers see the same external peer wiring truth the DSL committed",
+        ),
+        (
+            "MobMachine",
             "MemberSessionBindingChanged",
             SeamClassification::SurfaceResultAlignment,
             "External member-session binding delta must align with canonical runtime binding truth",

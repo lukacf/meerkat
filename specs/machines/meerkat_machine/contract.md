@@ -63,7 +63,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Reset`
 - `StopRuntimeExecutor`
 - `Destroy`(session_id: SessionId)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
+- `RecoverInputLifecycle`(input_id: InputId, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<InputId>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<BoundarySequence>, lane: Option<InputLane>)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -77,9 +77,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Wait`(session_id: SessionId)
 - `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: WorkOrigin)
 - `PublishEvent`(kind: String)
-- `RuntimeState`(runtime_id: String)
+- `RuntimeState`(runtime_id: AgentRuntimeId)
 - `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
-- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
+- `LoadBoundaryReceipt`(runtime_id: AgentRuntimeId, sequence: BoundarySequence)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Prepare`(session_id: SessionId, run_id: RunId)

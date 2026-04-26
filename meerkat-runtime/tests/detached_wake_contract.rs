@@ -28,6 +28,20 @@ use meerkat_runtime::{
     ContinuationInput, InputDurability, InputOrigin, InputVisibility, MeerkatMachine,
     RuntimeOpsLifecycleRegistry,
 };
+use tokio::sync::Notify;
+
+async fn wait_for_apply_count(apply_count: &AtomicUsize, expected: usize, context: &'static str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if apply_count.load(Ordering::SeqCst) >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context);
+}
 
 fn background_spec(name: &str) -> OperationSpec {
     OperationSpec {
@@ -192,12 +206,38 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
 
 #[tokio::test]
 async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
+    struct CountingExecutor {
+        apply_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            let mut executor = ResultExecutor;
+            executor.apply(run_id, primitive).await
+        }
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let apply_count = Arc::new(AtomicUsize::new(0));
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Register session with executor so runtime loop is running
     adapter
-        .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingExecutor {
+                apply_count: Arc::clone(&apply_count),
+            }),
+        )
         .await;
 
     // The runtime loop owns detached wake for registered sessions.
@@ -214,12 +254,6 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
     registry
         .complete_operation(&op_id, op_result(&op_id, "done"))
         .unwrap();
-
-    // The completion becomes visible through the completion feed. Once the
-    // runtime loop reaches a quiescent point, it injects a ContinuationInput
-    // through the canonical ingress seam.
-    // Give the async machinery time to propagate.
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Trigger the runtime loop so it reaches the post-drain wake check and can
     // inject the continuation on the feed-backed path.
@@ -250,26 +284,49 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
     }
 
-    // After the turn completes and queue drains, the runtime loop injects the
-    // continuation. Give that continuation time to process.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Give the continuation turn time to complete too.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // The test passes if we got here without hanging or panicking.
-    // The runtime loop successfully injected the continuation.
+    wait_for_apply_count(
+        &apply_count,
+        2,
+        "runtime loop should inject a detached-op continuation after the trigger turn",
+    )
+    .await;
 }
 
 // ─── CHOKE-004-IT-B: Five completions produce one coalesced wake ───
 
 #[tokio::test]
 async fn choke_004_five_completions_produce_one_coalesced_wake() {
+    struct CountingExecutor {
+        apply_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            let mut executor = ResultExecutor;
+            executor.apply(run_id, primitive).await
+        }
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let apply_count = Arc::new(AtomicUsize::new(0));
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
-        .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingExecutor {
+                apply_count: Arc::clone(&apply_count),
+            }),
+        )
         .await;
 
     // The runtime loop owns detached wake for registered sessions.
@@ -323,12 +380,21 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
     }
 
-    // Give the runtime loop time to fire the single coalesced continuation.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_apply_count(
+        &apply_count,
+        2,
+        "runtime loop should coalesce five completions into one continuation",
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(75)).await;
 
     // 5 completions -> pending=true (set once, stays true) -> 1 notify -> 1 continuation.
-    // The test passes if we got here without hanging — coalescing is inherent
-    // in the AtomicBool flag design (multiple stores of `true` are idempotent).
+    assert_eq!(
+        apply_count.load(Ordering::SeqCst),
+        2,
+        "five completions should coalesce into one continuation after the trigger prompt"
+    );
 }
 
 // ─── CHOKE-004-IT-C: Completion during Running defers wake ───
@@ -339,6 +405,7 @@ async fn choke_004_completion_during_running_defers_wake() {
 
     struct SlowExecutor {
         apply_count: Arc<AtomicUsize>,
+        first_apply_started: Arc<Notify>,
     }
 
     #[async_trait::async_trait]
@@ -348,9 +415,10 @@ async fn choke_004_completion_during_running_defers_wake() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            let call_index = self.apply_count.fetch_add(1, Ordering::SeqCst) + 1;
             // First call: sleep long enough for the op to complete during running
-            if self.apply_count.load(Ordering::SeqCst) == 1 {
+            if call_index == 1 {
+                self.first_apply_started.notify_one();
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             Ok(CoreApplyOutput {
@@ -382,6 +450,7 @@ async fn choke_004_completion_during_running_defers_wake() {
     }
 
     let apply_count = Arc::new(AtomicUsize::new(0));
+    let first_apply_started = Arc::new(Notify::new());
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -390,6 +459,7 @@ async fn choke_004_completion_during_running_defers_wake() {
             session_id.clone(),
             Box::new(SlowExecutor {
                 apply_count: apply_count.clone(),
+                first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
         .await;
@@ -429,8 +499,11 @@ async fn choke_004_completion_during_running_defers_wake() {
         .await
         .unwrap();
 
+    tokio::time::timeout(Duration::from_secs(1), first_apply_started.notified())
+        .await
+        .expect("initial prompt apply should start");
+
     // Complete the op while the session is running (during the 300ms sleep)
-    tokio::time::sleep(Duration::from_millis(50)).await;
     registry
         .complete_operation(&op_id, op_result(&op_id, "done-while-running"))
         .unwrap();
@@ -444,9 +517,12 @@ async fn choke_004_completion_during_running_defers_wake() {
         let _ = tokio::time::timeout(Duration::from_secs(3), handle.wait()).await;
     }
 
-    // After the turn completes and the queue drains, the idle-wake path
-    // injects the continuation from the completion feed.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_apply_count(
+        &apply_count,
+        2,
+        "runtime loop should inject deferred continuation after the prompt quiesces",
+    )
+    .await;
 
     // The executor should have been called at least twice:
     // 1. The initial prompt
@@ -540,9 +616,6 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
         .complete_operation(&op_id, op_result(&op_id, "delegate done"))
         .unwrap();
 
-    // Give the runtime loop time to process any idle wake
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
     // Trigger a prompt to flush any queued continuations
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger = Input::Prompt(PromptInput {
@@ -568,7 +641,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
     if let Some(handle) = handle {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(75)).await;
 
     // The executor should have been called exactly once (the flush prompt).
     // If MobMemberChild completion triggered an idle wake, we'd see 2+ calls

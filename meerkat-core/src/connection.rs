@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::Config;
 use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 
@@ -146,6 +147,11 @@ pub enum CredentialSourceSpec {
     InlineSecret {
         secret: String,
     },
+    /// Binding-scoped credential material stored in the configured
+    /// [`TokenStore`](crate::auth::TokenStore). The storage key is the
+    /// resolved typed binding identity (`realm`, `binding`), not a
+    /// second free-form profile string.
+    ManagedStore,
     Env {
         env: String,
         /// Ordered fallback env var names consulted when `env` is
@@ -230,6 +236,242 @@ pub struct RealmConnectionSet {
     pub bindings: BTreeMap<String, ProviderBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_binding: Option<String>,
+}
+
+/// Fully resolved connection target selected from config-owned identity
+/// policy. Surfaces should use this instead of inventing realm or binding
+/// defaults locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConnectionTarget {
+    pub realm: RealmConnectionSet,
+    pub connection_ref: ConnectionRef,
+    pub binding: ProviderBinding,
+    pub backend: BackendProfile,
+    pub auth_profile: AuthProfile,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ConnectionTargetError {
+    #[error("connection target did not name a realm and no configured default realm was available")]
+    MissingRealm,
+    #[error("realm '{0}' not found in config.realm")]
+    UnknownRealm(String),
+    #[error("realm '{realm}' has no default binding")]
+    MissingDefaultBinding { realm: String },
+    #[error("invalid realm id '{realm}': {source}")]
+    InvalidRealmId {
+        realm: String,
+        source: IdentityError,
+    },
+    #[error("invalid binding id '{binding}': {source}")]
+    InvalidBindingId {
+        binding: String,
+        source: IdentityError,
+    },
+    #[error("realm '{realm}' config invalid: {source}")]
+    RealmConfigInvalid {
+        realm: String,
+        source: ProviderBindingError,
+    },
+    #[error("binding '{realm}:{binding}' is invalid: {source}")]
+    BindingInvalid {
+        realm: String,
+        binding: String,
+        source: ProviderBindingError,
+    },
+    #[error(
+        "binding '{realm}:{binding}' resolves backend={backend:?} auth={auth:?}, expected provider {expected:?}"
+    )]
+    ProviderMismatch {
+        realm: String,
+        binding: String,
+        expected: Provider,
+        backend: Provider,
+        auth: Provider,
+    },
+}
+
+/// Resolve a connection target from config-owned identity facts.
+///
+/// `explicit_realm` / `explicit_binding` are request atoms, not defaults.
+/// When either is absent, selection falls back to the preferred realm and
+/// that realm's `default_binding`, then to the configured `default` realm.
+/// Provider-shaped binding names and hard-coded realm names must not be
+/// encoded by REST/RPC/SDK surfaces.
+pub fn resolve_realm_binding_target_for_provider(
+    config: &Config,
+    provider: Provider,
+    explicit_realm: Option<&RealmId>,
+    explicit_binding: Option<&BindingId>,
+    explicit_profile: Option<&ProfileId>,
+    preferred_realm: Option<&RealmId>,
+    allow_env_default: bool,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(realm) = explicit_realm {
+        candidates.push(realm.as_str());
+    } else {
+        if let Some(realm) = preferred_realm {
+            candidates.push(realm.as_str());
+        }
+        if !candidates.contains(&"default") {
+            candidates.push("default");
+        }
+    }
+
+    let mut missing_default: Option<String> = None;
+    for realm_id in candidates {
+        let Some(section) = config.realm.get(realm_id) else {
+            if explicit_realm.is_some() {
+                return Err(ConnectionTargetError::UnknownRealm(realm_id.to_string()));
+            }
+            continue;
+        };
+        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
+            ConnectionTargetError::RealmConfigInvalid {
+                realm: realm_id.to_string(),
+                source,
+            }
+        })?;
+        let binding_id = match explicit_binding {
+            Some(binding) => binding.clone(),
+            None => {
+                let Some(default_binding) = realm.default_binding.as_deref() else {
+                    missing_default = Some(realm_id.to_string());
+                    if explicit_realm.is_some() {
+                        return Err(ConnectionTargetError::MissingDefaultBinding {
+                            realm: realm_id.to_string(),
+                        });
+                    }
+                    continue;
+                };
+                BindingId::parse(default_binding).map_err(|source| {
+                    ConnectionTargetError::InvalidBindingId {
+                        binding: default_binding.to_string(),
+                        source,
+                    }
+                })?
+            }
+        };
+        return materialize_connection_target(
+            realm,
+            provider,
+            binding_id,
+            explicit_profile.cloned(),
+        );
+    }
+
+    if allow_env_default && explicit_realm.is_none() && explicit_binding.is_none() {
+        let realm = RealmConnectionSet::synthesize_env_default(provider);
+        let binding = BindingId::parse("default").map_err(|source| {
+            ConnectionTargetError::InvalidBindingId {
+                binding: "default".to_string(),
+                source,
+            }
+        })?;
+        return materialize_connection_target(realm, provider, binding, explicit_profile.cloned());
+    }
+
+    if let Some(realm) = missing_default {
+        return Err(ConnectionTargetError::MissingDefaultBinding { realm });
+    }
+    Err(ConnectionTargetError::MissingRealm)
+}
+
+/// Resolve an explicit [`ConnectionRef`] or the configured default target for
+/// the selected provider. This is the shared factory/runtime path for
+/// connection-ref-less provider resolution.
+pub fn resolve_connection_ref_or_default_for_provider(
+    config: &Config,
+    provider: Provider,
+    connection_ref: Option<&ConnectionRef>,
+    preferred_realm: Option<&RealmId>,
+    allow_env_default: bool,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    if let Some(connection_ref) = connection_ref {
+        let realm_id = connection_ref.realm.as_str();
+        if realm_id == "env_default" && connection_ref.binding.as_str() == "default" {
+            let realm = RealmConnectionSet::synthesize_env_default(provider);
+            return materialize_connection_target(
+                realm,
+                provider,
+                connection_ref.binding.clone(),
+                connection_ref.profile.clone(),
+            );
+        }
+        let section = config
+            .realm
+            .get(realm_id)
+            .ok_or_else(|| ConnectionTargetError::UnknownRealm(realm_id.to_string()))?;
+        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
+            ConnectionTargetError::RealmConfigInvalid {
+                realm: realm_id.to_string(),
+                source,
+            }
+        })?;
+        return materialize_connection_target(
+            realm,
+            provider,
+            connection_ref.binding.clone(),
+            connection_ref.profile.clone(),
+        );
+    }
+
+    resolve_realm_binding_target_for_provider(
+        config,
+        provider,
+        None,
+        None,
+        None,
+        preferred_realm,
+        allow_env_default,
+    )
+}
+
+fn materialize_connection_target(
+    realm: RealmConnectionSet,
+    provider: Provider,
+    binding: BindingId,
+    profile: Option<ProfileId>,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let realm_typed = RealmId::parse(realm.realm_id.clone()).map_err(|source| {
+        ConnectionTargetError::InvalidRealmId {
+            realm: realm.realm_id.clone(),
+            source,
+        }
+    })?;
+    let connection_ref = ConnectionRef {
+        realm: realm_typed,
+        binding,
+        profile,
+    };
+    let (binding, backend, auth_profile) =
+        realm
+            .lookup_connection_ref(&connection_ref)
+            .map_err(|source| ConnectionTargetError::BindingInvalid {
+                realm: connection_ref.realm.to_string(),
+                binding: connection_ref.binding.to_string(),
+                source,
+            })?;
+    if backend.provider != provider || auth_profile.provider != provider {
+        return Err(ConnectionTargetError::ProviderMismatch {
+            realm: connection_ref.realm.to_string(),
+            binding: connection_ref.binding.to_string(),
+            expected: provider,
+            backend: backend.provider,
+            auth: auth_profile.provider,
+        });
+    }
+    let binding = binding.clone();
+    let backend = backend.clone();
+    let auth_profile = auth_profile.clone();
+    Ok(ResolvedConnectionTarget {
+        realm,
+        connection_ref,
+        binding,
+        backend,
+        auth_profile,
+    })
 }
 
 impl RealmConnectionSet {
@@ -614,6 +856,39 @@ pub struct ProviderBindingConfig {
 mod tests {
     use super::*;
 
+    fn config_with_realms(toml_input: &str) -> Config {
+        Config {
+            realm: toml::from_str(toml_input).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    fn openai_target_config() -> Config {
+        config_with_realms(
+            r#"
+[prod]
+default_binding = "primary"
+
+[prod.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[prod.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[prod.binding.primary]
+backend_profile = "openai_default"
+auth_profile = "openai_oauth"
+
+[prod.binding.secondary]
+backend_profile = "openai_default"
+auth_profile = "openai_oauth"
+"#,
+        )
+    }
+
     #[test]
     fn connection_ref_is_purely_structural() {
         let c = ConnectionRef {
@@ -693,6 +968,7 @@ auth_profile = "default_profile"
             CredentialSourceSpec::InlineSecret {
                 secret: "sk-x".into(),
             },
+            CredentialSourceSpec::ManagedStore,
             CredentialSourceSpec::Env {
                 env: "OPENAI_API_KEY".into(),
                 fallback: Vec::new(),
@@ -737,6 +1013,73 @@ auth_profile = "default_profile"
             .lookup_binding("missing")
             .expect_err("empty set has no bindings");
         assert_eq!(err, ProviderBindingError::UnknownBinding("missing".into()));
+    }
+
+    #[test]
+    fn connection_target_uses_configured_realm_default_binding() {
+        let config = openai_target_config();
+        let preferred_realm = RealmId::parse("prod").unwrap();
+        let target = resolve_realm_binding_target_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            None,
+            None,
+            Some(&preferred_realm),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target.connection_ref.realm.as_str(), "prod");
+        assert_eq!(target.connection_ref.binding.as_str(), "primary");
+        assert_eq!(target.binding.id, "primary");
+    }
+
+    #[test]
+    fn connection_target_explicit_binding_wins_with_preferred_realm() {
+        let config = openai_target_config();
+        let preferred_realm = RealmId::parse("prod").unwrap();
+        let binding = BindingId::parse("secondary").unwrap();
+        let target = resolve_realm_binding_target_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            Some(&binding),
+            None,
+            Some(&preferred_realm),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target.connection_ref.realm.as_str(), "prod");
+        assert_eq!(target.connection_ref.binding.as_str(), "secondary");
+        assert_eq!(target.binding.id, "secondary");
+    }
+
+    #[test]
+    fn connection_target_rejects_provider_mismatch() {
+        let config = openai_target_config();
+        let preferred_realm = RealmId::parse("prod").unwrap();
+        let err = resolve_realm_binding_target_for_provider(
+            &config,
+            Provider::Anthropic,
+            None,
+            None,
+            None,
+            Some(&preferred_realm),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConnectionTargetError::ProviderMismatch {
+                expected: Provider::Anthropic,
+                backend: Provider::OpenAI,
+                auth: Provider::OpenAI,
+                ..
+            }
+        ));
     }
 
     #[test]

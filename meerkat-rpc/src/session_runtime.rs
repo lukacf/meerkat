@@ -272,24 +272,7 @@ impl SessionRuntimeLlmReconfigureHost {
         let raw_client = if let Some(default) = default_llm_client {
             default
         } else {
-            let config_runtime = self
-                .config_runtime
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let config = if let Some(runtime) = config_runtime {
-                runtime
-                    .get()
-                    .await
-                    .map(|snapshot| snapshot.config)
-                    .map_err(|e| {
-                        RuntimeDriverError::Internal(format!(
-                            "Failed to load config for hot-swap: {e}"
-                        ))
-                    })?
-            } else {
-                meerkat_core::Config::default()
-            };
+            let config = self.load_config_for_hot_swap().await?;
             self.factory
                 .build_llm_client_for_identity(&config, identity)
                 .await
@@ -304,12 +287,66 @@ impl SessionRuntimeLlmReconfigureHost {
             .factory
             .build_llm_adapter(raw_client, identity.model.clone())
             .await;
-        // Post-wave-a: `SessionLlmIdentity.provider_params` stays stringly
-        // typed (`serde_json::Value`) while the adapter seam expects a typed
-        // `ProviderTag`. The hot-swap path no longer carries provider_params
-        // overlay through this seam until the typed projector is plumbed.
-        let _ = identity.provider_params.clone();
         Ok(Arc::new(adapter))
+    }
+
+    async fn load_config_for_hot_swap(&self) -> Result<Config, RuntimeDriverError> {
+        let config_runtime = self
+            .config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(runtime) = config_runtime {
+            runtime
+                .get()
+                .await
+                .map(|snapshot| snapshot.config)
+                .map_err(|e| {
+                    RuntimeDriverError::Internal(format!("Failed to load config for hot-swap: {e}"))
+                })
+        } else {
+            Ok(meerkat_core::Config::default())
+        }
+    }
+
+    fn explicit_meerkat_tool_policy_for_session(session: &Session) -> bool {
+        let Some(metadata) = session.session_metadata() else {
+            return false;
+        };
+        !matches!(
+            metadata.tooling.builtins,
+            meerkat_core::ToolCategoryOverride::Inherit
+        ) || !matches!(
+            metadata.tooling.shell,
+            meerkat_core::ToolCategoryOverride::Inherit
+        ) || !matches!(
+            metadata.tooling.memory,
+            meerkat_core::ToolCategoryOverride::Inherit
+        ) || !matches!(
+            metadata.tooling.mob,
+            meerkat_core::ToolCategoryOverride::Inherit
+        )
+    }
+
+    async fn build_request_policy_for_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<meerkat_core::SessionLlmRequestPolicy, RuntimeDriverError> {
+        let config = self.load_config_for_hot_swap().await?;
+        let session = self
+            .service
+            .export_live_session(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?;
+        let explicit_meerkat_tool_policy = Self::explicit_meerkat_tool_policy_for_session(&session);
+        self.factory
+            .request_policy_for_llm_identity(&config, identity, explicit_meerkat_tool_policy)
+            .map_err(|e| {
+                RuntimeDriverError::Internal(format!(
+                    "Failed to build LLM request policy for session identity hot-swap: {e}"
+                ))
+            })
     }
 
     async fn resolve_target_llm_identity(
@@ -470,8 +507,16 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         identity: &SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
         let adapter = self.build_adapter_for_llm_identity(identity).await?;
+        let request_policy = self
+            .build_request_policy_for_llm_identity(session_id, identity)
+            .await?;
         self.service
-            .apply_runtime_session_llm_identity(session_id, adapter, identity.clone())
+            .apply_runtime_session_llm_identity(
+                session_id,
+                adapter,
+                identity.clone(),
+                request_policy,
+            )
             .await
             .map_err(session_error_to_runtime_driver)
     }
@@ -2170,11 +2215,6 @@ impl SessionRuntime {
         status: meerkat_contracts::PeerResponseTerminalStatusWire,
         result: serde_json::Value,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        use meerkat_runtime::input::{
-            Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
-            PeerInput, ResponseTerminalStatus,
-        };
-
         if self.live_session_is_stale(session_id).await? {
             let _ = self.service.discard_live_session(session_id).await;
             self.runtime_adapter.unregister_session(session_id).await;
@@ -2189,47 +2229,13 @@ impl SessionRuntime {
                 data: None,
             })?;
 
-        if request_id.trim().is_empty() {
-            return Err(RpcError {
+        let input =
+            meerkat_runtime::peer_response_terminal_input(&peer_name, request_id, status, result)
+                .map_err(|err| RpcError {
                 code: error::INVALID_PARAMS,
-                message: "request_id cannot be empty".to_string(),
+                message: err.to_string(),
                 data: None,
-            });
-        }
-
-        let input = Input::Peer(PeerInput {
-            header: InputHeader {
-                id: meerkat_core::lifecycle::InputId::new(),
-                timestamp: chrono::Utc::now(),
-                source: InputOrigin::Peer {
-                    peer_id: peer_name.as_string(),
-                    runtime_id: None,
-                },
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            convention: Some(PeerConvention::ResponseTerminal {
-                request_id,
-                status: match status {
-                    meerkat_contracts::PeerResponseTerminalStatusWire::Completed => {
-                        ResponseTerminalStatus::Completed
-                    }
-                    meerkat_contracts::PeerResponseTerminalStatusWire::Failed => {
-                        ResponseTerminalStatus::Failed
-                    }
-                    meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled => {
-                        ResponseTerminalStatus::Cancelled
-                    }
-                },
-            }),
-            body: String::new(),
-            payload: Some(result),
-            blocks: None,
-            handling_mode: None,
-        });
+            })?;
 
         self.runtime_adapter
             .accept_input(session_id, input)
@@ -2346,9 +2352,6 @@ impl SessionRuntime {
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
                 turn_metadata: primitive.turn_metadata().cloned(),
-                execution_kind: primitive
-                    .turn_metadata()
-                    .and_then(|meta| meta.execution_kind),
             };
 
             match self
@@ -2547,9 +2550,9 @@ impl SessionRuntime {
                 }
             }
 
-            let (_, output) = self
+            let output = self
                 .service
-                .apply_runtime_turn_with_result(
+                .apply_runtime_turn(
                     session_id,
                     run_id,
                     StartTurnRequest {
@@ -2562,9 +2565,6 @@ impl SessionRuntime {
                         skill_references,
                         flow_tool_overlay,
                         turn_metadata: primitive.turn_metadata().cloned(),
-                        execution_kind: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.execution_kind),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2609,9 +2609,9 @@ impl SessionRuntime {
                     .await;
             }
         }
-        let (_, output) = self
+        let output = self
             .service
-            .apply_runtime_turn_with_result(
+            .apply_runtime_turn(
                 session_id,
                 run_id,
                 StartTurnRequest {
@@ -2624,9 +2624,6 @@ impl SessionRuntime {
                     skill_references,
                     flow_tool_overlay,
                     turn_metadata: primitive.turn_metadata().cloned(),
-                    execution_kind: primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.execution_kind),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -3023,7 +3020,6 @@ impl SessionRuntime {
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
             turn_metadata: None,
-            execution_kind: None,
         };
 
         if self.live_session_is_stale(session_id).await? {

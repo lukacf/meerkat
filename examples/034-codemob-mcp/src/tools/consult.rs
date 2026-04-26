@@ -81,7 +81,7 @@ pub async fn handle(
             flow_tool_overlay: None,
             additional_instructions: None,
             turn_metadata: None,
-            execution_kind: None,
+
         };
 
         let result = state

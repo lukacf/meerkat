@@ -305,7 +305,6 @@ Skill introspection lets you see all skills — including shadowed ones — with
 | CLI | `rkat skill list [--json]` | List all skills with provenance |
 | CLI | `rkat skill inspect <id> [--source <name>] [--json]` | Inspect a skill's full body |
 | RPC | `skills/list` | List skills with provenance |
-| RPC | `skills/inspect` | Inspect a skill by ID |
 | REST | `GET /skills` | List skills |
 | REST | `GET /skills/{id}` | Inspect a skill |
 | MCP | `meerkat_skills` tool (`action: "list"` / `"inspect"`) | List or inspect |
@@ -348,7 +347,7 @@ let config = Config::load().await?;
 let factory = AgentFactory::new(store_path);
 
 // Build a SkillRuntime (requires "skills" feature)
-if let Some(runtime) = factory.build_skill_runtime(&config).await {
+if let Some(runtime) = factory.build_skill_runtime(&config).await? {
     // List all skills with provenance
     let entries = runtime.list_all_with_provenance(&SkillFilter::default()).await?;
     for entry in &entries {

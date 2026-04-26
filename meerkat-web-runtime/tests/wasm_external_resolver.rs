@@ -1,7 +1,6 @@
 //! T18 (Phase 5): WASM external auth resolver — top-down observable
-//! proof that the browser host can register a JS callback that yields
-//! a bearer token, and the meerkat WASM runtime reads the registration
-//! correctly.
+//! proof that the JS host can register a callback that yields a bearer
+//! token, and the meerkat WASM runtime reads the registration correctly.
 //!
 //! Plan choke point K9 reads: "browser host registers
 //! `ExternalAuthResolverHandle` via `wasm-bindgen`; calls
@@ -23,8 +22,6 @@ use meerkat_web_runtime::external_auth::{
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
-wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
 /// Before registration: `has_external_auth_resolver()` returns false.
 #[wasm_bindgen_test]
 fn resolver_is_absent_before_registration() {
@@ -38,8 +35,8 @@ fn resolver_is_absent_before_registration() {
 fn register_callback_sets_resolver_present() {
     let cb = js_sys::eval(
         r#"
-            (function (binding_key) {
-                return Promise.resolve("bearer-" + binding_key);
+            (function (connectionRef) {
+                return Promise.resolve("bearer-" + connectionRef.realm + "-" + connectionRef.binding);
             })
         "#,
     )

@@ -98,7 +98,9 @@ pub use auth::{
     metadata_grants_no_visibility,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
-pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use budget::{
+    Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
+};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
@@ -109,7 +111,7 @@ pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
-pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+pub use memory::{MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError};
 pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
 pub use peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
@@ -145,7 +147,7 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentErrorClass, AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta,
+    AgentErrorClass, AgentErrorReport, AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta,
     ExternalToolDeltaPhase, ScopedAgentEvent, StreamScopeFrame, ToolConfigChangeOperation,
     ToolConfigChangedPayload, VerboseEventConfig, agent_event_type, compare_event_envelopes,
     format_verbose_event, format_verbose_event_with_config,
@@ -154,9 +156,7 @@ pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
     EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send,
 };
-pub use gateway::{
-    Availability, AvailabilityCheck, DynamicToolComposite, ToolGateway, ToolGatewayBuilder,
-};
+pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
     DslTransitionError, ExternalToolSurfaceHandle, McpServerLifecycleHandle, PeerCommsHandle,
@@ -202,7 +202,10 @@ pub use ops_lifecycle::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
-pub use retry::RetryPolicy;
+pub use retry::{
+    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
+    select_retry_delay,
+};
 pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
     RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
@@ -227,9 +230,9 @@ pub use session::{
     SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
     SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
     SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
-    SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
-    ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionLlmRequestPolicy, SessionMeta,
+    SessionMetadata, SessionSystemContextState, SessionToolVisibilityState, SessionTooling,
+    SystemContextStageError, ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
     capability_base_filter_for_image_tool_results,
 };
 pub use session_recovery::{
@@ -241,9 +244,9 @@ pub use session_recovery::{
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;
 pub use tool_catalog::{
-    ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
-    deferred_session_entry_count, deferred_session_schema_volume,
+    ToolUnavailableReason, deferred_session_entry_count, deferred_session_schema_volume,
     select_catalog_mode_from_snapshot,
 };
 pub use tool_scope::{
@@ -264,8 +267,9 @@ pub use types::{
     ContentInput, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta, RunResult,
     SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
     SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
-    ToolProvenance, ToolResult, ToolSourceKind, Usage, UserMessage, VideoData, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
+    ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
+    Usage, UserMessage, VideoData, has_images, has_non_text_content, has_video,
+    is_supported_video_media_type, validate_inline_video_blocks,
 };
 
 // === Provider auth v2 (landed ahead of wiring — see
@@ -279,6 +283,8 @@ pub use auth::{
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,
-    ConnectionRef, CredentialSourceSpec, IdentityError, ProfileId, ProviderBinding,
-    ProviderBindingConfig, ProviderBindingError, RealmConfigSection, RealmConnectionSet, RealmId,
+    ConnectionRef, ConnectionTargetError, CredentialSourceSpec, IdentityError, ProfileId,
+    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
+    RealmConnectionSet, RealmId, ResolvedConnectionTarget,
+    resolve_connection_ref_or_default_for_provider, resolve_realm_binding_target_for_provider,
 };

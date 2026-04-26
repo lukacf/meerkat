@@ -1222,7 +1222,6 @@ mod scenario_09_session_service {
             skill_references: None,
             flow_tool_overlay: None,
             turn_metadata: None,
-            execution_kind: None,
         };
 
         let turn_result = service
@@ -1302,10 +1301,14 @@ mod scenario_10_memory {
         };
         let compactor = Arc::new(DefaultCompactor::new(compactor_config))
             as Arc<dyn meerkat_core::compact::Compactor>;
+        let memory_session = meerkat_core::Session::new();
+        let memory_session_id = memory_session.id().clone();
 
         // Build memory_search tool dispatcher
-        let memory_dispatcher =
-            meerkat_memory::MemorySearchDispatcher::new(Arc::clone(&memory_store));
+        let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::for_session(
+            Arc::clone(&memory_store),
+            memory_session_id,
+        );
         let memory_tools: Arc<dyn AgentToolDispatcher> = Arc::new(memory_dispatcher);
 
         // Build agent with memory store + compactor + memory_search tool
@@ -1321,6 +1324,7 @@ mod scenario_10_memory {
                  When asked to recall information from your memory, use the memory_search tool. \
                  Keep responses brief.",
             )
+            .resume_session(memory_session)
             .memory_store(Arc::clone(&memory_store))
             .compactor(compactor)
             .build(llm_adapter, memory_tools, store_adapter)
@@ -1687,7 +1691,6 @@ mod scenario_22_runtime_host_comms {
                 skill_references: None,
                 flow_tool_overlay: None,
                 turn_metadata: None,
-                execution_kind: None,
             };
 
             let result = self

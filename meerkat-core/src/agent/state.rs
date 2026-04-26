@@ -1,6 +1,7 @@
 //! Agent state machine internals.
 
-use crate::error::AgentError;
+use crate::budget::{BudgetDimension, BudgetExceeded};
+use crate::error::{AgentError, ToolError};
 use crate::event::{
     AgentEvent, BudgetType, DeferredCatalogDelta, ToolConfigChangeDomain,
     ToolConfigChangeOperation, ToolConfigChangedPayload,
@@ -11,17 +12,17 @@ use crate::hooks::{
 };
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
-use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
-    TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
-    SystemNoticeMessage, ToolCallView, ToolDef, ToolResult, UserMessage,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, ToolResult, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -70,9 +71,9 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::OpsBarrierSatisfied { run_id, .. }
         | TurnExecutionInput::BoundaryContinue { run_id }
         | TurnExecutionInput::BoundaryComplete { run_id }
-        | TurnExecutionInput::RecoverableFailure { run_id }
-        | TurnExecutionInput::FatalFailure { run_id }
-        | TurnExecutionInput::RetryRequested { run_id }
+        | TurnExecutionInput::RecoverableFailure { run_id, .. }
+        | TurnExecutionInput::FatalFailure { run_id, .. }
+        | TurnExecutionInput::RetryRequested { run_id, .. }
         | TurnExecutionInput::CancelNow { run_id }
         | TurnExecutionInput::CancelAfterBoundary { run_id }
         | TurnExecutionInput::CancellationObserved { run_id }
@@ -80,11 +81,52 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::TurnLimitReached { run_id }
         | TurnExecutionInput::BudgetExhausted { run_id }
         | TurnExecutionInput::TimeBudgetExceeded { run_id }
+        | TurnExecutionInput::BudgetLimitExceeded { run_id, .. }
         | TurnExecutionInput::EnterExtraction { run_id, .. }
         | TurnExecutionInput::ExtractionValidationPassed { run_id }
         | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
         | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
         TurnExecutionInput::ForceCancelNoRun => None,
+    }
+}
+
+fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureReason> {
+    match input {
+        TurnExecutionInput::FatalFailure { reason, .. } => Some(reason.clone()),
+        TurnExecutionInput::TurnLimitReached { .. } => Some(TurnFailureReason::new(
+            crate::event::AgentErrorClass::MaxTurns,
+            "turn limit reached",
+        )),
+        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::terminal_outcome(
+            TurnTerminalOutcome::BudgetExhausted,
+        )),
+        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::terminal_outcome(
+            TurnTerminalOutcome::TimeBudgetExceeded,
+        )),
+        TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
+            Some(TurnFailureReason::budget_exceeded(*exceeded))
+        }
+        TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
+            Some(TurnFailureReason::new(
+                crate::event::AgentErrorClass::StructuredOutput,
+                error.clone(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn budget_warning_event(exceeded: BudgetExceeded) -> AgentEvent {
+    let budget_type = match exceeded.dimension {
+        BudgetDimension::Tokens => BudgetType::Tokens,
+        BudgetDimension::Time => BudgetType::Time,
+        BudgetDimension::ToolCalls => BudgetType::ToolCalls,
+    };
+    AgentEvent::BudgetWarning {
+        budget_type,
+        used: exceeded.used,
+        limit: exceeded.limit,
+        percent: 1.0,
     }
 }
 
@@ -142,9 +184,47 @@ fn hidden_deferred_catalog_names(
                 ToolCatalogDeferredEligibility::DeferredEligible { .. }
             )
         })
-        .map(|entry| entry.tool.name.clone())
+        .map(|entry| entry.tool.name.to_string())
         .filter(|name| !visible_names.contains(name))
         .collect()
+}
+
+fn dispatcher_knows_tool<T>(dispatcher: &T, name: &str) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if dispatcher.tool_catalog_capabilities().exact_catalog {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .any(|entry| entry.tool.name == name)
+    } else {
+        dispatcher.tools().iter().any(|tool| tool.name == name)
+    }
+}
+
+fn precheck_visible_tool_call<T>(
+    dispatcher: &T,
+    visible_names: &ToolNameSet,
+    name: &str,
+) -> Result<(), ToolError>
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if visible_names.contains(name) {
+        return Ok(());
+    }
+    if dispatcher_knows_tool(dispatcher, name) {
+        return Err(ToolError::access_denied(name));
+    }
+    Err(ToolError::not_found(name))
+}
+
+fn tool_error_result(tool_use_id: String, error: ToolError) -> ToolResult {
+    let payload = error.to_error_payload();
+    let serialized = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
+    ToolResult::new(tool_use_id, serialized, true)
 }
 
 fn parse_runtime_operation_id(value: &str) -> Option<crate::ops::OperationId> {
@@ -318,16 +398,19 @@ where
 
         loop {
             // 1. Budget gate at loop entry
-            self.budget.check()?;
+            if let Some(exceeded) = self.budget.observe().exceeded() {
+                return Err(exceeded.to_agent_error());
+            }
 
             // 2. Compute effective timeout for this call
             let effective_call_timeout = self.resolve_effective_call_timeout();
             let remaining_turn = self.budget.remaining_duration();
 
             // If remaining turn budget is zero, surface immediately
-            if remaining_turn == Some(std::time::Duration::ZERO) {
-                self.budget.check()?;
-                // check() should have returned Err; unreachable, but be safe
+            if remaining_turn == Some(std::time::Duration::ZERO)
+                && let Some(exceeded) = self.budget.observe().exceeded()
+            {
+                return Err(exceeded.to_agent_error());
             }
 
             // 4. Determine whether to wrap the call and select timeout source
@@ -382,20 +465,20 @@ where
                                     ),
                                 }),
                                 CallTimeoutSource::TurnBudget => {
-                                    let limit = self
-                                        .budget
-                                        .time_usage()
-                                        .map(|(_, l)| l / 1000)
-                                        .unwrap_or(0);
-                                    let elapsed = self
-                                        .budget
-                                        .time_usage()
-                                        .map(|(e, _)| e / 1000)
-                                        .unwrap_or(0);
-                                    return Err(AgentError::TimeBudgetExceeded {
-                                        elapsed_secs: elapsed,
-                                        limit_secs: limit,
-                                    });
+                                    let exceeded =
+                                        self.budget.observe().exceeded().unwrap_or_else(|| {
+                                            let timeout_ms = effective_timeout.as_millis() as u64;
+                                            let (elapsed_ms, limit_ms) = self
+                                                .budget
+                                                .time_usage()
+                                                .unwrap_or((timeout_ms, timeout_ms));
+                                            BudgetExceeded {
+                                                dimension: BudgetDimension::Time,
+                                                used: elapsed_ms / 1000,
+                                                limit: limit_ms / 1000,
+                                            }
+                                        });
+                                    return Err(exceeded.to_agent_error());
                                 }
                             }
                         }
@@ -407,23 +490,21 @@ where
             match call_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
-                        let hint = e.retry_after_hint();
-                        let computed = self.retry_policy.delay_for_attempt(attempt + 1);
-                        let delay = compute_retry_delay(hint, computed, e.is_rate_limited());
-                        let capped = match self.budget.remaining_duration() {
-                            Some(remaining) => delay.min(remaining),
-                            None => delay,
-                        };
+                    if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                        &e,
+                        attempt,
+                        self.budget.remaining_duration(),
+                    ) {
                         tracing::warn!(
                             "LLM call failed (attempt {}), retrying in {}ms: {}",
-                            attempt + 1,
-                            capped.as_millis(),
+                            retry_schedule.plan.attempt,
+                            retry_schedule.plan.selected_delay_ms,
                             e
                         );
                         let recover =
                             self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
                                 run_id: run_id.clone(),
+                                retry: retry_schedule.clone(),
                             })?;
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await;
@@ -431,18 +512,22 @@ where
                             &self.event_tap,
                             event_tx.as_ref(),
                             AgentEvent::Retrying {
-                                attempt: attempt + 1,
-                                max_attempts: self.retry_policy.max_retries,
+                                attempt: retry_schedule.plan.attempt,
+                                max_attempts: retry_schedule.plan.max_retries,
                                 error: e.to_string(),
-                                delay_ms: capped.as_millis() as u64,
+                                delay_ms: retry_schedule.plan.selected_delay_ms,
+                                retry: Some(retry_schedule.clone()),
                             },
                         )
                         .await;
                         attempt += 1;
-                        tokio::time::sleep(capped).await;
-                        self.budget.check()?;
+                        tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
+                        if let Some(exceeded) = self.budget.observe().exceeded() {
+                            return Err(exceeded.to_agent_error());
+                        }
                         let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
                             run_id: run_id.clone(),
+                            retry_attempt: retry_schedule.plan.attempt,
                         })?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
                             .await;
@@ -465,7 +550,10 @@ where
                     point: HookPoint::TurnBoundary,
                     session_id: self.session.id().clone(),
                     turn_number: Some(turn_count),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -563,16 +651,13 @@ where
                 .ops_barrier_satisfied(operation_ids.iter().map(ToString::to_string).collect()),
             TurnExecutionInput::BoundaryContinue { .. } => handle.boundary_continue(),
             TurnExecutionInput::BoundaryComplete { .. } => handle.boundary_complete(),
-            TurnExecutionInput::RecoverableFailure { .. } => {
-                handle.recoverable_failure("recoverable_failure".to_string())
+            TurnExecutionInput::RecoverableFailure { retry, .. } => {
+                handle.recoverable_failure(retry.clone())
             }
-            TurnExecutionInput::FatalFailure { .. } => handle.fatal_failure(
-                self.pending_fatal_diagnostic
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "fatal_failure".to_string()),
-            ),
-            TurnExecutionInput::RetryRequested { .. } => handle.retry_requested(),
+            TurnExecutionInput::FatalFailure { reason, .. } => handle.fatal_failure(reason.clone()),
+            TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
+                handle.retry_requested(*retry_attempt)
+            }
             TurnExecutionInput::CancelNow { .. } => handle.cancel_now(),
             TurnExecutionInput::CancelAfterBoundary { .. } => {
                 handle.request_cancel_after_boundary()
@@ -584,6 +669,13 @@ where
             TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
             TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
             TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
+            TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
+                match terminal_outcome_for_budget_exceeded(*exceeded) {
+                    TurnTerminalOutcome::TimeBudgetExceeded => handle.time_budget_exceeded(),
+                    TurnTerminalOutcome::BudgetExhausted => handle.budget_exhausted(),
+                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
+                }
+            }
             TurnExecutionInput::EnterExtraction { max_retries, .. } => {
                 handle.enter_extraction(*max_retries)
             }
@@ -630,7 +722,13 @@ where
             && next_phase == TurnPhase::Failed
             && let Some(run_id) = turn_input_run_id(&input)
         {
-            effects.push(TurnExecutionEffect::RunFailed { run_id });
+            let reason = turn_input_failure_reason(&input).unwrap_or_else(|| {
+                TurnFailureReason::terminal_outcome(
+                    self.turn_terminal_outcome()
+                        .unwrap_or(TurnTerminalOutcome::Failed),
+                )
+            });
+            effects.push(TurnExecutionEffect::RunFailed { run_id, reason });
         }
         if prev_phase != TurnPhase::Cancelled
             && next_phase == TurnPhase::Cancelled
@@ -666,10 +764,9 @@ where
                         );
                     }
                 }
-                TurnExecutionEffect::RunFailed { run_id } => {
+                TurnExecutionEffect::RunFailed { run_id, reason } => {
                     if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) =
-                            handle.run_failed(run_id.clone(), "run failed".to_string())
+                        && let Err(error) = handle.run_failed(run_id.clone(), reason.clone())
                     {
                         tracing::warn!(
                             error = %error,
@@ -713,34 +810,62 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
+                            match self
+                                .index_compaction_discards(&outcome.discarded, turn_count)
+                                .await
+                            {
+                                crate::memory::MemoryIndexDelivery::Rejected {
+                                    error,
+                                    attempted_entries,
+                                    ..
+                                } => {
+                                    let error_message = format!(
+                                        "memory indexing failed after compaction ({attempted_entries} entries attempted): {error}"
+                                    );
+                                    tracing::warn!(
+                                        error = %error,
+                                        attempted_entries,
+                                        "memory store rejected compaction discard indexing; preserving original session history"
+                                    );
+                                    if !crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::CompactionFailed {
+                                            error: error_message,
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "compaction event stream receiver dropped before memory-indexing CompactionFailed"
+                                        );
+                                    }
+                                    continue;
+                                }
+                                crate::memory::MemoryIndexDelivery::NoStore { .. }
+                                | crate::memory::MemoryIndexDelivery::Delivered(_) => {}
+                            }
+
                             *self.session.messages_mut_internal() = outcome.new_messages;
                             self.session.record_usage(outcome.summary_usage.clone());
                             self.budget.record_usage(&outcome.summary_usage);
                             self.last_input_tokens = 0;
                             self.compaction_cadence.last_compaction_boundary_index =
                                 Some(outcome.session_boundary_index);
-
-                            if let Some(ref memory_store) = self.memory_store {
-                                let store = std::sync::Arc::clone(memory_store);
-                                let session_id = self.session.id().clone();
-                                let discarded = outcome.discarded;
-                                tokio::spawn(async move {
-                                    for message in &discarded {
-                                        let content = message.as_indexable_text();
-                                        if !content.is_empty() {
-                                            let metadata = crate::memory::MemoryMetadata {
-                                                session_id: session_id.clone(),
-                                                turn: Some(turn_count),
-                                                indexed_at: crate::time_compat::SystemTime::now(),
-                                            };
-                                            if let Err(e) = store.index(&content, metadata).await {
-                                                tracing::warn!(
-                                                    "failed to index compaction discard into memory: {e}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                });
+                            if !crate::event_tap::tap_emit(
+                                &self.event_tap,
+                                event_tx.as_ref(),
+                                AgentEvent::CompactionCompleted {
+                                    summary_tokens: outcome.summary_usage.output_tokens,
+                                    messages_before: outcome.messages_before,
+                                    messages_after: outcome.messages_after,
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "compaction event stream receiver dropped before CompactionCompleted"
+                                );
                             }
                         }
                     }
@@ -760,6 +885,59 @@ where
                 }
             }
         }
+    }
+
+    async fn index_compaction_discards(
+        &self,
+        discarded: &[Message],
+        turn_count: u32,
+    ) -> crate::memory::MemoryIndexDelivery {
+        let session_id = self.session.id().clone();
+        let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
+        let Some(memory_store) = self.memory_store.as_ref() else {
+            return crate::memory::MemoryIndexDelivery::NoStore { scope };
+        };
+        let mut indexed_entries = 0;
+        let mut attempted_entries = 0;
+        for message in discarded {
+            let content = message.as_indexable_text();
+            if content.is_empty() {
+                continue;
+            }
+            let metadata = crate::memory::MemoryMetadata {
+                session_id: session_id.clone(),
+                turn: Some(turn_count),
+                indexed_at: crate::time_compat::SystemTime::now(),
+            };
+            let request =
+                match crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return crate::memory::MemoryIndexDelivery::Rejected {
+                            scope,
+                            attempted_entries,
+                            error,
+                        };
+                    }
+                };
+            attempted_entries += 1;
+            match memory_store.index_scoped(request).await {
+                Ok(receipt) => {
+                    indexed_entries += receipt.indexed_entries;
+                }
+                Err(error) => {
+                    return crate::memory::MemoryIndexDelivery::Rejected {
+                        scope,
+                        attempted_entries,
+                        error,
+                    };
+                }
+            }
+        }
+        crate::memory::MemoryIndexDelivery::Delivered(crate::memory::MemoryIndexReceipt {
+            scope,
+            indexed_entries,
+        })
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
@@ -854,56 +1032,20 @@ where
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
-            // Check budget — typed routing per budget kind
-            if let Err(budget_err) = self.budget.check() {
-                match budget_err {
-                    AgentError::TimeBudgetExceeded {
-                        elapsed_secs,
-                        limit_secs,
-                    } => {
-                        emit_event!(AgentEvent::BudgetWarning {
-                            budget_type: BudgetType::Time,
-                            used: elapsed_secs,
-                            limit: limit_secs,
-                            percent: 1.0,
-                        });
-                        self.pending_fatal_diagnostic = Some(AgentError::TimeBudgetExceeded {
-                            elapsed_secs,
-                            limit_secs,
-                        });
-                        self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
-                            run_id: run_id.clone(),
-                        })?;
-                    }
-                    AgentError::TokenBudgetExceeded { used, limit } => {
-                        emit_event!(AgentEvent::BudgetWarning {
-                            budget_type: BudgetType::Tokens,
-                            used,
-                            limit,
-                            percent: 1.0,
-                        });
-                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
-                            run_id: run_id.clone(),
-                        })?;
-                    }
-                    AgentError::ToolCallBudgetExceeded { count, limit } => {
-                        emit_event!(AgentEvent::BudgetWarning {
-                            budget_type: BudgetType::ToolCalls,
-                            used: count as u64,
-                            limit: limit as u64,
-                            percent: 1.0,
-                        });
-                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
-                            run_id: run_id.clone(),
-                        })?;
-                    }
-                    other => return Err(other),
+            if let Some(exceeded) = self.budget.observe().exceeded() {
+                emit_event!(budget_warning_event(exceeded));
+                if matches!(exceeded.dimension, BudgetDimension::Time) {
+                    self.pending_fatal_diagnostic = Some(exceeded.to_agent_error());
                 }
+                self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+                    run_id: run_id.clone(),
+                    exceeded,
+                })?;
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
-            match self.turn_phase()?.to_loop_state() {
-                LoopState::CallingLlm => {
+            match self.turn_phase()? {
+                TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
                     // 0. Auth lease refresh loop (Phase 1.5-rev).
                     //    The canonical auth-state owner is the MeerkatMachine
                     //    DSL (see meerkat-machine-schema/src/catalog/dsl/
@@ -1058,7 +1200,7 @@ where
                                 let control_names = catalog
                                     .iter()
                                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                                    .map(|entry| entry.tool.name.clone())
+                                    .map(|entry| entry.tool.name.to_string())
                                     .collect::<std::collections::HashSet<_>>();
                                 let deferred_names = if !control_names.is_empty()
                                     && matches!(catalog_mode, ToolCatalogMode::Deferred)
@@ -1074,7 +1216,7 @@ where
                                                         ToolCatalogDeferredEligibility::DeferredEligible { .. }
                                                     )
                                                 })
-                                                .map(|entry| entry.tool.name.clone())
+                                                .map(|entry| entry.tool.name.to_string())
                                                 .collect()
                                 } else {
                                     std::collections::HashSet::new()
@@ -1087,33 +1229,28 @@ where
                             ),
                         };
                         let previous_visibility_state = self.tool_scope.visibility_state().ok();
-                        let visibility_state = match self.tool_scope.promote_staged_visibility() {
-                            Ok(state) => state,
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "failed to promote staged tool visibility state at boundary"
-                                );
-                                self.tool_scope.visibility_state().unwrap_or_default()
+                        let apply_result = match self.tool_scope.promote_staged_visibility() {
+                            Ok(visibility_state) => {
+                                if let Some(previous_visibility_state) =
+                                    previous_visibility_state.as_ref()
+                                {
+                                    self.tool_scope.apply_staged_projection_with_previous(
+                                        dispatcher_tools.clone(),
+                                        control_tool_names.into_iter().collect(),
+                                        deferred_tool_names.into_iter().collect(),
+                                        previous_visibility_state,
+                                        &visibility_state,
+                                    )
+                                } else {
+                                    self.tool_scope.apply_staged_projection(
+                                        dispatcher_tools.clone(),
+                                        control_tool_names,
+                                        deferred_tool_names,
+                                        &visibility_state,
+                                    )
+                                }
                             }
-                        };
-                        let apply_result = if let Some(previous_visibility_state) =
-                            previous_visibility_state.as_ref()
-                        {
-                            self.tool_scope.apply_staged_projection_with_previous(
-                                dispatcher_tools.clone(),
-                                control_tool_names,
-                                deferred_tool_names,
-                                previous_visibility_state,
-                                &visibility_state,
-                            )
-                        } else {
-                            self.tool_scope.apply_staged_projection(
-                                dispatcher_tools.clone(),
-                                control_tool_names,
-                                deferred_tool_names,
-                                &visibility_state,
-                            )
+                            Err(err) => Err(err),
                         };
                         match apply_result {
                             Ok(applied) => {
@@ -1251,10 +1388,10 @@ where
                                 applied.tools
                             }
                             Err(err) => {
-                                let status = format!("warning_fallback_all({err})");
+                                let status = format!("warning_failed_closed({err})");
                                 tracing::warn!(
                                     error = %err,
-                                    "tool scope boundary apply failed; falling back to full dispatcher tools"
+                                    "tool scope boundary apply failed; closing visible tool set for this boundary"
                                 );
                                 emit_event!(AgentEvent::ToolConfigChanged {
                                     payload: ToolConfigChangedPayload {
@@ -1270,10 +1407,18 @@ where
                                 self.session.push(synthetic_notice_message(
                                     SystemNoticeKind::ToolScopeWarning,
                                     format!(
-                                        "Tool scope apply failed ({err}); falling back to full tool set."
+                                        "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
                                     ),
                                 ));
-                                dispatcher_tools
+                                self.tool_scope.fail_closed_projection().unwrap_or_else(
+                                    |close_err| {
+                                        tracing::warn!(
+                                            error = %close_err,
+                                            "failed to persist fail-closed tool-scope projection"
+                                        );
+                                        Vec::<Arc<crate::types::ToolDef>>::new().into()
+                                    },
+                                )
                             }
                         }
                     };
@@ -1297,7 +1442,10 @@ where
                                 point: HookPoint::PreLlmRequest,
                                 session_id: self.session.id().clone(),
                                 turn_number: Some(turn_count),
+                                prompt_input: None,
                                 prompt: None,
+                                error_report: None,
+                                error_class: None,
                                 error: None,
                                 llm_request: Some(HookLlmRequest {
                                     max_tokens: effective_max_tokens,
@@ -1320,15 +1468,18 @@ where
                         ..
                     }) = pre_llm_report.decision
                     {
-                        self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                            run_id: run_id.clone(),
-                        })?;
-                        return Err(AgentError::HookDenied {
+                        let error = AgentError::HookDenied {
                             point: HookPoint::PreLlmRequest,
                             reason_code,
                             message,
                             payload,
-                        });
+                        };
+                        let reason = TurnFailureReason::from_agent_error(&error);
+                        self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                            run_id: run_id.clone(),
+                            reason,
+                        })?;
+                        return Err(error);
                     }
 
                     for outcome in &pre_llm_report.outcomes {
@@ -1408,80 +1559,42 @@ where
                         .await
                     {
                         Ok(r) => r,
-                        Err(
-                            e @ AgentError::TimeBudgetExceeded {
-                                elapsed_secs,
-                                limit_secs,
-                            },
-                        ) => {
-                            // Dedicated time-budget terminal path — same as loop-top
-                            emit_event!(AgentEvent::BudgetWarning {
-                                budget_type: BudgetType::Time,
-                                used: elapsed_secs,
-                                limit: limit_secs,
-                                percent: 1.0,
-                            });
-                            self.pending_fatal_diagnostic = Some(e);
-                            self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
-                                run_id: run_id.clone(),
-                            })?;
-                            return self.build_result(turn_count, tool_call_count).await;
+                        Err(e) => {
+                            if let Some(exceeded) = BudgetExceeded::from_agent_error(&e) {
+                                emit_event!(budget_warning_event(exceeded));
+                                if matches!(exceeded.dimension, BudgetDimension::Time) {
+                                    self.pending_fatal_diagnostic = Some(e);
+                                }
+                                self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+                                    run_id: run_id.clone(),
+                                    exceeded,
+                                })?;
+                                return self.build_result(turn_count, tool_call_count).await;
+                            }
+                            if matches!(&e, AgentError::Llm { .. }) {
+                                // Exhausted hard LLM-call failure — route through
+                                // machine-owned FatalFailure and preserve diagnostics.
+                                let reason = TurnFailureReason::from_agent_error(&e);
+                                self.pending_fatal_diagnostic = Some(e);
+                                self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                    run_id: run_id.clone(),
+                                    reason,
+                                })?;
+                                return self.build_result(turn_count, tool_call_count).await;
+                            }
+                            return Err(e);
                         }
-                        Err(AgentError::TokenBudgetExceeded { used, limit }) => {
-                            // Token budget exhausted during LLM call — same
-                            // terminal path as loop-top budget check.
-                            emit_event!(AgentEvent::BudgetWarning {
-                                budget_type: BudgetType::Tokens,
-                                used,
-                                limit,
-                                percent: 1.0,
-                            });
-                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
-                                run_id: run_id.clone(),
-                            })?;
-                            return self.build_result(turn_count, tool_call_count).await;
-                        }
-                        Err(AgentError::ToolCallBudgetExceeded { count, limit }) => {
-                            // Tool-call budget exhausted during LLM call — same
-                            // terminal path as loop-top budget check.
-                            emit_event!(AgentEvent::BudgetWarning {
-                                budget_type: BudgetType::ToolCalls,
-                                used: count as u64,
-                                limit: limit as u64,
-                                percent: 1.0,
-                            });
-                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
-                                run_id: run_id.clone(),
-                            })?;
-                            return self.build_result(turn_count, tool_call_count).await;
-                        }
-                        Err(e @ AgentError::Llm { .. }) => {
-                            // Exhausted hard LLM-call failure — route through
-                            // machine-owned FatalFailure and preserve diagnostics.
-                            self.pending_fatal_diagnostic = Some(e);
-                            self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                                run_id: run_id.clone(),
-                            })?;
-                            return self.build_result(turn_count, tool_call_count).await;
-                        }
-                        Err(e) => return Err(e),
                     };
 
                     // Update budget + session usage
                     self.budget.record_usage(&result.usage);
                     self.last_input_tokens = result.usage.input_tokens;
                     self.session.record_usage(result.usage.clone());
-                    if let Err(AgentError::TokenBudgetExceeded { used, limit }) =
-                        self.budget.check()
-                    {
-                        emit_event!(AgentEvent::BudgetWarning {
-                            budget_type: BudgetType::Tokens,
-                            used,
-                            limit,
-                            percent: 1.0,
-                        });
-                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                    if let Some(exceeded) = self.budget.observe().exceeded() {
+                        emit_event!(budget_warning_event(exceeded));
+                        self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                             run_id: run_id.clone(),
+                            exceeded,
                         })?;
                         return self.build_result(turn_count, tool_call_count).await;
                     }
@@ -1499,7 +1612,10 @@ where
                                 point: HookPoint::PostLlmResponse,
                                 session_id: self.session.id().clone(),
                                 turn_number: Some(turn_count),
+                                prompt_input: None,
                                 prompt: None,
+                                error_report: None,
+                                error_class: None,
                                 error: None,
                                 llm_request: None,
                                 llm_response: Some(HookLlmResponse {
@@ -1567,7 +1683,7 @@ where
                                 .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
                             emit_event!(AgentEvent::ToolCallRequested {
                                 id: tc.id.to_string(),
-                                name: tc.name.to_string(),
+                                name: tc.name.into(),
                                 args: args_value,
                             });
                         }
@@ -1587,6 +1703,10 @@ where
                         let tools_ref = Arc::clone(&self.tools);
                         let mut executable_tool_calls = Vec::new();
                         let mut tool_results = Vec::with_capacity(tool_calls.len());
+                        let visible_tool_names = tool_defs
+                            .iter()
+                            .map(|tool| tool.tool_name())
+                            .collect::<ToolNameSet>();
 
                         let pre_tool_reports =
                             futures::future::join_all(tool_calls.iter().map(|tc| {
@@ -1597,7 +1717,10 @@ where
                                         point: HookPoint::PreToolExecution,
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
+                                        prompt_input: None,
                                         prompt: None,
+                                        error_report: None,
+                                        error_class: None,
                                         error: None,
                                         llm_request: None,
                                         llm_response: None,
@@ -1675,6 +1798,31 @@ where
                                 }
                             }
 
+                            if let Err(error) = precheck_visible_tool_call(
+                                tools_ref.as_ref(),
+                                &visible_tool_names,
+                                tc.name.as_str(),
+                            ) {
+                                let tool_result = tool_error_result(tc.id.clone(), error);
+                                emit_event!(AgentEvent::ToolExecutionCompleted {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    result: tool_result.text_content(),
+                                    is_error: true,
+                                    duration_ms: 0,
+                                    has_images: false,
+                                });
+                                emit_event!(AgentEvent::ToolResultReceived {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    is_error: true,
+                                });
+                                tool_results.push(tool_result);
+                                self.budget.record_tool_call();
+                                tool_call_count += 1;
+                                continue;
+                            }
+
                             emit_event!(AgentEvent::ToolExecutionStarted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
@@ -1682,27 +1830,14 @@ where
                             executable_tool_calls.push(tc);
                         }
 
-                        // Build a set of currently visible tool names for dispatch-time gating.
-                        // This prevents models from executing tools hidden by ToolScope
-                        // external filters (e.g. view_image on non-image-capable models).
-                        let visible_tool_names: std::collections::HashSet<String> =
-                            tool_defs.iter().map(|t| t.name.clone()).collect();
-
                         // Execute all allowed tool calls in parallel using join_all
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|tc| {
                                 let tools_ref = Arc::clone(&tools_ref);
-                                let visible = visible_tool_names.contains(&tc.name);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = if visible {
-                                        tools_ref.dispatch(tc.as_view()).await
-                                    } else {
-                                        Err(crate::error::ToolError::NotFound {
-                                            name: tc.name.clone(),
-                                        })
-                                    };
+                                    let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tc, dispatch_result, duration_ms)
                                 }
@@ -1759,7 +1894,10 @@ where
                                         point: HookPoint::PostToolExecution,
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
+                                        prompt_input: None,
                                         prompt: None,
+                                        error_report: None,
+                                        error_class: None,
                                         error: None,
                                         llm_request: None,
                                         llm_response: None,
@@ -2108,7 +2246,7 @@ where
                         });
                     }
                 }
-                LoopState::WaitingForOps => {
+                TurnPhase::WaitingForOps => {
                     // Await completion of all pending barrier operations via
                     // the machine-owned turn-local wait-set. Only barrier ops
                     // block the turn; detached ops run independently.
@@ -2155,28 +2293,30 @@ where
                     self.execute_turn_effects(&t, turn_count, &event_tx).await;
                     turn_count += 1;
                 }
-                LoopState::DrainingEvents => {
+                TurnPhase::DrainingBoundary | TurnPhase::Extracting => {
                     // Wait for any pending events to be processed
                     let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                         run_id: run_id.clone(),
                     })?;
                     self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
-                LoopState::Cancelling => {
+                TurnPhase::Cancelling => {
                     // Handle cancellation
                     self.apply_turn_input(TurnExecutionInput::CancellationObserved {
                         run_id: run_id.clone(),
                     })?;
                     return self.build_result(turn_count, tool_call_count).await;
                 }
-                LoopState::ErrorRecovery => {
+                TurnPhase::ErrorRecovery => {
                     // Attempt recovery
+                    let retry_attempt = self.runtime_turn_authority_snapshot()?.llm_retry_attempt;
                     let t = self.apply_turn_input(TurnExecutionInput::RetryRequested {
                         run_id: run_id.clone(),
+                        retry_attempt,
                     })?;
                     self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
-                LoopState::Completed => {
+                TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
                     return self.build_result(turn_count, tool_call_count).await;
                 }
             }
@@ -2272,7 +2412,7 @@ impl ToolCallOwned {
             .unwrap_or_else(|_| fallback_raw_value());
         Self {
             id: view.id.to_string(),
-            name: view.name.to_string(),
+            name: view.name.into(),
             args,
         }
     }
@@ -2294,19 +2434,6 @@ impl ToolCallOwned {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
-}
-
-/// Compute retry delay using server hint, policy, and rate-limit floor.
-fn compute_retry_delay(
-    hint: Option<std::time::Duration>,
-    computed: std::time::Duration,
-    is_rate_limited: bool,
-) -> std::time::Duration {
-    match hint {
-        Some(h) if h > computed => h,
-        _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
-        _ => computed,
-    }
 }
 
 /// Map a terminal outcome to a stable status string for display.
@@ -2338,6 +2465,10 @@ mod tests {
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
+    use crate::memory::{
+        MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    };
+    use crate::retry::select_retry_delay;
     use crate::skills::{
         ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillKey,
         SkillName, SourceUuid,
@@ -2388,7 +2519,7 @@ mod tests {
             },
             AssistantBlock::ToolUse {
                 id: "t1".to_string(),
-                name: "tool".to_string(),
+                name: "tool".into(),
                 args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
                 meta: None,
             },
@@ -2445,17 +2576,23 @@ mod tests {
 
     struct RecordingLlmClient {
         seen_user_messages: Mutex<Vec<String>>,
+        seen_provider_params: Mutex<Vec<Option<Value>>>,
     }
 
     impl RecordingLlmClient {
         fn new() -> Self {
             Self {
                 seen_user_messages: Mutex::new(Vec::new()),
+                seen_provider_params: Mutex::new(Vec::new()),
             }
         }
 
         fn seen(&self) -> Vec<String> {
             self.seen_user_messages.lock().unwrap().clone()
+        }
+
+        fn seen_params(&self) -> Vec<Option<Value>> {
+            self.seen_provider_params.lock().unwrap().clone()
         }
     }
 
@@ -2506,7 +2643,7 @@ mod tests {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| fixture_skill_key("email-extractor")),
-                    name: "email-extractor".to_string(),
+                    name: "email-extractor".into(),
                     rendered_body: "<skill>injected canonical skill</skill>".to_string(),
                     byte_size: 34,
                 }])
@@ -2588,7 +2725,7 @@ mod tests {
             _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
-            _provider_params: Option<&Value>,
+            provider_params: Option<&Value>,
         ) -> Result<super::LlmStreamResult, AgentError> {
             let mut seen = self.seen_user_messages.lock().unwrap();
             for msg in messages {
@@ -2597,6 +2734,10 @@ mod tests {
                 }
             }
             drop(seen);
+            self.seen_provider_params
+                .lock()
+                .unwrap()
+                .push(provider_params.cloned());
 
             Ok(super::LlmStreamResult::new(
                 vec![AssistantBlock::Text {
@@ -2831,6 +2972,108 @@ mod tests {
         }
     }
 
+    struct DiscardingCompactor {
+        compact_on_boundary: u64,
+    }
+
+    impl DiscardingCompactor {
+        fn new(compact_on_boundary: u64) -> Self {
+            Self {
+                compact_on_boundary,
+            }
+        }
+    }
+
+    impl Compactor for DiscardingCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.compact_on_boundary == ctx.session_boundary_index
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find(|message| matches!(message, Message::User(_)))
+                .cloned();
+            let mut compacted = vec![Message::User(UserMessage::text(format!(
+                "[Context compacted] {summary}"
+            )))];
+            if let Some(last_user) = last_user {
+                compacted.push(last_user);
+            }
+            let discarded_len = messages.len().saturating_sub(1);
+            CompactionResult {
+                messages: compacted,
+                discarded: messages.iter().take(discarded_len).cloned().collect(),
+            }
+        }
+    }
+
+    struct RecordingMemoryStore {
+        entries: Mutex<Vec<(String, MemoryMetadata)>>,
+        fail_indexing: bool,
+    }
+
+    impl RecordingMemoryStore {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(Vec::new()),
+                fail_indexing: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                entries: Mutex::new(Vec::new()),
+                fail_indexing: true,
+            }
+        }
+
+        fn contents(&self) -> Vec<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(content, _)| content.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for RecordingMemoryStore {
+        async fn index(
+            &self,
+            content: &str,
+            metadata: MemoryMetadata,
+        ) -> Result<(), MemoryStoreError> {
+            if self.fail_indexing {
+                return Err(MemoryStoreError::Index("injected failure".to_string()));
+            }
+            self.entries
+                .lock()
+                .unwrap()
+                .push((content.to_string(), metadata));
+            Ok(())
+        }
+
+        async fn search(
+            &self,
+            _scope: &MemorySearchScope,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
     struct NoTools;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2845,7 +3088,7 @@ mod tests {
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             })
         }
     }
@@ -2875,7 +3118,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
-                        name: (*name).to_string(),
+                        name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),
                         provenance: None,
@@ -2928,19 +3171,19 @@ mod tests {
     impl PlaneAwareToolDispatcher {
         fn new() -> Self {
             let visible = Arc::new(ToolDef {
-                name: "visible".to_string(),
+                name: "visible".into(),
                 description: "visible tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let secret = Arc::new(ToolDef {
-                name: "secret".to_string(),
+                name: "secret".into(),
                 description: "secret tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let control = Arc::new(ToolDef {
-                name: "tool_catalog_search".to_string(),
+                name: "tool_catalog_search".into(),
                 description: "control search tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
@@ -3013,29 +3256,29 @@ mod tests {
     impl DeferredLoadDispatcher {
         fn new() -> Self {
             let deferred = Arc::new(ToolDef {
-                name: "deferred_tool".to_string(),
+                name: "deferred_tool".into(),
                 description:
                     "deferred tool that must stay hidden until tool_catalog_load reaches the next boundary."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "test".to_string(),
+                    source_id: "test".into(),
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
-                name: "deferred_tool_two".to_string(),
+                name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "test".to_string(),
+                    source_id: "test".into(),
                 }),
             });
             let control = Arc::new(ToolDef {
-                name: "tool_catalog_load".to_string(),
+                name: "tool_catalog_load".into(),
                 description: "control load tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
@@ -3102,7 +3345,7 @@ mod tests {
                                 stable_owner_key: Some("callback:test".to_string()),
                                 last_seen_provenance: Some(crate::ToolProvenance {
                                     kind: crate::ToolSourceKind::Callback,
-                                    source_id: "test".to_string(),
+                                    source_id: "test".into(),
                                 }),
                             },
                         )]
@@ -3124,24 +3367,24 @@ mod tests {
     impl DeferredWithoutControlDispatcher {
         fn new() -> Self {
             let secret = Arc::new(ToolDef {
-                name: "secret".to_string(),
+                name: "secret".into(),
                 description: "deferred secret tool that direct AgentBuilder users must still reach without a control plane."
                     .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "direct-builder".to_string(),
+                    source_id: "direct-builder".into(),
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
-                name: "deferred_tool_two".to_string(),
+                name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
                         .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
-                    source_id: "direct-builder".to_string(),
+                    source_id: "direct-builder".into(),
                 }),
             });
 
@@ -3236,7 +3479,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
             Ok(super::LlmStreamResult::new(
@@ -3271,7 +3514,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3280,7 +3523,7 @@ mod tests {
                 super::LlmStreamResult::new(
                     vec![AssistantBlock::ToolUse {
                         id: "call-1".to_string(),
-                        name: "secret".to_string(),
+                        name: "secret".into(),
                         args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
                         meta: None,
                     }],
@@ -3341,7 +3584,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3351,14 +3594,14 @@ mod tests {
                     vec![
                         AssistantBlock::ToolUse {
                             id: "call-hidden".to_string(),
-                            name: "secret".to_string(),
+                            name: "secret".into(),
                             args: serde_json::value::RawValue::from_string("{}".to_string())
                                 .unwrap(),
                             meta: None,
                         },
                         AssistantBlock::ToolUse {
                             id: "call-control".to_string(),
-                            name: "tool_catalog_search".to_string(),
+                            name: "tool_catalog_search".into(),
                             args: serde_json::value::RawValue::from_string(
                                 "{\"query\":\"secret\"}".to_string(),
                             )
@@ -3423,7 +3666,7 @@ mod tests {
             self.seen_tools.lock().unwrap().push(
                 tools
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect::<Vec<_>>(),
             );
 
@@ -3432,7 +3675,7 @@ mod tests {
                 super::LlmStreamResult::new(
                     vec![AssistantBlock::ToolUse {
                         id: "call-load".to_string(),
-                        name: "tool_catalog_load".to_string(),
+                        name: "tool_catalog_load".into(),
                         args: serde_json::value::RawValue::from_string(
                             "{\"names\":[\"deferred_tool\"]}".to_string(),
                         )
@@ -3547,6 +3790,88 @@ mod tests {
                 "COMPACT NOW".to_string(),
                 "second".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_discards_are_indexed_before_history_replacement() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        let indexed = memory_store.contents();
+        assert!(
+            indexed.iter().any(|content| content.contains("first")),
+            "discarded first turn should be indexed before compaction commits"
+        );
+        assert!(
+            !agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "committed compacted history should no longer carry indexed discarded text"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_memory_index_failure_preserves_original_history() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(RecordingMemoryStore::failing());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("indexing failure should preserve history and continue the turn");
+
+        assert!(memory_store.contents().is_empty());
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "failed indexing must not discard the only authoritative copy of compacted text"
+        );
+
+        let mut saw_memory_failure = false;
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::CompactionFailed { error }
+                    if error.contains("memory indexing failed") =>
+                {
+                    saw_memory_failure = true;
+                }
+                crate::event::AgentEvent::CompactionCompleted { .. } => {
+                    saw_completed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_memory_failure,
+            "memory-index rejection should surface as a typed compaction failure"
+        );
+        assert!(
+            !saw_completed,
+            "compaction must not complete when memory indexing rejects discarded history"
         );
     }
 
@@ -3817,6 +4142,44 @@ mod tests {
         }
         assert!(saw_run_started, "tap should receive RunStarted");
         assert!(saw_run_completed, "tap should receive RunCompleted");
+    }
+
+    #[tokio::test]
+    async fn hot_swap_request_policy_updates_next_turn_provider_params() {
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .provider_params(serde_json::json!({"old": true}))
+            .provider_tool_defaults(serde_json::json!({"stale_tool": {"type": "old"}}))
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent.replace_client_with_request_policy(
+            client.clone(),
+            crate::SessionLlmRequestPolicy {
+                model: "new-model".to_string(),
+                provider_params: Some(serde_json::json!({"temperature": 0.2})),
+                provider_tool_defaults: Some(serde_json::json!({
+                    "web_search": {"type": "web_search"}
+                })),
+            },
+        );
+
+        let result = agent
+            .run("policy follows identity".to_string().into())
+            .await
+            .expect("run should use swapped request policy");
+        assert_eq!(result.turns, 1);
+
+        let seen_params = client.seen_params();
+        assert_eq!(
+            seen_params.last(),
+            Some(&Some(serde_json::json!({
+                "web_search": {"type": "web_search"},
+                "temperature": 0.2
+            }))),
+            "next LLM request must use the hot-swapped provider params/defaults, not the build-time policy",
+        );
     }
 
     #[tokio::test]
@@ -4210,7 +4573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_loop_fails_safe_to_full_tools_with_warning_event_and_notice() {
+    async fn run_loop_fails_closed_on_tool_scope_boundary_failure() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
@@ -4229,22 +4592,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.text, "done");
-        assert_eq!(
-            client.seen_tools(),
-            vec![vec!["visible".to_string(), "secret".to_string()]]
-        );
+        assert_eq!(client.seen_tools(), vec![Vec::<String>::new()]);
 
         let mut saw_warning_event = false;
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
-                && payload.status.contains("warning_fallback_all")
+                && payload.status.contains("warning_failed_closed")
             {
                 saw_warning_event = true;
             }
         }
         assert!(
             saw_warning_event,
-            "expected warning ToolConfigChanged event during fail-safe fallback"
+            "expected warning ToolConfigChanged event during fail-closed boundary handling"
         );
 
         let notices: Vec<String> = agent
@@ -4412,8 +4772,8 @@ mod tests {
     async fn token_budget_exhausted_after_llm_call_routes_through_authority() {
         // Budget allows exactly 100 tokens — the first LLM call reports 1000,
         // so usage recording at the call site pushes the budget over the limit.
-        // The next loop-top budget.check() fires TokenBudgetExceeded, which
-        // must be routed to BudgetExhausted -> Success, not raw Err.
+        // The next budget observation reports token exhaustion as evidence,
+        // then the turn authority maps it to BudgetExhausted -> Success.
         let mut agent = build_agent(Arc::new(HighUsageLlmClient)).await;
         agent.config.max_turns = Some(10);
         agent.budget = Budget::new(BudgetLimits {
@@ -4461,44 +4821,46 @@ mod tests {
 
     #[test]
     fn compute_retry_delay_uses_computed_for_non_rate_limited() {
-        let delay = super::compute_retry_delay(None, Duration::from_millis(500), false);
+        let (delay, floor_applied) = select_retry_delay(None, Duration::from_millis(500), false);
         assert_eq!(delay, Duration::from_millis(500));
+        assert!(!floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_30s_floor_for_rate_limited_without_hint() {
-        let delay = super::compute_retry_delay(None, Duration::from_millis(500), true);
+        let (delay, floor_applied) = select_retry_delay(None, Duration::from_millis(500), true);
         assert_eq!(delay, Duration::from_secs(30));
+        assert!(floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_hint_when_greater_than_computed() {
-        let delay = super::compute_retry_delay(
+        let (delay, floor_applied) = select_retry_delay(
             Some(Duration::from_secs(60)),
             Duration::from_millis(500),
             true,
         );
         assert_eq!(delay, Duration::from_secs(60));
+        assert!(!floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_30s_floor_when_hint_below_floor() {
-        let delay = super::compute_retry_delay(
+        let (delay, floor_applied) = select_retry_delay(
             Some(Duration::from_millis(100)),
             Duration::from_millis(500),
             true,
         );
         assert_eq!(delay, Duration::from_secs(30));
+        assert!(floor_applied);
     }
 
     #[test]
     fn compute_retry_delay_uses_computed_when_greater_than_hint() {
-        let delay = super::compute_retry_delay(
-            Some(Duration::from_secs(60)),
-            Duration::from_secs(90),
-            true,
-        );
+        let (delay, floor_applied) =
+            select_retry_delay(Some(Duration::from_secs(60)), Duration::from_secs(90), true);
         assert_eq!(delay, Duration::from_secs(90));
+        assert!(!floor_applied);
     }
 
     /// Mock LLM client that returns RateLimited with a retry_after hint on
@@ -4635,8 +4997,8 @@ mod tests {
             .await;
 
         // Set a 100ms time budget — the 30s rate-limit floor will be
-        // capped to 100ms by remaining_duration, then budget.check()
-        // fires TimeBudgetExceeded after the sleep.
+        // capped to 100ms by remaining_duration, then the next budget
+        // observation reports TimeBudgetExceeded after the sleep.
         agent.budget = Budget::new(BudgetLimits {
             max_tokens: None,
             max_duration: Some(Duration::from_millis(100)),

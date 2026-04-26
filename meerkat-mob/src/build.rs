@@ -10,6 +10,7 @@ use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
 use meerkat_core::PeerMeta;
+use meerkat_core::RealmId;
 use meerkat_core::Session;
 use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
 use meerkat_core::session::SessionMetadata;
@@ -22,6 +23,14 @@ pub enum MobToolAccessContext {
     None,
     #[allow(dead_code)]
     InjectedAuthority(MobToolAuthorityContext),
+}
+
+fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
+    RealmId::parse(format!("mob.{mob_id}")).map_err(|e| {
+        MobError::WiringError(format!(
+            "mob id '{mob_id}' cannot be used as a realm identity: {e}"
+        ))
+    })
 }
 
 impl MobToolAccessContext {
@@ -110,8 +119,7 @@ pub async fn build_agent_config(
         .with_label("role", profile_name.as_str())
         .with_label("meerkat_id", agent_identity.as_str());
 
-    // Realm ID for namespace isolation
-    let realm_id = format!("mob:{mob_id}");
+    let realm_id = mob_realm_id(mob_id)?;
 
     // Assemble system prompt from profile skills (inline/path-based).
     let system_prompt = assemble_system_prompt(profile, definition).await?;
@@ -120,7 +128,7 @@ pub async fn build_agent_config(
     config.keep_alive = false;
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
-    config.realm_id = Some(realm_id);
+    config.realm_id = Some(realm_id.to_string());
     if !system_prompt.is_empty() {
         config.system_prompt = Some(system_prompt);
     }
@@ -556,8 +564,8 @@ mod tests {
 
         assert_eq!(
             config.realm_id.as_deref(),
-            Some("mob:test-mob"),
-            "realm_id should be 'mob:test-mob'"
+            Some("mob.test-mob"),
+            "realm_id should be a canonical mob realm slug"
         );
     }
 
@@ -966,7 +974,7 @@ mod tests {
         let build = req.build.expect("build options should be set");
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
         assert!(build.peer_meta.is_some());
-        assert_eq!(build.realm_id.as_deref(), Some("mob:test-mob"));
+        assert_eq!(build.realm_id.as_deref(), Some("mob.test-mob"));
         assert_eq!(
             build.override_builtins,
             meerkat_core::ToolCategoryOverride::Enable

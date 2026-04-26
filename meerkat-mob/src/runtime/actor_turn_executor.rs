@@ -368,7 +368,6 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             skill_references: None,
                             flow_tool_overlay,
                             turn_metadata: None,
-                            execution_kind: None,
                         },
                     )
                     .await

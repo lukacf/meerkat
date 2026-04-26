@@ -821,47 +821,60 @@ fn max_named_sample_cardinality(named_samples: &BTreeMap<String, BTreeSet<String
     named_samples.values().map(BTreeSet::len).max().unwrap_or(1)
 }
 
-pub fn composition_witness_cfg_name(name: &str) -> String {
-    format!("witness-{}.cfg", tla_ident(name))
+pub fn composition_witness_cfg_name(name: impl AsRef<str>) -> String {
+    format!("witness-{}.cfg", tla_ident(name.as_ref()))
 }
 
-fn composition_witness_route_property_name(witness: &str, route_name: impl AsRef<str>) -> String {
+fn composition_witness_route_property_name(
+    witness: impl AsRef<str>,
+    route_name: impl AsRef<str>,
+) -> String {
     format!(
         "WitnessRouteObserved_{}_{}",
-        tla_ident(witness),
+        tla_ident(witness.as_ref()),
         tla_ident(route_name)
     )
 }
 
-fn composition_witness_scheduler_property_name(witness: &str, rule: &SchedulerRule) -> String {
+fn composition_witness_scheduler_property_name(
+    witness: impl AsRef<str>,
+    rule: &SchedulerRule,
+) -> String {
     format!(
         "WitnessSchedulerTriggered_{}_{}",
-        tla_ident(witness),
+        tla_ident(witness.as_ref()),
         tla_ident(witness_scheduler_rule_label(rule))
     )
 }
 
-fn composition_witness_state_property_name(witness: &str, index: usize) -> String {
-    format!("WitnessStateObserved_{}_{}", tla_ident(witness), index + 1)
+fn composition_witness_state_property_name(witness: impl AsRef<str>, index: usize) -> String {
+    format!(
+        "WitnessStateObserved_{}_{}",
+        tla_ident(witness.as_ref()),
+        index + 1
+    )
 }
 
 fn composition_witness_transition_property_name(
-    witness: &str,
+    witness: impl AsRef<str>,
     machine: impl AsRef<str>,
     transition: impl AsRef<str>,
 ) -> String {
     format!(
         "WitnessTransitionObserved_{}_{}_{}",
-        tla_ident(witness),
+        tla_ident(witness.as_ref()),
         tla_ident(machine),
         tla_ident(transition)
     )
 }
 
-fn composition_witness_transition_order_property_name(witness: &str, index: usize) -> String {
+fn composition_witness_transition_order_property_name(
+    witness: impl AsRef<str>,
+    index: usize,
+) -> String {
     format!(
         "WitnessTransitionOrder_{}_{}",
-        tla_ident(witness),
+        tla_ident(witness.as_ref()),
         index + 1
     )
 }
@@ -874,20 +887,20 @@ fn witness_scheduler_rule_label(rule: &SchedulerRule) -> String {
     }
 }
 
-fn composition_witness_init_name(name: &str) -> String {
-    format!("WitnessInit_{}", tla_ident(name))
+fn composition_witness_init_name(name: impl AsRef<str>) -> String {
+    format!("WitnessInit_{}", tla_ident(name.as_ref()))
 }
 
-fn composition_witness_next_name(name: &str) -> String {
-    format!("WitnessNext_{}", tla_ident(name))
+fn composition_witness_next_name(name: impl AsRef<str>) -> String {
+    format!("WitnessNext_{}", tla_ident(name.as_ref()))
 }
 
-fn composition_witness_spec_name(name: &str) -> String {
-    format!("WitnessSpec_{}", tla_ident(name))
+fn composition_witness_spec_name(name: impl AsRef<str>) -> String {
+    format!("WitnessSpec_{}", tla_ident(name.as_ref()))
 }
 
-fn composition_witness_state_constraint_name(name: &str) -> String {
-    format!("WitnessStateConstraint_{}", tla_ident(name))
+fn composition_witness_state_constraint_name(name: impl AsRef<str>) -> String {
+    format!("WitnessStateConstraint_{}", tla_ident(name.as_ref()))
 }
 
 pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {

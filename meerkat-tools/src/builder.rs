@@ -142,13 +142,7 @@ impl ToolDispatcherBuilder {
         #[cfg(not(feature = "comms"))]
         let router = router;
 
-        // Populate registry from router's tools
-        let mut registry = crate::registry::ToolRegistry::new();
-        for tool_def in router.tools().iter() {
-            registry.register((**tool_def).clone());
-        }
-
-        Ok(ToolDispatcher::new(registry, router).with_timeout(self.config.default_timeout))
+        Ok(ToolDispatcher::new(router).with_timeout(self.config.default_timeout))
     }
 }
 

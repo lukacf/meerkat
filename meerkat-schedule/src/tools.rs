@@ -192,7 +192,7 @@ impl ScheduleToolDispatcher {
             .into_iter()
             .map(|tool| {
                 Arc::new(ToolDef {
-                    name: tool["name"].as_str().unwrap_or_default().to_string(),
+                    name: tool["name"].as_str().unwrap_or_default().into(),
                     description: tool["description"].as_str().unwrap_or_default().to_string(),
                     input_schema: tool["inputSchema"].clone(),
                     provenance: Some(ToolProvenance {
@@ -653,6 +653,18 @@ fn scheduled_session_action_schema() -> Value {
     })
 }
 
+fn skill_key_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "source_uuid": { "type": "string" },
+            "skill_name": { "type": "string" }
+        },
+        "required": ["source_uuid", "skill_name"],
+        "additionalProperties": false
+    })
+}
+
 fn session_materialization_spec_schema() -> Value {
     json!({
         "type": "object",
@@ -672,7 +684,7 @@ fn session_materialization_spec_schema() -> Value {
             },
             "preload_skills": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": skill_key_schema()
             },
             "additional_instructions": {
                 "type": "array",
@@ -922,7 +934,7 @@ mod tests {
         let actual: Vec<String> = dispatcher
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         let expected: Vec<String> = schedule_tools_list()
             .into_iter()

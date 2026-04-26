@@ -751,9 +751,6 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
-            execution_kind: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.execution_kind),
         };
 
         self.session_service
@@ -835,6 +832,12 @@ impl MobProvisioner for SessionBackend {
             peer_name = %req.peer_name,
             "SessionBackend::provision_member start"
         );
+        let admitted_bridge_session_id = req
+            .create_session
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone());
         // Pre-register with the runtime adapter so the factory receives
         // epoch-local bindings instead of creating a competing registry.
         let pre_registered_bridge_session_id = if let Some(adapter) = &self.runtime_adapter {
@@ -887,9 +890,34 @@ impl MobProvisioner for SessionBackend {
             }
         };
         let created_bridge_session_id = created.session_id.clone();
-        // Reconcile: if the session service returned a different bridge binding
-        // than we pre-registered (e.g. LocalSessionService mints fresh IDs),
-        // unregister the orphan and re-register with the real bridge session.
+        if let Some(admitted_bridge_session_id) = admitted_bridge_session_id.as_ref()
+            && admitted_bridge_session_id != &created_bridge_session_id
+        {
+            if let Some(adapter) = &self.runtime_adapter {
+                adapter.unregister_session(admitted_bridge_session_id).await;
+                adapter.unregister_session(&created_bridge_session_id).await;
+            }
+            self.remove_runtime_session_state(admitted_bridge_session_id)
+                .await;
+            self.remove_runtime_session_state(&created_bridge_session_id)
+                .await;
+            if let Err(error) = self
+                .session_service
+                .archive(&created_bridge_session_id)
+                .await
+                && !matches!(error, SessionError::NotFound { .. })
+            {
+                return Err(MobError::Internal(format!(
+                    "session service returned bridge session '{created_bridge_session_id}' for admitted mob spawn session '{admitted_bridge_session_id}', and cleanup archive failed: {error}"
+                )));
+            }
+            return Err(MobError::Internal(format!(
+                "session service returned bridge session '{created_bridge_session_id}' for admitted mob spawn session '{admitted_bridge_session_id}'"
+            )));
+        }
+        // If no admission id was supplied, clean up stale local pre-registration
+        // defensively. Normal mob spawn paths now admit a concrete session id
+        // before provisioning starts.
         if let (Some(adapter), Some(pre_id)) =
             (&self.runtime_adapter, &pre_registered_bridge_session_id)
         {
@@ -1432,6 +1460,7 @@ impl MultiBackendProvisioner {
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
+        self.supervisor_bridge.trust_recipient(peer).await?;
         let value = self
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
@@ -1464,6 +1493,7 @@ impl MultiBackendProvisioner {
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
     ) -> Result<R, MobError> {
+        self.supervisor_bridge.trust_recipient(peer).await?;
         let value = self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
@@ -1714,6 +1744,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
+                self.supervisor_bridge.trust_recipient(&peer).await?;
                 let _ = self
                     .supervisor_bridge
                     .send_bridge_command(&peer, &command, Duration::from_secs(10))
@@ -1751,6 +1782,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
+                self.supervisor_bridge.trust_recipient(&peer).await?;
                 let _ = self
                     .supervisor_bridge
                     .send_bridge_command(&peer, &command, Duration::from_secs(5))

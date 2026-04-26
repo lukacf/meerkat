@@ -26,7 +26,9 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillKey, SkillName, SkillRuntime, SkillScope, SourceUuid,
+    SkillDescriptor, SkillDocument, SkillKey, SkillName, SkillRuntime, SkillScope,
+    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
+    SourceUuid,
 };
 use meerkat_skills::{DefaultSkillEngine, InMemorySkillSource};
 use meerkat_tools::BuiltinTool;
@@ -67,7 +69,30 @@ fn fixture_runtime() -> (Arc<SkillRuntime>, SourceUuid, SourceUuid) {
     ];
 
     let source = InMemorySkillSource::new(docs);
-    let engine = DefaultSkillEngine::new(source, Vec::new());
+    let registry = SourceIdentityRegistry::build(
+        vec![
+            SourceIdentityRecord {
+                source_uuid: primary.clone(),
+                display_name: "primary fixture".to_string(),
+                transport_kind: SourceTransportKind::Filesystem,
+                fingerprint: format!("fixture:{primary}"),
+                status: SourceIdentityStatus::Active,
+            },
+            SourceIdentityRecord {
+                source_uuid: secondary.clone(),
+                display_name: "secondary fixture".to_string(),
+                transport_kind: SourceTransportKind::Filesystem,
+                fingerprint: format!("fixture:{secondary}"),
+                status: SourceIdentityStatus::Active,
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let engine = DefaultSkillEngine::new(source, Vec::new())
+        .with_source_identity_registry(Arc::new(registry));
     let runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
     (runtime, primary, secondary)
 }

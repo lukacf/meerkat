@@ -20,7 +20,6 @@ Example::
 from __future__ import annotations
 
 import asyncio
-import base64
 from dataclasses import asdict, is_dataclass
 import json
 import os
@@ -142,40 +141,6 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
         }
         for r in refs
     ]
-
-
-def _encode_agent_runtime_ref(raw: Any) -> str | None:
-    """Encode the wire ``{identity, generation}`` shape as an opaque
-    ``AgentRuntimeRef`` handle.
-
-    The server emits ``AgentRuntimeId`` as a ``{"identity": ..., "generation": ...}``
-    object. The SDK re-encodes it as a base64url-encoded opaque token
-    (``base64url(json({"i": identity, "g": generation}))``) so public
-    callers cannot parse incarnation internals — they can only compare
-    handles for equality to detect incarnation rotation. This matches the
-    ``WireMemberRef`` pattern from dogma round 1 (PR #295).
-
-    Returns ``None`` when the field is absent (``None``). Any other
-    non-canonical shape surfaces as a typed ``MeerkatError`` at the
-    boundary — no string legacy form, no ``agent_identity`` alias, no
-    fabrication.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise MeerkatError(
-            "INVALID_RESPONSE",
-            f"Invalid agent_runtime_id wire shape: expected object, got {type(raw).__name__}",
-        )
-    identity = raw.get("identity")
-    generation = raw.get("generation")
-    if not isinstance(identity, str) or not identity or not isinstance(generation, int):
-        raise MeerkatError(
-            "INVALID_RESPONSE",
-            "Invalid agent_runtime_id wire shape: missing identity/generation",
-        )
-    payload = json.dumps({"i": identity, "g": generation}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
 class MeerkatClient:
@@ -369,35 +334,35 @@ class MeerkatClient:
         `realm/get`."""
         return await self._request("realm/get", {"realm_id": realm_id})
 
-    async def list_auth_profiles(self, realm_id: str = "dev") -> dict[str, Any]:
+    async def list_auth_profiles(self, realm_id: str) -> dict[str, Any]:
         """List auth profiles / backend profiles / bindings for one
         realm. Delegates to `auth/profile/list`."""
         return await self._request("auth/profile/list", {"realm_id": realm_id})
 
     async def get_auth_profile(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
-        """Fetch a single auth profile via `auth/profile/get`."""
-        return await self._request(
-            "auth/profile/get", {"realm_id": realm_id, "profile_id": profile_id}
-        )
+        """Fetch a binding-scoped auth profile via `auth/profile/get`."""
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/profile/get", params)
 
     async def create_auth_profile(
         self, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Create an auth profile via `auth/profile/create`. The server
-        requires a full profile payload (`{realm_id, provider,
-        auth_method, source, storage?, ...}`) — Python passes it
-        through unchanged so the wire schema governs the contract."""
+        """Create binding-scoped credentials via `auth/profile/create`."""
         return await self._request("auth/profile/create", params)
 
-    async def delete_auth_profile(self, realm_id: str, profile_id: str) -> None:
+    async def delete_auth_profile(
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
+    ) -> None:
         """Clear a profile's persisted credentials via
         `auth/profile/delete`."""
-        await self._request(
-            "auth/profile/delete",
-            {"realm_id": realm_id, "profile_id": profile_id},
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        await self._request("auth/profile/delete", params)
 
     async def auth_login_start(
         self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
@@ -417,8 +382,9 @@ class MeerkatClient:
         code: str,
         state: str,
         *,
-        realm_id: str = "dev",
-        binding_id: str | None = None,
+        realm_id: str,
+        binding_id: str,
+        profile_id: str | None = None,
         redirect_uri: str = "http://127.0.0.1:0/callback",
     ) -> dict[str, Any]:
         """Exchange an authorization code for tokens via
@@ -429,10 +395,11 @@ class MeerkatClient:
             "code": code,
             "state": state,
             "realm_id": realm_id,
+            "binding_id": binding_id,
             "redirect_uri": redirect_uri,
         }
-        if binding_id is not None:
-            params["binding_id"] = binding_id
+        if profile_id is not None:
+            params["profile_id"] = profile_id
         return await self._request("auth/login/complete", params)
 
     async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
@@ -448,7 +415,8 @@ class MeerkatClient:
         provider: str,
         device_code: str,
         *,
-        realm_id: str = "dev",
+        realm_id: str,
+        binding_id: str,
         profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Poll once for device-code completion via
@@ -458,6 +426,7 @@ class MeerkatClient:
             "provider": provider,
             "device_code": device_code,
             "realm_id": realm_id,
+            "binding_id": binding_id,
         }
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -467,7 +436,8 @@ class MeerkatClient:
         self,
         access_token: str,
         *,
-        realm_id: str = "dev",
+        realm_id: str,
+        binding_id: str,
         profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Anthropic Console-OAuth → API key provisioning via
@@ -478,28 +448,31 @@ class MeerkatClient:
         params: dict[str, Any] = {
             "access_token": access_token,
             "realm_id": realm_id,
+            "binding_id": binding_id,
         }
         if profile_id is not None:
             params["profile_id"] = profile_id
         return await self._request("auth/login/provision_api_key", params)
 
     async def auth_status(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
-        """Report persisted-credential status for a profile via
+        """Report persisted-credential status for a binding via
         `auth/status/get`."""
-        return await self._request(
-            "auth/status/get", {"realm_id": realm_id, "profile_id": profile_id}
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/status/get", params)
 
     async def auth_logout(
-        self, realm_id: str, profile_id: str
+        self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
-        """Revoke + delete a profile's persisted credentials via
+        """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
-        return await self._request(
-            "auth/logout", {"realm_id": realm_id, "profile_id": profile_id}
-        )
+        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/logout", params)
 
     # -- Session lifecycle -------------------------------------------------
 
@@ -1055,17 +1028,6 @@ class MeerkatClient:
         result = await self._request("skills/list", {})
         return result.get("skills", [])
 
-    async def inspect_skill(
-        self,
-        skill_id: str,
-        *,
-        source: str | None = None,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {"id": skill_id}
-        if source is not None:
-            params["source"] = source
-        return await self._request("skills/inspect", params)
-
     async def subscribe_session_events(self, session_id: str) -> EventSubscription:
         return await self._open_event_subscription(
             "session/stream_open",
@@ -1419,15 +1381,8 @@ class MeerkatClient:
             "mob/member_status",
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
-        runtime_ref = _encode_agent_runtime_ref(result.get("agent_runtime_id"))
         return {
             "status": str(result.get("status", "unknown")),
-            "agent_runtime_id": runtime_ref or "",
-            "fence_token": (
-                int(result["fence_token"])
-                if isinstance(result.get("fence_token"), int)
-                else 0
-            ),
             **(
                 {"output_preview": str(result["output_preview"])}
                 if result.get("output_preview") is not None
@@ -1486,16 +1441,9 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            runtime_ref = _encode_agent_runtime_ref(entry.get("agent_runtime_id"))
             normalized.append(
                 {
                     "agent_identity": str(entry.get("agent_identity", "")),
-                    "agent_runtime_id": runtime_ref or "",
-                    "fence_token": (
-                        int(entry["fence_token"])
-                        if isinstance(entry.get("fence_token"), int)
-                        else 0
-                    ),
                     "status": str(entry.get("status", "unknown")),
                     **(
                         {"output_preview": str(entry["output_preview"])}
@@ -1543,16 +1491,9 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            runtime_ref = _encode_agent_runtime_ref(entry.get("agent_runtime_id"))
             normalized.append(
                 {
                     "agent_identity": str(entry.get("agent_identity", "")),
-                    "agent_runtime_id": runtime_ref or "",
-                    "fence_token": (
-                        int(entry["fence_token"])
-                        if isinstance(entry.get("fence_token"), int)
-                        else 0
-                    ),
                     "status": str(entry.get("status", "unknown")),
                     **(
                         {"output_preview": str(entry["output_preview"])}
@@ -2097,34 +2038,34 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
-    async def status(self, session_id: str) -> RuntimeStateResult:
-        raw = await self._request("session/status", {"session_id": session_id})
+    async def runtime_status(self, session_id: str) -> RuntimeStateResult:
+        raw = await self._request("runtime/session_status", {"session_id": session_id})
         result = RuntimeStateResult()
         for key, value in raw.items():
             setattr(result, key, value)
         return result
 
-    async def submit(
+    async def runtime_submit(
         self, session_id: str, input: dict[str, Any] | ContentInput
     ) -> RuntimeAcceptResult:
         raw = await self._request(
-            "session/submit",
+            "runtime/session_submit",
             {"session_id": session_id, "input": input},
         )
         return RuntimeAcceptResult(**raw)
 
-    async def submission(self, session_id: str, input_id: str) -> WireInputState:
+    async def runtime_submission(self, session_id: str, input_id: str) -> WireInputState:
         raw = await self._request(
-            "session/submission",
+            "runtime/session_submission",
             {"session_id": session_id, "input_id": input_id},
         )
         return self._parse_wire_input_state(raw)
 
-    async def submissions(self, session_id: str) -> dict[str, list[WireInputState]]:
-        raw = await self._request("session/submissions", {"session_id": session_id})
+    async def runtime_submissions(self, session_id: str) -> dict[str, list[WireInputState]]:
+        raw = await self._request("runtime/session_submissions", {"session_id": session_id})
         inputs = raw.get("inputs", [])
         if not isinstance(inputs, list):
-            raise MeerkatError("INVALID_RESPONSE", "Invalid session/submissions response")
+            raise MeerkatError("INVALID_RESPONSE", "Invalid runtime/session_submissions response")
         return {
             "inputs": [
                 self._parse_wire_input_state(item)
@@ -2133,15 +2074,15 @@ class MeerkatClient:
             ]
         }
 
-    async def retire(self, session_id: str) -> RuntimeRetireResult:
-        raw = await self._request("session/retire", {"session_id": session_id})
+    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
+        raw = await self._request("runtime/session_retire", {"session_id": session_id})
         result = RuntimeRetireResult()
         for key, value in raw.items():
             setattr(result, key, value)
         return result
 
-    async def reset(self, session_id: str) -> RuntimeResetResult:
-        raw = await self._request("session/reset", {"session_id": session_id})
+    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
+        raw = await self._request("runtime/session_reset", {"session_id": session_id})
         result = RuntimeResetResult()
         for key, value in raw.items():
             setattr(result, key, value)
@@ -2192,27 +2133,27 @@ class MeerkatClient:
             {"mob_id": mob_id, "filter": filter},
         )
 
-    async def status(self, session_id: str) -> RuntimeStateResult:
-        """Return the runtime state for a session via `session/status`."""
-        raw = await self._request("session/status", {"session_id": session_id})
+    async def runtime_status(self, session_id: str) -> RuntimeStateResult:
+        """Return the runtime state for a session via `runtime/session_status`."""
+        raw = await self._request("runtime/session_status", {"session_id": session_id})
         return RuntimeStateResult(**raw)
 
-    async def submit(
+    async def runtime_submit(
         self, session_id: str, input: dict[str, Any]
     ) -> RuntimeAcceptResult:
-        """Submit a runtime input via `session/submit`."""
+        """Submit a runtime input via `runtime/session_submit`."""
         raw = await self._request(
-            "session/submit",
+            "runtime/session_submit",
             {"session_id": session_id, "input": input},
         )
         return RuntimeAcceptResult(**raw)
 
-    async def submission(
+    async def runtime_submission(
         self, session_id: str, input_id: str
     ) -> WireInputState | None:
-        """Read one runtime input state via `session/submission`."""
+        """Read one runtime input state via `runtime/session_submission`."""
         raw = await self._request(
-            "session/submission",
+            "runtime/session_submission",
             {"session_id": session_id, "input_id": input_id},
         )
         if raw is None:

@@ -2,16 +2,17 @@
 
 //! Track-B wave-b B-4b — named-type binding authority.
 //!
-//! The codegen must lower every `TypeRef::Named` slug through its
-//! authoritative [`NamedTypeBinding`] entry on the schema. Every
-//! [`RustTypeAtom`] variant lowers to a concrete Rust type:
+//! The codegen must render every `TypeRef::Named` slug through its
+//! authoritative [`NamedTypeBinding`] entry on the schema. Scalar
+//! [`RustTypeAtom`] variants keep the DSL name as a tuple-struct identity
+//! boundary whose inner field uses the authoritative Rust atom:
 //!
-//! | atom                 | rust                          |
-//! | -------------------- | ----------------------------- |
-//! | `U8` / `U16` / `U32` / `U64` | `u8` / `u16` / `u32` / `u64` |
-//! | `Bool`               | `bool`                        |
-//! | `String`             | `String`                      |
-//! | `TypePath(path)`     | `path` verbatim               |
+//! | atom                 | rust                                      |
+//! | -------------------- | ----------------------------------------- |
+//! | `U8` / `U16` / `U32` / `U64` | `pub struct Name(pub u8/u16/u32/u64)` |
+//! | `Bool`               | `pub struct Name(pub bool)`               |
+//! | `String`             | `pub struct Name(pub String)`             |
+//! | `TypePath(path)`     | `pub type Name = path`                    |
 //!
 //! A `TypeRef::Named` referenced without a matching binding is rejected by
 //! `MachineSchema::validate()` — there is no name-based fallback.
@@ -63,6 +64,7 @@ fn schema_with_single_named_type(field_name: &str, named: &str) -> MachineSchema
             variants: vec![],
         },
         surface_only_inputs: vec![],
+        runtime_internal_inputs: vec![],
         signals: EnumSchema {
             name: "AtomProbeSignal".into(),
             variants: vec![],
@@ -89,11 +91,25 @@ fn with_atom(mut schema: MachineSchema, atom: RustTypeAtom) -> MachineSchema {
     schema
 }
 
+fn assert_scalar_newtype(rendered: &str, name: &str, rust_type: &str) {
+    let expected = format!("pub struct {name}(pub {rust_type});");
+    assert!(
+        rendered.contains(&expected),
+        "rendered kernel module must keep `{name}` as a named scalar over `{rust_type}`:\n\
+         expected line: `{expected}`\n\
+         rendered:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("pub type {name} = {rust_type};")),
+        "named scalar `{name}` must not erase to a primitive alias:\n{rendered}"
+    );
+}
+
 fn assert_type_alias(rendered: &str, alias: &str, rust_type: &str) {
     let expected = format!("pub type {alias} = {rust_type};");
     assert!(
         rendered.contains(&expected),
-        "rendered kernel module must lower `{alias}` to `{rust_type}`:\n\
+        "rendered kernel module must bind `{alias}` to `{rust_type}`:\n\
          expected line: `{expected}`\n\
          rendered:\n{rendered}"
     );
@@ -107,7 +123,7 @@ fn rust_type_atom_u64_lowers_to_u64() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomU64", "u64");
+    assert_scalar_newtype(&rendered, "AtomU64", "u64");
 }
 
 #[test]
@@ -118,7 +134,7 @@ fn rust_type_atom_u32_lowers_to_u32() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomU32", "u32");
+    assert_scalar_newtype(&rendered, "AtomU32", "u32");
 }
 
 #[test]
@@ -129,7 +145,7 @@ fn rust_type_atom_u16_lowers_to_u16() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomU16", "u16");
+    assert_scalar_newtype(&rendered, "AtomU16", "u16");
 }
 
 #[test]
@@ -140,7 +156,7 @@ fn rust_type_atom_u8_lowers_to_u8() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomU8", "u8");
+    assert_scalar_newtype(&rendered, "AtomU8", "u8");
 }
 
 #[test]
@@ -151,7 +167,7 @@ fn rust_type_atom_bool_lowers_to_bool() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomBool", "bool");
+    assert_scalar_newtype(&rendered, "AtomBool", "bool");
 }
 
 #[test]
@@ -162,7 +178,7 @@ fn rust_type_atom_string_lowers_to_string() {
     );
     schema.validate().expect("schema validates");
     let rendered = render_machine_kernel_module(&schema);
-    assert_type_alias(&rendered, "AtomString", "String");
+    assert_scalar_newtype(&rendered, "AtomString", "String");
 }
 
 #[test]

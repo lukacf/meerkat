@@ -143,6 +143,10 @@ pub(crate) fn project_state(
         terminal_outcome: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,
+        llm_retry_attempt: 0,
+        llm_retry_max_retries: 0,
+        llm_retry_selected_delay_ms: 0,
+        llm_retry_last_failure_kind: None,
         silent_intent_overrides,
         // Absorbed substate fields — initialised to DSL defaults.
         // These are projected from their respective authority owners

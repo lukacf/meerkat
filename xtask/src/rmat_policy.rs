@@ -316,7 +316,7 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                 let mut seen_crates = std::collections::BTreeSet::new();
                 candidate_crates.retain(|c| seen_crates.insert(*c));
                 let protocol_name = protocol.name.as_str().to_string();
-                let mut candidate_paths = vec![protocol.rust.module_path.clone()];
+                let mut candidate_paths = vec![protocol.rust.module_path.to_string()];
                 candidate_paths.extend(candidate_crates.into_iter().map(|crate_name| {
                     format!("{crate_name}/src/generated/protocol_{protocol_name}.rs")
                 }));

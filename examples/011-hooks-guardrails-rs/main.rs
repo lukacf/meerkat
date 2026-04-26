@@ -47,7 +47,7 @@ struct WeatherDispatcher;
 impl AgentToolDispatcher for WeatherDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![Arc::new(ToolDef {
-            name: "get_weather".to_string(),
+            name: "get_weather".into(),
             description: "Get current weather for a city (simulated data)".to_string(),
             input_schema: meerkat_tools::schema_for::<WeatherArgs>(),
             provenance: None,

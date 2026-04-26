@@ -57,12 +57,11 @@ impl MeerkatMachine {
                 //     record `MobOwned { comms_runtime_id, mob_id }`.
                 //   - Otherwise → fire `AttachSessionIngress` to record
                 //     `SessionOwned { comms_runtime_id }`.
-                // Ignore the DSL's transition-rejected case gracefully —
-                // the two guards (`owner_is_unattached` on Session,
-                // `owner_allows_mob_attach` on Mob) turn no-op when the
-                // owner is already at the target kind or a higher level,
-                // which is the idempotent semantic these helpers have
-                // always meant to carry.
+                // The attach/detach transitions below encode exact
+                // idempotence in DSL guards. Any remaining rejection is an
+                // authoritative denial (for example a session attach trying
+                // to downgrade a mob-owned ingress) and must stop before the
+                // drain shell mutates task state.
                 //
                 // When `comms_runtime` is `None` the caller intends
                 // keep-alive-only; no ownership transition fires.
@@ -79,27 +78,21 @@ impl MeerkatMachine {
                             comms_runtime_id,
                         }
                     };
-                    // The Attach transitions have `guard` clauses that
-                    // reject no-op re-application (already at target
-                    // owner kind); treat transition rejections as
-                    // expected idempotent behavior rather than a
-                    // command failure.
-                    let _ = self
-                        .stage_session_dsl_input(&session_id, attach_input, "AttachPeerIngress")
-                        .await;
+                    self.stage_session_dsl_input(&session_id, attach_input, "AttachPeerIngress")
+                        .await
+                        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 } else if !keep_alive {
                     // keep_alive=false + comms_runtime=None → caller is
                     // tearing down the drain. Fire `DetachIngress` to
-                    // clear any active ownership. Its guard rejects
-                    // no-op (already Unattached) with the same
-                    // idempotent semantic as the Attach transitions.
-                    let _ = self
-                        .stage_session_dsl_input(
-                            &session_id,
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::DetachIngress,
-                            "DetachIngress",
-                        )
-                        .await;
+                    // clear any active ownership. The DSL accepts exact
+                    // no-op detach; other rejection stops the shell here.
+                    self.stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::DetachIngress,
+                        "DetachIngress",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 }
 
                 // Ownership transitions above have succeeded (or been

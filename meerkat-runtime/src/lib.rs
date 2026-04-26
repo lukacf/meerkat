@@ -96,8 +96,9 @@ pub use identifiers::{
 pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
     ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
-    InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
-    ResponseProgressPhase, ResponseTerminalStatus,
+    InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput,
+    PeerResponseTerminalInputError, PromptInput, ResponseProgressPhase, ResponseTerminalStatus,
+    peer_response_terminal_input, response_terminal_status_from_wire,
 };
 pub use input_ledger::InputLedger;
 pub use input_scope::InputScope;

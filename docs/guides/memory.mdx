@@ -98,8 +98,11 @@ When compaction triggers:
     - The last `recent_turn_budget` complete turns are retained.
     - All other messages become `discarded`.
   </Step>
+  <Step title="Index discarded memory">
+    If semantic memory is enabled, discarded messages are indexed before the compacted history is committed.
+  </Step>
   <Step title="Replace session messages">
-    The session messages are replaced with the rebuilt history.
+    The session messages are replaced with the rebuilt history after memory indexing accepts the discarded content.
   </Step>
   <Step title="Record usage and emit completion event">
     Compaction usage is recorded against the session and budget. A **CompactionCompleted** event is emitted with summary token count and before/after message counts.
@@ -123,7 +126,7 @@ The compactor sends this prompt to the LLM:
 
 ## Memory indexing after compaction
 
-When both a `Compactor` and a `MemoryStore` are wired into the agent, discarded messages are indexed into semantic memory after compaction completes. This happens asynchronously (fire-and-forget via `tokio::spawn`).
+When both a `Compactor` and a `MemoryStore` are wired into the agent, discarded messages are indexed into semantic memory before compacted history is committed. If the memory store rejects indexing, Meerkat preserves the original history, emits a `CompactionFailed` event, and skips that compaction attempt instead of dropping the only authoritative copy of the discarded text.
 
 For each discarded message:
 - The message's indexable text content is extracted via `message.as_indexable_text()`.

@@ -304,7 +304,7 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await client_b.status(session_id)
+            runtime_state = await client_b.runtime_status(session_id)
             assert runtime_state.state in {
                 "attached",
                 "idle",
@@ -312,7 +312,7 @@ if include_scenario(39):
                 "initializing",
             }
 
-            accepted = await client_b.submit(
+            accepted = await client_b.runtime_submit(
                 session_id,
                 make_prompt_input(
                     f"Reply with PY-RUNTIME-39, PY-RUNTIME-OK, and the marker {marker}.",
@@ -329,7 +329,7 @@ if include_scenario(39):
 
             input_state = await wait_for(
                 "runtime input to be consumed",
-                lambda: client_b.submission(session_id, input_id),
+                lambda: client_b.runtime_submission(session_id, input_id),
                 lambda state: state is not None and state.current_state == "consumed",
                 timeout_secs=120.0,
             )
@@ -479,10 +479,11 @@ if include_scenario(40):
             )
             respawned_member_ref = respawn_result["receipt"]["member_ref"]
             respawned_snapshot = await wait_for(
-                "reviewer runtime id changes after respawn",
+                "reviewer bridge session changes after respawn",
                 lambda: mob.member_status("reviewer-1"),
-                lambda state: state.get("agent_runtime_id")
-                and state.get("agent_runtime_id") != reviewer_state.get("agent_runtime_id"),
+                lambda state: state.get("current_session_id")
+                and state.get("current_session_id")
+                != reviewer_state.get("current_session_id"),
                 timeout_secs=60.0,
             )
             respawn_receipt = await mob.member("reviewer-1").send(
@@ -498,8 +499,8 @@ if include_scenario(40):
                 timeout_secs=120.0,
             )
             assert (
-                respawned_state.get("agent_runtime_id")
-                == respawned_snapshot.get("agent_runtime_id")
+                respawned_state.get("current_session_id")
+                == respawned_snapshot.get("current_session_id")
             )
             assert "reviewer_respawn_40" in (
                 respawned_state.get("output_preview") or ""

@@ -50,6 +50,7 @@ async fn inner_test_rest_resume_metadata() {
         .builtins(true)
         .shell(true)
         .project_root(project_root.clone());
+    let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence = PersistenceBundle::new(
@@ -122,6 +123,7 @@ async fn inner_test_rest_resume_metadata() {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_registry,
     };
 
     let app = router(state_run);
@@ -172,6 +174,7 @@ async fn inner_test_rest_resume_metadata() {
         .builtins(true)
         .shell(true)
         .project_root(project_root.clone());
+    let provider_registry2 = factory2.provider_runtime_registry();
     let mut builder2 = FactoryAgentBuilder::new(factory2, config.clone());
     builder2.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence2 = PersistenceBundle::new(
@@ -251,6 +254,7 @@ async fn inner_test_rest_resume_metadata() {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_registry: provider_registry2,
     };
 
     let app = router(state_resume);

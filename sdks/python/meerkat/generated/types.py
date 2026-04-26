@@ -171,7 +171,8 @@ class MobUnwireParams:
 
 @dataclass
 class RuntimeStateParams:
-    """Request payload for session/status."""
+    """Request payload for `runtime/session_status`."""
+    session_id: str
 
 
 @dataclass
@@ -183,48 +184,60 @@ class RuntimeRealtimeAttachmentStatusParams:
 @dataclass
 class RealtimeOpenRequest:
     """Request payload for `realtime/open_info`."""
-    role: Literal['primary', 'observer']
-    target: dict[str, Any]
-    turning_mode: Literal['provider_managed', 'explicit_commit']
-    channel_config: Optional[dict[str, Any]] = None
-    reconnect_policy: Optional[dict[str, Any]] = None
+    role: RealtimeChannelRole
+    target: RealtimeChannelTarget
+    turning_mode: RealtimeTurningMode
+    channel_config: Optional[RealtimeChannelConfig] = None
+    reconnect_policy: Optional[RealtimeReconnectPolicy] = None
 
 
 @dataclass
 class RealtimeStatusParams:
     """Request payload for `realtime/status`."""
-    target: dict[str, Any]
+    target: RealtimeChannelTarget
 
 
 @dataclass
 class RealtimeCapabilitiesParams:
     """Request payload for `realtime/capabilities`."""
-    target: dict[str, Any]
+    target: RealtimeChannelTarget
 
 
 @dataclass
 class RuntimeAcceptParams:
-    """Request payload for session/submit."""
+    """Request payload for `runtime/session_submit`.
+
+The runtime input body is owned by `meerkat-runtime`; contracts cannot
+depend on the runtime crate without inverting the dependency graph. The
+envelope is canonical here and the runtime crate remains the typed
+authority over the `input` discriminator and variant body."""
+    input: Any
+    session_id: str
 
 
 @dataclass
 class RuntimeRetireParams:
-    """Request payload for session/retire."""
+    """Request payload for `runtime/session_retire`."""
+    session_id: str
 
 
 @dataclass
 class RuntimeResetParams:
-    """Request payload for session/reset."""
+    """Request payload for `runtime/session_reset`."""
+    session_id: str
 
 
 @dataclass
 class InputStateParams:
-    """Request payload for session/submission."""
+    """Request payload for `runtime/session_submission`."""
+    input_id: str
+    session_id: str
 
 
 @dataclass
 class InputListParams:
-    """Request payload for session/submissions."""
+    """Request payload for `runtime/session_submissions`."""
+    session_id: str
 
 
 @dataclass
@@ -314,7 +327,7 @@ class MobUnwireResult:
 
 @dataclass
 class RuntimeStateResult:
-    """Response payload for session/status."""
+    """Response payload for runtime/session_status."""
     state: WireRuntimeState
 
 
@@ -334,23 +347,41 @@ class RealtimeReconnectPolicy:
 
 
 @dataclass
+class RealtimeChannelConfig:
+    """Per-channel runtime knobs negotiated at open time.
+
+Additive fields only — clients that do not carry this struct inherit the
+server-default behavior via `#[serde(default)]` on the parent
+[`RealtimeOpenRequest`]."""
+    tool_timeout_ms: Optional[int] = None
+
+
+@dataclass
+class RealtimeAudioFormat:
+    """Descriptor for an expected or actual realtime audio format."""
+    channels: int
+    mime_type: str
+    sample_rate_hz: int
+
+
+@dataclass
 class RealtimeCapabilities:
     """Product-facing realtime capability set for one target/provider combination."""
     interrupt_supported: bool
     tool_lifecycle_events_supported: bool
     transcript_supported: bool
     video_supported: bool
-    audio_input_format: Optional[dict[str, Any]] = None
-    audio_output_format: Optional[dict[str, Any]] = None
-    input_kinds: Optional[list[Literal['text', 'audio', 'video']]] = None
-    output_kinds: Optional[list[Literal['text', 'audio', 'video']]] = None
-    turning_modes: Optional[list[Literal['provider_managed', 'explicit_commit']]] = None
+    audio_input_format: Optional[RealtimeAudioFormat] = None
+    audio_output_format: Optional[RealtimeAudioFormat] = None
+    input_kinds: Optional[list[RealtimeInputKind]] = None
+    output_kinds: Optional[list[RealtimeOutputKind]] = None
+    turning_modes: Optional[list[RealtimeTurningMode]] = None
 
 
 @dataclass
 class RealtimeChannelStatus:
     """Public realtime channel status projection."""
-    state: Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
+    state: RealtimeChannelState
     attempt_count: Optional[int] = None
     deadline_at: Optional[str] = None
     next_retry_at: Optional[str] = None
@@ -360,11 +391,11 @@ class RealtimeChannelStatus:
 @dataclass
 class RealtimeOpenInfo:
     """Response payload for `realtime/open_info`."""
-    capabilities: dict[str, Any]
+    capabilities: RealtimeCapabilities
     default_protocol_version: str
     expires_at: str
     open_token: str
-    target: dict[str, Any]
+    target: RealtimeChannelTarget
     ws_url: str
     supported_protocol_versions: Optional[list[str]] = None
 
@@ -372,13 +403,13 @@ class RealtimeOpenInfo:
 @dataclass
 class RealtimeStatusResult:
     """Response payload for `realtime/status`."""
-    status: dict[str, Any]
+    status: RealtimeChannelStatus
 
 
 @dataclass
 class RealtimeCapabilitiesResult:
     """Response payload for `realtime/capabilities`."""
-    capabilities: dict[str, Any]
+    capabilities: RealtimeCapabilities
 
 
 @dataclass
@@ -415,47 +446,75 @@ class RealtimeVideoChunk:
 
 
 @dataclass
+class RealtimeBargeInTruncateFrame:
+    """Payload for `channel.barge_in_truncate`.
+
+Sent by the client the moment it detects the user starting to speak over
+the assistant's audio, to tell the server what prefix was actually heard.
+Field names mirror OpenAI Realtime's `conversation.item.truncate` so the
+provider adapter can map straight through without re-encoding."""
+    audio_played_ms: int
+    content_index: int
+    item_id: str
+
+
+@dataclass
+class AudioFormatMismatchContext:
+    """Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`]."""
+    actual: RealtimeAudioFormat
+    expected: RealtimeAudioFormat
+
+
+@dataclass
+class ToolCallTimeoutContext:
+    """Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`]."""
+    call_id: str
+    elapsed_ms: int
+    timeout_ms: int
+
+
+@dataclass
 class RealtimeChannelOpenFrame:
     """Payload for `channel.open`."""
     open_token: str
     protocol_version: str
-    role: Literal['primary', 'observer']
-    turning_mode: Literal['provider_managed', 'explicit_commit']
+    role: RealtimeChannelRole
+    turning_mode: RealtimeTurningMode
 
 
 @dataclass
 class RealtimeChannelInputFrame:
     """Payload for `channel.input`."""
-    chunk: dict[str, Any]
+    chunk: RealtimeInputChunk
 
 
 @dataclass
 class RealtimeChannelOpenedFrame:
     """Payload for `channel.opened`."""
-    capabilities: dict[str, Any]
+    capabilities: RealtimeCapabilities
     protocol_version: str
-    role: Literal['primary', 'observer']
-    status: dict[str, Any]
+    role: RealtimeChannelRole
+    status: RealtimeChannelStatus
 
 
 @dataclass
 class RealtimeChannelStatusFrame:
     """Payload for `channel.status`."""
-    status: dict[str, Any]
+    status: RealtimeChannelStatus
 
 
 @dataclass
 class RealtimeChannelEventFrame:
     """Payload for `channel.event`."""
-    event: dict[str, Any]
+    event: RealtimeEvent
 
 
 @dataclass
 class RealtimeChannelErrorFrame:
     """Payload for `channel.error`."""
-    code: Literal['invalid_frame', 'expected_channel_open', 'invalid_open_token', 'open_token_expired', 'role_mismatch', 'turning_mode_mismatch', 'unsupported_turning_mode', 'target_busy', 'unsupported_protocol_version', 'audio_format_mismatch', 'unauthorized_realm', 'tool_call_timeout', 'internal_error', 'reconnect_exhausted', 'invalid_target', 'channel_not_bound', 'runtime_internal', 'runtime_not_ready', 'provider_session_closed', 'provider_session_failed', 'provider_session_unavailable', 'unsupported_input_kind', 'no_pending_turn', 'observer_read_only', 'unexpected_channel_open', 'commit_turn_unavailable', 'channel_reconnecting', 'binding_released', 'authentication_failed', 'content_filtered', 'model_not_found', 'invalid_request']
+    code: RealtimeErrorCode
     message: str
-    details: Optional[dict[str, Any]] = None
+    details: Optional[RealtimeErrorDetails] = None
 
 
 @dataclass
@@ -466,7 +525,7 @@ class RealtimeChannelClosedFrame:
 
 @dataclass
 class RuntimeAcceptResult:
-    """Response payload for `session/submit`."""
+    """Response payload for `runtime/session_submit`."""
     outcome_type: Literal['accepted', 'deduplicated', 'rejected']
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
@@ -477,12 +536,15 @@ class RuntimeAcceptResult:
 
 @dataclass
 class RuntimeRetireResult:
-    """Response payload for session/retire."""
+    """Response payload for `runtime/session_retire`."""
+    inputs_abandoned: int
+    inputs_pending_drain: Optional[int] = None
 
 
 @dataclass
 class RuntimeResetResult:
-    """Response payload for session/reset."""
+    """Response payload for `runtime/session_reset`."""
+    inputs_abandoned: int
 
 
 @dataclass
@@ -519,7 +581,8 @@ fields with typed projections so the wire carries no untyped carriers."""
 
 @dataclass
 class InputListResult:
-    """Response payload for session/submissions."""
+    """Response payload for `runtime/session_submissions`."""
+    inputs: list[dict[str, Any]]
 
 
 @dataclass
@@ -777,7 +840,7 @@ WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', '
 # - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 #   canonical anchor, and the server resolves the current bridge session
 #   on every tick from the MobMachine's `member_session_bindings` map.
-#   Respawn atomically rotates the bound session via the
+#   Respawn atomically rotates the bridge session via the
 #   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
 #   channel survives without any SDK round-trip. A terminal
 #   `MemberSessionBindingChanged { old: Some, new: None }` closes the
@@ -808,26 +871,66 @@ RealtimeOutputKind = Literal['text', 'audio', 'video']
 # Lifecycle state for a realtime channel.
 RealtimeChannelState = Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
 
+# Typed realtime channel error code. Replaces the prior freeform `String` on
+# [`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick
+# exactly one variant so downstream SDKs can match without string folklore.
+RealtimeErrorCode = Literal['invalid_frame', 'expected_channel_open', 'invalid_open_token', 'open_token_expired', 'role_mismatch', 'turning_mode_mismatch', 'unsupported_turning_mode', 'target_busy', 'unsupported_protocol_version', 'audio_format_mismatch', 'unauthorized_realm', 'tool_call_timeout', 'internal_error', 'reconnect_exhausted', 'invalid_target', 'channel_not_bound', 'runtime_internal', 'runtime_not_ready', 'provider_session_closed', 'provider_session_failed', 'provider_session_unavailable', 'unsupported_input_kind', 'no_pending_turn', 'observer_read_only', 'unexpected_channel_open', 'commit_turn_unavailable', 'channel_reconnecting', 'binding_released', 'authentication_failed', 'content_filtered', 'model_not_found', 'invalid_request']
+
+# Structured typed context carried on a channel error frame. Each variant
+# corresponds to a specific [`RealtimeErrorCode`] and lets clients match
+# the reason without parsing the message string.
+class RealtimeErrorDetailsAudioFormatMismatch(TypedDict, total=False):
+    actual: Required[RealtimeAudioFormat]
+    expected: Required[RealtimeAudioFormat]
+    kind: Required[Literal['audio_format_mismatch']]
+
+class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
+    call_id: Required[str]
+    elapsed_ms: Required[int]
+    timeout_ms: Required[int]
+    kind: Required[Literal['tool_call_timeout']]
+
+class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
+    kind: Required[Literal['unsupported_protocol_version']]
+    requested: Required[str]
+    supported: Required[list[str]]
+
+RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion
+
 # Modality-neutral input chunk.
 class RealtimeInputChunkTextChunk(TypedDict, total=False):
+    text: Required[str]
     kind: Required[Literal['text_chunk']]
 
 class RealtimeInputChunkAudioChunk(TypedDict, total=False):
+    channels: Required[int]
+    data: Required[str]
+    mime_type: Required[str]
+    sample_rate_hz: Required[int]
     kind: Required[Literal['audio_chunk']]
 
 class RealtimeInputChunkVideoChunk(TypedDict, total=False):
+    data: Required[str]
+    mime_type: Required[str]
     kind: Required[Literal['video_chunk']]
 
 RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk
 
 # Modality-neutral output chunk.
 class RealtimeOutputChunkTextDelta(TypedDict, total=False):
+    delta: Required[str]
     kind: Required[Literal['text_delta']]
 
 class RealtimeOutputChunkAudioChunk(TypedDict, total=False):
+    channels: Required[int]
+    data: Required[str]
+    mime_type: Required[str]
+    sample_rate_hz: Required[int]
     kind: Required[Literal['audio_chunk']]
 
 class RealtimeOutputChunkVideoChunk(TypedDict, total=False):
+    data: Required[str]
+    mime_type: Required[str]
     kind: Required[Literal['video_chunk']]
 
 RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk
@@ -856,11 +959,11 @@ class RealtimeEventOutputTextDelta(TypedDict, total=False):
     type: Required[Literal['output_text_delta']]
 
 class RealtimeEventOutputAudioChunk(TypedDict, total=False):
-    chunk: Required[dict[str, Any]]
+    chunk: Required[RealtimeAudioChunk]
     type: Required[Literal['output_audio_chunk']]
 
 class RealtimeEventOutputVideoChunk(TypedDict, total=False):
-    chunk: Required[dict[str, Any]]
+    chunk: Required[RealtimeVideoChunk]
     type: Required[Literal['output_video_chunk']]
 
 class RealtimeEventInterrupted(TypedDict, total=False):
@@ -892,7 +995,7 @@ class RealtimeEventAssistantTranscriptTruncated(TypedDict, total=False):
     type: Required[Literal['assistant_transcript_truncated']]
 
 class RealtimeEventStatusChanged(TypedDict, total=False):
-    status: Required[dict[str, Any]]
+    status: Required[RealtimeChannelStatus]
     type: Required[Literal['status_changed']]
 
 class RealtimeEventNeedsReattach(TypedDict, total=False):
@@ -902,9 +1005,14 @@ RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscri
 
 # Client-to-server realtime frame.
 class RealtimeClientFrameChannelOpen(TypedDict, total=False):
+    open_token: Required[str]
+    protocol_version: Required[str]
+    role: Required[RealtimeChannelRole]
+    turning_mode: Required[RealtimeTurningMode]
     type: Required[Literal['channel.open']]
 
 class RealtimeClientFrameChannelInput(TypedDict, total=False):
+    chunk: Required[RealtimeInputChunk]
     type: Required[Literal['channel.input']]
 
 class RealtimeClientFrameChannelCommitTurn(TypedDict, total=False):
@@ -914,6 +1022,9 @@ class RealtimeClientFrameChannelInterrupt(TypedDict, total=False):
     type: Required[Literal['channel.interrupt']]
 
 class RealtimeClientFrameChannelBargeInTruncate(TypedDict, total=False):
+    audio_played_ms: Required[int]
+    content_index: Required[int]
+    item_id: Required[str]
     type: Required[Literal['channel.barge_in_truncate']]
 
 class RealtimeClientFrameChannelClose(TypedDict, total=False):
@@ -923,23 +1034,33 @@ RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChanne
 
 # Server-to-client realtime frame.
 class RealtimeServerFrameChannelOpened(TypedDict, total=False):
+    capabilities: Required[RealtimeCapabilities]
+    protocol_version: Required[str]
+    role: Required[RealtimeChannelRole]
+    status: Required[RealtimeChannelStatus]
     type: Required[Literal['channel.opened']]
 
 class RealtimeServerFrameChannelStatus(TypedDict, total=False):
+    status: Required[RealtimeChannelStatus]
     type: Required[Literal['channel.status']]
 
 class RealtimeServerFrameChannelEvent(TypedDict, total=False):
+    event: Required[RealtimeEvent]
     type: Required[Literal['channel.event']]
 
 class RealtimeServerFrameChannelError(TypedDict, total=False):
+    code: Required[RealtimeErrorCode]
+    details: NotRequired[RealtimeErrorDetails]
+    message: Required[str]
     type: Required[Literal['channel.error']]
 
 class RealtimeServerFrameChannelClosed(TypedDict, total=False):
+    reason: NotRequired[str]
     type: Required[Literal['channel.closed']]
 
 RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
 
-# Discriminator for `session/submit` responses.
+# Discriminator for `runtime/session_submit` responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
 
 # Public input lifecycle state projection used by RPC surfaces.
@@ -1005,5 +1126,5 @@ class CommsCommandPeerResponse(TypedDict, total=False):
 
 CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
 
-# Response payload for `session/submission`.
+# Response payload for `runtime/session_submission`.
 InputStateResult = Optional[WireInputState]

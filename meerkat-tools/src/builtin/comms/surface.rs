@@ -1,14 +1,13 @@
 //! Comms tool surface - provides comms tools as a ToolDispatcher
 
 use async_trait::async_trait;
-use meerkat_comms::{
-    PubKey, Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call,
-};
+use meerkat_comms::{Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::gateway::Availability;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
-use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
+use meerkat_core::{
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
+};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -51,22 +50,20 @@ impl CommsToolSurface {
         }
     }
 
-    /// Helper to create an availability predicate that only shows tools if peers exist.
-    ///
-    /// Peers are considered present only when trusted peers are configured.
-    pub fn peer_availability(
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
-        _self_pubkey: PubKey,
-    ) -> Availability {
-        Availability::when(
-            "no peers configured",
-            Arc::new(move || {
-                trusted_peers
-                    .try_read()
-                    .map(|g| g.has_peers())
-                    .unwrap_or(false)
-            }),
-        )
+    fn has_peers(&self) -> bool {
+        self.tool_context
+            .trusted_peers
+            .try_read()
+            .map(|peers| peers.has_peers())
+            .unwrap_or(false)
+    }
+
+    fn callability(&self) -> ToolCallability {
+        if self.has_peers() {
+            ToolCallability::callable()
+        } else {
+            ToolCallability::unavailable(ToolUnavailableReason::NoPeersConfigured)
+        }
     }
 
     /// Usage instructions for comms tools to be added to the system prompt
@@ -88,7 +85,12 @@ Use `send_message` for ordinary collaboration. Use `send_request` only when you 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CommsToolSurface {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tool_defs)
+        self.tool_catalog()
+            .iter()
+            .filter(|entry| entry.currently_callable())
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>()
+            .into()
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
@@ -99,9 +101,12 @@ impl AgentToolDispatcher for CommsToolSurface {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        let callability = self.callability();
         self.tool_defs
             .iter()
-            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .map(|tool| {
+                ToolCatalogEntry::session_inline_with_callability(Arc::clone(tool), callability)
+            })
             .collect::<Vec<_>>()
             .into()
     }
@@ -115,6 +120,9 @@ impl AgentToolDispatcher for CommsToolSurface {
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),
             });
+        }
+        if let Some(reason) = self.callability().unavailable_reason() {
+            return Err(ToolError::unavailable(call.name, reason.to_string()));
         }
 
         let args: Value = serde_json::from_str(call.args.get())
@@ -191,8 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_availability_true_with_trusted_peers() {
-        let self_key = make_keypair().public_key();
+    fn test_comms_callability_true_with_trusted_peers() {
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
             peers: vec![TrustedPeer {
                 name: "trusted".to_string(),
@@ -201,15 +208,37 @@ mod tests {
                 meta: meerkat_comms::PeerMeta::default(),
             }],
         }));
-        let availability = CommsToolSurface::peer_availability(trusted_peers, self_key);
-        assert!(availability.is_available());
+        let router = make_tool_context().0;
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        assert_eq!(surface.tools().len(), surface.tool_defs.len());
+        assert!(
+            surface
+                .tool_catalog()
+                .iter()
+                .all(meerkat_core::ToolCatalogEntry::currently_callable)
+        );
     }
 
-    #[test]
-    fn test_peer_availability_false_without_trusted_peers() {
-        let self_key = make_keypair().public_key();
+    #[tokio::test]
+    async fn test_comms_callability_false_without_trusted_peers() {
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let availability = CommsToolSurface::peer_availability(trusted_peers, self_key);
-        assert!(!availability.is_available());
+        let router = make_tool_context().0;
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        assert!(surface.tools().is_empty());
+        assert!(
+            surface
+                .tool_catalog()
+                .iter()
+                .all(|entry| !entry.currently_callable())
+        );
+
+        let args_raw = serde_json::value::RawValue::from_string(Value::Null.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-1",
+            name: surface.tool_defs[0].name.as_str(),
+            args: &args_raw,
+        };
+        let result = surface.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::Unavailable { .. })));
     }
 }

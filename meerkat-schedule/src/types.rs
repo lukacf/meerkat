@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::skills::SkillRef;
+use meerkat_core::skills::{SkillKey, SkillName, SkillRef};
 use meerkat_core::types::RenderMetadata;
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -446,8 +446,12 @@ pub struct SessionMaterializationSpec {
     pub peer_meta: Option<PeerMeta>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preload_skills: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_preload_skills",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub preload_skills: Vec<SkillKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_instructions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -469,6 +473,28 @@ impl SessionMaterializationSpec {
         self.output_schema = Some(output_schema);
         self
     }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PreloadSkillInput {
+    Key(SkillKey),
+    LegacyBuiltinName(String),
+}
+
+fn deserialize_preload_skills<'de, D>(deserializer: D) -> Result<Vec<SkillKey>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<PreloadSkillInput>::deserialize(deserializer)?
+        .into_iter()
+        .map(|input| match input {
+            PreloadSkillInput::Key(key) => Ok(key),
+            PreloadSkillInput::LegacyBuiltinName(name) => SkillName::parse(&name)
+                .map(SkillKey::builtin)
+                .map_err(serde::de::Error::custom),
+        })
+        .collect()
 }
 
 impl PartialEq for SessionMaterializationSpec {
@@ -1157,7 +1183,12 @@ pub fn default_planning_horizon_occurrences() -> u32 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use meerkat_core::ToolNameSet;
+    use meerkat_core::skills::{SkillName, SourceUuid};
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        SkillKey::new(SourceUuid::builtin(), SkillName::parse(name).unwrap())
+    }
 
     // -----------------------------------------------------------------------
     // ScheduleSpawnTooling serde roundtrip
@@ -1221,7 +1252,7 @@ mod tests {
     #[test]
     fn resolved_spawn_snapshot_roundtrip_allow_filter() {
         let snapshot = ResolvedSpawnSnapshot {
-            tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(HashSet::from([
+            tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
                 "shell".to_string(),
                 "read_file".to_string(),
             ])),
@@ -1236,7 +1267,7 @@ mod tests {
     #[test]
     fn resolved_spawn_snapshot_roundtrip_deny_filter() {
         let snapshot = ResolvedSpawnSnapshot {
-            tool_filter: meerkat_core::tool_scope::ToolFilter::Deny(HashSet::from([
+            tool_filter: meerkat_core::tool_scope::ToolFilter::Deny(ToolNameSet::from_iter([
                 "dangerous_tool".to_string(),
             ])),
             model: "gpt-5.4".into(),
@@ -1282,8 +1313,8 @@ mod tests {
     fn helper_options_spec_with_resolved_snapshot_roundtrip() {
         let spec = HelperOptionsSpec {
             resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
-                tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(HashSet::from([
-                    "shell".to_string()
+                tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
+                    "shell".to_string(),
                 ])),
                 model: "claude-sonnet-4-6".into(),
                 provider_params: None,
@@ -1378,6 +1409,35 @@ mod tests {
             err.to_string().contains("profile_name"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn session_materialization_preload_skills_are_canonical_skill_keys() {
+        let key = fixture_skill_key("email");
+        let json = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "preload_skills": [
+                {
+                    "source_uuid": key.source_uuid.to_string(),
+                    "skill_name": key.skill_name.to_string()
+                }
+            ]
+        });
+
+        let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.preload_skills, vec![key]);
+    }
+
+    #[test]
+    fn session_materialization_converts_legacy_string_preload_skills() {
+        let key = fixture_skill_key("email");
+        let json = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "preload_skills": ["email"]
+        });
+
+        let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.preload_skills, vec![key]);
     }
 
     // -----------------------------------------------------------------------

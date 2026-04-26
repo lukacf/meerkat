@@ -31,7 +31,13 @@ impl MeerkatMachine {
         // before publishing the session entry. The shell projection remains a
         // persistence witness; it never directly seeds `authority.state`.
         let recovered_phase = entry.as_driver().runtime_state();
-        if recovered_phase != RuntimeState::Idle {
+        let authority_phase = {
+            let authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::dsl_authority::runtime_phase_from_authority(&authority)
+        };
+        if recovered_phase != RuntimeState::Idle && recovered_phase != authority_phase {
             let mut authority = dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -82,7 +88,6 @@ impl MeerkatMachine {
             phase: RegistrationPhase::Queuing,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
-            trust_reconciler: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -263,7 +268,6 @@ impl MeerkatMachine {
                             phase: RegistrationPhase::Queuing,
                             dsl_authority,
                             drain_slot: CommsDrainSlot::new(),
-                            trust_reconciler: None,
                         },
                     );
                     (driver, completions, recovered_ops)
@@ -926,26 +930,16 @@ impl MeerkatMachine {
         &self,
         authority: crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority,
     ) -> Result<(), RuntimeDriverError> {
-        // Phase-guarded: we use PublishRealtimeSignal with the
-        // next_binding_state the authority already represents, and the DSL
-        // guard enforces authority epoch match. We piggy-back on the existing
-        // DSL input because adding a dedicated "reattach-if-authority" input
-        // would duplicate the epoch check.
-        //
-        // Actually simpler: rely on the shell to read current epoch, compare,
-        // then apply RequireRealtimeReattach. Keep it as a direct apply.
-        let current = self
-            .read_session_realtime_authority_if_any(&authority.session_id)
-            .await?;
-        match current {
-            Some(live) if live.authority_epoch == authority.authority_epoch => {
-                self.require_realtime_attachment_reattach(&authority.session_id)
-                    .await
-            }
-            _ => Err(RuntimeDriverError::ValidationFailed {
-                reason: "stale realtime attachment authority".to_string(),
-            }),
-        }
+        self.stage_session_dsl_input(
+            &authority.session_id,
+            dsl::MeerkatMachineInput::RequireRealtimeReattachForAuthority {
+                authority_epoch: authority.authority_epoch,
+            },
+            "RequireRealtimeReattachForAuthority",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
     }
 
     /// Apply a provider-callback realtime signal through the DSL's authority-

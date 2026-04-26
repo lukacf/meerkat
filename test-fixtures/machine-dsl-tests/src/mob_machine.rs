@@ -1237,7 +1237,15 @@ mod tests {
             }
         }
 
-        let schema = MobMachineState::schema();
+        let mut schema = MobMachineState::schema();
+        schema.named_types = vec![
+            meerkat_machine_schema::identity::NamedTypeBinding::u64("FenceToken"),
+            meerkat_machine_schema::identity::NamedTypeBinding::u64("Generation"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("AgentIdentity"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("AgentRuntimeId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("MobPhase"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("WorkId"),
+        ];
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         let mut auth = MobMachineAuthority::new();

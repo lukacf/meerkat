@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 
@@ -67,9 +68,24 @@ pub enum RuntimeBindingsError {
     SessionNotFound(SessionId),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type MeerkatMachineCommandFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+#[cfg(target_arch = "wasm32")]
+type MeerkatMachineCommandFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>> + 'a>,
+>;
+
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run,
-    fail_runtime_loop_run, machine_apply_run_return_projection, machine_begin_run, machine_destroy,
+    fail_runtime_loop_run, machine_apply_run_return_projection, machine_batch_execution_kind,
+    machine_batch_primitive_projections, machine_begin_run, machine_destroy,
     machine_executor_attach_projection, machine_input_boundary,
     machine_prepare_bindings_projection, machine_recover_ephemeral_driver,
     machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
@@ -165,14 +181,6 @@ struct RuntimeSessionEntry {
     /// could fall out of sync across a registration/unregistration
     /// boundary.
     drain_slot: CommsDrainSlot,
-    /// D-track-b: per-session trust reconciler consuming the DSL-owned
-    /// `CommsTrustReconcileRequested` effect. Lazily constructed on the
-    /// first `stage_*_peer_endpoint` / `stage_apply_mob_peer_overlay`
-    /// call so the reconciler is bound to the caller-supplied
-    /// [`CommsRuntime`] (the same runtime the session's drain is
-    /// bound to). Re-used across subsequent stager calls so the
-    /// applied-view epoch watermark is monotonically advanced.
-    trust_reconciler: Option<Arc<crate::comms_trust_reconcile::CommsTrustReconciler>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -704,88 +712,90 @@ impl MeerkatMachine {
         }
     }
 
-    async fn execute_meerkat_machine_command(
+    fn execute_meerkat_machine_command(
         &self,
         self_handle: Option<Arc<Self>>,
         command: MeerkatMachineCommand,
-    ) -> Result<MeerkatMachineCommandResult, MeerkatMachineCommandError> {
-        match command {
-            MeerkatMachineCommand::EnsureSessionWithExecutor { .. } => {
-                let self_handle = self_handle.ok_or_else(|| {
-                    MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
-                        "EnsureSessionWithExecutor requires Arc<Self> machine handle".into(),
-                    ))
-                })?;
-                self_handle
-                    .execute_meerkat_machine_ensure_session_command(command)
+    ) -> MeerkatMachineCommandFuture<'_> {
+        Box::pin(async move {
+            match command {
+                MeerkatMachineCommand::EnsureSessionWithExecutor { .. } => {
+                    let self_handle = self_handle.ok_or_else(|| {
+                        MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
+                            "EnsureSessionWithExecutor requires Arc<Self> machine handle".into(),
+                        ))
+                    })?;
+                    self_handle
+                        .execute_meerkat_machine_ensure_session_command(command)
+                        .await
+                        .map_err(Into::into)
+                }
+                MeerkatMachineCommand::RegisterSession { .. }
+                | MeerkatMachineCommand::UnregisterSession { .. }
+                | MeerkatMachineCommand::SetSilentIntents { .. }
+                | MeerkatMachineCommand::InterruptCurrentRun { .. }
+                | MeerkatMachineCommand::CancelAfterBoundary { .. }
+                | MeerkatMachineCommand::StopRuntimeExecutor { .. }
+                | MeerkatMachineCommand::ContainsSession { .. }
+                | MeerkatMachineCommand::SessionHasExecutor { .. }
+                | MeerkatMachineCommand::SessionHasComms { .. }
+                | MeerkatMachineCommand::OpsLifecycleRegistry { .. }
+                | MeerkatMachineCommand::PrepareBindings { .. }
+                | MeerkatMachineCommand::PrepareLocalSessionBindings { .. }
+                | MeerkatMachineCommand::InputState { .. }
+                | MeerkatMachineCommand::ListActiveInputs { .. }
+                | MeerkatMachineCommand::ReconfigureSessionLlmIdentity { .. }
+                | MeerkatMachineCommand::StagePersistentFilter { .. }
+                | MeerkatMachineCommand::RequestDeferredTools { .. }
+                | MeerkatMachineCommand::PublishCommittedVisibleSet { .. } => self
+                    .execute_meerkat_machine_session_command(command)
                     .await
-                    .map_err(Into::into)
-            }
-            MeerkatMachineCommand::RegisterSession { .. }
-            | MeerkatMachineCommand::UnregisterSession { .. }
-            | MeerkatMachineCommand::SetSilentIntents { .. }
-            | MeerkatMachineCommand::InterruptCurrentRun { .. }
-            | MeerkatMachineCommand::CancelAfterBoundary { .. }
-            | MeerkatMachineCommand::StopRuntimeExecutor { .. }
-            | MeerkatMachineCommand::ContainsSession { .. }
-            | MeerkatMachineCommand::SessionHasExecutor { .. }
-            | MeerkatMachineCommand::SessionHasComms { .. }
-            | MeerkatMachineCommand::OpsLifecycleRegistry { .. }
-            | MeerkatMachineCommand::PrepareBindings { .. }
-            | MeerkatMachineCommand::PrepareLocalSessionBindings { .. }
-            | MeerkatMachineCommand::InputState { .. }
-            | MeerkatMachineCommand::ListActiveInputs { .. }
-            | MeerkatMachineCommand::ReconfigureSessionLlmIdentity { .. }
-            | MeerkatMachineCommand::StagePersistentFilter { .. }
-            | MeerkatMachineCommand::RequestDeferredTools { .. }
-            | MeerkatMachineCommand::PublishCommittedVisibleSet { .. } => self
-                .execute_meerkat_machine_session_command(command)
-                .await
-                .map_err(Into::into),
-            MeerkatMachineCommand::SetPeerIngressContext { .. }
-            | MeerkatMachineCommand::NotifyDrainExited { .. } => {
-                let self_handle = self_handle.ok_or_else(|| {
-                    MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
-                        "drain command requires Arc<Self> machine handle".into(),
-                    ))
-                })?;
-                self_handle
-                    .execute_meerkat_machine_drain_command(command)
+                    .map_err(Into::into),
+                MeerkatMachineCommand::SetPeerIngressContext { .. }
+                | MeerkatMachineCommand::NotifyDrainExited { .. } => {
+                    let self_handle = self_handle.ok_or_else(|| {
+                        MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
+                            "drain command requires Arc<Self> machine handle".into(),
+                        ))
+                    })?;
+                    self_handle
+                        .execute_meerkat_machine_drain_command(command)
+                        .await
+                        .map_err(Into::into)
+                }
+                MeerkatMachineCommand::AbortAll
+                | MeerkatMachineCommand::Abort { .. }
+                | MeerkatMachineCommand::Wait { .. } => self
+                    .execute_meerkat_machine_drain_local_command(command)
                     .await
-                    .map_err(Into::into)
+                    .map_err(Into::into),
+                MeerkatMachineCommand::Ingest { .. }
+                | MeerkatMachineCommand::PublishEvent { .. }
+                | MeerkatMachineCommand::Retire { .. }
+                | MeerkatMachineCommand::Recycle { .. }
+                | MeerkatMachineCommand::Reset { .. }
+                | MeerkatMachineCommand::Recover { .. }
+                | MeerkatMachineCommand::Destroy { .. }
+                | MeerkatMachineCommand::RuntimeState { .. }
+                | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
+                | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
+                | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
+                    .execute_meerkat_machine_control_command(command)
+                    .await
+                    .map_err(Into::into),
+                MeerkatMachineCommand::AcceptWithCompletion { .. }
+                | MeerkatMachineCommand::AcceptWithoutWake { .. } => self
+                    .execute_meerkat_machine_ingress_command(command)
+                    .await
+                    .map_err(Into::into),
+                MeerkatMachineCommand::Prepare { .. }
+                | MeerkatMachineCommand::Commit { .. }
+                | MeerkatMachineCommand::Fail { .. } => self
+                    .execute_meerkat_machine_legacy_run_command(command)
+                    .await
+                    .map_err(Into::into),
             }
-            MeerkatMachineCommand::AbortAll
-            | MeerkatMachineCommand::Abort { .. }
-            | MeerkatMachineCommand::Wait { .. } => self
-                .execute_meerkat_machine_drain_local_command(command)
-                .await
-                .map_err(Into::into),
-            MeerkatMachineCommand::Ingest { .. }
-            | MeerkatMachineCommand::PublishEvent { .. }
-            | MeerkatMachineCommand::Retire { .. }
-            | MeerkatMachineCommand::Recycle { .. }
-            | MeerkatMachineCommand::Reset { .. }
-            | MeerkatMachineCommand::Recover { .. }
-            | MeerkatMachineCommand::Destroy { .. }
-            | MeerkatMachineCommand::RuntimeState { .. }
-            | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
-            | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
-            | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
-                .execute_meerkat_machine_control_command(command)
-                .await
-                .map_err(Into::into),
-            MeerkatMachineCommand::AcceptWithCompletion { .. }
-            | MeerkatMachineCommand::AcceptWithoutWake { .. } => self
-                .execute_meerkat_machine_ingress_command(command)
-                .await
-                .map_err(Into::into),
-            MeerkatMachineCommand::Prepare { .. }
-            | MeerkatMachineCommand::Commit { .. }
-            | MeerkatMachineCommand::Fail { .. } => self
-                .execute_meerkat_machine_legacy_run_command(command)
-                .await
-                .map_err(Into::into),
-        }
+        })
     }
 
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but

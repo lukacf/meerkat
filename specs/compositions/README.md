@@ -17,6 +17,7 @@ Canonical composition set:
 
 - `meerkat_mob_seam`
 - perimeter compositions retained after audit:
+  - `auth_lease_bundle`
   - `schedule_bundle`
   - `schedule_runtime_bundle`
   - `schedule_mob_bundle`
@@ -28,6 +29,8 @@ Status:
 - `meerkat_mob_seam` is the sole inter-kernel composition
 - the retained perimeter compositions were audited during the two-kernel
   collapse:
+  - `auth_lease_bundle` remains because it publishes auth lease lifecycle
+    facts across the auth authority perimeter
   - `schedule_bundle` remains the pure schedule/occurrence perimeter bundle
   - `schedule_runtime_bundle` remains because it references only
     schedule/occurrence delivery protocol edges into the runtime perimeter

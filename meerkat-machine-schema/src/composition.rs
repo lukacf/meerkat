@@ -1,11 +1,109 @@
 use crate::identity::{
-    ActorId, CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
-    PhaseId, ProtocolId, RouteId, SignalVariantId, TransitionId,
+    ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
+    EntryInputId, FieldId, InputVariantId, MachineId, MachineInstanceId, PhaseId, ProtocolId,
+    RouteId, SignalVariantId, StorePrimitiveId, TransactionPlanId, TransactionTriggerId,
+    TransitionId,
 };
 use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
 use std::collections::BTreeMap;
 use std::fmt;
+
+macro_rules! define_metadata_string {
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+define_metadata_string!(
+    /// Repository-relative Rust module path consumed by composition codegen.
+    RustModulePath
+);
+
+impl AsRef<std::path::Path> for RustModulePath {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(self.as_str())
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for RustModulePath {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new(self.as_str())
+    }
+}
+
+define_metadata_string!(
+    /// Fully-qualified Rust type or trait path used by generated helper code.
+    RustTypePath
+);
+define_metadata_string!(
+    /// Rust item identifier emitted into generated driver/helper modules.
+    RustItemIdent
+);
+define_metadata_string!(
+    /// Rust method identifier emitted by HandleBridge helpers.
+    RustMethodName
+);
+define_metadata_string!(
+    /// Complete Rust `use ...;` import line inserted into generated code.
+    RustUseStatement
+);
+define_metadata_string!(
+    /// Rust expression suffix appended to an obligation-field reference.
+    RustArgAccessor
+);
+define_metadata_string!(
+    /// Rust module qualifier for kernel-codegen payload structs.
+    RustPayloadModulePath
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
@@ -135,12 +233,12 @@ pub enum FeedbackFieldSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleBridgeFeedbackBinding {
     pub input_variant: InputVariantId,
-    pub method_name: String,
+    pub method_name: RustMethodName,
     /// Per-call suffix applied to `obligation.<field>` references when
     /// constructing handle-method arguments. Keys are typed obligation
     /// field ids; values are suffixes like `.0`, `.clone()`, `.into()`.
     /// Absent entries emit bare `obligation.<field>`.
-    pub arg_accessors: BTreeMap<FieldId, String>,
+    pub arg_accessors: BTreeMap<FieldId, RustArgAccessor>,
     /// Positional list of obligation fields forwarded to the handle
     /// method. `None` falls back to every obligation-sourced feedback
     /// binding in declaration order. Use `Some(vec![...])` when the
@@ -153,32 +251,32 @@ pub struct HandleBridgeFeedbackBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolRustBinding {
     /// Output file path relative to the repo root.
-    pub module_path: String,
+    pub module_path: RustModulePath,
     /// How the helper is generated.
     pub generation_mode: ProtocolGenerationMode,
     /// `use ...;` lines inserted at the top of the helper module.
-    pub required_imports: Vec<String>,
+    pub required_imports: Vec<RustUseStatement>,
     /// Concrete authority type used by generated helpers.
-    pub authority_type_path: Option<String>,
+    pub authority_type_path: Option<RustTypePath>,
     /// Sealed mutator trait path used to call `apply`.
-    pub mutator_trait_path: Option<String>,
+    pub mutator_trait_path: Option<RustTypePath>,
     /// Typed input enum path for feedback/executor helpers.
-    pub input_enum_path: Option<String>,
+    pub input_enum_path: Option<RustTypePath>,
     /// Typed effect enum path for executor/effect-extractor helpers.
-    pub effect_enum_path: Option<String>,
+    pub effect_enum_path: Option<RustTypePath>,
     /// Concrete transition type returned by `authority.apply(...)`.
-    pub transition_type_path: Option<String>,
+    pub transition_type_path: Option<RustTypePath>,
     /// Concrete error type returned by `authority.apply(...)`.
-    pub error_type_path: Option<String>,
+    pub error_type_path: Option<RustTypePath>,
     /// Triggering producer input variant for `Executor` helpers.
-    pub executor_trigger_input_variant: Option<String>,
+    pub executor_trigger_input_variant: Option<InputVariantId>,
     /// Authority-owned source token type for `ShellBridge` helpers.
-    pub bridge_source_type_path: Option<String>,
+    pub bridge_source_type_path: Option<RustTypePath>,
     /// Shape of the primary generated helper return value.
     pub helper_return_shape: ProtocolHelperReturnShape,
     /// Handle trait path used by `HandleBridge` helpers. Required when
     /// `generation_mode` or `additional_modes` contains `HandleBridge`.
-    pub handle_trait_path: Option<String>,
+    pub handle_trait_path: Option<RustTypePath>,
     /// HandleBridge metadata per feedback input. Required for each
     /// feedback entry emitted through the `HandleBridge` mode.
     pub handle_feedback_bindings: Vec<HandleBridgeFeedbackBinding>,
@@ -190,7 +288,7 @@ pub struct ProtocolRustBinding {
     /// codegen emits the tuple-wrapping form and qualifies the payload
     /// struct by this module path (e.g. `inputs`). Absent → named-field
     /// form (the canonical DSL-emitted shape).
-    pub input_payload_module_path: Option<String>,
+    pub input_payload_module_path: Option<RustPayloadModulePath>,
     /// Additional generation modes stacked onto the primary mode. Each
     /// listed mode emits its own family of helpers into the same output
     /// file, letting a single protocol expose both (for example)
@@ -228,17 +326,17 @@ pub enum ProtocolHelperReturnShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriverRustBinding {
     /// Output file path relative to the repo root.
-    pub module_path: String,
+    pub module_path: RustModulePath,
     /// Primary generated driver type name.
-    pub driver_type: String,
+    pub driver_type: RustItemIdent,
     /// Generated store-plan enum type name.
-    pub store_plan_type: String,
+    pub store_plan_type: RustItemIdent,
     /// Generated follow-up work enum type name.
-    pub work_type: String,
+    pub work_type: RustItemIdent,
     /// Generated decision type name.
-    pub decision_type: String,
+    pub decision_type: RustItemIdent,
     /// `use ...;` lines inserted at the top of the generated driver module.
-    pub required_imports: Vec<String>,
+    pub required_imports: Vec<RustUseStatement>,
 }
 
 /// Declarative description of a composition-level driver.
@@ -256,9 +354,9 @@ pub struct CompositionDriverRustBinding {
 /// codegen knowing about it by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionDriver {
-    /// Stable logical name — used for driver registration at runtime and
+    /// Stable logical name used for driver registration at runtime and
     /// referenced in diagnostics.
-    pub name: String,
+    pub name: CompositionDriverId,
     /// Rust emission/runtime binding metadata.
     pub rust: CompositionDriverRustBinding,
     /// Effects this driver observes. Each entry pairs a producer machine
@@ -310,14 +408,14 @@ pub struct RouteTargetSelector {
 /// Describes an atomic persistence bundle for a composition-owned driver plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionTransactionPlan {
-    /// Stable transaction-plan name. Free-form — not a kernel identity.
-    pub name: String,
+    /// Stable transaction-plan identity.
+    pub name: TransactionPlanId,
     /// Host/runtime trigger or entrypoint that requests this plan.
-    pub trigger: String,
+    pub trigger: TransactionTriggerId,
     /// Human-readable explanation of the bundle.
     pub description: String,
     /// Existing store primitive that realizes the plan atomically.
-    pub store_primitive: String,
+    pub store_primitive: StorePrimitiveId,
     /// Deterministic routes included in the bundle.
     pub route_names: Vec<RouteId>,
     /// Handoff protocols explicitly closed or emitted by the bundle.
@@ -337,8 +435,8 @@ pub enum ClosurePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitness {
-    /// Stable witness name. Free-form; not a kernel identity.
-    pub name: String,
+    /// Stable witness identity.
+    pub name: CompositionWitnessId,
     pub preload_inputs: Vec<CompositionWitnessInput>,
     pub expected_routes: Vec<RouteId>,
     pub expected_scheduler_rules: Vec<SchedulerRule>,
@@ -610,7 +708,7 @@ impl CompositionSchema {
         }
 
         if let Some(driver) = &self.driver {
-            if driver.name.is_empty() {
+            if driver.name.as_str().is_empty() {
                 return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
                     composition: self.name.as_str().to_owned(),
                     detail: "driver name must not be empty".into(),
@@ -662,22 +760,22 @@ impl CompositionSchema {
             .map(|protocol| protocol.name.as_str())
             .collect::<IndexSet<_>>();
         for plan in &self.transaction_plans {
-            if plan.trigger.is_empty() {
+            if plan.trigger.as_str().is_empty() {
                 return Err(CompositionSchemaError::InvalidTransactionPlan {
-                    plan: plan.name.clone(),
+                    plan: plan.name.to_string(),
                     detail: "trigger must not be empty".into(),
                 });
             }
-            if plan.store_primitive.is_empty() {
+            if plan.store_primitive.as_str().is_empty() {
                 return Err(CompositionSchemaError::InvalidTransactionPlan {
-                    plan: plan.name.clone(),
+                    plan: plan.name.to_string(),
                     detail: "store_primitive must not be empty".into(),
                 });
             }
             for route_name in &plan.route_names {
                 if !route_names.contains(route_name.as_str()) {
                     return Err(CompositionSchemaError::UnknownTransactionPlanRoute {
-                        plan: plan.name.clone(),
+                        plan: plan.name.to_string(),
                         route: route_name.as_str().to_owned(),
                     });
                 }
@@ -685,7 +783,7 @@ impl CompositionSchema {
             for protocol_name in &plan.protocol_names {
                 if !protocol_names.contains(protocol_name.as_str()) {
                     return Err(CompositionSchemaError::UnknownTransactionPlanProtocol {
-                        plan: plan.name.clone(),
+                        plan: plan.name.to_string(),
                         protocol: protocol_name.as_str().to_owned(),
                     });
                 }
@@ -724,7 +822,7 @@ impl CompositionSchema {
             for route in &witness.expected_routes {
                 if !route_names.contains(route.as_str()) {
                     return Err(CompositionSchemaError::UnknownWitnessRoute {
-                        witness: witness.name.clone(),
+                        witness: witness.name.to_string(),
                         route: route.as_str().to_owned(),
                     });
                 }
@@ -737,7 +835,7 @@ impl CompositionSchema {
                     .any(|candidate| candidate == rule)
                 {
                     return Err(CompositionSchemaError::UnknownWitnessSchedulerRule {
-                        witness: witness.name.clone(),
+                        witness: witness.name.to_string(),
                         rule: rule.clone(),
                     });
                 }
@@ -1152,7 +1250,7 @@ impl CompositionSchema {
                     .ok_or_else(|| {
                         CompositionSchemaError::UnknownCompositionDriverWatchedMachine {
                             composition: self.name.as_str().to_owned(),
-                            driver: driver.name.clone(),
+                            driver: driver.name.to_string(),
                             instance: watched.producer_instance.as_str().to_owned(),
                         }
                     })?;
@@ -1165,7 +1263,7 @@ impl CompositionSchema {
                     return Err(
                         CompositionSchemaError::UnknownCompositionDriverWatchedEffect {
                             composition: self.name.as_str().to_owned(),
-                            driver: driver.name.clone(),
+                            driver: driver.name.to_string(),
                             instance: watched.producer_instance.as_str().to_owned(),
                             effect_variant: watched.effect_variant.as_str().to_owned(),
                         },
@@ -1185,7 +1283,7 @@ impl CompositionSchema {
                     .ok_or_else(|| {
                         CompositionSchemaError::UnknownCompositionDriverDispatchMachine {
                             composition: self.name.as_str().to_owned(),
-                            driver: driver.name.clone(),
+                            driver: driver.name.to_string(),
                             instance: dispatch.target_instance.as_str().to_owned(),
                         }
                     })?;
@@ -1204,7 +1302,7 @@ impl CompositionSchema {
                     return Err(
                         CompositionSchemaError::UnknownCompositionDriverDispatchVariant {
                             composition: self.name.as_str().to_owned(),
-                            driver: driver.name.clone(),
+                            driver: driver.name.to_string(),
                             instance: dispatch.target_instance.as_str().to_owned(),
                             target_kind: dispatch.target_kind,
                             variant: dispatch.input_variant.as_str().to_owned(),
@@ -1239,14 +1337,14 @@ impl CompositionSchema {
                         .map_err(CompositionSchemaError::MachineSchema)?;
                     if !route_literal_expr_allowed(&field.expr) {
                         return Err(CompositionSchemaError::UnsupportedWitnessLiteral {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: preload.machine.as_str().to_owned(),
                             field: field.field.as_str().to_owned(),
                         });
                     }
                     if !literal_matches_type(&field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessLiteralTypeMismatch {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: preload.machine.as_str().to_owned(),
                             field: field.field.as_str().to_owned(),
                             ty: target_field.ty.clone(),
@@ -1261,7 +1359,7 @@ impl CompositionSchema {
                         .any(|candidate| candidate.field == field.name);
                     if !present {
                         return Err(CompositionSchemaError::MissingWitnessField {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: preload.machine.as_str().to_owned(),
                             input_variant: preload.input_variant.as_str().to_owned(),
                             field: field.name.as_str().to_owned(),
@@ -1291,7 +1389,7 @@ impl CompositionSchema {
                         .map_err(CompositionSchemaError::MachineSchema)?;
                     if !phases.contains(phase.as_str()) {
                         return Err(CompositionSchemaError::UnknownWitnessPhase {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: state.machine.as_str().to_owned(),
                             phase: phase.as_str().to_owned(),
                         });
@@ -1310,20 +1408,20 @@ impl CompositionSchema {
                         .iter()
                         .find(|candidate| candidate.name == field.field)
                         .ok_or_else(|| CompositionSchemaError::UnknownWitnessStateField {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: state.machine.as_str().to_owned(),
                             field: field.field.as_str().to_owned(),
                         })?;
                     if !route_literal_expr_allowed(&field.expr) {
                         return Err(CompositionSchemaError::UnsupportedWitnessStateLiteral {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: state.machine.as_str().to_owned(),
                             field: field.field.as_str().to_owned(),
                         });
                     }
                     if !literal_matches_type(&field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessStateLiteralTypeMismatch {
-                            witness: witness.name.clone(),
+                            witness: witness.name.to_string(),
                             machine: state.machine.as_str().to_owned(),
                             field: field.field.as_str().to_owned(),
                             ty: target_field.ty.clone(),
@@ -1637,8 +1735,8 @@ pub struct MachineInstance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryInput {
-    /// Free-form entry-point name. Not a kernel identity.
-    pub name: String,
+    /// Stable entry-point identity.
+    pub name: EntryInputId,
     pub machine: MachineInstanceId,
     pub input_variant: InputVariantId,
 }
@@ -2697,7 +2795,7 @@ fn validate_witness_transition_ref(
         .any(|candidate| candidate.name == transition.transition);
     if !present {
         return Err(CompositionSchemaError::UnknownWitnessTransition {
-            witness: witness.name.clone(),
+            witness: witness.name.to_string(),
             machine: transition.machine.as_str().to_owned(),
             transition: transition.transition.as_str().to_owned(),
         });

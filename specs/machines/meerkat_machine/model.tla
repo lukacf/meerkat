@@ -3,14 +3,19 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MeerkatMachine.
 
-CONSTANTS AgentRuntimeIdValues, BooleanValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputIdValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OperationIdValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RealtimeProjectionFreshnessValues, RealtimeReconnectPolicyValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfStringValues, StringValues, SupervisorBindingKindValues, SurfaceDeltaOperationValues, SurfaceIdValues, ToolFilterValues, ToolVisibilityWitnessValues, TurnNumberValues, WorkIdValues, WorkOriginValues
+CONSTANTS AgentRuntimeIdValues, BooleanValues, BoundarySequenceValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputIdValues, InputLaneValues, InputPhaseValues, InputTerminalKindValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OperationIdValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RealtimeProjectionFreshnessValues, RealtimeReconnectPolicyValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfStringValues, StringValues, SupervisorBindingKindValues, SurfaceDeltaOperationValues, SurfaceIdValues, ToolFilterValues, ToolVisibilityWitnessValues, TurnNumberValues, WorkIdValues, WorkOriginValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 OptionAgentRuntimeIdValues == {None} \cup {Some(x) : x \in AgentRuntimeIdValues}
+OptionBoundarySequenceValues == {None} \cup {Some(x) : x \in BoundarySequenceValues}
 OptionCommsRuntimeIdValues == {None} \cup {Some(x) : x \in CommsRuntimeIdValues}
 OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
+OptionInputAbandonReasonValues == {None} \cup {Some(x) : x \in InputAbandonReasonValues}
+OptionInputIdValues == {None} \cup {Some(x) : x \in InputIdValues}
+OptionInputLaneValues == {None} \cup {Some(x) : x \in InputLaneValues}
+OptionInputTerminalKindValues == {None} \cup {Some(x) : x \in InputTerminalKindValues}
 OptionMobIdValues == {None} \cup {Some(x) : x \in MobIdValues}
 OptionPeerEndpointValues == {None} \cup {Some(x) : x \in PeerEndpointValues}
 OptionRunIdValues == {None} \cup {Some(x) : x \in RunIdValues}
@@ -570,6 +575,41 @@ Destroy(arg_session_id) ==
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RecoverInputLifecycleIdle(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane) ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RecoverInputLifecycleAttached(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RecoverInputLifecycleRunning(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane) ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RecoverInputLifecycleRetired(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane) ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RecoverInputLifecycleStopped(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
 
 
 EnsureSessionWithExecutorIdle(arg_session_id) ==
@@ -1603,6 +1643,71 @@ RequireRealtimeReattachRetired ==
 RequireRealtimeReattachStopped ==
     /\ phase = "Stopped"
     /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_binding_state' = "Unbound"
+    /\ realtime_binding_authority_epoch' = None
+    /\ realtime_reattach_required' = TRUE
+    /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RequireRealtimeReattachForAuthorityIdle(authority_epoch) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ (realtime_binding_authority_epoch = Some(authority_epoch))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_binding_state' = "Unbound"
+    /\ realtime_binding_authority_epoch' = None
+    /\ realtime_reattach_required' = TRUE
+    /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RequireRealtimeReattachForAuthorityAttached(authority_epoch) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ (realtime_binding_authority_epoch = Some(authority_epoch))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_binding_state' = "Unbound"
+    /\ realtime_binding_authority_epoch' = None
+    /\ realtime_reattach_required' = TRUE
+    /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RequireRealtimeReattachForAuthorityRunning(authority_epoch) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ (realtime_binding_authority_epoch = Some(authority_epoch))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_binding_state' = "Unbound"
+    /\ realtime_binding_authority_epoch' = None
+    /\ realtime_reattach_required' = TRUE
+    /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RequireRealtimeReattachForAuthorityRetired(authority_epoch) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ (realtime_binding_authority_epoch = Some(authority_epoch))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_binding_state' = "Unbound"
+    /\ realtime_binding_authority_epoch' = None
+    /\ realtime_reattach_required' = TRUE
+    /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RequireRealtimeReattachForAuthorityStopped(authority_epoch) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ (realtime_binding_authority_epoch = Some(authority_epoch))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -3873,7 +3978,7 @@ FailLiveTopologyAfterDetachStopped ==
 AttachSessionIngressIdle(comms_runtime_id) ==
     /\ phase = "Idle"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind = "Unattached")
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ ((peer_ingress_owner_kind = "SessionOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = None)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "SessionOwned"
@@ -3885,7 +3990,7 @@ AttachSessionIngressIdle(comms_runtime_id) ==
 AttachSessionIngressAttached(comms_runtime_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind = "Unattached")
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ ((peer_ingress_owner_kind = "SessionOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = None)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "SessionOwned"
@@ -3897,7 +4002,7 @@ AttachSessionIngressAttached(comms_runtime_id) ==
 AttachSessionIngressRunning(comms_runtime_id) ==
     /\ phase = "Running"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind = "Unattached")
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ ((peer_ingress_owner_kind = "SessionOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = None)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "SessionOwned"
@@ -3909,7 +4014,7 @@ AttachSessionIngressRunning(comms_runtime_id) ==
 AttachSessionIngressRetired(comms_runtime_id) ==
     /\ phase = "Retired"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind = "Unattached")
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ ((peer_ingress_owner_kind = "SessionOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = None)))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "SessionOwned"
@@ -3921,7 +4026,7 @@ AttachSessionIngressRetired(comms_runtime_id) ==
 AttachSessionIngressStopped(comms_runtime_id) ==
     /\ phase = "Stopped"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind = "Unattached")
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ ((peer_ingress_owner_kind = "SessionOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = None)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "SessionOwned"
@@ -3933,7 +4038,7 @@ AttachSessionIngressStopped(comms_runtime_id) ==
 AttachMobIngressIdle(comms_runtime_id, mob_id) ==
     /\ phase = "Idle"
     /\ (session_id # None)
-    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned"))
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned") \/ ((peer_ingress_owner_kind = "MobOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = Some(mob_id))))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "MobOwned"
@@ -3945,7 +4050,7 @@ AttachMobIngressIdle(comms_runtime_id, mob_id) ==
 AttachMobIngressAttached(comms_runtime_id, mob_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
-    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned"))
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned") \/ ((peer_ingress_owner_kind = "MobOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = Some(mob_id))))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "MobOwned"
@@ -3957,7 +4062,7 @@ AttachMobIngressAttached(comms_runtime_id, mob_id) ==
 AttachMobIngressRunning(comms_runtime_id, mob_id) ==
     /\ phase = "Running"
     /\ (session_id # None)
-    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned"))
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned") \/ ((peer_ingress_owner_kind = "MobOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = Some(mob_id))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "MobOwned"
@@ -3969,7 +4074,7 @@ AttachMobIngressRunning(comms_runtime_id, mob_id) ==
 AttachMobIngressRetired(comms_runtime_id, mob_id) ==
     /\ phase = "Retired"
     /\ (session_id # None)
-    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned"))
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned") \/ ((peer_ingress_owner_kind = "MobOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = Some(mob_id))))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "MobOwned"
@@ -3981,7 +4086,7 @@ AttachMobIngressRetired(comms_runtime_id, mob_id) ==
 AttachMobIngressStopped(comms_runtime_id, mob_id) ==
     /\ phase = "Stopped"
     /\ (session_id # None)
-    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned"))
+    /\ ((peer_ingress_owner_kind = "Unattached") \/ (peer_ingress_owner_kind = "SessionOwned") \/ ((peer_ingress_owner_kind = "MobOwned") /\ (peer_ingress_comms_runtime_id = Some(comms_runtime_id)) /\ (peer_ingress_mob_id = Some(mob_id))))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "MobOwned"
@@ -3993,7 +4098,6 @@ AttachMobIngressStopped(comms_runtime_id, mob_id) ==
 DetachIngressIdle ==
     /\ phase = "Idle"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind # "Unattached")
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "Unattached"
@@ -4005,7 +4109,6 @@ DetachIngressIdle ==
 DetachIngressAttached ==
     /\ phase = "Attached"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind # "Unattached")
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "Unattached"
@@ -4017,7 +4120,6 @@ DetachIngressAttached ==
 DetachIngressRunning ==
     /\ phase = "Running"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind # "Unattached")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "Unattached"
@@ -4029,7 +4131,6 @@ DetachIngressRunning ==
 DetachIngressRetired ==
     /\ phase = "Retired"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind # "Unattached")
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "Unattached"
@@ -4041,7 +4142,6 @@ DetachIngressRetired ==
 DetachIngressStopped ==
     /\ phase = "Stopped"
     /\ (session_id # None)
-    /\ (peer_ingress_owner_kind # "Unattached")
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_owner_kind' = "Unattached"
@@ -4666,6 +4766,11 @@ Next ==
     \/ StopRuntimeExecutorAttached
     \/ StopRuntimeExecutorRunning
     \/ \E arg_session_id \in SessionIdValues : Destroy(arg_session_id)
+    \/ \E input_id \in InputIdValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionInputIdValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionRunIdValues : \E boundary_sequence \in OptionBoundarySequenceValues : \E lane \in OptionInputLaneValues : RecoverInputLifecycleIdle(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+    \/ \E input_id \in InputIdValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionInputIdValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionRunIdValues : \E boundary_sequence \in OptionBoundarySequenceValues : \E lane \in OptionInputLaneValues : RecoverInputLifecycleAttached(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+    \/ \E input_id \in InputIdValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionInputIdValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionRunIdValues : \E boundary_sequence \in OptionBoundarySequenceValues : \E lane \in OptionInputLaneValues : RecoverInputLifecycleRunning(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+    \/ \E input_id \in InputIdValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionInputIdValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionRunIdValues : \E boundary_sequence \in OptionBoundarySequenceValues : \E lane \in OptionInputLaneValues : RecoverInputLifecycleRetired(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+    \/ \E input_id \in InputIdValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionInputIdValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionRunIdValues : \E boundary_sequence \in OptionBoundarySequenceValues : \E lane \in OptionInputLaneValues : RecoverInputLifecycleStopped(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorAttached(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorRunning(arg_session_id)
@@ -4779,6 +4884,11 @@ Next ==
     \/ RequireRealtimeReattachRunning
     \/ RequireRealtimeReattachRetired
     \/ RequireRealtimeReattachStopped
+    \/ \E authority_epoch \in 0..2 : RequireRealtimeReattachForAuthorityIdle(authority_epoch)
+    \/ \E authority_epoch \in 0..2 : RequireRealtimeReattachForAuthorityAttached(authority_epoch)
+    \/ \E authority_epoch \in 0..2 : RequireRealtimeReattachForAuthorityRunning(authority_epoch)
+    \/ \E authority_epoch \in 0..2 : RequireRealtimeReattachForAuthorityRetired(authority_epoch)
+    \/ \E authority_epoch \in 0..2 : RequireRealtimeReattachForAuthorityStopped(authority_epoch)
     \/ \E authority_epoch \in 0..2 : \E next_binding_state \in RealtimeBindingStateValues : PublishRealtimeSignalIdle(authority_epoch, next_binding_state)
     \/ \E authority_epoch \in 0..2 : \E next_binding_state \in RealtimeBindingStateValues : PublishRealtimeSignalAttached(authority_epoch, next_binding_state)
     \/ \E authority_epoch \in 0..2 : \E next_binding_state \in RealtimeBindingStateValues : PublishRealtimeSignalRunning(authority_epoch, next_binding_state)

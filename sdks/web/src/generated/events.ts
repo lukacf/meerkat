@@ -3,6 +3,65 @@
 
 export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
+export type AgentErrorReason = {
+  reason_type: "llm_rate_limited";
+  retry_after_ms?: number | null;
+} | {
+  max: number;
+  reason_type: "llm_context_exceeded";
+  requested: number;
+} | {
+  reason_type: "llm_auth_error";
+} | {
+  model: string;
+  reason_type: "llm_invalid_model";
+} | {
+  provider_error: unknown;
+  reason_type: "llm_provider_error";
+} | {
+  duration_ms: number;
+  reason_type: "llm_network_timeout";
+} | {
+  duration_ms: number;
+  reason_type: "llm_call_timeout";
+} | {
+  point: HookPoint;
+  reason_code: HookReasonCode;
+  reason_type: "hook_denied";
+} | {
+  hook_id: string;
+  reason_type: "hook_timeout";
+  timeout_ms: number;
+} | {
+  hook_id: string;
+  reason: string;
+  reason_type: "hook_execution_failed";
+} | {
+  reason: string;
+  reason_type: "hook_config_invalid";
+} | {
+  attempts: number;
+  reason: string;
+  reason_type: "structured_output_validation_failed";
+} | {
+  reason: string;
+  reason_type: "invalid_output_schema";
+} | {
+  binding_key: string;
+  message: string;
+  reason_type: "auth_reauth_required";
+} | {
+  args: unknown;
+  reason_type: "callback_pending";
+  tool_name: string;
+};
+
+export type AgentErrorReport = {
+  class: AgentErrorClass;
+  message: string;
+  reason?: AgentErrorReason | null;
+};
+
 export type BlobId = string;
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
@@ -67,6 +126,31 @@ export type HookRevision = number;
 
 export type InteractionId = string;
 
+export type LlmRetryFailure = {
+  duration_ms?: number | null;
+  kind: LlmRetryFailureKind;
+  message: string;
+  provider: string;
+  retry_after_ms?: number | null;
+};
+
+export type LlmRetryFailureKind = "rate_limited" | "network_timeout" | "call_timeout" | "retryable_provider_error";
+
+export type LlmRetryPlan = {
+  attempt: number;
+  budget_capped: boolean;
+  computed_delay_ms: number;
+  max_retries: number;
+  rate_limit_floor_applied: boolean;
+  retry_after_hint_ms?: number | null;
+  selected_delay_ms: number;
+};
+
+export interface LlmRetrySchedule {
+  failure: LlmRetryFailure;
+  plan: LlmRetryPlan;
+}
+
 export type SessionId = string;
 
 export interface SkillKey {
@@ -86,8 +170,8 @@ export type ToolConfigChangeOperation = "add" | "remove" | "reload";
 
 export type ToolConfigChangedPayload = {
   applied_at_turn?: number | null;
-  deferred_catalog_delta?: DeferredCatalogDelta | unknown;
-  domain?: ToolConfigChangeDomain | unknown;
+  deferred_catalog_delta?: DeferredCatalogDelta | null;
+  domain?: ToolConfigChangeDomain | null;
   operation: ToolConfigChangeOperation;
   persisted: boolean;
   status: string;
@@ -117,6 +201,7 @@ export interface RunCompletedEvent {
 export interface RunFailedEvent {
   error: string;
   error_class: AgentErrorClass;
+  error_report?: AgentErrorReport | null;
   session_id: SessionId;
   type: "run_failed";
 }
@@ -264,6 +349,7 @@ export interface RetryingEvent {
   delay_ms: number;
   error: string;
   max_attempts: number;
+  retry?: LlmRetrySchedule | null;
   type: "retrying";
 }
 

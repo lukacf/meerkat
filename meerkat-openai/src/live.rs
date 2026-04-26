@@ -687,7 +687,7 @@ fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
     visible_tools
         .iter()
         .map(|tool| Tool::Function {
-            name: tool.name.clone(),
+            name: tool.name.clone().into(),
             description: (!tool.description.trim().is_empty()).then(|| tool.description.clone()),
             parameters: tool.input_schema.clone(),
         })
@@ -2117,7 +2117,7 @@ mod tests {
                 connection_ref: None,
             },
             vec![ToolDef {
-                name: "send_request".to_string(),
+                name: "send_request".into(),
                 description: "Send a request to another mob member.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -2834,7 +2834,7 @@ mod tests {
                         item_id: "item_2".to_string(),
                         output_index: 0,
                         call_id: "call_1".to_string(),
-                        name: "lookup".to_string(),
+                        name: "lookup".into(),
                         arguments: "{\"q\":\"otter\"}".to_string(),
                     })),
                     Ok(Some(ServerEvent::ResponseCancelled {
@@ -2906,7 +2906,7 @@ mod tests {
                         item_id: "item_tool".to_string(),
                         output_index: 0,
                         call_id: "call_tool".to_string(),
-                        name: "send_request".to_string(),
+                        name: "send_request".into(),
                         arguments: "{\"subject\":\"alpha beta gamma\"}".to_string(),
                     })),
                     Ok(Some(ServerEvent::ResponseDone {
@@ -3714,7 +3714,7 @@ mod tests {
                             status: None,
                             call_id: "call_mcp_1".to_string(),
                             server_label: "meerkat".to_string(),
-                            name: "send_request".to_string(),
+                            name: "send_request".into(),
                             arguments: "".to_string(),
                             approval_request_id: None,
                             output: None,
@@ -3760,7 +3760,7 @@ mod tests {
                             status: None,
                             call_id: "call_mcp_2".to_string(),
                             server_label: "meerkat".to_string(),
-                            name: "send_request".to_string(),
+                            name: "send_request".into(),
                             arguments: "".to_string(),
                             approval_request_id: None,
                             output: None,

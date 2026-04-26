@@ -1116,6 +1116,11 @@ impl ToolCall {
     pub fn new(id: String, name: String, args: Value) -> Self {
         Self { id, name, args }
     }
+
+    /// Return the typed model-facing tool name for internal policy and routing.
+    pub fn tool_name(&self) -> ToolName {
+        ToolName::new(self.name.clone())
+    }
 }
 
 /// Result of executing a tool
@@ -1270,14 +1275,346 @@ pub enum ToolSourceKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolProvenance {
     pub kind: ToolSourceKind,
-    pub source_id: String,
+    pub source_id: ToolSourceId,
+}
+
+/// Canonical typed source identifier for tool provenance.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolSourceId(String);
+
+impl ToolSourceId {
+    pub fn new(source_id: impl Into<String>) -> Self {
+        Self(source_id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for ToolSourceId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<ToolSourceId> for String {
+    fn from(value: ToolSourceId) -> Self {
+        value.into_string()
+    }
+}
+
+impl From<&str> for ToolSourceId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ToolSourceId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for ToolSourceId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for ToolSourceId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ToolSourceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for ToolSourceId {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ToolSourceId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ToolSourceId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<ToolSourceId> for String {
+    fn eq(&self, other: &ToolSourceId) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<ToolSourceId> for str {
+    fn eq(&self, other: &ToolSourceId) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<ToolSourceId> for &str {
+    fn eq(&self, other: &ToolSourceId) -> bool {
+        *self == other.as_str()
+    }
+}
+
+/// Canonical typed name for an LLM-callable tool.
+///
+/// The model-facing wire shape is still the provider's string tool name, but
+/// internal policy, routing, and registry surfaces carry this handle so raw
+/// strings do not become the tool identity owner.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolName(String);
+
+impl ToolName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for ToolName {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<ToolName> for String {
+    fn from(value: ToolName) -> Self {
+        value.into_string()
+    }
+}
+
+impl From<&str> for ToolName {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ToolName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::ops::Deref for ToolName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for ToolName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ToolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for ToolName {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ToolName {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ToolName {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<ToolName> for String {
+    fn eq(&self, other: &ToolName) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<ToolName> for str {
+    fn eq(&self, other: &ToolName) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<ToolName> for &str {
+    fn eq(&self, other: &ToolName) -> bool {
+        *self == other.as_str()
+    }
+}
+
+/// Set of canonical tool names.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolNameSet(pub std::collections::HashSet<ToolName>);
+
+impl ToolNameSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: impl Into<ToolName>) -> bool {
+        self.0.insert(name.into())
+    }
+
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.0.remove(name)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ToolName> {
+        self.0.iter()
+    }
+
+    pub fn retain(&mut self, mut f: impl FnMut(&ToolName) -> bool) {
+        self.0.retain(|name| f(name));
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn into_inner(self) -> std::collections::HashSet<ToolName> {
+        self.0
+    }
+
+    pub fn to_string_set(&self) -> std::collections::HashSet<String> {
+        self.iter().map(|name| name.as_str().to_string()).collect()
+    }
+}
+
+impl From<ToolName> for ToolNameSet {
+    fn from(value: ToolName) -> Self {
+        Self(std::iter::once(value).collect())
+    }
+}
+
+impl std::iter::FromIterator<ToolName> for ToolNameSet {
+    fn from_iter<T: IntoIterator<Item = ToolName>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl std::iter::FromIterator<String> for ToolNameSet {
+    fn from_iter<T: IntoIterator<Item = String>>(iter: T) -> Self {
+        Self(iter.into_iter().map(ToolName::from).collect())
+    }
+}
+
+impl<'a> std::iter::FromIterator<&'a str> for ToolNameSet {
+    fn from_iter<T: IntoIterator<Item = &'a str>>(iter: T) -> Self {
+        Self(iter.into_iter().map(ToolName::from).collect())
+    }
+}
+
+impl Extend<ToolName> for ToolNameSet {
+    fn extend<T: IntoIterator<Item = ToolName>>(&mut self, iter: T) {
+        self.0.extend(iter);
+    }
+}
+
+impl<'a> Extend<&'a ToolName> for ToolNameSet {
+    fn extend<T: IntoIterator<Item = &'a ToolName>>(&mut self, iter: T) {
+        self.0.extend(iter.into_iter().cloned());
+    }
+}
+
+impl Extend<String> for ToolNameSet {
+    fn extend<T: IntoIterator<Item = String>>(&mut self, iter: T) {
+        self.0.extend(iter.into_iter().map(ToolName::from));
+    }
+}
+
+impl IntoIterator for ToolNameSet {
+    type Item = ToolName;
+    type IntoIter = std::collections::hash_set::IntoIter<ToolName>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ToolNameSet {
+    type Item = &'a ToolName;
+    type IntoIter = std::collections::hash_set::Iter<'a, ToolName>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// Provenance-aware identity for a concrete tool definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolIdentity {
+    pub name: ToolName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ToolProvenance>,
 }
 
 /// Tool definition for the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolDef {
-    pub name: String,
+    pub name: ToolName,
     pub description: String,
     pub input_schema: Value,
     /// Optional provenance metadata tracking which subsystem materialized this tool.
@@ -1288,7 +1625,7 @@ pub struct ToolDef {
 impl ToolDef {
     /// Create a new ToolDef without provenance.
     pub fn new(
-        name: impl Into<String>,
+        name: impl Into<ToolName>,
         description: impl Into<String>,
         input_schema: Value,
     ) -> Self {
@@ -1304,6 +1641,19 @@ impl ToolDef {
     pub fn with_provenance(mut self, provenance: ToolProvenance) -> Self {
         self.provenance = Some(provenance);
         self
+    }
+
+    /// Return the typed, provenance-aware identity for this tool definition.
+    pub fn identity(&self) -> ToolIdentity {
+        ToolIdentity {
+            name: self.name.clone(),
+            provenance: self.provenance.clone(),
+        }
+    }
+
+    /// Return the typed model-facing tool name.
+    pub fn tool_name(&self) -> ToolName {
+        self.name.clone()
     }
 }
 

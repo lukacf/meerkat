@@ -57,6 +57,94 @@ pub enum RequestTerminal<T> {
     RespondWithoutPublish(T),
 }
 
+/// Whether a surface request needs tracked asynchronous execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestExecution {
+    Inline,
+    LongRunning,
+}
+
+/// Canonical terminal publication policy for a surface request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestTerminalPolicy {
+    /// Successful terminal responses publish committed side effects.
+    PublishOnSuccess,
+    /// Terminal responses are observational only; cancellation may supersede
+    /// them until the request leaves the executor.
+    RespondWithoutPublish,
+}
+
+/// Typed request semantics supplied by surface routers before a request is
+/// admitted to [`SurfaceRequestExecutor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceRequestSemantics {
+    pub execution: SurfaceRequestExecution,
+    pub terminal_policy: SurfaceRequestTerminalPolicy,
+}
+
+impl SurfaceRequestSemantics {
+    pub const fn inline_observation() -> Self {
+        Self {
+            execution: SurfaceRequestExecution::Inline,
+            terminal_policy: SurfaceRequestTerminalPolicy::RespondWithoutPublish,
+        }
+    }
+
+    pub const fn long_running_publish_on_success() -> Self {
+        Self {
+            execution: SurfaceRequestExecution::LongRunning,
+            terminal_policy: SurfaceRequestTerminalPolicy::PublishOnSuccess,
+        }
+    }
+
+    pub const fn long_running_observation() -> Self {
+        Self {
+            execution: SurfaceRequestExecution::LongRunning,
+            terminal_policy: SurfaceRequestTerminalPolicy::RespondWithoutPublish,
+        }
+    }
+
+    /// Canonical RPC request semantics.
+    ///
+    /// The RPC surface supplies only the already-parsed "does session/create
+    /// run immediately?" fact. Method-to-publication policy lives here so RPC
+    /// transports do not each grow their own terminal classifier.
+    pub fn for_rpc_method(method: &str, session_create_runs_immediately: bool) -> Self {
+        match method {
+            "turn/start" | "mob/turn_start" => Self::long_running_publish_on_success(),
+            "session/create" if session_create_runs_immediately => {
+                Self::long_running_publish_on_success()
+            }
+            _ => Self::inline_observation(),
+        }
+    }
+
+    /// Canonical MCP tool-call request semantics.
+    pub fn for_mcp_tool_call(tool_name: &str) -> Self {
+        match tool_name {
+            "meerkat_run" | "meerkat_resume" => Self::long_running_publish_on_success(),
+            _ => Self::long_running_observation(),
+        }
+    }
+
+    pub const fn requires_long_running_executor(self) -> bool {
+        matches!(self.execution, SurfaceRequestExecution::LongRunning)
+    }
+
+    pub fn classify_terminal<T>(self, success: bool, response: T) -> RequestTerminal<T> {
+        if success
+            && matches!(
+                self.terminal_policy,
+                SurfaceRequestTerminalPolicy::PublishOnSuccess
+            )
+        {
+            RequestTerminal::Publish(response)
+        } else {
+            RequestTerminal::RespondWithoutPublish(response)
+        }
+    }
+}
+
 /// Canonical lifecycle phase of a tracked request.
 ///
 /// Every tracked request advances through this state machine exactly once.
@@ -129,6 +217,13 @@ pub enum CancelOutcome {
     NotFound,
 }
 
+/// Outcome of installing request cancellation mechanics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelActionInstallOutcome {
+    Installed,
+    AlreadyCancelled,
+}
+
 /// Outcome of completing a request via the uncommitted path.
 ///
 /// RPC and MCP surfaces use this to decide whether to write the task's own
@@ -181,6 +276,12 @@ impl RequestContext {
         self.entry.phase()
     }
 
+    /// Narrow cancellation observation for pre-admission gates. Surfaces
+    /// should prefer this over branching on arbitrary lifecycle phases.
+    pub fn cancel_already_requested(&self) -> bool {
+        matches!(self.entry.phase(), SurfaceRequestPhase::Cancelled)
+    }
+
     /// Install (or replace) the cancel action. If the request is already
     /// [`SurfaceRequestPhase::Cancelled`], the newly-installed action is run
     /// immediately so initialization-time races can't leave the caller with a
@@ -200,6 +301,19 @@ impl RequestContext {
             action().await;
         }
         phase
+    }
+
+    /// Install the cancel action and collapse phase observation into the only
+    /// admission decision surfaces should make at this point: whether cancel
+    /// had already won before the action could be installed.
+    pub async fn install_cancel_action_or_cancelled(
+        &self,
+        action: RequestAsyncAction,
+    ) -> CancelActionInstallOutcome {
+        match self.install_cancel_action(action).await {
+            SurfaceRequestPhase::Cancelled => CancelActionInstallOutcome::AlreadyCancelled,
+            _ => CancelActionInstallOutcome::Installed,
+        }
     }
 
     /// Install the cleanup action that runs if the request finishes without

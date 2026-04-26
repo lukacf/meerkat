@@ -414,7 +414,7 @@ fn build_tools(request: &LlmRequest) -> Vec<Tool> {
         .tools
         .iter()
         .map(|tool| Tool::Function {
-            name: tool.name.clone(),
+            name: tool.name.clone().into(),
             description: (!tool.description.trim().is_empty()).then(|| tool.description.clone()),
             parameters: tool.input_schema.clone(),
         })
@@ -602,7 +602,7 @@ mod tests {
         let request =
             LlmRequest::new("gpt-realtime-1.5", vec![user("run the tool")]).with_tools(vec![
                 Arc::new(ToolDef {
-                    name: "read_file".to_string(),
+                    name: "read_file".into(),
                     description: "read a file".to_string(),
                     input_schema: serde_json::json!({"type":"object"}),
                     provenance: None,

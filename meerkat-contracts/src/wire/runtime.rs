@@ -15,6 +15,55 @@ where
     serde_json::value::RawValue::from_string(value.to_string()).map_err(serde::de::Error::custom)
 }
 
+/// Request payload for `runtime/session_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeStateParams {
+    pub session_id: String,
+}
+
+/// Request payload for `runtime/session_submit`.
+///
+/// The runtime input body is owned by `meerkat-runtime`; contracts cannot
+/// depend on the runtime crate without inverting the dependency graph. The
+/// envelope is canonical here and the runtime crate remains the typed
+/// authority over the `input` discriminator and variant body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeAcceptParams {
+    pub session_id: String,
+    pub input: serde_json::Value,
+}
+
+/// Request payload for `runtime/session_retire`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeRetireParams {
+    pub session_id: String,
+}
+
+/// Request payload for `runtime/session_reset`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeResetParams {
+    pub session_id: String,
+}
+
+/// Request payload for `runtime/session_submission`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InputStateParams {
+    pub session_id: String,
+    pub input_id: String,
+}
+
+/// Request payload for `runtime/session_submissions`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InputListParams {
+    pub session_id: String,
+}
+
 /// Request payload for `session/realtime_attachment_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -97,6 +146,13 @@ pub enum WireRuntimeState {
     Destroyed,
 }
 
+/// Response payload for `runtime/session_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeStateResult {
+    pub state: WireRuntimeState,
+}
+
 /// Public live attachment status projection used by runtime and mob surfaces.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -117,7 +173,7 @@ pub struct RuntimeRealtimeAttachmentStatusResult {
     pub status: WireRealtimeAttachmentStatus,
 }
 
-/// Discriminator for `session/submit` responses.
+/// Discriminator for `runtime/session_submit` responses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -271,7 +327,7 @@ pub struct WireInputState {
     pub updated_at: String,
 }
 
-/// Response payload for `session/submit`.
+/// Response payload for `runtime/session_submit`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeAcceptResult {
@@ -286,6 +342,32 @@ pub struct RuntimeAcceptResult {
     pub policy: Option<WireInputPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<WireInputState>,
+}
+
+/// Response payload for `runtime/session_retire`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeRetireResult {
+    pub inputs_abandoned: usize,
+    #[serde(default)]
+    pub inputs_pending_drain: usize,
+}
+
+/// Response payload for `runtime/session_reset`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeResetResult {
+    pub inputs_abandoned: usize,
+}
+
+/// Response payload for `runtime/session_submission`.
+pub type InputStateResult = Option<WireInputState>;
+
+/// Response payload for `runtime/session_submissions`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InputListResult {
+    pub inputs: Vec<WireInputState>,
 }
 
 // -----------------------------------------------------------------------

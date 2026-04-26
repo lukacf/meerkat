@@ -17,7 +17,7 @@ struct MathTools;
 impl AgentToolDispatcher for MathTools {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![Arc::new(ToolDef {
-            name: "add".to_string(),
+            name: "add".into(),
             description: "Add two numbers".to_string(),
             input_schema: json!({
                 "type": "object",

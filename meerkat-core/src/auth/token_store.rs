@@ -11,9 +11,9 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::connection::{BindingId, IdentityError, RealmId};
+use crate::connection::{BindingId, ConnectionRef, IdentityError, ProfileId, RealmId};
 
-/// Key for a persisted token bundle: realm + binding.
+/// Key for a persisted token bundle: realm + binding + optional auth profile override.
 ///
 /// Wave-c C-12 / C-1 follow-up: `realm_id: String` / `binding_id: String`
 /// retyped to `realm: RealmId` / `binding: BindingId` to match the typed-atom
@@ -24,6 +24,8 @@ use crate::connection::{BindingId, IdentityError, RealmId};
 pub struct TokenKey {
     pub realm: RealmId,
     pub binding: BindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileId>,
 }
 
 impl TokenKey {
@@ -35,7 +37,31 @@ impl TokenKey {
     /// fold the resulting `Result<TokenKey, IdentityError>` into their
     /// ambient error handling.
     pub fn new(realm: RealmId, binding: BindingId) -> Self {
-        Self { realm, binding }
+        Self {
+            realm,
+            binding,
+            profile: None,
+        }
+    }
+
+    pub fn new_with_profile(
+        realm: RealmId,
+        binding: BindingId,
+        profile: Option<ProfileId>,
+    ) -> Self {
+        Self {
+            realm,
+            binding,
+            profile,
+        }
+    }
+
+    pub fn from_connection_ref(connection_ref: &ConnectionRef) -> Self {
+        Self::new_with_profile(
+            connection_ref.realm.clone(),
+            connection_ref.binding.clone(),
+            connection_ref.profile.clone(),
+        )
     }
 
     /// Construct a token key from raw strings, validating each component
@@ -45,20 +71,38 @@ impl TokenKey {
     /// input — the CLI `--connection-ref` parser, wire-layer handlers,
     /// test fixtures.
     pub fn parse(realm: impl AsRef<str>, binding: impl AsRef<str>) -> Result<Self, IdentityError> {
+        Self::parse_with_profile(realm, binding, None::<&str>)
+    }
+
+    pub fn parse_with_profile(
+        realm: impl AsRef<str>,
+        binding: impl AsRef<str>,
+        profile: Option<impl AsRef<str>>,
+    ) -> Result<Self, IdentityError> {
         Ok(Self {
             realm: RealmId::parse(realm.as_ref())?,
             binding: BindingId::parse(binding.as_ref())?,
+            profile: profile
+                .map(|profile| ProfileId::parse(profile.as_ref()))
+                .transpose()?,
         })
     }
 
-    /// The flat account identifier used by OS keyrings. Format: `<realm>:<binding>`.
+    /// The flat account identifier used by OS keyrings.
     ///
-    /// Format stays identical to the pre-retype output; this method is the
-    /// source of truth for the keyring `service:account` convention, so any
-    /// renaming of the struct's fields must preserve this output byte-for-byte
-    /// to keep existing OAuth credentials reachable.
+    /// Default binding credentials preserve the legacy format:
+    /// `<realm>:<binding>`. Profile override credentials include the
+    /// canonical override atom: `<realm>:<binding>:<profile>`.
+    ///
+    /// The default credential format stays identical to the pre-profile-key
+    /// output; this method is the source of truth for the keyring
+    /// `service:account` convention, so the default branch must preserve that
+    /// output byte-for-byte to keep existing OAuth credentials reachable.
     pub fn keyring_account(&self) -> String {
-        format!("{}:{}", self.realm, self.binding)
+        match &self.profile {
+            Some(profile) => format!("{}:{}:{}", self.realm, self.binding, profile),
+            None => format!("{}:{}", self.realm, self.binding),
+        }
     }
 }
 

@@ -61,7 +61,10 @@ fn generate_snapshot() -> Result<Value, Box<dyn std::error::Error>> {
 
     let mut schemas = Map::new();
     for tool in tools {
-        schemas.insert(tool.name.clone(), canonicalize(tool.input_schema.clone()));
+        schemas.insert(
+            tool.name.to_string(),
+            canonicalize(tool.input_schema.clone()),
+        );
     }
 
     Ok(Value::Object(schemas))

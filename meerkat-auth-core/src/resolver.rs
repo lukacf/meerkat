@@ -12,6 +12,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::auth::{PersistedAuthMode, TokenKey};
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
     AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
@@ -60,6 +62,7 @@ pub async fn resolve_simple_secret(
             let envelope = resolver.resolve(binding).await?;
             extract_secret_from_envelope(envelope)
         }
+        CredentialSourceSpec::ManagedStore => resolve_managed_store_secret(env, binding).await,
         #[cfg(not(target_arch = "wasm32"))]
         CredentialSourceSpec::Command {
             program,
@@ -108,6 +111,59 @@ pub async fn resolve_simple_secret(
         CredentialSourceSpec::PlatformDefault => {
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
+    }
+}
+
+async fn resolve_managed_store_secret(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+) -> Result<String, ProviderAuthError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let store = env
+            .token_store
+            .as_ref()
+            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let tokens = store
+            .load(&key)
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
+            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+        let expected = managed_store_auth_mode(&binding.auth_profile.auth_method)?;
+        if tokens.auth_mode != expected {
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "managed_store credential mode {:?} does not match binding auth_method '{}'",
+                tokens.auth_mode, binding.auth_profile.auth_method,
+            )));
+        }
+        tokens.primary_secret.ok_or_else(|| {
+            ProviderAuthError::SourceResolutionFailed(
+                "managed_store credential has no primary_secret".into(),
+            )
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (env, binding);
+        Err(ProviderAuthError::SourceResolutionFailed(
+            "CredentialSourceSpec::ManagedStore requires a host TokenStore; \
+             not available on the wasm32 target"
+                .into(),
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_auth_mode(auth_method: &str) -> Result<PersistedAuthMode, ProviderAuthError> {
+    match auth_method {
+        "api_key" | "api_key_express" | "foundry_api_key" => Ok(PersistedAuthMode::ApiKey),
+        "static_bearer" | "bearer_api_key" | "bedrock_bearer" => {
+            Ok(PersistedAuthMode::StaticBearer)
+        }
+        other => Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "auth_method '{other}' cannot resolve simple credentials from managed_store"
+        ))),
     }
 }
 
@@ -388,6 +444,10 @@ fn enforce_metadata_requirements(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::EphemeralTokenStore;
+    #[cfg(not(target_arch = "wasm32"))]
+    use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
     use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
@@ -495,6 +555,60 @@ mod tests {
             }),
             policy: BindingPolicy::default(),
         }
+    }
+
+    fn simple_secret_binding(source: CredentialSourceSpec, auth_method: &str) -> ValidatedBinding {
+        let mut binding = binding();
+        binding.auth = NormalizedAuthMethod::Google(
+            meerkat_core::provider_matrix::google::GoogleAuthMethod::ApiKey,
+        );
+        binding.auth_profile = Arc::new(AuthProfile {
+            id: "managed".into(),
+            provider: Provider::Gemini,
+            auth_method: auth_method.into(),
+            source,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        });
+        binding
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_source_reads_binding_scoped_token_store() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(&key, &PersistedTokens::api_key("sk-managed"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing().with_token_store(store);
+
+        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap();
+
+        assert_eq!(secret, "sk-managed");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_source_rejects_wrong_token_mode() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(&key, &PersistedTokens::static_bearer("bearer"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing().with_token_store(store);
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Hook contracts and engine interfaces.
 
-use crate::types::{SessionId, StopReason, Usage};
+use crate::error::AgentError;
+use crate::event::{AgentErrorClass, AgentErrorReport};
+use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -242,7 +244,15 @@ pub struct HookInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_input: Option<ContentInput>,
+    /// Text-only projection of `prompt_input` for legacy hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_report: Option<AgentErrorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<AgentErrorClass>,
+    /// Display projection of `error_report.message` for legacy hooks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +263,51 @@ pub struct HookInvocation {
     pub tool_call: Option<HookToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<HookToolResult>,
+}
+
+impl HookInvocation {
+    pub fn new(point: HookPoint, session_id: SessionId) -> Self {
+        Self {
+            point,
+            session_id,
+            turn_number: None,
+            prompt_input: None,
+            prompt: None,
+            error_report: None,
+            error_class: None,
+            error: None,
+            llm_request: None,
+            llm_response: None,
+            tool_call: None,
+            tool_result: None,
+        }
+    }
+
+    pub fn run_started(session_id: SessionId, prompt_input: ContentInput) -> Self {
+        let prompt = prompt_input.text_content();
+        Self {
+            prompt_input: Some(prompt_input),
+            prompt: Some(prompt),
+            ..Self::new(HookPoint::RunStarted, session_id)
+        }
+    }
+
+    pub fn run_completed(session_id: SessionId, turn_number: u32) -> Self {
+        Self {
+            turn_number: Some(turn_number),
+            ..Self::new(HookPoint::RunCompleted, session_id)
+        }
+    }
+
+    pub fn run_failed(session_id: SessionId, error: &AgentError) -> Self {
+        let error_report = AgentErrorReport::from_agent_error(error);
+        Self {
+            error_class: Some(error_report.class),
+            error: Some(error_report.message.clone()),
+            error_report: Some(error_report),
+            ..Self::new(HookPoint::RunFailed, session_id)
+        }
+    }
 }
 
 /// Outcome emitted by one executed hook entry.
@@ -357,6 +412,14 @@ pub trait HookEngine: Send + Sync {
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
+
+    /// Drain background patches explicitly published for one session.
+    async fn drain_published_patches(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

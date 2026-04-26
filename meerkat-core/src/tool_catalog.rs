@@ -36,25 +36,39 @@ pub enum ToolCatalogDeferredEligibility {
 pub struct ToolCatalogEntry {
     pub tool: Arc<ToolDef>,
     pub plane: ToolPlaneClass,
-    pub currently_callable: bool,
+    pub callability: ToolCallability,
     pub deferred_eligibility: ToolCatalogDeferredEligibility,
 }
 
 impl ToolCatalogEntry {
     pub fn session_inline(tool: Arc<ToolDef>, currently_callable: bool) -> Self {
+        Self::session_inline_with_callability(tool, ToolCallability::from_bool(currently_callable))
+    }
+
+    pub fn session_inline_with_callability(
+        tool: Arc<ToolDef>,
+        callability: ToolCallability,
+    ) -> Self {
         Self {
             tool,
             plane: ToolPlaneClass::Session,
-            currently_callable,
+            callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
         }
     }
 
     pub fn control_inline(tool: Arc<ToolDef>, currently_callable: bool) -> Self {
+        Self::control_inline_with_callability(tool, ToolCallability::from_bool(currently_callable))
+    }
+
+    pub fn control_inline_with_callability(
+        tool: Arc<ToolDef>,
+        callability: ToolCallability,
+    ) -> Self {
         Self {
             tool,
             plane: ToolPlaneClass::Control,
-            currently_callable,
+            callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
         }
     }
@@ -64,13 +78,89 @@ impl ToolCatalogEntry {
         currently_callable: bool,
         stable_owner_key: String,
     ) -> Self {
+        Self::session_deferred_with_callability(
+            tool,
+            ToolCallability::from_bool(currently_callable),
+            stable_owner_key,
+        )
+    }
+
+    pub fn session_deferred_with_callability(
+        tool: Arc<ToolDef>,
+        callability: ToolCallability,
+        stable_owner_key: String,
+    ) -> Self {
         Self {
             tool,
             plane: ToolPlaneClass::Session,
-            currently_callable,
+            callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::DeferredEligible {
                 stable_owner_key,
             },
+        }
+    }
+
+    pub fn currently_callable(&self) -> bool {
+        self.callability.is_callable()
+    }
+}
+
+/// Typed reason that a catalog-owned tool cannot be called right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolUnavailableReason {
+    NotCurrentlyCallable,
+    NoPeersConfigured,
+    TemporarilyUnavailable,
+}
+
+impl std::fmt::Display for ToolUnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolUnavailableReason::NotCurrentlyCallable => {
+                f.write_str("tool is not currently callable")
+            }
+            ToolUnavailableReason::NoPeersConfigured => f.write_str("no peers configured"),
+            ToolUnavailableReason::TemporarilyUnavailable => {
+                f.write_str("tool is temporarily unavailable")
+            }
+        }
+    }
+}
+
+/// Catalog-owned callability for a tool identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status", content = "reason")]
+pub enum ToolCallability {
+    Callable,
+    Unavailable(ToolUnavailableReason),
+}
+
+impl ToolCallability {
+    pub fn callable() -> Self {
+        Self::Callable
+    }
+
+    pub fn unavailable(reason: ToolUnavailableReason) -> Self {
+        Self::Unavailable(reason)
+    }
+
+    pub fn from_bool(currently_callable: bool) -> Self {
+        if currently_callable {
+            Self::Callable
+        } else {
+            Self::Unavailable(ToolUnavailableReason::NotCurrentlyCallable)
+        }
+    }
+
+    pub fn is_callable(self) -> bool {
+        matches!(self, Self::Callable)
+    }
+
+    pub fn unavailable_reason(self) -> Option<ToolUnavailableReason> {
+        match self {
+            Self::Callable => None,
+            Self::Unavailable(reason) => Some(reason),
         }
     }
 }

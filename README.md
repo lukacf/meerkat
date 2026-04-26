@@ -77,7 +77,7 @@ rkat run --model claude-sonnet-4-6 --tools workspace \
   "Audit the last 20 commits for security issues. Check each changed file."
 ```
 
-The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. All three examples use the same binary; provider is inferred from the model name.
+The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. All three examples use the same binary; provider is resolved from the model registry.
 
 ### Self-hosted models
 
@@ -139,7 +139,7 @@ Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider l
 
 ## Capabilities
 
-**Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is inferred from the model name -- switch models with a flag, not a code change.
+**Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is resolved from the built-in model catalog or configured self-hosted aliases -- switch models with a flag, not a code change.
 
 **Self-hosted models.** Run local models through Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Self-hosted models are first-class -- once configured, they work identically to cloud models across all surfaces (CLI, REST, RPC, MCP, SDKs). `rkat doctor` validates server connectivity and model availability.
 

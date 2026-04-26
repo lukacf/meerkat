@@ -114,6 +114,17 @@ impl MobSupervisorBridge {
         .await
     }
 
+    pub(crate) async fn trust_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let runtime = self.runtime().await;
+        runtime
+            .add_trusted_peer(recipient.clone())
+            .await
+            .map_err(MobError::from)
+    }
+
     pub(crate) async fn request_json<T: serde::Serialize>(
         &self,
         recipient: &TrustedPeerDescriptor,
@@ -123,19 +134,6 @@ impl MobSupervisorBridge {
     ) -> Result<serde_json::Value, MobError> {
         let _request_guard = self.request_lock.lock().await;
         let runtime = self.runtime().await;
-        // #31 Wave D (D-trust-reconciliation subsystem 1): bootstrap comms
-        // trust for the recipient so the supervisor can address the external
-        // peer at all. The pre-Wave-A implementation did this via
-        // `runtime.add_trusted_peer(recipient.clone())` at the head of this
-        // method (deleted by `0ad584cde` as a shell-authority violation
-        // piggybacked onto every request). Restoring the trust bootstrap
-        // here keeps supervisor bridge commands (BindMember,
-        // AuthorizeSupervisor, WireMember, UnwireMember, RetireMember)
-        // deliverable at spawn time for external backend members — without
-        // the install, `send` below fails with
-        // `SendError::PeerNotFound(recipient.name)` because the supervisor
-        // runtime's trusted-peer directory is empty for the new member.
-        runtime.add_trusted_peer(recipient.clone()).await?;
         let to = PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let params = serde_json::to_value(payload).map_err(|error| {
             MobError::Internal(format!("serialize supervisor payload: {error}"))

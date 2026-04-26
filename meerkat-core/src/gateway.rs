@@ -4,27 +4,15 @@
 //! dispatcher. This enables composing core tool dispatchers (shell, task, MCP)
 //! with infrastructure-provided tools (comms) without coupling them together.
 //!
-//! ## Availability
-//!
-//! Tools can have dynamic availability based on runtime conditions. For example,
-//! comms tools are only available when peers are configured. This is controlled
-//! via the [`Availability`] type.
-//!
 //! # Example
 //!
 //! ```text
-//! use meerkat_core::{ToolGateway, ToolGatewayBuilder, AgentToolDispatcher, Availability};
+//! use meerkat_core::{ToolGateway, ToolGatewayBuilder, AgentToolDispatcher};
 //!
-//! // Compose base dispatcher with conditionally-available comms
+//! // Compose multiple dispatchers
 //! let gateway = ToolGatewayBuilder::new()
 //!     .add_dispatcher(base_dispatcher)
-//!     .add_dispatcher_with_availability(
-//!         comms_dispatcher,
-//!         Availability::when(
-//!             "no peers configured",
-//!             Arc::new(move || peers_check.try_read().map(|g| g.has_peers()).unwrap_or(false))
-//!         )
-//!     )
+//!     .add_dispatcher(comms_dispatcher)
 //!     .build()?;
 //! ```
 
@@ -32,107 +20,26 @@ use crate::AgentToolDispatcher;
 use crate::agent::{DetachedOpCompletion, ExternalToolUpdate};
 use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", test))]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry};
-#[cfg(test)]
-use crate::types::ToolResult;
-use crate::types::{ToolCallView, ToolDef};
+use crate::tool_catalog::{
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
+};
+use crate::types::{ToolCallView, ToolDef, ToolIdentity, ToolName};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
-/// Predicate function type for availability checks.
-///
-/// Returns `true` if tools should be available, `false` otherwise.
-/// Must be `Send + Sync` for use across threads.
-///
-/// **Important requirements**:
-/// - Must be **fast** (no blocking I/O, no heavy computation)
-/// - Must be **non-blocking** (use `try_read()` not `read()` for locks)
-/// - Should be **deterministic** within a short time window
-///
-/// Predicates are called multiple times per agent turn (once in `tools()`,
-/// once in `dispatch()`), so they must be cheap to evaluate.
-pub type AvailabilityCheck = Arc<dyn Fn() -> bool + Send + Sync>;
-
-/// Controls when a set of tools is visible and callable.
-///
-/// - `Always`: Tools are always available (default for most tools)
-/// - `When`: Tools are only available when a predicate returns true
-#[derive(Clone, Default)]
-pub enum Availability {
-    /// Tools are always available.
-    #[default]
-    Always,
-    /// Tools are available when the check returns true.
-    When {
-        /// The predicate that determines availability.
-        check: AvailabilityCheck,
-        /// Human-readable reason shown when tools are unavailable.
-        reason: String,
-    },
-}
-
-impl std::fmt::Debug for Availability {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Availability::Always => write!(f, "Availability::Always"),
-            Availability::When { reason, .. } => {
-                write!(f, "Availability::When {{ reason: {reason:?} }}")
-            }
-        }
-    }
-}
-
-impl Availability {
-    /// Create an availability that depends on a runtime check.
-    ///
-    /// # Arguments
-    /// * `reason` - Human-readable reason shown when unavailable (e.g., "no peers configured")
-    /// * `check` - Predicate that returns true when tools should be available
-    pub fn when(reason: impl Into<String>, check: AvailabilityCheck) -> Self {
-        Availability::When {
-            check,
-            reason: reason.into(),
-        }
-    }
-
-    /// Returns true if tools are currently available.
-    pub fn is_available(&self) -> bool {
-        match self {
-            Availability::Always => true,
-            Availability::When { check, .. } => check(),
-        }
-    }
-
-    /// Returns the unavailability reason, if tools are unavailable.
-    pub fn unavailable_reason(&self) -> Option<&str> {
-        match self {
-            Availability::Always => None,
-            Availability::When { check, reason } => {
-                if check() {
-                    None
-                } else {
-                    Some(reason)
-                }
-            }
-        }
-    }
-}
 
 /// Entry for a dispatcher in the gateway.
 struct DispatcherEntry {
     dispatcher: Arc<dyn AgentToolDispatcher>,
-    availability: Availability,
 }
 
 /// A tool dispatcher that composes multiple dispatchers into one.
 ///
-/// The gateway builds a routing table at construction time, mapping each tool
-/// name to its owning dispatcher. This provides O(1) dispatch and catches
-/// name collisions early.
+/// The gateway freezes a routing table at construction time, mapping each tool
+/// name to its owning dispatcher. Live child catalogs are still consulted for
+/// callability and listing, but they cannot transfer ownership or add routes.
 ///
 /// ## Dynamic Visibility
 ///
@@ -141,38 +48,28 @@ struct DispatcherEntry {
 /// - Only returning available tools from `tools()`
 /// - Returning `ToolError::Unavailable` for hidden tools on dispatch
 pub struct ToolGateway {
-    /// All registered tool definitions (for collision detection)
-    all_tools: Vec<Arc<ToolDef>>,
-    /// Parallel vector containing the catalog entry for each registered tool.
-    catalog_entries: Vec<ToolCatalogEntry>,
-    /// Parallel vector: tool index -> owning dispatcher entry index
-    tool_entry: Vec<usize>,
-    /// Routing table: tool name -> tool index
-    route: HashMap<String, usize>,
-    /// Dispatcher entries with their availability
+    /// Dispatcher entries with frozen ownership snapshots.
     entries: Vec<DispatcherEntry>,
-    /// Cached visible tool set; rebuilt only when availability changes.
-    cache: RwLock<ToolGatewayCache>,
-}
-
-#[derive(Debug)]
-struct ToolGatewayCache {
-    entry_available: Vec<bool>,
-    visible_tools: Arc<[Arc<ToolDef>]>,
+    /// Frozen name-to-owner registry. Live catalogs may change callability,
+    /// but they do not transfer ownership or create new gateway routes.
+    routes: HashMap<ToolName, usize>,
+    /// Frozen identities in gateway catalog order.
+    frozen_order: Vec<ToolIdentity>,
+    /// Static tool definitions for frozen identities. Callability is live.
+    frozen_tools: HashMap<ToolName, Arc<ToolDef>>,
 }
 
 impl std::fmt::Debug for ToolGateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolGateway")
             .field(
-                "all_tools",
+                "tools",
                 &self
-                    .all_tools
+                    .tool_catalog()
                     .iter()
-                    .map(|t| t.name.as_str())
+                    .map(|entry| entry.tool.name.as_str())
                     .collect::<Vec<_>>(),
             )
-            .field("routes", &self.route.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
@@ -180,8 +77,6 @@ impl std::fmt::Debug for ToolGateway {
 impl ToolGateway {
     /// Create a new gateway with a base dispatcher and optional overlay.
     ///
-    /// Both dispatchers use `Availability::Always`.
-    /// For conditional availability, use [`ToolGatewayBuilder`].
     pub fn new(
         base: Arc<dyn AgentToolDispatcher>,
         overlay: Option<Arc<dyn AgentToolDispatcher>>,
@@ -192,14 +87,56 @@ impl ToolGateway {
         }
         builder.build()
     }
+
+    fn live_catalog_for_dispatcher(
+        dispatcher: &dyn AgentToolDispatcher,
+    ) -> Arc<[ToolCatalogEntry]> {
+        if dispatcher.tool_catalog_capabilities().exact_catalog {
+            return dispatcher.tool_catalog();
+        }
+        dispatcher
+            .tools()
+            .iter()
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn unavailable_frozen_entry(tool: Arc<ToolDef>) -> ToolCatalogEntry {
+        ToolCatalogEntry::session_inline_with_callability(
+            tool,
+            ToolCallability::unavailable(ToolUnavailableReason::NotCurrentlyCallable),
+        )
+    }
+
+    fn live_route_entry(
+        dispatcher: &dyn AgentToolDispatcher,
+        frozen_tool: Arc<ToolDef>,
+        name: &str,
+    ) -> Option<ToolCatalogEntry> {
+        if dispatcher.tool_catalog_capabilities().exact_catalog {
+            return dispatcher
+                .tool_catalog()
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .cloned()
+                .or_else(|| Some(Self::unavailable_frozen_entry(frozen_tool)));
+        }
+
+        dispatcher
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .or_else(|| Some(Self::unavailable_frozen_entry(frozen_tool)))
+    }
 }
 
 /// Builder for constructing a [`ToolGateway`].
 ///
-/// Use this when you need to compose more than two dispatchers or want
-/// explicit control over availability conditions.
+/// Use this when you need to compose more than two dispatchers.
 pub struct ToolGatewayBuilder {
-    dispatchers: Vec<(Arc<dyn AgentToolDispatcher>, Availability)>,
+    dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
 }
 
 impl Default for ToolGatewayBuilder {
@@ -217,17 +154,8 @@ impl ToolGatewayBuilder {
     }
 
     /// Add a dispatcher with default availability (always).
-    pub fn add_dispatcher(self, dispatcher: Arc<dyn AgentToolDispatcher>) -> Self {
-        self.add_dispatcher_with_availability(dispatcher, Availability::Always)
-    }
-
-    /// Add a dispatcher with custom availability.
-    pub fn add_dispatcher_with_availability(
-        mut self,
-        dispatcher: Arc<dyn AgentToolDispatcher>,
-        availability: Availability,
-    ) -> Self {
-        self.dispatchers.push((dispatcher, availability));
+    pub fn add_dispatcher(mut self, dispatcher: Arc<dyn AgentToolDispatcher>) -> Self {
+        self.dispatchers.push(dispatcher);
         self
     }
 
@@ -239,90 +167,41 @@ impl ToolGatewayBuilder {
         }
     }
 
-    /// Optionally add a dispatcher with availability if present.
-    pub fn maybe_add_dispatcher_with_availability(
-        self,
-        dispatcher: Option<Arc<dyn AgentToolDispatcher>>,
-        availability: Availability,
-    ) -> Self {
-        match dispatcher {
-            Some(d) => self.add_dispatcher_with_availability(d, availability),
-            None => self,
-        }
-    }
-
     /// Build the gateway, validating that there are no tool name collisions.
     ///
     /// Returns an error if any two dispatchers provide tools with the same name.
     /// All tools are checked for collisions regardless of their availability.
     pub fn build(self) -> Result<ToolGateway, ToolError> {
-        let mut route: HashMap<String, usize> = HashMap::new();
-        let mut all_tools: Vec<Arc<ToolDef>> = Vec::new();
-        let mut catalog_entries: Vec<ToolCatalogEntry> = Vec::new();
-        let mut tool_entry: Vec<usize> = Vec::new();
         let mut entries: Vec<DispatcherEntry> = Vec::new();
+        let mut seen: std::collections::HashSet<ToolName> = std::collections::HashSet::new();
+        let mut routes: HashMap<ToolName, usize> = HashMap::new();
+        let mut frozen_order = Vec::new();
+        let mut frozen_tools = HashMap::new();
 
-        for (dispatcher, availability) in self.dispatchers {
-            let entry_idx = entries.len();
-
-            let dispatcher_catalog: Vec<ToolCatalogEntry> =
-                if dispatcher.tool_catalog_capabilities().exact_catalog {
-                    dispatcher.tool_catalog().iter().cloned().collect()
-                } else {
-                    dispatcher
-                        .tools()
-                        .iter()
-                        .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
-                        .collect()
-                };
-
-            for entry in dispatcher_catalog {
-                if route.contains_key(&entry.tool.name) {
+        for dispatcher in self.dispatchers {
+            let frozen_catalog = ToolGateway::live_catalog_for_dispatcher(dispatcher.as_ref());
+            let dispatcher_index = entries.len();
+            for entry in frozen_catalog.iter() {
+                let name = entry.tool.tool_name();
+                let identity = entry.tool.identity();
+                if !seen.insert(name.clone()) {
                     return Err(ToolError::Other(format!(
                         "tool name collision in gateway: '{}'",
-                        entry.tool.name
+                        entry.tool.name.as_str()
                     )));
                 }
-                let tool_idx = all_tools.len();
-                route.insert(entry.tool.name.clone(), tool_idx);
-                all_tools.push(Arc::clone(&entry.tool));
-                catalog_entries.push(entry);
-                tool_entry.push(entry_idx);
+                routes.insert(name.clone(), dispatcher_index);
+                frozen_tools.insert(name, Arc::clone(&entry.tool));
+                frozen_order.push(identity);
             }
-
-            entries.push(DispatcherEntry {
-                dispatcher,
-                availability,
-            });
+            entries.push(DispatcherEntry { dispatcher });
         }
-
-        let entry_available: Vec<bool> = entries
-            .iter()
-            .map(|e| e.availability.is_available())
-            .collect();
-
-        let mut visible = Vec::with_capacity(all_tools.len());
-        for ((tool, entry), &idx) in all_tools
-            .iter()
-            .zip(catalog_entries.iter())
-            .zip(tool_entry.iter())
-        {
-            if entry_available[idx] && entry.currently_callable {
-                visible.push(Arc::clone(tool));
-            }
-        }
-        let visible_tools: Arc<[Arc<ToolDef>]> = visible.into();
 
         Ok(ToolGateway {
-            all_tools,
-            catalog_entries,
-            tool_entry,
-            route,
             entries,
-            cache: RwLock::new(ToolGatewayCache {
-                entry_available,
-                visible_tools,
-            }),
+            routes,
+            frozen_order,
+            frozen_tools,
         })
     }
 }
@@ -330,49 +209,14 @@ impl ToolGatewayBuilder {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for ToolGateway {
-    /// Returns only the tools that are currently available.
-    ///
-    /// Tools with `Availability::When` predicates that return false
-    /// are excluded from the returned list.
-    ///
-    /// **Important**: Availability is evaluated once per dispatcher entry to ensure
-    /// consistency - either all tools from a dispatcher are visible or none are.
-    /// This prevents partial listings when predicates are evaluated under contention.
+    /// Returns only tools whose owning catalog says they are currently callable.
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        if let Ok(cache) = self.cache.try_read() {
-            let changed = self.entries.iter().enumerate().any(|(idx, entry)| {
-                cache.entry_available[idx] != entry.availability.is_available()
-            });
-            if !changed {
-                return Arc::clone(&cache.visible_tools);
-            }
-        }
-
-        let entry_available: Vec<bool> = self
-            .entries
+        self.tool_catalog()
             .iter()
-            .map(|entry| entry.availability.is_available())
-            .collect();
-
-        let mut visible = Vec::with_capacity(self.all_tools.len());
-        for ((tool, entry), &idx) in self
-            .all_tools
-            .iter()
-            .zip(self.catalog_entries.iter())
-            .zip(self.tool_entry.iter())
-        {
-            if entry_available[idx] && entry.currently_callable {
-                visible.push(Arc::clone(tool));
-            }
-        }
-        let visible_tools: Arc<[Arc<ToolDef>]> = visible.into();
-
-        if let Ok(mut cache) = self.cache.try_write() {
-            cache.entry_available = entry_available;
-            cache.visible_tools = Arc::clone(&visible_tools);
-        }
-
-        visible_tools
+            .filter(|entry| entry.callability.is_callable())
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>()
+            .into()
     }
 
     /// Dispatch a tool call.
@@ -385,24 +229,23 @@ impl AgentToolDispatcher for ToolGateway {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        let tool_idx = self
-            .route
-            .get(call.name)
-            .ok_or_else(|| ToolError::not_found(call.name))?;
-
-        let entry = &self.entries[self.tool_entry[*tool_idx]];
-
-        // Check availability before dispatch
-        if let Some(reason) = entry.availability.unavailable_reason() {
-            return Err(ToolError::unavailable(call.name, reason));
+        let Some(dispatcher_index) = self.routes.get(call.name).copied() else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(entry) = self.entries.get(dispatcher_index) else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(frozen_tool) = self.frozen_tools.get(call.name).cloned() else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(catalog_entry) =
+            Self::live_route_entry(entry.dispatcher.as_ref(), frozen_tool, call.name)
+        else {
+            return Err(ToolError::not_found(call.name));
+        };
+        if let Some(reason) = catalog_entry.callability.unavailable_reason() {
+            return Err(ToolError::unavailable(call.name, reason.to_string()));
         }
-        if !self.catalog_entries[*tool_idx].currently_callable {
-            return Err(ToolError::unavailable(
-                call.name,
-                "tool is not currently callable",
-            ));
-        }
-
         entry.dispatcher.dispatch(call).await
     }
 
@@ -431,21 +274,29 @@ impl AgentToolDispatcher for ToolGateway {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-        let entry_available: Vec<bool> = self
-            .entries
-            .iter()
-            .map(|entry| entry.availability.is_available())
-            .collect();
-        self.catalog_entries
-            .iter()
-            .zip(self.tool_entry.iter())
-            .map(|(entry, entry_idx)| {
-                let mut entry = entry.clone();
-                entry.currently_callable &= entry_available[*entry_idx];
-                entry
-            })
-            .collect::<Vec<_>>()
-            .into()
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for identity in &self.frozen_order {
+            let Some(dispatcher_index) = self.routes.get(&identity.name).copied() else {
+                continue;
+            };
+            let Some(entry) = self.entries.get(dispatcher_index) else {
+                continue;
+            };
+            let Some(frozen_tool) = self.frozen_tools.get(&identity.name).cloned() else {
+                continue;
+            };
+            if seen.insert(identity.name.clone())
+                && let Some(catalog_entry) = Self::live_route_entry(
+                    entry.dispatcher.as_ref(),
+                    frozen_tool,
+                    identity.name.as_str(),
+                )
+            {
+                result.push(catalog_entry);
+            }
+        }
+        result.into()
     }
 
     fn capabilities(&self) -> crate::agent::DispatcherCapabilities {
@@ -477,13 +328,9 @@ impl AgentToolDispatcher for ToolGateway {
                 if outcome.was_bound() {
                     any_bound = true;
                 }
-                builder = builder.add_dispatcher_with_availability(
-                    outcome.into_dispatcher(),
-                    entry.availability,
-                );
+                builder = builder.add_dispatcher(outcome.into_dispatcher());
             } else {
-                builder =
-                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+                builder = builder.add_dispatcher(entry.dispatcher);
             }
         }
 
@@ -595,7 +442,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
             return self
                 .tool_catalog()
                 .iter()
-                .filter(|entry| entry.currently_callable)
+                .filter(|entry| entry.currently_callable())
                 .map(|entry| Arc::clone(&entry.tool))
                 .collect::<Vec<_>>()
                 .into();
@@ -624,10 +471,10 @@ impl AgentToolDispatcher for DynamicToolComposite {
                     .iter()
                     .find(|entry| entry.tool.name == call.name)
                 {
-                    if !entry.currently_callable {
+                    if let Some(reason) = entry.callability.unavailable_reason() {
                         return Err(crate::error::ToolError::unavailable(
                             call.name,
-                            "tool is not currently callable",
+                            reason.to_string(),
                         ));
                     }
                     return d.dispatch(call).await;
@@ -761,6 +608,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::types::ToolResult;
     use serde_json::Value;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -805,7 +653,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
-                        name: name.to_string(),
+                        name: (*name).into(),
                         description: format!("{prefix} tool: {name}"),
                         input_schema: empty_object_schema(),
                         provenance: None,
@@ -833,7 +681,7 @@ mod tests {
                 .map(|(name, currently_callable)| {
                     crate::ToolCatalogEntry::session_inline(
                         Arc::new(ToolDef {
-                            name: (*name).to_string(),
+                            name: (*name).into(),
                             description: format!("{prefix} tool: {name}"),
                             input_schema: empty_object_schema(),
                             provenance: None,
@@ -844,7 +692,7 @@ mod tests {
                 .collect();
             let tools: Arc<[Arc<ToolDef>]> = catalog
                 .iter()
-                .filter(|entry| entry.currently_callable)
+                .filter(|entry| entry.currently_callable())
                 .map(|entry| Arc::clone(&entry.tool))
                 .collect::<Vec<_>>()
                 .into();
@@ -853,6 +701,73 @@ mod tests {
                 catalog: catalog.into(),
                 prefix: prefix.to_string(),
             }
+        }
+    }
+
+    struct LiveExactMockDispatcher {
+        tool: Arc<ToolDef>,
+        prefix: String,
+        callable: Arc<AtomicBool>,
+    }
+
+    struct MutableMockDispatcher {
+        tools: std::sync::Mutex<Vec<Arc<ToolDef>>>,
+        prefix: String,
+    }
+
+    impl LiveExactMockDispatcher {
+        fn new(prefix: &str, tool_name: &str, callable: Arc<AtomicBool>) -> Self {
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: tool_name.into(),
+                    description: format!("{prefix} tool: {tool_name}"),
+                    input_schema: empty_object_schema(),
+                    provenance: None,
+                }),
+                prefix: prefix.to_string(),
+                callable,
+            }
+        }
+
+        fn current_entry(&self) -> crate::ToolCatalogEntry {
+            crate::ToolCatalogEntry::session_inline(
+                Arc::clone(&self.tool),
+                self.callable.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    impl MutableMockDispatcher {
+        fn new(prefix: &str, names: &[&str]) -> Self {
+            Self {
+                tools: std::sync::Mutex::new(
+                    names
+                        .iter()
+                        .map(|name| {
+                            Arc::new(ToolDef {
+                                name: (*name).into(),
+                                description: format!("{prefix} tool: {name}"),
+                                input_schema: empty_object_schema(),
+                                provenance: None,
+                            })
+                        })
+                        .collect(),
+                ),
+                prefix: prefix.to_string(),
+            }
+        }
+
+        fn add_tool(&self, name: &str) {
+            self.tools.lock().unwrap().push(Arc::new(ToolDef {
+                name: name.into(),
+                description: format!("{} tool: {}", self.prefix, name),
+                input_schema: empty_object_schema(),
+                provenance: None,
+            }));
+        }
+
+        fn remove_tool(&self, name: &str) {
+            self.tools.lock().unwrap().retain(|tool| tool.name != name);
         }
     }
 
@@ -885,7 +800,48 @@ mod tests {
             else {
                 return Err(ToolError::not_found(call.name));
             };
-            if !entry.currently_callable {
+            if let Some(reason) = entry.callability.unavailable_reason() {
+                return Err(ToolError::unavailable(call.name, reason.to_string()));
+            }
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"source": self.prefix, "tool": call.name}).to_string(),
+                false,
+            )
+            .into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for LiveExactMockDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            if self.callable.load(Ordering::SeqCst) {
+                Arc::from([Arc::clone(&self.tool)])
+            } else {
+                Arc::new([])
+            }
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([self.current_entry()])
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            if self.tool.name != call.name {
+                return Err(ToolError::not_found(call.name));
+            }
+            if !self.callable.load(Ordering::SeqCst) {
                 return Err(ToolError::unavailable(
                     call.name,
                     "tool is not currently callable",
@@ -912,6 +868,36 @@ mod tests {
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|t| t.name == call.name) {
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    json!({"source": self.prefix, "tool": call.name}).to_string(),
+                    false,
+                )
+                .into())
+            } else {
+                Err(ToolError::not_found(call.name))
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for MutableMockDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.lock().unwrap().clone().into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            if self
+                .tools
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.name == call.name)
+            {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"source": self.prefix, "tool": call.name}).to_string(),
@@ -1015,142 +1001,147 @@ mod tests {
         assert_eq!(gateway.tools().len(), 3);
     }
 
-    #[test]
-    fn test_availability_always() {
-        let avail = Availability::Always;
-        assert!(avail.is_available());
-        assert!(avail.unavailable_reason().is_none());
-    }
-
-    #[test]
-    fn test_availability_when_true() {
-        let avail = Availability::when("no peers", Arc::new(|| true));
-        assert!(avail.is_available());
-        assert!(avail.unavailable_reason().is_none());
-    }
-
-    #[test]
-    fn test_availability_when_false() {
-        let avail = Availability::when("no peers configured", Arc::new(|| false));
-        assert!(!avail.is_available());
-        assert_eq!(avail.unavailable_reason(), Some("no peers configured"));
-    }
-
-    #[test]
-    fn test_availability_dynamic() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-        let avail = Availability::when(
-            "no peers",
-            Arc::new(move || flag_clone.load(Ordering::SeqCst)),
-        );
-
-        assert!(!avail.is_available());
-
-        flag.store(true, Ordering::SeqCst);
-        assert!(avail.is_available());
-
-        flag.store(false, Ordering::SeqCst);
-        assert!(!avail.is_available());
-    }
-
-    #[test]
-    fn test_gateway_conditional_visibility() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
-        let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
-
-        let gateway = ToolGatewayBuilder::new()
-            .add_dispatcher(base)
-            .add_dispatcher_with_availability(
-                comms,
-                Availability::when(
-                    "no peers",
-                    Arc::new(move || flag_clone.load(Ordering::SeqCst)),
-                ),
-            )
-            .build()
-            .unwrap();
-
-        // Initially comms tools are hidden
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "task_create");
-
-        // Enable comms
-        flag.store(true, Ordering::SeqCst);
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 2);
-
-        // Disable again
-        flag.store(false, Ordering::SeqCst);
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 1);
-    }
-
     #[tokio::test]
-    async fn test_gateway_unavailable_dispatch() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
+    async fn gateway_exact_catalog_uses_live_callability_snapshot_for_all_paths() {
+        let callable = Arc::new(AtomicBool::new(false));
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
+        let dynamic = Arc::new(LiveExactMockDispatcher::new(
+            "dynamic",
+            "send",
+            Arc::clone(&callable),
+        ));
 
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(base)
-            .add_dispatcher_with_availability(
-                comms,
-                Availability::when(
-                    "no peers configured",
-                    Arc::new(move || flag_clone.load(Ordering::SeqCst)),
-                ),
-            )
+            .add_dispatcher(dynamic)
             .build()
             .unwrap();
 
-        // Try to dispatch unavailable tool
+        let tools = gateway.tools();
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task_create"]
+        );
+        let catalog = gateway.tool_catalog();
+        assert!(
+            !catalog
+                .iter()
+                .find(|entry| entry.tool.name == "send")
+                .expect("send catalog entry")
+                .currently_callable()
+        );
         let result = dispatch_json(&gateway, "send", json!({})).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ToolError::Unavailable { .. }));
-        assert!(err.to_string().contains("no peers configured"));
+        assert!(matches!(result, Err(ToolError::Unavailable { .. })));
 
-        // Enable comms
-        flag.store(true, Ordering::SeqCst);
+        callable.store(true, Ordering::SeqCst);
+        let tools = gateway.tools();
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task_create", "send"]
+        );
+        let catalog = gateway.tool_catalog();
+        assert!(
+            catalog
+                .iter()
+                .find(|entry| entry.tool.name == "send")
+                .expect("send catalog entry")
+                .currently_callable()
+        );
         let result = dispatch_json(&gateway, "send", json!({})).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_collision_detection_ignores_availability() {
-        // Collision should be detected even if one dispatcher is conditionally hidden
-        let flag = Arc::new(AtomicBool::new(false));
+    #[tokio::test]
+    async fn gateway_freezes_routes_but_uses_live_child_callability() {
+        let dynamic = Arc::new(MutableMockDispatcher::new("dynamic", &["initial"]));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(dynamic.clone())
+            .build()
+            .unwrap();
 
-        let base = Arc::new(MockDispatcher::new("base", &["send"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
+        let initial_names: Vec<_> = gateway
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(initial_names, vec!["initial".to_string()]);
 
-        let result = ToolGatewayBuilder::new()
+        dynamic.add_tool("late");
+
+        let live_names: Vec<_> = gateway
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(
+            live_names,
+            vec!["initial".to_string()],
+            "gateway freezes route identity/order at build time"
+        );
+
+        let catalog_names: Vec<_> = gateway
+            .tool_catalog()
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect();
+        assert_eq!(catalog_names, vec!["initial".to_string()]);
+
+        let result = dispatch_json(&gateway, "late", json!({})).await;
+        assert!(matches!(result, Err(ToolError::NotFound { .. })));
+
+        dynamic.remove_tool("initial");
+        assert!(gateway.tools().is_empty());
+        let catalog = gateway.tool_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].tool.name, "initial");
+        assert!(!catalog[0].currently_callable());
+
+        let result = dispatch_json(&gateway, "initial", json!({})).await;
+        assert!(matches!(result, Err(ToolError::Unavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_unavailable_dispatch() {
+        let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
+        let exact = Arc::new(ExactMockDispatcher::with_callability(
+            "exact",
+            &[("send", false)],
+        ));
+
+        let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(base)
-            .add_dispatcher_with_availability(
-                comms,
-                Availability::when("no peers", Arc::new(move || flag.load(Ordering::SeqCst))),
-            )
-            .build();
+            .add_dispatcher(exact)
+            .build()
+            .unwrap();
 
-        // Should fail even though comms is currently unavailable
+        let result = dispatch_json(&gateway, "send", json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("collision"));
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::Unavailable { .. }));
+        assert!(err.to_string().contains("not currently callable"));
     }
 
     #[test]
-    fn test_availability_debug() {
-        let always = Availability::Always;
-        assert_eq!(format!("{always:?}"), "Availability::Always");
+    fn test_collision_detection_ignores_callability() {
+        let base = Arc::new(MockDispatcher::new("base", &["send"]));
+        let exact = Arc::new(ExactMockDispatcher::with_callability(
+            "exact",
+            &[("send", false)],
+        ));
 
-        let when = Availability::when("test reason", Arc::new(|| true));
-        assert!(format!("{when:?}").contains("test reason"));
+        let result = ToolGatewayBuilder::new()
+            .add_dispatcher(base)
+            .add_dispatcher(exact)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("collision"));
     }
 
     #[test]
@@ -1173,55 +1164,6 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(gateway.tools().len(), 2);
-    }
-
-    #[test]
-    fn test_dispatcher_all_or_nothing_visibility() {
-        // Verify that all tools from a dispatcher appear/disappear together
-        // (no partial visibility within a single dispatcher)
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
-        let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        // Dispatcher with multiple tools
-        let comms = Arc::new(MockDispatcher::new(
-            "comms",
-            &["send", "send_request", "send_response", "peers"],
-        ));
-
-        let gateway = ToolGatewayBuilder::new()
-            .add_dispatcher(base)
-            .add_dispatcher_with_availability(
-                comms,
-                Availability::when(
-                    "no peers",
-                    Arc::new(move || flag_clone.load(Ordering::SeqCst)),
-                ),
-            )
-            .build()
-            .unwrap();
-
-        // Initially unavailable - only base tool visible
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "task_create");
-
-        // Enable - ALL comms tools should appear together
-        flag.store(true, Ordering::SeqCst);
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 5); // 1 base + 4 comms
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"task_create"));
-        assert!(names.contains(&"send"));
-        assert!(names.contains(&"send_request"));
-        assert!(names.contains(&"send_response"));
-        assert!(names.contains(&"peers"));
-
-        // Disable - ALL comms tools should disappear together
-        flag.store(false, Ordering::SeqCst);
-        let tools = gateway.tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "task_create");
     }
 
     /// Mock dispatcher that returns a pre-built ExternalToolUpdate from poll_external_updates.
@@ -1316,14 +1258,14 @@ mod tests {
         let visible_names: Vec<_> = gateway
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(visible_names, vec!["alpha".to_string()]);
 
         let catalog = gateway.tool_catalog();
         let catalog_names: Vec<_> = catalog
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect();
         assert_eq!(catalog_names, vec!["alpha".to_string(), "beta".to_string()]);
         assert!(
@@ -1331,7 +1273,7 @@ mod tests {
                 .iter()
                 .find(|entry| entry.tool.name == "beta")
                 .expect("beta catalog entry")
-                .currently_callable,
+                .currently_callable(),
             "exact catalog should retain unavailable winners"
         );
     }
@@ -1372,7 +1314,7 @@ mod tests {
         let visible_names: Vec<_> = composite
             .tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.name.to_string())
             .collect();
         assert_eq!(
             visible_names,
@@ -1387,7 +1329,7 @@ mod tests {
                 .iter()
                 .find(|entry| entry.tool.name == "shared")
                 .expect("shared entry")
-                .currently_callable
+                .currently_callable()
         );
     }
 }

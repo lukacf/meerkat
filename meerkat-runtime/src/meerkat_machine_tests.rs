@@ -625,6 +625,64 @@ async fn realtime_attachment_signal_rejects_stale_authority() {
 }
 
 #[tokio::test]
+async fn realtime_reattach_for_authority_rejects_stale_authority_without_mutation() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let stale_authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            stale_authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+    let live_authority = adapter
+        .replace_realtime_attachment(&session_id)
+        .await
+        .expect("replacement should mint fresh authority");
+
+    let stale_err = adapter
+        .require_realtime_attachment_reattach_for_authority(stale_authority)
+        .await
+        .expect_err("stale authority should be rejected by DSL guard");
+    assert!(
+        matches!(stale_err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {stale_err:?}"
+    );
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+    assert_eq!(status, crate::RealtimeAttachmentStatus::ReplacementPending);
+
+    adapter
+        .require_realtime_attachment_reattach_for_authority(live_authority)
+        .await
+        .expect("current authority should require reattach");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+    assert_eq!(status, crate::RealtimeAttachmentStatus::ReattachRequired);
+}
+
+#[tokio::test]
 async fn attach_live_rejects_sessions_without_executor_and_preserves_unbound_status() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -15425,11 +15483,9 @@ async fn attach_mob_ingress_transitions_owner() {
 #[tokio::test]
 async fn mob_owned_drain_rejects_silent_session_downgrade() {
     // The spec's regression class: once a mob has claimed peer-ingress
-    // ownership, a later session-runtime `update_peer_ingress_context`
-    // call must not silently swap the comms runtime out from under the
-    // mob. At the DSL level, the `AttachSessionIngress` guard rejects the
-    // transition from `MobOwned`. At the shell level, the session runtime
-    // calls `peer_ingress_owner()` and skips the reconfigure path.
+    // ownership, a later session-runtime attach must not silently swap the
+    // comms runtime out from under the mob. The command must surface the DSL
+    // rejection and stop before the mechanical drain slot can rebind.
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
@@ -15437,21 +15493,41 @@ async fn mob_owned_drain_rejects_silent_session_downgrade() {
     // Mob claims ownership with a specific comms runtime instance.
     let mob_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-nodowngrade");
-    adapter
-        .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
-        .await;
+    assert!(
+        adapter
+            .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
+            .await,
+        "initial mob-owned drain should spawn"
+    );
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);
 
-    // Session runtime attempts to swap in a different comms runtime (the
-    // s71 regression path). The shell helper stages
-    // `AttachSessionIngress { comms_runtime_id }` into the DSL; the guard
-    // rejects because owner is `MobOwned`, so DSL state is unchanged. A
-    // typical surface would additionally short-circuit before staging by
-    // consulting `peer_ingress_owner`.
+    let phase_before = current_phase(&adapter, &session_id).await;
     let session_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
-    adapter
-        .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
+    let downgrade = adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&adapter)),
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(Arc::clone(&session_comms)),
+                mob_id: None,
+            },
+        )
         .await;
+    assert!(
+        matches!(
+            downgrade,
+            Err(MeerkatMachineCommandError::Driver(
+                RuntimeDriverError::ValidationFailed { .. }
+            ))
+        ),
+        "mob-owned downgrade must surface a DSL validation failure, got {downgrade:?}"
+    );
+    assert_eq!(
+        current_phase(&adapter, &session_id).await,
+        phase_before,
+        "mechanical drain slot must not be rebound after DSL rejection"
+    );
 
     // Owner must remain `MobOwned` with the original comms runtime id.
     let owner = adapter.peer_ingress_owner(&session_id).await;
@@ -15468,6 +15544,177 @@ async fn mob_owned_drain_rejects_silent_session_downgrade() {
         }
         other => panic!("expected MobOwned to survive downgrade attempt, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn attach_session_ingress_exact_reassertion_is_idempotent() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    assert!(
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
+            .await,
+        "first session-owned attach should spawn"
+    );
+
+    let reassert = adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&adapter)),
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(Arc::clone(&comms_runtime)),
+                mob_id: None,
+            },
+        )
+        .await
+        .expect("exact session-owned reassertion should be accepted");
+    assert!(
+        matches!(reassert, MeerkatMachineCommandResult::Spawned(false)),
+        "idempotent reassertion should not spawn or rebind, got {reassert:?}"
+    );
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    assert!(
+        matches!(
+            owner,
+            crate::meerkat_machine::PeerIngressOwner::SessionOwned { ref comms_runtime_id }
+                if *comms_runtime_id == expected_id
+        ),
+        "session owner should remain bound to the original runtime, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_mob_ingress_exact_reassertion_is_idempotent() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-idempotent");
+    assert!(
+        adapter
+            .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
+            .await,
+        "first mob-owned attach should spawn"
+    );
+
+    let reassert = adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&adapter)),
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(Arc::clone(&comms_runtime)),
+                mob_id: Some(mob_id.clone()),
+            },
+        )
+        .await
+        .expect("exact mob-owned reassertion should be accepted");
+    assert!(
+        matches!(reassert, MeerkatMachineCommandResult::Spawned(false)),
+        "idempotent mob reassertion should not spawn or rebind, got {reassert:?}"
+    );
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    assert!(
+        matches!(
+            owner,
+            crate::meerkat_machine::PeerIngressOwner::MobOwned {
+                ref comms_runtime_id,
+                mob_id: ref actual_mob_id,
+            } if *comms_runtime_id == expected_id && *actual_mob_id == mob_id
+        ),
+        "mob owner should remain bound to the original runtime and mob, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_mob_ingress_rejects_conflicting_mob_rebind() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-original");
+    assert!(
+        adapter
+            .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
+            .await,
+        "first mob-owned attach should spawn"
+    );
+
+    let conflicting_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let conflicting_mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-conflict");
+    let rebind = adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&adapter)),
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(conflicting_comms),
+                mob_id: Some(conflicting_mob_id),
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            rebind,
+            Err(MeerkatMachineCommandError::Driver(
+                RuntimeDriverError::ValidationFailed { .. }
+            ))
+        ),
+        "conflicting mob-owned rebind must surface a DSL validation failure, got {rebind:?}"
+    );
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    assert!(
+        matches!(
+            owner,
+            crate::meerkat_machine::PeerIngressOwner::MobOwned {
+                ref comms_runtime_id,
+                mob_id: ref actual_mob_id,
+            } if *comms_runtime_id == expected_id && *actual_mob_id == mob_id
+        ),
+        "conflicting mob rebind must leave authoritative owner unchanged, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn detach_ingress_unattached_is_idempotent_noop() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let detach = adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&adapter)),
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: false,
+                comms_runtime: None,
+                mob_id: None,
+            },
+        )
+        .await
+        .expect("no-op detach from Unattached should be accepted");
+    assert!(
+        matches!(detach, MeerkatMachineCommandResult::Spawned(false)),
+        "no-op detach should not spawn, got {detach:?}"
+    );
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(owner, crate::meerkat_machine::PeerIngressOwner::Unattached),
+        "no-op detach should leave owner Unattached, got {owner:?}"
+    );
 }
 
 #[tokio::test]

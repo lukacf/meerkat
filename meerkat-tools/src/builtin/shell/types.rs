@@ -92,6 +92,35 @@ pub enum JobStatus {
     },
 }
 
+/// Lightweight lifecycle status for job list summaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum JobSummaryStatus {
+    /// Job is currently executing.
+    Running,
+    /// Job completed successfully.
+    Completed,
+    /// Job failed to execute or terminated unsuccessfully.
+    Failed,
+    /// Job exceeded timeout.
+    TimedOut,
+    /// Job was cancelled by user or lifecycle retirement.
+    Cancelled,
+}
+
+impl From<&JobStatus> for JobSummaryStatus {
+    fn from(status: &JobStatus) -> Self {
+        match status {
+            JobStatus::Running { .. } => Self::Running,
+            JobStatus::Completed { .. } => Self::Completed,
+            JobStatus::Failed { .. } => Self::Failed,
+            JobStatus::TimedOut { .. } => Self::TimedOut,
+            JobStatus::Cancelled { .. } => Self::Cancelled,
+        }
+    }
+}
+
 /// A background job in the job management system
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackgroundJob {
@@ -119,8 +148,8 @@ pub struct JobSummary {
     pub id: JobId,
     /// The command being executed
     pub command: String,
-    /// Status as a simple string: "running", "completed", "failed", "timed_out", "cancelled"
-    pub status: String,
+    /// Lightweight typed lifecycle status.
+    pub status: JobSummaryStatus,
     /// Unix timestamp when the job started
     pub started_at_unix: u64,
 }
@@ -397,13 +426,13 @@ mod tests {
         let summary = JobSummary {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
             command: "npm test".to_string(),
-            status: "running".to_string(),
+            status: JobSummaryStatus::Running,
             started_at_unix: 1706123500,
         };
 
         assert_eq!(summary.id.0, "job_01hx7z8k9m2n3p4q5r6s7t8u9v");
         assert_eq!(summary.command, "npm test");
-        assert_eq!(summary.status, "running");
+        assert_eq!(summary.status, JobSummaryStatus::Running);
         assert_eq!(summary.started_at_unix, 1706123500);
     }
 
@@ -412,7 +441,7 @@ mod tests {
         let summary = JobSummary {
             id: JobId::from_string("job_01hx7z9abcdefghijklmnopqr"),
             command: "make build".to_string(),
-            status: "completed".to_string(),
+            status: JobSummaryStatus::Completed,
             started_at_unix: 1706123456,
         };
 
@@ -427,17 +456,27 @@ mod tests {
 
     #[test]
     fn test_job_summary_status_values() {
-        // Test all valid status string values
-        let statuses = ["running", "completed", "failed", "timed_out", "cancelled"];
+        let statuses = [
+            (JobSummaryStatus::Running, "running"),
+            (JobSummaryStatus::Completed, "completed"),
+            (JobSummaryStatus::Failed, "failed"),
+            (JobSummaryStatus::TimedOut, "timed_out"),
+            (JobSummaryStatus::Cancelled, "cancelled"),
+        ];
 
-        for status in statuses {
+        for (status, wire_status) in statuses {
             let summary = JobSummary {
                 id: JobId::from_string("job_test"),
                 command: "test".to_string(),
-                status: status.to_string(),
+                status,
                 started_at_unix: 0,
             };
             assert_eq!(summary.status, status);
+            let value = serde_json::to_value(&summary).unwrap();
+            assert_eq!(
+                value.get("status").and_then(serde_json::Value::as_str),
+                Some(wire_status)
+            );
         }
     }
 }

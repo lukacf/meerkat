@@ -69,7 +69,7 @@ impl AgentLlmClient for ScenarioClient {
                     Ok(LlmStreamResult::new(
                         vec![meerkat_core::AssistantBlock::ToolUse {
                             id: "tc_1".to_string(),
-                            name: "echo".to_string(),
+                            name: "echo".into(),
                             args,
                             meta: None,
                         }],
@@ -114,7 +114,7 @@ impl RecordingToolDispatcher {
 impl AgentToolDispatcher for RecordingToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::new([Arc::new(ToolDef {
-            name: "echo".to_string(),
+            name: "echo".into(),
             description: "echo".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,

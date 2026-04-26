@@ -177,7 +177,7 @@ pub fn persist_compaction_cadence(
 /// 2. Call LLM with compaction prompt
 /// 3. On failure: emit CompactionFailed, return error without mutating session
 /// 4. Rebuild history via compactor
-/// 5. Emit CompactionCompleted
+/// 5. Return a typed outcome; the caller commits it and emits CompactionCompleted
 pub async fn run_compaction<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
@@ -274,27 +274,13 @@ where
     let result = compactor.rebuild_history(messages, &summary_text);
     let messages_after = result.messages.len();
 
-    // 5. Emit CompactionCompleted
-    if event_stream_open
-        && !crate::event_tap::tap_emit(
-            event_tap,
-            event_tx.as_ref(),
-            AgentEvent::CompactionCompleted {
-                summary_tokens: summary_usage.output_tokens,
-                messages_before: message_count,
-                messages_after,
-            },
-        )
-        .await
-    {
-        tracing::warn!("compaction event stream receiver dropped before CompactionCompleted");
-    }
-
     Ok(CompactionOutcome {
         new_messages: result.messages,
         discarded: result.discarded,
         summary_usage,
         session_boundary_index,
+        messages_before: message_count,
+        messages_after,
     })
 }
 
@@ -308,6 +294,10 @@ pub struct CompactionOutcome {
     pub summary_usage: Usage,
     /// Session boundary index at which compaction occurred.
     pub session_boundary_index: u64,
+    /// Number of messages before compaction.
+    pub messages_before: usize,
+    /// Number of messages after compaction.
+    pub messages_after: usize,
 }
 
 #[cfg(test)]

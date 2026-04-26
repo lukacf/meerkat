@@ -822,19 +822,12 @@ async fn initialize_methods_list_complete() {
         "session/stream_close",
         "turn/start",
         "turn/interrupt",
-        "session/status",
-        "session/submit",
-        "session/retire",
-        "session/reset",
-        "session/submission",
-        "session/submissions",
         "config/get",
         "config/set",
         "config/patch",
         "capabilities/get",
         "models/catalog",
         "skills/list",
-        "skills/inspect",
     ];
     for method in &expected_core {
         assert!(

@@ -461,8 +461,12 @@ impl From<&meerkat_core::ToolFilter> for ToolFilter {
     fn from(f: &meerkat_core::ToolFilter) -> Self {
         match f {
             meerkat_core::ToolFilter::All => Self::All,
-            meerkat_core::ToolFilter::Allow(names) => Self::Allow(names.iter().cloned().collect()),
-            meerkat_core::ToolFilter::Deny(names) => Self::Deny(names.iter().cloned().collect()),
+            meerkat_core::ToolFilter::Allow(names) => {
+                Self::Allow(names.iter().map(|name| name.as_str().to_string()).collect())
+            }
+            meerkat_core::ToolFilter::Deny(names) => {
+                Self::Deny(names.iter().map(|name| name.as_str().to_string()).collect())
+            }
         }
     }
 }
@@ -530,7 +534,7 @@ impl From<&meerkat_core::types::ToolProvenance> for ToolProvenance {
     fn from(p: &meerkat_core::types::ToolProvenance) -> Self {
         Self {
             kind: ToolSourceKind::from(&p.kind),
-            source_id: p.source_id.clone(),
+            source_id: p.source_id.to_string(),
         }
     }
 }
@@ -1383,6 +1387,31 @@ pub enum TurnCancellationReason {
     Observed,
 }
 
+/// Typed recoverable LLM retry failure classifier. Closed mirror of
+/// [`meerkat_core::retry::LlmRetryFailureKind`] so retry authority records the
+/// retry cause as data, not as a parsed diagnostic string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LlmRetryFailureKind {
+    #[default]
+    RateLimited,
+    NetworkTimeout,
+    CallTimeout,
+    RetryableProviderError,
+}
+
+impl From<meerkat_core::retry::LlmRetryFailureKind> for LlmRetryFailureKind {
+    fn from(kind: meerkat_core::retry::LlmRetryFailureKind) -> Self {
+        match kind {
+            meerkat_core::retry::LlmRetryFailureKind::RateLimited => Self::RateLimited,
+            meerkat_core::retry::LlmRetryFailureKind::NetworkTimeout => Self::NetworkTimeout,
+            meerkat_core::retry::LlmRetryFailureKind::CallTimeout => Self::CallTimeout,
+            meerkat_core::retry::LlmRetryFailureKind::RetryableProviderError => {
+                Self::RetryableProviderError
+            }
+        }
+    }
+}
+
 /// Typed admission-signal classifier for the `PostAdmissionSignal` effect.
 /// Closed set of post-admission wake/interrupt intents emitted by the
 /// ingress authority so the shell dispatcher matches exhaustively on a
@@ -1880,6 +1909,10 @@ machine! {
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
+            llm_retry_attempt: u64,
+            llm_retry_max_retries: u64,
+            llm_retry_selected_delay_ms: u64,
+            llm_retry_last_failure_kind: Option<Enum<LlmRetryFailureKind>>,
             silent_intent_overrides: Set<String>,
 
             // --- Registration substate ---
@@ -2182,6 +2215,10 @@ machine! {
             terminal_outcome = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
+            llm_retry_attempt = 0,
+            llm_retry_max_retries = 0,
+            llm_retry_selected_delay_ms = 0,
+            llm_retry_last_failure_kind = None,
             silent_intent_overrides = EmptySet,
             // Registration substate
             registration_phase = RegistrationPhase::Queuing,
@@ -2370,9 +2407,15 @@ machine! {
             ExtractionStart,
             ExtractionValidationPassed,
             ExtractionValidationFailed { error: String },
-            RecoverableFailure { error: String },
+            RecoverableFailure {
+                failure_kind: Enum<LlmRetryFailureKind>,
+                retry_attempt: u64,
+                max_retries: u64,
+                selected_delay_ms: u64,
+                error: String,
+            },
             FatalFailure { error: String },
-            RetryRequested,
+            RetryRequested { retry_attempt: u64 },
             CancelNow,
             RequestCancelAfterBoundary,
             CancellationObserved,
@@ -2385,6 +2428,19 @@ machine! {
             RunFailed { run_id: RunId, error: String },
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
+            RecoverInputLifecycle {
+                input_id: String,
+                phase: Enum<InputPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                superseded_by: Option<String>,
+                aggregate_id: Option<String>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+                abandon_attempt_count: u64,
+                attempt_count: u64,
+                run_id: Option<String>,
+                boundary_sequence: Option<u64>,
+                lane: Option<Enum<InputLane>>,
+            },
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
@@ -2468,6 +2524,7 @@ machine! {
             ReplaceRealtimeBinding,
             DetachRealtimeBinding,
             RequireRealtimeReattach,
+            RequireRealtimeReattachForAuthority { authority_epoch: u64 },
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
             // Wave-c C-9c R4: overlay-tracked reconnect progress projected
             // into DSL state so RPC/MCP status queries read real retry state.
@@ -3910,6 +3967,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -3941,6 +4002,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -3971,6 +4036,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4003,6 +4072,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4034,6 +4107,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4064,6 +4141,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4096,6 +4177,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4127,6 +4212,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4157,6 +4246,10 @@ machine! {
                 self.terminal_outcome = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
@@ -4370,7 +4463,13 @@ machine! {
         }
 
         transition RecoverableFailure {
-            on input RecoverableFailure { error }
+            on input RecoverableFailure {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+                selected_delay_ms,
+                error
+            }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_non_terminal" {
                 self.turn_phase == TurnPhase::CallingLlm
@@ -4378,8 +4477,13 @@ machine! {
                 || self.turn_phase == TurnPhase::DrainingBoundary
                 || self.turn_phase == TurnPhase::Extracting
             }
+            guard "retry_attempt_present" { retry_attempt > 0 }
             update {
                 self.turn_phase = TurnPhase::ErrorRecovery;
+                self.llm_retry_attempt = retry_attempt;
+                self.llm_retry_max_retries = max_retries;
+                self.llm_retry_selected_delay_ms = selected_delay_ms;
+                self.llm_retry_last_failure_kind = Some(failure_kind);
             }
             to Running
         }
@@ -4397,9 +4501,10 @@ machine! {
         }
 
         transition RetryRequested {
-            on input RetryRequested
+            on input RetryRequested { retry_attempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_error_recovery" { self.turn_phase == TurnPhase::ErrorRecovery }
+            guard "retry_attempt_matches" { retry_attempt == self.llm_retry_attempt }
             update {
                 self.turn_phase = TurnPhase::CallingLlm;
             }
@@ -4473,6 +4578,10 @@ machine! {
                 self.terminal_outcome = Some(outcome);
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
             }
             to Running
         }
@@ -4915,6 +5024,84 @@ machine! {
         // =====================================================================
         // Absorbed substate transitions — Input Lifecycle
         // =====================================================================
+
+        // RecoverInputLifecycle: restore persisted input lifecycle facts
+        // through machine authority. Store recovery may present an input at
+        // any lifecycle phase, so this transition deliberately owns the
+        // whole recovered projection instead of replaying admit/stage/apply
+        // transitions whose preconditions may no longer hold after restart.
+        transition RecoverInputLifecycle {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverInputLifecycle {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                lane
+            }
+            update {
+                self.input_phases.insert(input_id, phase);
+
+                if terminal_kind != None {
+                    self.input_terminal_kind.insert(input_id, terminal_kind.get("value"));
+                } else {
+                    self.input_terminal_kind.remove(input_id);
+                }
+
+                if superseded_by != None {
+                    self.input_superseded_by.insert(input_id, superseded_by.get("value"));
+                } else {
+                    self.input_superseded_by.remove(input_id);
+                }
+
+                if aggregate_id != None {
+                    self.input_aggregate_id.insert(input_id, aggregate_id.get("value"));
+                } else {
+                    self.input_aggregate_id.remove(input_id);
+                }
+
+                if abandon_reason != None {
+                    self.input_abandon_reason.insert(input_id, abandon_reason.get("value"));
+                    self.input_abandon_attempt_count.insert(input_id, abandon_attempt_count);
+                } else {
+                    self.input_abandon_reason.remove(input_id);
+                    self.input_abandon_attempt_count.remove(input_id);
+                }
+
+                self.input_attempt_counts.insert(input_id, attempt_count);
+
+                if run_id != None {
+                    self.input_run_associations.insert(input_id, run_id.get("value"));
+                } else {
+                    self.input_run_associations.remove(input_id);
+                }
+
+                if boundary_sequence != None {
+                    self.input_boundary_sequences.insert(input_id, boundary_sequence.get("value"));
+                } else {
+                    self.input_boundary_sequences.remove(input_id);
+                }
+
+                if !self.input_admission_seq.contains_key(input_id) {
+                    self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                    self.next_admission_seq += 1;
+                }
+
+                if lane != None {
+                    self.input_lane.insert(input_id, lane.get("value"));
+                } else {
+                    self.input_lane.remove(input_id);
+                }
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
 
         // QueueAccepted: admit a new input into the queue lane
         transition QueueAccepted {
@@ -5623,6 +5810,20 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RequireRealtimeReattach
             guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
+        transition RequireRealtimeReattachForAuthority {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequireRealtimeReattachForAuthority { authority_epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
             update {
                 self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
@@ -6402,14 +6603,21 @@ machine! {
         // Peer-ingress transport capability ownership (W2-G / issue #264)
         // =====================================================================
 
-        // AttachSessionIngress: only valid from `Unattached`. Rejects
-        // `MobOwned` → `SessionOwned` silent downgrades by construction.
+        // AttachSessionIngress: valid from `Unattached`, or as an exact
+        // idempotent re-assertion of the already-owned session runtime.
+        // Rejects `MobOwned` → `SessionOwned` silent downgrades by
+        // construction.
         transition AttachSessionIngress {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AttachSessionIngress { comms_runtime_id }
             guard "session_registered" { self.session_id != None }
-            guard "owner_is_unattached" {
+            guard "owner_allows_session_attach" {
                 self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == None
+                )
             }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::SessionOwned;
@@ -6419,7 +6627,8 @@ machine! {
             to Idle
         }
 
-        // AttachMobIngress: valid from `Unattached` or `SessionOwned`.
+        // AttachMobIngress: valid from `Unattached`, `SessionOwned`, or as
+        // an exact idempotent re-assertion of the same mob-owned runtime.
         // Mob provisioning is allowed to take over a session-owned drain
         // (the spec's promotion case).
         transition AttachMobIngress {
@@ -6429,6 +6638,11 @@ machine! {
             guard "owner_allows_mob_attach" {
                 self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
                 || self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::MobOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == Some(mob_id)
+                )
             }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::MobOwned;
@@ -6438,14 +6652,12 @@ machine! {
             to Idle
         }
 
-        // DetachIngress: clear any active ownership back to `Unattached`.
+        // DetachIngress: clear any active ownership back to `Unattached`;
+        // exact no-op detach is accepted as idempotence by the DSL itself.
         transition DetachIngress {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input DetachIngress
             guard "session_registered" { self.session_id != None }
-            guard "owner_is_attached" {
-                self.peer_ingress_owner_kind != PeerIngressOwnerKind::Unattached
-            }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached;
                 self.peer_ingress_comms_runtime_id = None;

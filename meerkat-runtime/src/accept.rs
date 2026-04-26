@@ -58,6 +58,8 @@ pub struct CoarseAdmissionFlags {
 pub struct ResolvedAdmission {
     pub policy: PolicyDecision,
     pub handling_mode: HandlingMode,
+    pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
     pub admission_plan: AdmissionPlan,
     pub coarse_flags: CoarseAdmissionFlags,
 }
@@ -259,6 +261,9 @@ pub fn resolve_admission(
     let mut policy = DefaultPolicyTable::resolve(input, runtime_idle);
     crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
     let handling_mode = handling_mode_from_policy(&policy);
+    let runtime_semantics =
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+    let primitive_projection = crate::input::runtime_input_projection(input);
     let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
     let request_immediate_processing = requests_immediate_processing(input);
     let interrupt_yielding = !request_immediate_processing
@@ -269,6 +274,8 @@ pub fn resolve_admission(
     ResolvedAdmission {
         policy,
         handling_mode,
+        runtime_semantics,
+        primitive_projection,
         admission_plan,
         coarse_flags: CoarseAdmissionFlags {
             request_immediate_processing,

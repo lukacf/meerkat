@@ -94,13 +94,48 @@ impl RpcMethodDescriptor {
 pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDescriptor> {
     let mut methods = vec![
         RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
-        RpcMethodDescriptor::basic("session/create", "Create session + run first turn"),
-        RpcMethodDescriptor::basic("session/list", "List active sessions"),
-        RpcMethodDescriptor::basic("session/read", "Get session state"),
-        RpcMethodDescriptor::basic("session/history", "Get full session history"),
-        RpcMethodDescriptor::basic("session/archive", "Remove session"),
-        RpcMethodDescriptor::basic("turn/start", "Start a new turn on existing session"),
-        RpcMethodDescriptor::basic("turn/interrupt", "Cancel in-flight turn"),
+        RpcMethodDescriptor::typed(
+            "session/create",
+            "Create session + run first turn",
+            "CreateSessionParams",
+            "WireRunResult | DeferredCreateResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/list",
+            "List active sessions",
+            "ListSessionsParams",
+            "ListSessionsResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/read",
+            "Get session state",
+            "ReadSessionParams",
+            "WireSessionInfo",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/history",
+            "Get full session history",
+            "ReadSessionHistoryParams",
+            "WireSessionHistory",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/archive",
+            "Remove session",
+            "ArchiveSessionParams",
+            "Value",
+        ),
+        RpcMethodDescriptor::typed(
+            "turn/start",
+            "Start a new turn on existing session",
+            "StartTurnParams",
+            "WireRunResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "turn/interrupt",
+            "Cancel in-flight turn",
+            "InterruptParams",
+            "Value",
+        ),
         RpcMethodDescriptor::basic("config/get", "Read config"),
         RpcMethodDescriptor::basic("config/set", "Replace config"),
         RpcMethodDescriptor::basic("config/patch", "Merge-patch config"),
@@ -223,9 +258,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "SessionPeerResponseTerminalParams",
                 "RuntimeAcceptResult",
             ),
-            RpcMethodDescriptor::basic(
+            RpcMethodDescriptor::typed(
                 "session/inject_context",
                 "Stage runtime system context for application at the next LLM boundary",
+                "InjectSystemContextParams",
+                "InjectSystemContextResult",
             ),
             RpcMethodDescriptor::typed(
                 "events/latest_cursor",
@@ -320,20 +357,14 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.skills_enabled {
-        methods.extend([
-            RpcMethodDescriptor::basic("skills/list", "List available skills"),
-            RpcMethodDescriptor::basic("skills/inspect", "Inspect one skill"),
-        ]);
+        methods.extend([RpcMethodDescriptor::basic(
+            "skills/list",
+            "List available skills",
+        )]);
     }
 
     if options.runtime_available {
         methods.extend([
-            RpcMethodDescriptor::basic("session/status", "Get a session's current runtime state"),
-            RpcMethodDescriptor::basic("session/submit", "Accept a runtime input for a session"),
-            RpcMethodDescriptor::basic("session/retire", "Retire a session runtime"),
-            RpcMethodDescriptor::basic("session/reset", "Reset a session runtime"),
-            RpcMethodDescriptor::basic("session/submission", "Get a runtime input state"),
-            RpcMethodDescriptor::basic("session/submissions", "List active runtime inputs"),
             RpcMethodDescriptor::typed(
                 "realtime/open_info",
                 "Get bootstrap metadata for opening a realtime channel",
@@ -630,5 +661,52 @@ mod tests {
             !methods.iter().any(|m| m == "auth/profile/test"),
             "retired auth/profile/test must not be advertised by public catalogs"
         );
+    }
+
+    #[test]
+    fn documented_surface_excludes_runtime_session_control_nouns() {
+        let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
+        for retired in [
+            "runtime/session_status",
+            "runtime/session_submit",
+            "runtime/session_retire",
+            "runtime/session_reset",
+            "runtime/session_submission",
+            "runtime/session_submissions",
+        ] {
+            assert!(
+                !methods.iter().any(|m| m == retired),
+                "runtime/session control noun must not be advertised by public catalogs: {retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn basic_turn_and_session_methods_advertise_required_params() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for name in [
+            "session/create",
+            "session/read",
+            "session/history",
+            "session/archive",
+            "turn/start",
+            "turn/interrupt",
+        ] {
+            let descriptors: Vec<_> = methods
+                .iter()
+                .filter(|method| method.name == name)
+                .collect();
+            assert_eq!(
+                descriptors.len(),
+                1,
+                "missing or duplicated descriptor for {name}"
+            );
+            for descriptor in descriptors {
+                assert!(
+                    descriptor.params_type.is_some(),
+                    "{name} must advertise its required params type"
+                );
+            }
+        }
     }
 }

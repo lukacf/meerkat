@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use meerkat::surface::{RequestTerminal, SurfaceRequestExecutor, noop_request_action};
+use meerkat::surface::{
+    RequestTerminal, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
+};
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -369,12 +371,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         &self,
         request: &RpcRequest,
     ) -> Option<(String, tokio::task::JoinHandle<()>)> {
-        if !request_requires_long_running_executor(request) {
+        let semantics = request_semantics(request);
+        if !semantics.requires_long_running_executor() {
             return None;
         }
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let publish_on_success = request_commits_state_on_success(request);
         let context = self
             .request_executor
             .begin_request(request_key.clone(), noop_request_action());
@@ -386,7 +388,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             if let Some(response) =
                 Box::pin(router.dispatch_with_request_context(request, Some(context))).await
             {
-                let terminal = classify_long_running_response(&response, publish_on_success);
+                let terminal = classify_long_running_response(&response, semantics);
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
@@ -446,13 +448,9 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
 fn classify_long_running_response(
     response: &RpcResponse,
-    publish_on_success: bool,
+    semantics: SurfaceRequestSemantics,
 ) -> RequestTerminal<RpcResponse> {
-    if publish_on_success && response.error.is_none() {
-        RequestTerminal::Publish(response.clone())
-    } else {
-        RequestTerminal::RespondWithoutPublish(response.clone())
-    }
+    semantics.classify_terminal(response.error.is_none(), response.clone())
 }
 
 fn request_key(id: &RpcId) -> String {
@@ -474,20 +472,11 @@ fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
     )
 }
 
-fn request_requires_long_running_executor(request: &RpcRequest) -> bool {
-    match request.method.as_str() {
-        "turn/start" | "mob/turn_start" => true,
-        "session/create" => session_create_runs_immediately(request.params.as_deref()),
-        _ => false,
-    }
-}
-
-fn request_commits_state_on_success(request: &RpcRequest) -> bool {
-    match request.method.as_str() {
-        "turn/start" | "mob/turn_start" => true,
-        "session/create" => session_create_runs_immediately(request.params.as_deref()),
-        _ => false,
-    }
+fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
+    SurfaceRequestSemantics::for_rpc_method(
+        request.method.as_str(),
+        session_create_runs_immediately(request.params.as_deref()),
+    )
 }
 
 fn session_create_runs_immediately(params: Option<&serde_json::value::RawValue>) -> bool {
@@ -652,7 +641,7 @@ mod tests {
             }))),
         };
 
-        assert!(!request_requires_long_running_executor(&request));
+        assert!(!request_semantics(&request).requires_long_running_executor());
     }
 
     #[test]
@@ -666,7 +655,7 @@ mod tests {
             }))),
         };
 
-        assert!(request_requires_long_running_executor(&request));
+        assert!(request_semantics(&request).requires_long_running_executor());
     }
 
     #[test]
@@ -681,10 +670,11 @@ mod tests {
             }))),
         };
 
-        assert!(request_commits_state_on_success(&request));
-        let response = RpcResponse::success(request.id.clone(), serde_json::json!({"ok": true}));
+        let semantics = request_semantics(&request);
+        assert!(semantics.requires_long_running_executor());
+        let response = RpcResponse::success(request.id, serde_json::json!({"ok": true}));
         assert!(matches!(
-            classify_long_running_response(&response, request_commits_state_on_success(&request)),
+            classify_long_running_response(&response, semantics),
             RequestTerminal::Publish(_)
         ));
     }

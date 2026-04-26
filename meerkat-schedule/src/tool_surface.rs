@@ -41,7 +41,7 @@ impl AgentToolDispatcher for ScheduleToolSurface {
         let is_schedule_tool = self.tool_defs.iter().any(|tool| tool.name == call.name);
         if !is_schedule_tool {
             return Err(ToolError::NotFound {
-                name: call.name.to_string(),
+                name: call.name.into(),
             });
         }
 
@@ -61,7 +61,7 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
         .into_iter()
         .map(|tool| {
             Arc::new(ToolDef {
-                name: tool["name"].as_str().unwrap_or_default().to_string(),
+                name: tool["name"].as_str().unwrap_or_default().into(),
                 description: tool["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: tool["inputSchema"].clone(),
                 provenance: Some(ToolProvenance {

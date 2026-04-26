@@ -27,12 +27,31 @@ use crate::{
 // construction site through these one-line helpers. A panic here is a
 // hand-authored DSL-slug bug, never reachable from wire input.
 use crate::identity::{
-    ActorId, CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
-    PhaseId, ProtocolId, RouteId, TransitionId,
+    ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
+    EntryInputId, FieldId, InputVariantId, MachineId, MachineInstanceId, PhaseId, ProtocolId,
+    RouteId, StorePrimitiveId, TransactionPlanId, TransactionTriggerId, TransitionId,
 };
 
 fn comp_id(s: &str) -> CompositionId {
     CompositionId::parse(s).expect("valid composition slug")
+}
+fn driver_id(s: &str) -> CompositionDriverId {
+    CompositionDriverId::parse(s).expect("valid composition-driver slug")
+}
+fn tx_plan_id(s: &str) -> TransactionPlanId {
+    TransactionPlanId::parse(s).expect("valid transaction-plan slug")
+}
+fn tx_trigger_id(s: &str) -> TransactionTriggerId {
+    TransactionTriggerId::parse(s).expect("valid transaction-trigger slug")
+}
+fn store_primitive_id(s: &str) -> StorePrimitiveId {
+    StorePrimitiveId::parse(s).expect("valid store-primitive slug")
+}
+fn witness_id(s: &str) -> CompositionWitnessId {
+    CompositionWitnessId::parse(s).expect("valid witness slug")
+}
+fn entry_input_id(s: &str) -> EntryInputId {
+    EntryInputId::parse(s).expect("valid entry-input slug")
 }
 fn mach_id(s: &str) -> MachineId {
     MachineId::parse(s).expect("valid machine slug")
@@ -420,22 +439,22 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         handoff_protocols,
         entry_inputs: vec![
             EntryInput {
-                name: "spawn_member".into(),
+                name: entry_input_id("spawn_member"),
                 machine: mi_id("mob"),
                 input_variant: iv_id("Spawn"),
             },
             EntryInput {
-                name: "submit_work".into(),
+                name: entry_input_id("submit_work"),
                 machine: mi_id("mob"),
                 input_variant: iv_id("SubmitWork"),
             },
             EntryInput {
-                name: "retire_member".into(),
+                name: entry_input_id("retire_member"),
                 machine: mi_id("mob"),
                 input_variant: iv_id("Retire"),
             },
             EntryInput {
-                name: "destroy_mob".into(),
+                name: entry_input_id("destroy_mob"),
                 machine: mi_id("mob"),
                 input_variant: iv_id("Destroy"),
             },
@@ -534,7 +553,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         // above (producer=mob, consumer=meerkat); Signal-kind routes are
         // emitted through the generated `route_to_signal` surface.
         driver: Some(CompositionDriver {
-            name: "meerkat_mob_seam_driver".into(),
+            name: driver_id("meerkat_mob_seam_driver"),
             rust: CompositionDriverRustBinding {
                 module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
                 driver_type: "MeerkatMobSeamDriver".into(),
@@ -667,10 +686,10 @@ fn transaction_plan(
     store_primitive: &str,
 ) -> CompositionTransactionPlan {
     CompositionTransactionPlan {
-        name: name.into(),
-        trigger: trigger.into(),
+        name: tx_plan_id(name),
+        trigger: tx_trigger_id(trigger),
         description: description.into(),
-        store_primitive: store_primitive.into(),
+        store_primitive: store_primitive_id(store_primitive),
         route_names: vec![],
         protocol_names: vec![],
     }
@@ -678,7 +697,7 @@ fn transaction_plan(
 
 fn witness(name: &str, expected_routes: &[&str]) -> CompositionWitness {
     CompositionWitness {
-        name: name.into(),
+        name: witness_id(name),
         preload_inputs: vec![],
         expected_routes: expected_routes.iter().map(|r| route_id(r)).collect(),
         expected_scheduler_rules: vec![],

@@ -576,7 +576,7 @@ impl MockSessionService {
                 dispatcher
                     .tools()
                     .iter()
-                    .map(|tool| tool.name.clone())
+                    .map(|tool| tool.name.to_string())
                     .collect()
             })
             .unwrap_or_default()
@@ -1118,6 +1118,7 @@ impl SessionService for MockSessionService {
                                 session_id,
                                 error_class: meerkat_core::event::AgentErrorClass::Internal,
                                 error: "mock flow turn failure".to_string(),
+                                error_report: None,
                             },
                         ))
                         .await;
@@ -3349,7 +3350,7 @@ struct EchoBundleDispatcher;
 impl AgentToolDispatcher for EchoBundleDispatcher {
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
         vec![Arc::new(meerkat_core::ToolDef {
-            name: "bundle_echo".to_string(),
+            name: "bundle_echo".into(),
             description: "Echo input value".to_string(),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
             provenance: None,
@@ -3413,6 +3414,7 @@ impl SessionAgent for PersistentMockAgent {
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
     }
@@ -3455,11 +3457,17 @@ impl SessionAgentBuilder for PersistentMockBuilder {
 
     async fn build_agent(
         &self,
-        _req: &CreateSessionRequest,
+        req: &CreateSessionRequest,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
+        let session_id = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         Ok(PersistentMockAgent {
-            session_id: SessionId::new(),
+            session_id,
             system_context_state: Arc::new(std::sync::Mutex::new(
                 SessionSystemContextState::default(),
             )),
@@ -3866,7 +3874,7 @@ impl OverlayProbeDispatcher {
                     "properties": {}
                 });
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema,
                     provenance: None,
@@ -3910,7 +3918,7 @@ impl AgentLlmClient for OverlayProbeLlmClient {
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
-            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+            .push(tools.iter().map(|tool| tool.name.to_string()).collect());
         Ok(LlmStreamResult::new(
             vec![AssistantBlock::Text {
                 text: "{}".to_string(),
@@ -3968,6 +3976,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
     }
@@ -4863,6 +4872,10 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
     .expect("peer spec");
     let old_bridge = crate::runtime::MobSupervisorBridge::new(&mob_id, original.clone())
         .expect("build old supervisor bridge");
+    old_bridge
+        .trust_recipient(&peer)
+        .await
+        .expect("old supervisor bridge should explicitly trust peer for stale-epoch probe");
     let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
         super::bridge_protocol::BridgeDeliveryPayload {
             supervisor: old_bridge
@@ -5462,13 +5475,13 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         "spawn result should surface agent_identity"
     );
     assert!(
-        spawn_payload["agent_runtime_id"].is_object(),
-        "spawn result should surface agent_runtime_id"
+        spawn_payload["member_ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "spawn result should surface canonical member_ref"
     );
-    assert!(
-        spawn_payload["fence_token"].is_number(),
-        "spawn result should surface fence_token"
-    );
+    assert!(spawn_payload.get("agent_runtime_id").is_none());
+    assert!(spawn_payload.get("fence_token").is_none());
 
     let list_args = RawValue::from_string("{}".to_string()).expect("list args");
     let list_result = dispatcher
@@ -5489,15 +5502,14 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         .expect("spawned member should appear in list");
     assert_eq!(member["agent_identity"], "w-bridge");
     assert!(
-        member["agent_runtime_id"].is_object(),
-        "list output should surface agent_runtime_id"
+        member["member_ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "list output should surface canonical member_ref"
     );
-    assert!(
-        member["fence_token"].is_number(),
-        "list output should surface fence_token"
-    );
+    assert!(member.get("agent_runtime_id").is_none());
+    assert!(member.get("fence_token").is_none());
     assert_eq!(member["role"], "worker");
-    assert!(member.get("member_ref").is_none());
     assert!(member.get("session_id").is_none());
     assert!(member.get("bridge_session_id").is_none());
     assert!(member.get("current_session_id").is_none());
@@ -6410,7 +6422,6 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 skill_references: None,
                 flow_tool_overlay: None,
                 turn_metadata: None,
-                execution_kind: None,
             },
         )
         .await
@@ -6677,6 +6688,7 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
 #[tokio::test]
 async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut def = sample_definition();
     for profile in def.profiles.values_mut().filter_map(|b| b.as_inline_mut()) {
         profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
@@ -6710,9 +6722,15 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     .resume()
     .await;
 
+    let error = result
+        .err()
+        .expect("resume must surface orchestrator start_turn failures");
     assert!(
-        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
-        "resume must surface orchestrator start_turn failures"
+        matches!(
+            &error,
+            MobError::Internal(message) if message.contains("mock start_turn failure")
+        ),
+        "resume must surface orchestrator start_turn failures, got {error:?}"
     );
 }
 
@@ -7749,7 +7767,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     .with_label("role", "worker")
                     .with_label("member_id", "w-1"),
             ),
-            realm_id: Some("mob:test-mob".to_string()),
+            realm_id: Some("mob.test-mob".to_string()),
             instance_id: None,
             backend: None,
             config_generation: None,
@@ -9997,6 +10015,25 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         trusted.iter().any(|n| n == external.name.as_str()),
         "trusted peer list should include external peer name"
     );
+
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    assert!(
+        dsl.wiring_edges
+            .iter()
+            .all(|edge| edge.a.0 != external.name.as_str() && edge.b.0 != external.name.as_str()),
+        "external peer descriptors must not be projected into member wiring_edges"
+    );
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert!(
+        dsl.external_peer_edges.contains(&external_edge),
+        "MobMachine should own the descriptor-bearing external peer edge"
+    );
 }
 
 #[tokio::test]
@@ -10108,6 +10145,25 @@ async fn test_unwire_external_removes_trust_and_projection() {
     assert!(
         !trusted.iter().any(|n| n == external.name.as_str()),
         "trusted peer list should not include the removed external peer"
+    );
+
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert!(
+        !dsl.external_peer_edges.contains(&external_edge),
+        "external unwire should remove the machine-owned descriptor edge"
+    );
+    assert!(
+        dsl.wiring_edges
+            .iter()
+            .all(|edge| edge.a.0 != external.name.as_str() && edge.b.0 != external.name.as_str()),
+        "external unwire should not touch member wiring_edges"
     );
 }
 
@@ -11349,6 +11405,7 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
 #[tokio::test]
 async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition_with_auto_wire();
     definition
         .profiles
@@ -13122,12 +13179,6 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
 
     tokio::time::sleep(Duration::from_millis(25)).await;
 
-    let active_members = handle.list_members().await;
-    assert!(
-        active_members.is_empty(),
-        "retiring member must leave the active roster before disposal completes"
-    );
-
     let all_members = handle.list_all_members().await;
     assert_eq!(
         all_members.len(),
@@ -13136,6 +13187,12 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
     );
     assert_eq!(all_members[0].agent_identity.as_str(), "w-1");
     assert_eq!(all_members[0].state, crate::roster::MemberState::Retiring);
+
+    let active_members = handle.list_members().await;
+    assert!(
+        active_members.is_empty(),
+        "retiring member must leave the active roster before disposal completes"
+    );
 
     let start_turn_calls_before = service.start_turn_call_count();
     let external_turn = handle.member(&AgentIdentity::from("w-1")).await;
@@ -13274,6 +13331,17 @@ async fn test_stop_clears_pending_spawn_count_and_failed_member_projection() {
         staged.pending_spawn_count, 1,
         "pending spawn must contribute to orchestrator-owned lineage while provisioning is in flight"
     );
+    let staged_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("staged dsl snapshot");
+    assert!(
+        staged_dsl
+            .pending_spawn_sessions
+            .keys()
+            .any(|identity| identity.0 == "w-stop-lineage"),
+        "pending spawn admission must name the member identity before provisioning completes"
+    );
 
     handle.stop().await.expect("stop should succeed");
     let _ = pending_spawn
@@ -13289,6 +13357,14 @@ async fn test_stop_clears_pending_spawn_count_and_failed_member_projection() {
     assert_eq!(
         stopped.pending_spawn_count, 0,
         "stop must clear orchestrator-owned pending spawn lineage"
+    );
+    let stopped_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("stopped dsl snapshot");
+    assert!(
+        stopped_dsl.pending_spawn_sessions.is_empty(),
+        "stop must clear machine-owned pending spawn admissions"
     );
     assert!(
         handle
@@ -14230,6 +14306,22 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("staged snapshot");
     assert_eq!(staged.pending_spawn_count, 1);
+    let staged_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("staged dsl snapshot");
+    assert_eq!(
+        staged_dsl.pending_spawn_sessions.len(),
+        1,
+        "exactly one machine-owned pending spawn admission should be visible while provisioning is blocked"
+    );
+    assert!(
+        staged_dsl
+            .pending_spawn_sessions
+            .keys()
+            .any(|identity| identity.0 == "w-1"),
+        "pending admission should carry the member identity, not just an anonymous count"
+    );
     // topology_revision is orchestrator shell metadata not tracked by the DSL authority.
 
     spawn_handle
@@ -14241,6 +14333,14 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("settled snapshot");
     assert_eq!(settled.pending_spawn_count, 0);
+    let settled_dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("settled dsl snapshot");
+    assert!(
+        settled_dsl.pending_spawn_sessions.is_empty(),
+        "successful spawn completion should clear pending admission"
+    );
 
     let events = handle.events().replay_all().await.expect("replay events");
     assert!(events.iter().any(|event| matches!(
@@ -16082,6 +16182,7 @@ struct RealCommsSessionService {
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
 impl RealCommsSessionService {
@@ -16091,6 +16192,7 @@ impl RealCommsSessionService {
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
+            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
         }
     }
 }
@@ -16098,7 +16200,12 @@ impl RealCommsSessionService {
 #[async_trait]
 impl SessionService for RealCommsSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let session_id = SessionId::new();
+        let session_id = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
         let comms_name = req
@@ -16124,6 +16231,9 @@ impl SessionService for RealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), comms_name);
+        self.runtime_adapter
+            .register_session(session_id.clone())
+            .await;
 
         Ok(mock_run_result(session_id, "Session created".to_string()))
     }
@@ -16266,6 +16376,10 @@ impl MobSessionService for RealCommsSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
+        Some(Arc::clone(&self.runtime_adapter))
+    }
+
     async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
         let names = self.session_comms_names.read().await;
         names
@@ -16374,7 +16488,12 @@ impl RuntimeBackedRealCommsSessionService {
 #[async_trait]
 impl SessionService for RuntimeBackedRealCommsSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let session_id = SessionId::new();
+        let session_id = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
         let comms_name = req
@@ -17424,20 +17543,6 @@ async fn test_mob_session_service_subscribe_session_events_available() {
     );
 }
 
-fn has_request_intent_for_peer(
-    interactions: &[meerkat_core::InboxInteraction],
-    expected_intent: &str,
-    expected_peer: &str,
-) -> bool {
-    interactions.iter().any(|interaction| {
-        matches!(
-            &interaction.content,
-            meerkat_core::InteractionContent::Request { intent, params }
-                if intent == expected_intent && params["peer"] == expected_peer
-        )
-    })
-}
-
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
@@ -17504,16 +17609,8 @@ async fn test_wire_enables_peer_request_delivery() {
         "wire should expose lead in worker peers()"
     );
 
-    let notify_for_a = CoreCommsRuntime::drain_inbox_interactions(&*comms_a).await;
-    let notify_for_b = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
-    assert!(
-        has_request_intent_for_peer(&notify_for_a, "mob.peer_added", "w-1"),
-        "lead should receive mob.peer_added for worker"
-    );
-    assert!(
-        has_request_intent_for_peer(&notify_for_b, "mob.peer_added", "l-1"),
-        "worker should receive mob.peer_added for lead"
-    );
+    let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_a).await;
+    let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
         to: test_peer_route(&*comms_a, &comms_name_b).await,
@@ -18579,7 +18676,7 @@ impl MultiToolDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: name.to_string(),
+                    name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),
                     provenance: None,
@@ -18623,7 +18720,11 @@ async fn test_name_filtered_dispatcher() {
     let filtered = NameFilteredDispatcher::new(inner, excluded);
 
     // tools() should return only ["a", "c"]
-    let tool_names: Vec<String> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = filtered
+        .tools()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
     assert_eq!(tool_names.len(), 2);
     assert!(tool_names.contains(&"a".to_string()));
     assert!(tool_names.contains(&"c".to_string()));
@@ -18867,6 +18968,53 @@ async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
         supervisor_entry.is_none(),
         "supervisor must NOT appear in the session-backed member's public \
          peer directory; the private-trust seam is the whole point. Got: {directory:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_supervisor_private_trust_failure_does_not_commit_spawn() {
+    let definition = with_unique_mob_id(sample_definition(), "supervisor-trust-failure");
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob(definition).await;
+    service
+        .set_comms_behavior(
+            &format!("{mob_id}/worker/w-trust-fail"),
+            MockCommsBehavior {
+                fail_add_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let error = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-trust-fail"),
+            None,
+        )
+        .await
+        .expect_err("supervisor private trust failure should fail spawn");
+    assert!(
+        error
+            .to_string()
+            .contains("supervisor private trust publication failed"),
+        "spawn should surface the authority-gated trust failure, got: {error}"
+    );
+    assert!(
+        handle.list_members().await.is_empty(),
+        "failed supervisor trust publication must not commit roster membership"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "failed supervisor trust publication must roll back the provisioned session"
+    );
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.kind, MobEventKind::MemberSpawned(_))),
+        "failed supervisor trust publication must not append MemberSpawned"
     );
 }
 
@@ -19182,7 +19330,7 @@ async fn test_external_tools_late_registration() {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: name.to_string(),
+                    name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),
                     provenance: None,
@@ -20906,6 +21054,7 @@ struct MobRuntimeParitySnapshotSummary {
     // formal-fields coverage gate passes; full projection is a follow-up.
     member_state_markers: BTreeMap<String, String>,
     wiring_edges: BTreeSet<String>,
+    external_peer_edges: BTreeSet<String>,
     identity_to_runtime: BTreeMap<String, String>,
     tasks: BTreeMap<String, String>,
     in_progress_task_ids: BTreeSet<String>,
@@ -20914,6 +21063,7 @@ struct MobRuntimeParitySnapshotSummary {
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
     member_session_bindings: BTreeMap<String, String>,
+    pending_spawn_sessions: BTreeMap<String, String>,
     pending_session_ingress_detach_runtime_ids: BTreeSet<String>,
     // Track-B (R5): monotonically increasing topology epoch. Incremented on
     // every mutation of `wiring_edges` or `member_session_bindings`. Stubbed
@@ -21583,11 +21733,13 @@ async fn mob_runtime_parity_snapshot_summary(
     let (
         member_state_markers,
         wiring_edges,
+        external_peer_edges,
         identity_to_runtime,
         tasks_map,
         in_progress_task_ids,
         completed_task_ids,
         member_session_bindings,
+        pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
     ) = dsl_t2
         .map(|snap| {
@@ -21597,6 +21749,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
                 snap.wiring_edges
+                    .into_iter()
+                    .map(|edge| format!("{edge:?}"))
+                    .collect::<BTreeSet<_>>(),
+                snap.external_peer_edges
                     .into_iter()
                     .map(|edge| format!("{edge:?}"))
                     .collect::<BTreeSet<_>>(),
@@ -21617,6 +21773,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
                 snap.member_session_bindings
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.pending_spawn_sessions
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
@@ -21657,11 +21817,13 @@ async fn mob_runtime_parity_snapshot_summary(
         formal_unavailable_fields,
         member_state_markers,
         wiring_edges,
+        external_peer_edges,
         identity_to_runtime,
         tasks: tasks_map,
         in_progress_task_ids,
         completed_task_ids,
         member_session_bindings,
+        pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
         // Track-B (R5): stubbed 0 here; full projection lands alongside
         // `member_session_bindings` wiring-through when the observer
@@ -21701,6 +21863,9 @@ fn mob_runtime_parity_field_value(
         "wiring_edges" => Some(MobRuntimeParityExprValue::Set(
             snapshot.wiring_edges.clone(),
         )),
+        "external_peer_edges" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.external_peer_edges.clone(),
+        )),
         "identity_to_runtime" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .identity_to_runtime
@@ -21720,6 +21885,13 @@ fn mob_runtime_parity_field_value(
         "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_session_bindings
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "pending_spawn_sessions" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .pending_spawn_sessions
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
@@ -22437,7 +22609,7 @@ fn mob_runtime_parity_schema_transition_summaries_for_phase_input(
             guard_names: transition
                 .guards
                 .iter()
-                .map(|guard| guard.name.clone())
+                .map(|guard| guard.name.to_string())
                 .collect(),
             update_count: transition.updates.len(),
             effect_variants: transition

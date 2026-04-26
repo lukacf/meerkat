@@ -27,7 +27,6 @@ use std::sync::Arc;
 
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
 use meerkat_core::memory::{MemoryMetadata, MemoryStore as _};
-use meerkat_core::types::SessionId;
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
 
@@ -55,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // similarity search backed by hnsw_rs + SQLite persistence.
 
     let memory_store = Arc::new(SimpleMemoryStore::new());
+    let memory_session = meerkat_core::Session::new();
+    let memory_session_id = memory_session.id().clone();
 
     // ── Step 2: Pre-seed memory with facts ───────────────────────────────────
     //
@@ -64,8 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that by directly indexing some facts.
 
     let now = std::time::SystemTime::now();
-    let prior_session = SessionId::new();
-
     let facts = [
         "Our team uses Rust for all backend services, Python for data pipelines, \
          and TypeScript for the frontend.",
@@ -77,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, fact) in facts.iter().enumerate() {
         let metadata = MemoryMetadata {
-            session_id: prior_session.clone(),
+            session_id: memory_session_id.clone(),
             turn: Some(i as u32 + 1),
             indexed_at: now,
         };
@@ -92,8 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `memory_search` tool. The agent can call this tool with a natural
     // language query and get back scored results.
 
-    let memory_dispatcher = MemorySearchDispatcher::new(
-        Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>
+    let memory_dispatcher = MemorySearchDispatcher::for_session(
+        Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>,
+        memory_session_id,
     );
 
     // ── Step 4: Compose tool dispatchers ─────────────────────────────────────
@@ -130,6 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              infrastructure, or deployment information.",
         )
         .max_tokens_per_turn(1024)
+        .resume_session(memory_session)
         .memory_store(Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>)
         .build(Arc::new(llm), Arc::new(gateway), store)
         .await;

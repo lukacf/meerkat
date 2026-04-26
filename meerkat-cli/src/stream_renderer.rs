@@ -397,6 +397,7 @@ fn render_event(
             max_attempts,
             error,
             delay_ms,
+            ..
         } => {
             chrome_line(
                 mux,

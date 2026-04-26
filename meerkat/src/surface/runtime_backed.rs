@@ -194,7 +194,6 @@ fn start_turn_request_from_primitive(
         skill_references: metadata.and_then(|metadata| metadata.skill_references.clone()),
         flow_tool_overlay: metadata.and_then(|metadata| metadata.flow_tool_overlay.clone()),
         turn_metadata: metadata.cloned(),
-        execution_kind: metadata.and_then(|metadata| metadata.execution_kind),
     })
 }
 
@@ -386,7 +385,9 @@ mod tests {
 
         assert_eq!(req.turn_metadata, Some(metadata));
         assert_eq!(
-            req.execution_kind,
+            req.turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.execution_kind),
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
         );
     }

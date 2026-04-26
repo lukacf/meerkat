@@ -1347,13 +1347,13 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/status" => {
+            "runtime/session_status" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/status",
+                        "Method not found: runtime/session_status",
                     )
                 } else {
                     let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
@@ -1373,13 +1373,13 @@ impl MethodRouter {
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/submit" => {
+            "runtime/session_submit" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
                     RpcResponse::error(
                         id,
                         error::METHOD_NOT_FOUND,
-                        "Method not found: session/submit",
+                        "Method not found: runtime/session_submit",
                     )
                 } else {
                     let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
@@ -1399,7 +1399,7 @@ impl MethodRouter {
                 }
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/submission" => {
+            "runtime/session_submission" => {
                 let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
                     Ok(session_id) => session_id,
                     Err(response) => return Some(response),
@@ -1415,7 +1415,7 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/submissions" => {
+            "runtime/session_submissions" => {
                 let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
                     Ok(session_id) => session_id,
                     Err(response) => return Some(response),
@@ -1431,7 +1431,7 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/retire" => {
+            "runtime/session_retire" => {
                 let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
                     Ok(session_id) => session_id,
                     Err(response) => return Some(response),
@@ -1443,7 +1443,7 @@ impl MethodRouter {
                     .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "session/reset" => {
+            "runtime/session_reset" => {
                 let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
                     Ok(session_id) => session_id,
                     Err(response) => return Some(response),
@@ -5826,7 +5826,7 @@ mod tests {
 
         let state_resp = router
             .dispatch(make_request(
-                "session/status",
+                "runtime/session_status",
                 serde_json::json!({ "session_id": session_id }),
             ))
             .await
@@ -5837,12 +5837,12 @@ mod tests {
         assert_eq!(
             state["state"].as_str(),
             Some("attached"),
-            "deferred sessions should be routable through session/status before their first turn"
+            "deferred sessions should be routable through runtime/session_status before their first turn"
         );
 
         let accept_resp = router
             .dispatch(make_request(
-                "session/submit",
+                "runtime/session_submit",
                 serde_json::json!({
                     "session_id": session_id,
                     "input": {
@@ -5867,7 +5867,7 @@ mod tests {
         assert_eq!(
             accepted["outcome_type"].as_str(),
             Some("accepted"),
-            "deferred sessions should also be routable through session/submit before their first turn"
+            "deferred sessions should also be routable through runtime/session_submit before their first turn"
         );
     }
 
@@ -5893,7 +5893,7 @@ mod tests {
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
         let session_status = router
             .dispatch(make_request(
-                "session/status",
+                "runtime/session_status",
                 serde_json::json!({ "session_id": session_id }),
             ))
             .await
@@ -5948,7 +5948,7 @@ mod tests {
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
         let session_status = router
             .dispatch(make_request(
-                "session/status",
+                "runtime/session_status",
                 serde_json::json!({ "session_id": session_id }),
             ))
             .await

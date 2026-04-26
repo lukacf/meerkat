@@ -7,6 +7,12 @@ OUTPUT_FILE="$ROOT_DIR/artifacts/session_control_public_name_scan.txt"
 TERMS=(
   "session/runtime_state"
   "session/accept_input"
+  "session/status"
+  "session/submit"
+  "session/retire"
+  "session/reset"
+  "session/submission"
+  "session/submissions"
   "session/retire_runtime"
   "session/reset_runtime"
   "session/input_state"
@@ -48,6 +54,7 @@ for term in "${TERMS[@]}"; do
         --glob '!target/**' \
         --glob '!.git/**' \
         --glob '!node_modules/**' \
+        --glob '!sdks/typescript/dist/**' \
         --glob '!.rct/**' \
         --glob '!docs/dogma-*.md' \
         --glob '!docs/wave-*-prep/**' \

@@ -63,7 +63,7 @@ pub use ::tokio;
 
 // Phase 4d.wasm.1 — External-auth resolver seam for browser-hosted
 // OAuth. Host pages register a JS callback that returns a bearer
-// token; the provider-runtime registry consults the handle when a
+// token; the provider-runtime registry consults the resolver id when a
 // binding uses `CredentialSourceSpec::ExternalResolver`.
 pub mod external_auth;
 
@@ -184,11 +184,10 @@ struct MobDefinitionHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionConfig {
     model: String,
-    /// Optional realm-qualified binding reference in `realm:binding`
-    /// form (plan §4d.wasm.2). When set, overrides the default
-    /// provider-match from bootstrap-populated `config.realm`.
+    /// Optional structural connection reference. When set, overrides the
+    /// default provider-match from bootstrap-populated `config.realm`.
     #[serde(default)]
-    connection_ref: Option<String>,
+    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
@@ -423,11 +422,11 @@ fn build_service_infrastructure(
     // the provider runtime registry. The resolver itself handles the
     // "no callback registered" case by returning `MissingSecret`; we
     // always register the bridge so realm bindings configured with
-    // `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
+    // `CredentialSourceSpec::ExternalResolver { handle: WASM_EXTERNAL_AUTH_RESOLVER_ID }`
     // work whether or not the host page has (yet) installed a callback.
     #[cfg(target_arch = "wasm32")]
     let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
-        "wasm_host",
+        crate::external_auth::WASM_EXTERNAL_AUTH_RESOLVER_ID,
         std::sync::Arc::new(crate::external_auth::WasmExternalAuthResolver),
     );
     #[cfg(not(target_arch = "wasm32"))]
@@ -560,65 +559,6 @@ fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> 
 fn err_js(code: &str, message: &str) -> JsValue {
     let json = serde_json::json!({ "code": code, "message": message });
     JsValue::from_str(&json.to_string())
-}
-
-/// Wasm boundary parser for caller-supplied `realm:binding[:profile]` input.
-///
-/// `meerkat_core::connection::ConnectionRef` is structural-only by wave-b
-/// design — no `parse` / `Display` impl exists so string form cannot ferry
-/// through the runtime. Each surface that takes a flat colon-delimited
-/// connection-ref at its ingress edge owns its own boundary parser; this is
-/// the wasm_bindgen surface's. See `meerkat-cli/src/cli_parse.rs` for the
-/// CLI-side equivalent.
-fn parse_connection_ref_boundary(raw: &str) -> Result<meerkat_core::ConnectionRef, JsValue> {
-    let trimmed = raw.trim();
-    let mut parts = trimmed.splitn(4, ':');
-    let realm_str = parts
-        .next()
-        .expect("splitn always yields at least one element");
-    let Some(binding_str) = parts.next() else {
-        return Err(err_js(
-            "invalid_config",
-            &format!("connection_ref requires `realm:binding[:profile]`; got `{raw}`"),
-        ));
-    };
-    let profile_str = parts.next();
-    if parts.next().is_some() {
-        return Err(err_js(
-            "invalid_config",
-            &format!(
-                "connection_ref takes at most three components (`realm:binding[:profile]`); got `{raw}`"
-            ),
-        ));
-    }
-
-    let realm = meerkat_core::connection::RealmId::parse(realm_str).map_err(|e| {
-        err_js(
-            "invalid_config",
-            &format!("invalid connection_ref realm `{realm_str}`: {e}"),
-        )
-    })?;
-    let binding = meerkat_core::connection::BindingId::parse(binding_str).map_err(|e| {
-        err_js(
-            "invalid_config",
-            &format!("invalid connection_ref binding `{binding_str}`: {e}"),
-        )
-    })?;
-    let profile = match profile_str {
-        None => None,
-        Some(p) => Some(meerkat_core::connection::ProfileId::parse(p).map_err(|e| {
-            err_js(
-                "invalid_config",
-                &format!("invalid connection_ref profile `{p}`: {e}"),
-            )
-        })?),
-    };
-
-    Ok(meerkat_core::ConnectionRef {
-        realm,
-        binding,
-        profile,
-    })
 }
 
 fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
@@ -889,7 +829,7 @@ pub fn register_tool_callback(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
-            name,
+            name: name.into(),
             description,
             input_schema: schema,
             provenance: Some(meerkat_core::types::ToolProvenance {
@@ -951,7 +891,7 @@ pub fn register_js_tool(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
-            name,
+            name: name.into(),
             description,
             input_schema: schema,
             provenance: Some(meerkat_core::types::ToolProvenance {
@@ -1269,13 +1209,12 @@ fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
 }
 
 fn build_session_request_with_connection_ref(
-    connection_ref: Option<&str>,
+    connection_ref: Option<&meerkat_contracts::WireConnectionRef>,
     model: &str,
     config: &SessionConfig,
     system_prompt: Option<String>,
 ) -> Result<meerkat_core::service::CreateSessionRequest, JsValue> {
-    // Plan §4d.wasm.2 real signature: (connection_ref, model, session_config,
-    // system_prompt). Credentials flow through bootstrap-populated
+    // Credentials flow through bootstrap-populated
     // `config.realm` (populate_realm_from_api_keys) or the host's
     // registered external-auth resolver. No per-session api_key.
     if model.trim().is_empty() {
@@ -1288,7 +1227,7 @@ fn build_session_request_with_connection_ref(
 
     let mut build_config = AgentBuildConfig::new(model);
     if let Some(conn) = connection_ref {
-        build_config.connection_ref = Some(parse_connection_ref_boundary(conn)?);
+        build_config.connection_ref = Some(conn.clone().into());
     }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
@@ -1322,7 +1261,7 @@ fn create_runtime_backed_session(
     let keep_alive = config.comms_name.is_some() && config.keep_alive;
     let model = config.model.clone();
     let request = build_session_request_with_connection_ref(
-        config.connection_ref.as_deref(),
+        config.connection_ref.as_ref(),
         &model,
         &config,
         system_prompt,
@@ -1492,7 +1431,6 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
                 skill_references: None,
                 flow_tool_overlay: None,
                 turn_metadata: None,
-                execution_kind: None,
             },
         )
         .await;
@@ -2099,7 +2037,7 @@ struct MobSpawnHelperOptions {
     #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
-    connection_ref: Option<String>,
+    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -2115,7 +2053,7 @@ struct MobForkHelperOptions {
     #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
-    connection_ref: Option<String>,
+    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -2238,8 +2176,8 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref.as_deref() {
-        options.connection_ref = Some(parse_connection_ref_boundary(connection_ref)?);
+    if let Some(connection_ref) = request.connection_ref {
+        options.connection_ref = Some(connection_ref.into());
     }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
@@ -2272,8 +2210,8 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref.as_deref() {
-        options.connection_ref = Some(parse_connection_ref_boundary(connection_ref)?);
+    if let Some(connection_ref) = request.connection_ref {
+        options.connection_ref = Some(connection_ref.into());
     }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;

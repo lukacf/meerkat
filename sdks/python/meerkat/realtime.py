@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import MeerkatError
 from .generated.types import (
     RealtimeCapabilitiesResult,
+    RealtimeChannelTarget,
+    RealtimeChannelTargetMobMember,
+    RealtimeChannelTargetSessionTarget,
+    RealtimeInputChunk,
     RealtimeOpenInfo,
     RealtimeOpenRequest,
     RealtimeReconnectPolicy,
@@ -17,25 +21,15 @@ if TYPE_CHECKING:
     from .client import MeerkatClient
 
 
-class RealtimeSessionTarget(TypedDict):
-    type: Literal["session_target"]
-    session_id: str
-
-
-class RealtimeMobMemberTarget(TypedDict):
-    type: Literal["mob_member"]
-    mob_id: str
-    agent_identity: str
-
-
 # W3-H: `RealtimeChannelTarget` carries identity as a first-class wire
 # fact for mob-member channels via the `mob_member` variant. The server
 # resolves `(mob_id, agent_identity)` against the MobMachine's
-# canonical `member_realtime_bindings` map on every tick, so respawn
-# atomically rotates the bound session without any SDK round-trip and
+# canonical `member_session_bindings` map on every tick, so respawn
+# atomically rotates the bridge session without any SDK round-trip and
 # without any client-side session-id pin. A terminal retire surfaces
 # as `RealtimeErrorCode::BindingReleased`.
-RealtimeChannelTarget = RealtimeSessionTarget | RealtimeMobMemberTarget
+RealtimeSessionTarget = RealtimeChannelTargetSessionTarget
+RealtimeMobMemberTarget = RealtimeChannelTargetMobMember
 
 
 def _reconnect_policy_to_wire(
@@ -111,7 +105,7 @@ class RealtimeConnection:
     async def send_frame(self, frame: dict[str, Any]) -> None:
         await self._websocket.send(json.dumps(frame))
 
-    async def send_input(self, chunk: dict[str, Any] | Any) -> None:
+    async def send_input(self, chunk: RealtimeInputChunk | dict[str, Any] | Any) -> None:
         await self.send_frame({"type": "channel.input", "chunk": _to_wire(chunk)})
 
     async def commit_turn(self) -> None:
@@ -150,7 +144,7 @@ class RealtimeChannel:
     # The wire target that crosses the RPC boundary. Carries identity
     # directly for `mob_member` channels (W3-H); the server resolves the
     # current bridge session on every tick from the MobMachine's
-    # canonical binding map, so the SDK never pins a session id.
+    # canonical member-session map, so the SDK never pins a session id.
     target: RealtimeChannelTarget
     role: Literal["primary", "observer"] = "primary"
     turning_mode: Literal["provider_managed", "explicit_commit"] = "provider_managed"
@@ -188,8 +182,9 @@ class RealtimeChannel:
         # W3-H: identity is a first-class wire fact. The channel target
         # is `mob_member { mob_id, agent_identity }`; the server
         # resolves the current bridge session from the MobMachine's
-        # canonical binding map on every tick, so respawn rotates the
-        # bound session without any SDK round-trip or session-id pin.
+        # canonical member-session map on every tick, so respawn
+        # rotates the bridge session without any SDK round-trip or
+        # session-id pin.
         return cls(
             _client=client,
             target={

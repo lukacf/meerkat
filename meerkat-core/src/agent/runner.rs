@@ -1,7 +1,7 @@
 //! Agent runner interface.
 
 use crate::budget::Budget;
-use crate::error::AgentError;
+use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::ops::ToolDispatchOutcome;
@@ -18,7 +18,7 @@ use crate::tool_scope::{
     ToolScopeStageError,
 };
 use crate::turn_execution_authority::{ContentShape, TurnPrimitiveKind, TurnTerminalOutcome};
-use crate::types::{ContentInput, Message, RunResult, ToolCallView};
+use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
 use std::collections::HashSet;
@@ -30,6 +30,37 @@ use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDis
 
 fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
     Uuid::parse_str(value).ok().map(crate::ops::OperationId)
+}
+
+fn dispatcher_knows_tool<T>(dispatcher: &T, name: &str) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if dispatcher.tool_catalog_capabilities().exact_catalog {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .any(|entry| entry.tool.name == name)
+    } else {
+        dispatcher.tools().iter().any(|tool| tool.name == name)
+    }
+}
+
+fn precheck_visible_tool_call<T>(
+    dispatcher: &T,
+    visible_names: &ToolNameSet,
+    name: &str,
+) -> Result<(), ToolError>
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    if visible_names.contains(name) {
+        return Ok(());
+    }
+    if dispatcher_knows_tool(dispatcher, name) {
+        return Err(ToolError::access_denied(name));
+    }
+    Err(ToolError::not_found(name))
 }
 
 fn runtime_execution_snapshot(
@@ -65,7 +96,7 @@ fn runtime_execution_snapshot(
         .collect::<Option<Vec<_>>>()?;
 
     Some(crate::AgentExecutionSnapshot {
-        loop_state: turn_phase.to_loop_state(),
+        loop_state: snapshot.loop_state,
         turn_phase,
         active_run_id: snapshot.active_run_id,
         primitive_kind,
@@ -148,7 +179,7 @@ pub trait AgentRunner: Send {
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized,
-    T: AgentToolDispatcher + ?Sized,
+    T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized,
 {
     /// Stage an external tool visibility filter update for subsequent turns.
@@ -306,6 +337,23 @@ where
         self.client = client;
     }
 
+    /// Apply the live LLM request policy paired with an identity hot-swap.
+    pub fn apply_llm_request_policy(&mut self, policy: crate::SessionLlmRequestPolicy) {
+        self.config.model = policy.model;
+        self.config.provider_params = policy.provider_params;
+        self.config.provider_tool_defaults = policy.provider_tool_defaults;
+    }
+
+    /// Replace the LLM client and its next-turn request policy together.
+    pub fn replace_client_with_request_policy(
+        &mut self,
+        client: Arc<C>,
+        policy: crate::SessionLlmRequestPolicy,
+    ) {
+        self.replace_client(client);
+        self.apply_llm_request_policy(policy);
+    }
+
     /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
     pub fn rotate_auth_lease_connection_ref(
         &self,
@@ -366,11 +414,12 @@ where
     ) -> Result<ToolDispatchOutcome, AgentError> {
         let visible_tool_names = self
             .tool_scope
-            .visible_tools_result()
+            .visible_tool_names()
             .map_err(|err| AgentError::InternalError(err.to_string()))?
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<HashSet<_>>();
+            .into_iter()
+            .collect::<ToolNameSet>();
+        precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
+            .map_err(|error| AgentError::ToolError(error.to_string()))?;
         let args = to_raw_value(&call.args).map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to serialize external tool-call arguments: {err}"
@@ -381,13 +430,7 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let dispatch_result = if visible_tool_names.contains(call.name.as_str()) {
-            self.tools.dispatch(view).await
-        } else {
-            Err(crate::error::ToolError::NotFound {
-                name: call.name.clone(),
-            })
-        };
+        let dispatch_result = self.tools.dispatch(view).await;
 
         match dispatch_result {
             Ok(mut outcome) => {
@@ -586,22 +629,12 @@ where
 
     async fn run_started_hooks(
         &self,
-        prompt: &str,
+        prompt: &ContentInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunStarted,
-                    session_id: self.session.id().clone(),
-                    turn_number: None,
-                    prompt: Some(prompt.to_string()),
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_started(self.session.id().clone(), prompt.clone()),
                 event_tx,
             )
             .await?;
@@ -630,17 +663,7 @@ where
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunCompleted,
-                    session_id: self.session.id().clone(),
-                    turn_number: Some(result.turns),
-                    prompt: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_completed(self.session.id().clone(), result.turns),
                 event_tx,
             )
             .await?;
@@ -729,13 +752,15 @@ where
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
+        let error_report = crate::event::AgentErrorReport::from_agent_error(error);
         let _ = crate::event_tap::tap_emit(
             &self.event_tap,
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
-                error_class: crate::event::AgentErrorClass::from(error),
-                error: error.to_string(),
+                error_class: error_report.class,
+                error: error_report.message.clone(),
+                error_report: Some(error_report),
             },
         )
         .await;
@@ -780,17 +805,7 @@ where
     ) -> Result<(), AgentError> {
         let report = self
             .execute_hooks(
-                HookInvocation {
-                    point: HookPoint::RunFailed,
-                    session_id: self.session.id().clone(),
-                    turn_number: None,
-                    prompt: None,
-                    error: Some(error.to_string()),
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
+                HookInvocation::run_failed(self.session.id().clone(), error),
                 event_tx,
             )
             .await?;
@@ -898,8 +913,8 @@ where
             ContentInput::Text(text)
         };
 
-        // Hooks/events always see the text projection.
-        let run_prompt = user_input.text_content();
+        // Hooks/events receive the typed content input; legacy hook fields
+        // still include the text projection for compatibility.
         let run_prompt_input = user_input.clone();
 
         // Add user message — preserve image blocks when present.
@@ -910,10 +925,13 @@ where
         };
         self.session.push(Message::User(user_message));
 
-        self.emit_run_started_event(run_prompt_input, event_tx.as_ref())
+        self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
             .await;
 
-        if let Err(err) = self.run_started_hooks(&run_prompt, event_tx.as_ref()).await {
+        if let Err(err) = self
+            .run_started_hooks(&run_prompt_input, event_tx.as_ref())
+            .await
+        {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }
@@ -981,7 +999,10 @@ where
         self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
 
-        if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {
+        if let Err(err) = self
+            .run_started_hooks(&ContentInput::Text(prompt.clone()), event_tx.as_ref())
+            .await
+        {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }

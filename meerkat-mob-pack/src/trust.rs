@@ -1,4 +1,4 @@
-use crate::digest::MobpackDigest;
+use crate::digest::{MobpackDigest, canonical_digest_from_map};
 use crate::signing::PackSignature;
 use crate::validate::PackValidationError;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -24,6 +24,12 @@ impl TrustedSigners {
     pub fn lookup(&self, signer_id: &str) -> Option<&str> {
         self.signers.get(signer_id).map(String::as_str)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackTrustVerification {
+    pub digest: MobpackDigest,
+    pub warnings: Vec<String>,
 }
 
 pub fn load_trusted_signers(
@@ -53,6 +59,16 @@ pub fn load_trusted_signers(
         }
     }
     Ok(merged)
+}
+
+pub fn verify_extracted_pack_trust(
+    files: &BTreeMap<String, Vec<u8>>,
+    trust_policy: TrustPolicy,
+    trusted_signers: &TrustedSigners,
+) -> Result<PackTrustVerification, PackValidationError> {
+    let digest = canonical_digest_from_map(files);
+    let warnings = verify_pack_trust(files, digest, trust_policy, trusted_signers)?;
+    Ok(PackTrustVerification { digest, warnings })
 }
 
 pub fn verify_pack_trust(

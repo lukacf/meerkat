@@ -337,7 +337,7 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         )?;
         for witness in &composition.schema.witnesses {
             write_generated(
-                &composition_witness_path(root, &composition.slug, &witness.name),
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
                 &render_composition_witness_cfg(&composition.schema, witness),
             )?;
         }
@@ -553,7 +553,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         )?;
         for witness in &composition.schema.witnesses {
             compare_generated(
-                &composition_witness_path(root, &composition.slug, &witness.name),
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
                 &render_composition_witness_cfg(&composition.schema, witness),
                 &mut mismatches,
             )?;
@@ -1604,7 +1604,7 @@ fn maybe_run_tlc_in_dir_with_config(
         );
     }
 
-    if !tlc_run_succeeded(&output.status, &combined) {
+    if !tlc_run_succeeded(&output.status) {
         bail!("tlc failed for {slug} ({config_name})");
     }
 
@@ -1617,16 +1617,8 @@ fn maybe_run_tlc_in_dir_with_config(
     Ok(coverage)
 }
 
-pub fn tlc_run_succeeded(status: &ExitStatus, combined_output: &str) -> bool {
-    if status.success() {
-        return true;
-    }
-
-    combined_output.contains("Model checking completed. No error has been found.")
-        && !combined_output.contains("Error: TLC threw an unexpected exception")
-        && !combined_output.contains("Error: The behavior up to this point is")
-        && !combined_output.contains("is violated by the initial state")
-        && !combined_output.contains("is violated.")
+pub fn tlc_run_succeeded(status: &ExitStatus) -> bool {
+    status.success()
 }
 
 pub fn ensure_machine_transition_coverage(
@@ -2655,7 +2647,7 @@ fn dump_tlc_dot_for_target(
         );
     }
 
-    if !tlc_run_succeeded(&output.status, &combined) {
+    if !tlc_run_succeeded(&output.status) {
         bail!("tlc hopcroft dump failed for {}", target.display_name);
     }
 

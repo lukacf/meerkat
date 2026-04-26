@@ -29,9 +29,8 @@ const REALTIME_NO_EFFORT: &[&str] = &[];
 pub const CAPABILITIES: &[ModelCapabilities] = &[
     // GPT-5.5
     //
-    // Successor to GPT-5.4. Capability shape is modeled on the 5.4 family
-    // pending authoritative source documentation; family heuristics
-    // (`gpt-5` prefix, no `-pro` suffix) match.
+    // Successor to GPT-5.4. Capability shape is a catalog-owned row so
+    // request policy does not infer facts from the model name.
     ModelCapabilities {
         id: "gpt-5.5",
         provider: "openai",
@@ -63,10 +62,8 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     },
     // GPT-5.5 Pro
     //
-    // Pro tier of GPT-5.5. Mirrors the 5.5 capability shape; the `-pro`
-    // suffix is recognized by `model_profile::openai` heuristics for the
-    // long-running timeout (7200s) consistent with other gpt-5 pro
-    // variants.
+    // Pro tier of GPT-5.5. The long-running timeout is explicit catalog data,
+    // not derived from the `-pro` suffix.
     ModelCapabilities {
         id: "gpt-5.5-pro",
         provider: "openai",

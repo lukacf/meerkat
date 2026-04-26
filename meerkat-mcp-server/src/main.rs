@@ -2,7 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
-    RequestTerminal, SurfaceRequestExecutor, noop_request_action, spawn_stdio_json_writer,
+    RequestTerminal, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
+    spawn_stdio_json_writer,
 };
 use meerkat_contracts::ErrorCode;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -230,6 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let state = Arc::clone(&state);
                         let completion_tx = completion_tx.clone();
                         let tool_name = name.clone();
+                        let semantics = tool_call_request_semantics(&tool_name);
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
                         let handle = tokio::spawn(async move {
@@ -246,11 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "id": request_id_for_task,
                                         "result": result
                                     });
-                                    if tool_call_commits_state_on_success(&tool_name) {
-                                        RequestTerminal::Publish(response)
-                                    } else {
-                                        RequestTerminal::RespondWithoutPublish(response)
-                                    }
+                                    semantics.classify_terminal(true, response)
                                 }
                                 Err(err) => {
                                     let mut error = json!({
@@ -339,8 +337,8 @@ fn request_key(id: &Value) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| id.to_string())
 }
 
-fn tool_call_commits_state_on_success(tool_name: &str) -> bool {
-    matches!(tool_name, "meerkat_run" | "meerkat_resume")
+fn tool_call_request_semantics(tool_name: &str) -> SurfaceRequestSemantics {
+    SurfaceRequestSemantics::for_mcp_tool_call(tool_name)
 }
 
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {
@@ -365,8 +363,17 @@ mod tests {
 
     #[test]
     fn meerkat_run_and_resume_publish_on_success() {
-        assert!(tool_call_commits_state_on_success("meerkat_run"));
-        assert!(tool_call_commits_state_on_success("meerkat_resume"));
-        assert!(!tool_call_commits_state_on_success("meerkat_sessions"));
+        assert!(matches!(
+            tool_call_request_semantics("meerkat_run").classify_terminal(true, ()),
+            RequestTerminal::Publish(())
+        ));
+        assert!(matches!(
+            tool_call_request_semantics("meerkat_resume").classify_terminal(true, ()),
+            RequestTerminal::Publish(())
+        ));
+        assert!(matches!(
+            tool_call_request_semantics("meerkat_sessions").classify_terminal(true, ()),
+            RequestTerminal::RespondWithoutPublish(())
+        ));
     }
 }

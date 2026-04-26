@@ -308,6 +308,19 @@ machine! {
             Reset,
             StopRuntimeExecutor,
             Destroy { session_id: SessionId },
+            RecoverInputLifecycle {
+                input_id: InputId,
+                phase: Enum<InputPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                superseded_by: Option<InputId>,
+                aggregate_id: Option<String>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+                abandon_attempt_count: u64,
+                attempt_count: u64,
+                run_id: Option<RunId>,
+                boundary_sequence: Option<BoundarySequence>,
+                lane: Option<Enum<InputLane>>,
+            },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
             SetSilentIntents { session_id: SessionId, intents: Set<String> },
@@ -322,9 +335,9 @@ machine! {
             Wait { session_id: SessionId },
             Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
             PublishEvent { kind: String },
-            RuntimeState { runtime_id: String },
+            RuntimeState { runtime_id: AgentRuntimeId },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
-            LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
+            LoadBoundaryReceipt { runtime_id: AgentRuntimeId, sequence: BoundarySequence },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool, run_id: RunId },
             AcceptWithoutWake { input_id: InputId },
             Prepare { session_id: SessionId, run_id: RunId },
@@ -337,6 +350,7 @@ machine! {
             ReplaceRealtimeBinding,
             DetachRealtimeBinding,
             RequireRealtimeReattach,
+            RequireRealtimeReattachForAuthority { authority_epoch: u64 },
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
             ProjectRealtimeReconnectProgress {
                 attempt_count: u64,
@@ -1290,6 +1304,31 @@ machine! {
         // Absorbed transitions
         // =====================================================================
 
+        // 17b. RecoverInputLifecycle: recovery feeds persisted lifecycle facts
+        // through the typed machine input. The runtime implementation carries
+        // the rich input-lifecycle maps; this catalog arm keeps the canonical
+        // input alphabet covered and emits the typed lifecycle notice rather
+        // than treating recovery as a shell-local projection write.
+        transition RecoverInputLifecycle {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverInputLifecycle {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                lane
+            }
+            update {}
+            to Idle
+            emit InputLifecycleNotice
+        }
+
         // 18. EnsureSessionWithExecutor
         // Idle → Attached (phase change)
         transition EnsureSessionWithExecutorIdle {
@@ -2028,6 +2067,20 @@ machine! {
             to Idle
         }
 
+        transition RequireRealtimeReattachForAuthority {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequireRealtimeReattachForAuthority { authority_epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
+            update {
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
         transition PublishRealtimeSignal {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PublishRealtimeSignal { authority_epoch, next_binding_state }
@@ -2684,14 +2737,21 @@ machine! {
         // Peer-ingress transport capability ownership (W2-G)
         // =====================================================================
 
-        // AttachSessionIngress: only valid from `Unattached`. Rejects
-        // `MobOwned` → `SessionOwned` silent downgrades by construction.
+        // AttachSessionIngress: valid from `Unattached`, or as an exact
+        // idempotent re-assertion of the already-owned session runtime.
+        // Rejects `MobOwned` → `SessionOwned` silent downgrades by
+        // construction.
         transition AttachSessionIngress {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AttachSessionIngress { comms_runtime_id }
             guard "session_registered" { self.session_id != None }
-            guard "owner_is_unattached" {
+            guard "owner_allows_session_attach" {
                 self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == None
+                )
             }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::SessionOwned;
@@ -2701,7 +2761,8 @@ machine! {
             to Idle
         }
 
-        // AttachMobIngress: valid from `Unattached` or `SessionOwned`.
+        // AttachMobIngress: valid from `Unattached`, `SessionOwned`, or as
+        // an exact idempotent re-assertion of the same mob-owned runtime.
         // Mob provisioning is allowed to take over a session-owned drain
         // (the spec's promotion case).
         transition AttachMobIngress {
@@ -2711,6 +2772,11 @@ machine! {
             guard "owner_allows_mob_attach" {
                 self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
                 || self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::MobOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == Some(mob_id)
+                )
             }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::MobOwned;
@@ -2720,14 +2786,12 @@ machine! {
             to Idle
         }
 
-        // DetachIngress: clear any active ownership back to `Unattached`.
+        // DetachIngress: clear any active ownership back to `Unattached`;
+        // exact no-op detach is accepted as idempotence by the DSL itself.
         transition DetachIngress {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input DetachIngress
             guard "session_registered" { self.session_id != None }
-            guard "owner_is_attached" {
-                self.peer_ingress_owner_kind != PeerIngressOwnerKind::Unattached
-            }
             update {
                 self.peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached;
                 self.peer_ingress_comms_runtime_id = None;
@@ -3019,9 +3083,21 @@ macro_rules! stub_newtype {
     };
 }
 
+macro_rules! stub_u64_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(pub u64);
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+    };
+}
+
 stub_newtype!(SessionId);
 stub_newtype!(AgentRuntimeId);
-stub_newtype!(FenceToken);
+stub_u64_newtype!(FenceToken);
 stub_newtype!(RunId);
 stub_newtype!(InputId);
 stub_newtype!(WorkId);
@@ -3051,11 +3127,12 @@ pub enum SurfaceDeltaOperation {
 }
 
 stub_newtype!(SurfaceId);
-stub_newtype!(TurnNumber);
+stub_u64_newtype!(TurnNumber);
+stub_u64_newtype!(BoundarySequence);
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
-stub_newtype!(Generation);
+stub_u64_newtype!(Generation);
 
 pub use crate::types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
@@ -3227,6 +3304,51 @@ pub enum OperationKind {
     #[default]
     ToolCall,
     Completion,
+}
+
+/// Typed input-lifecycle phase (catalog DSL twin). Closed set of lifecycle
+/// phases written by input authority transitions and recovered through the
+/// machine-owned `RecoverInputLifecycle` input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPhase {
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+/// Typed input terminal kind (catalog DSL twin). Variant-specific payloads
+/// live in companion fields so the discriminant remains a closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputTerminalKind {
+    #[default]
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+/// Typed input abandon reason (catalog DSL twin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputAbandonReason {
+    #[default]
+    StageAttemptsExceeded,
+    ReplacedByNewer,
+    RuntimeReset,
+    RuntimeRetired,
+}
+
+/// Typed work-lane membership for admitted inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputLane {
+    #[default]
+    Queue,
+    Steer,
 }
 
 /// Live-topology reconfigure phase (catalog DSL twin of the runtime

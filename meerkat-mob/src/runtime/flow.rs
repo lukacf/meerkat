@@ -1590,13 +1590,9 @@ impl FlowEngine {
                     .get(candidate)
                     .and_then(|b| b.as_ref())
                     == Some(branch)
-                && matches!(
-                    run.flow_state.step_status.get(candidate).and_then(
-                        |s: &Option<flow_run::StepRunStatus>| {
-                            s.as_ref().map(flow_run::StepRunStatus::as_str)
-                        }
-                    ),
-                    Some("Completed")
+                && flow_run_step_status_is(
+                    run.flow_state.step_status.get(candidate),
+                    FlowRunStepStatusKind::Completed,
                 )
         }))
     }
@@ -1620,29 +1616,15 @@ impl FlowEngine {
             .flow_state
             .step_dependency_modes
             .get(step_id)
-            .map(flow_run::DependencyMode::as_str)
-            .unwrap_or("All");
+            .map(flow_run_dependency_mode)
+            .unwrap_or(FlowRunDependencyModeKind::All);
         let statuses = &run.flow_state.step_status;
         Ok(match mode {
-            "Any" => deps.iter().any(|dep| {
-                matches!(
-                    statuses
-                        .get(dep)
-                        .and_then(|s: &Option<flow_run::StepRunStatus>| {
-                            s.as_ref().map(flow_run::StepRunStatus::as_str)
-                        }),
-                    Some("Completed")
-                )
+            FlowRunDependencyModeKind::Any => deps.iter().any(|dep| {
+                flow_run_step_status_is(statuses.get(dep), FlowRunStepStatusKind::Completed)
             }),
-            _ => deps.iter().all(|dep| {
-                matches!(
-                    statuses
-                        .get(dep)
-                        .and_then(|s: &Option<flow_run::StepRunStatus>| {
-                            s.as_ref().map(flow_run::StepRunStatus::as_str)
-                        }),
-                    Some("Completed")
-                )
+            FlowRunDependencyModeKind::All => deps.iter().all(|dep| {
+                flow_run_step_status_is(statuses.get(dep), FlowRunStepStatusKind::Completed)
             }),
         })
     }
@@ -1666,21 +1648,14 @@ impl FlowEngine {
             .flow_state
             .step_dependency_modes
             .get(step_id)
-            .map(flow_run::DependencyMode::as_str)
-            .unwrap_or("All");
+            .map(flow_run_dependency_mode)
+            .unwrap_or(FlowRunDependencyModeKind::All);
         let statuses = &run.flow_state.step_status;
         Ok(match mode {
-            "Any" => deps.iter().all(|dep| {
-                matches!(
-                    statuses
-                        .get(dep)
-                        .and_then(|s: &Option<flow_run::StepRunStatus>| {
-                            s.as_ref().map(flow_run::StepRunStatus::as_str)
-                        }),
-                    Some("Skipped")
-                )
+            FlowRunDependencyModeKind::Any => deps.iter().all(|dep| {
+                flow_run_step_status_is(statuses.get(dep), FlowRunStepStatusKind::Skipped)
             }),
-            _ => false,
+            FlowRunDependencyModeKind::All => false,
         })
     }
 
@@ -2164,6 +2139,18 @@ struct StepNoticeEffect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowRunDependencyModeKind {
+    All,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowRunStepStatusKind {
+    Completed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlowRunEffectKind {
     AdmitStepWork,
     EmitStepNotice,
@@ -2183,6 +2170,29 @@ impl FlowRunEffectKind {
             _ => None,
         }
     }
+}
+
+fn flow_run_dependency_mode(mode: &flow_run::DependencyMode) -> FlowRunDependencyModeKind {
+    match mode {
+        flow_run::DependencyMode::All => FlowRunDependencyModeKind::All,
+        flow_run::DependencyMode::Any => FlowRunDependencyModeKind::Any,
+    }
+}
+
+fn flow_run_step_status_is(
+    status: Option<&Option<flow_run::StepRunStatus>>,
+    expected: FlowRunStepStatusKind,
+) -> bool {
+    matches!(
+        (status.and_then(|status| *status), expected),
+        (
+            Some(flow_run::StepRunStatus::Completed),
+            FlowRunStepStatusKind::Completed
+        ) | (
+            Some(flow_run::StepRunStatus::Skipped),
+            FlowRunStepStatusKind::Skipped
+        )
+    )
 }
 
 fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
@@ -2264,23 +2274,23 @@ fn effect_target_id(effect: &flow_run::Effect) -> Result<Option<MeerkatId>, MobE
 }
 
 fn effect_step_status(effect: &flow_run::Effect) -> Result<StepRunStatus, MobError> {
-    let status = match effect {
-        flow_run::Effect::EmitStepNotice(payload) => payload.step_status.as_str(),
-        other => {
-            return Err(MobError::Internal(format!(
-                "flow_run effect {other:?} does not carry step_status"
-            )));
+    match effect {
+        flow_run::Effect::EmitStepNotice(payload) => {
+            Ok(step_status_from_flow_run(payload.step_status))
         }
-    };
-    match status {
-        "Dispatched" => Ok(StepRunStatus::Dispatched),
-        "Completed" => Ok(StepRunStatus::Completed),
-        "Failed" => Ok(StepRunStatus::Failed),
-        "Skipped" => Ok(StepRunStatus::Skipped),
-        "Canceled" => Ok(StepRunStatus::Canceled),
         other => Err(MobError::Internal(format!(
-            "flow_run effect carried unknown StepRunStatus `{other}`"
+            "flow_run effect {other:?} does not carry step_status"
         ))),
+    }
+}
+
+fn step_status_from_flow_run(status: flow_run::StepRunStatus) -> StepRunStatus {
+    match status {
+        flow_run::StepRunStatus::Dispatched => StepRunStatus::Dispatched,
+        flow_run::StepRunStatus::Completed => StepRunStatus::Completed,
+        flow_run::StepRunStatus::Failed => StepRunStatus::Failed,
+        flow_run::StepRunStatus::Skipped => StepRunStatus::Skipped,
+        flow_run::StepRunStatus::Canceled => StepRunStatus::Canceled,
     }
 }
 
@@ -2940,5 +2950,22 @@ mod strip_code_fences_tests {
         let input =
             "Here is the raw JSON response:\n\n```json\n{\"final_message\":\"joined\"}\n```";
         assert_eq!(strip_code_fences(input), r#"{"final_message":"joined"}"#);
+    }
+}
+
+#[cfg(test)]
+mod status_projection_tests {
+    use super::{StepRunStatus, flow_run, step_status_from_flow_run};
+
+    #[test]
+    fn flow_run_step_status_projects_from_typed_variant() {
+        assert_eq!(
+            step_status_from_flow_run(flow_run::StepRunStatus::Failed),
+            StepRunStatus::Failed
+        );
+        assert_eq!(
+            step_status_from_flow_run(flow_run::StepRunStatus::Canceled),
+            StepRunStatus::Canceled
+        );
     }
 }

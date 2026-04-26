@@ -42,12 +42,12 @@ use crate::turn_execution_authority::{
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
-    ToolDef, Usage,
+    ToolDef, ToolName, ToolNameSet, Usage,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub use builder::AgentBuilder;
@@ -395,27 +395,44 @@ pub enum OpsLifecycleBindError {
 
 /// A tool dispatcher that filters tools based on a policy
 ///
-/// Tools are filtered once at construction time based on the allowed_tools list.
+/// Legacy tool lists are filtered once at construction time based on the
+/// allowed_tools list. Exact-catalog dispatchers keep catalog callability live.
 /// The inner dispatcher is used for actual dispatch, but only allowed tools are
 /// exposed via tools() and dispatch() returns AccessDenied for filtered tools.
 pub struct FilteredToolDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
-    allowed_tools: HashSet<String>,
-    /// Pre-computed filtered tool list (computed once at construction)
+    allowed_tools: ToolNameSet,
+    /// Pre-computed filtered tool list for non-exact dispatchers.
     filtered_tools: Arc<[Arc<ToolDef>]>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
-    pub fn new(inner: Arc<T>, allowed_tools: Vec<String>) -> Self {
-        let allowed_set: HashSet<String> = allowed_tools.into_iter().collect();
+    pub fn new<I, N>(inner: Arc<T>, allowed_tools: I) -> Self
+    where
+        I: IntoIterator<Item = N>,
+        N: Into<ToolName>,
+    {
+        let allowed_set: ToolNameSet = allowed_tools
+            .into_iter()
+            .map(Into::into)
+            .collect::<ToolNameSet>();
 
-        // Filter tools once at construction - the tool registry is static for agent lifetime
-        let inner_tools = inner.tools();
-        let filtered: Vec<Arc<ToolDef>> = inner_tools
-            .iter()
-            .filter(|t| allowed_set.contains(t.name.as_str()))
-            .map(Arc::clone)
-            .collect();
+        let filtered: Vec<Arc<ToolDef>> = if inner.tool_catalog_capabilities().exact_catalog {
+            inner
+                .tool_catalog()
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .filter(|t| allowed_set.contains(t.name.as_str()))
+                .collect()
+        } else {
+            inner
+                .tools()
+                .iter()
+                .filter(|t| allowed_set.contains(t.name.as_str()))
+                .map(Arc::clone)
+                .collect()
+        };
 
         Self {
             inner,
@@ -429,6 +446,17 @@ impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        if self.inner.tool_catalog_capabilities().exact_catalog {
+            return self
+                .inner
+                .tool_catalog()
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .filter(|tool| self.allowed_tools.contains(tool.name.as_str()))
+                .collect::<Vec<_>>()
+                .into();
+        }
         Arc::clone(&self.filtered_tools)
     }
 
@@ -437,9 +465,46 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if !self.allowed_tools.contains(call.name) {
+            let inner_knows_tool = if self.inner.tool_catalog_capabilities().exact_catalog {
+                self.inner
+                    .tool_catalog()
+                    .iter()
+                    .any(|entry| entry.tool.name == call.name)
+            } else {
+                self.inner.tools().iter().any(|tool| tool.name == call.name)
+            };
+            if !inner_knows_tool {
+                return Err(crate::error::ToolError::not_found(call.name));
+            }
             return Err(crate::error::ToolError::access_denied(call.name));
         }
         self.inner.dispatch(call).await
+    }
+
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        if !self.inner.tool_catalog_capabilities().exact_catalog {
+            return self
+                .tools()
+                .iter()
+                .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+                .collect::<Vec<_>>()
+                .into();
+        }
+        self.inner
+            .tool_catalog()
+            .iter()
+            .filter(|entry| self.allowed_tools.contains(entry.tool.name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
@@ -466,18 +531,11 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
                 .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
             let bound = outcome.was_bound();
             let d = outcome.into_dispatcher();
+            let allowed_tools = owned.allowed_tools.into_iter().collect::<Vec<_>>();
             Ok(if bound {
-                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
-                    inner: d,
-                    allowed_tools: owned.allowed_tools,
-                    filtered_tools: owned.filtered_tools,
-                }))
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher::new(d, allowed_tools)))
             } else {
-                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
-                    inner: d,
-                    allowed_tools: owned.allowed_tools,
-                    filtered_tools: owned.filtered_tools,
-                }))
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher::new(d, allowed_tools)))
             })
         } else {
             Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {

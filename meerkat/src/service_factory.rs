@@ -153,17 +153,19 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         identity: meerkat_core::SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         // Atomically update the live client and the session's durable
-        // LLM identity so subsequent turns run against the new
-        // model/provider/connection_ref and persisted recovery sees
-        // the swap.
+        // LLM request policy/identity so subsequent turns run against the
+        // new model/provider/provider_params/connection_ref and persisted
+        // recovery sees the swap.
         let previous_connection_ref = self
             .agent
             .session()
             .session_metadata()
             .and_then(|metadata| metadata.connection_ref);
-        self.agent.replace_client(client);
+        self.agent
+            .replace_client_with_request_policy(client, request_policy);
         self.agent
             .rotate_auth_lease_connection_ref(
                 previous_connection_ref.as_ref(),
@@ -646,8 +648,11 @@ mod tests {
         ) -> Pin<
             Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
         > {
-            *self.seen_tools.lock().expect("capture lock") =
-                request.tools.iter().map(|tool| tool.name.clone()).collect();
+            *self.seen_tools.lock().expect("capture lock") = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
             self.inner.stream(request)
         }
 

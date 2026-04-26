@@ -1415,7 +1415,7 @@ fn collect_runtime_comms_bridge_projection_findings(root: &Path) -> Vec<Finding>
 fn collect_runtime_external_event_projection_findings(root: &Path) -> Vec<Finding> {
     let stdin_path = "meerkat-cli/src/stdin_events.rs";
     let bridge_path = "meerkat-runtime/src/comms_bridge.rs";
-    let loop_path = "meerkat-runtime/src/runtime_loop.rs";
+    let input_path = "meerkat-runtime/src/input.rs";
 
     let stdin_source = match fs::read_to_string(root.join(stdin_path)) {
         Ok(source) => source,
@@ -1425,7 +1425,7 @@ fn collect_runtime_external_event_projection_findings(root: &Path) -> Vec<Findin
         Ok(source) => source,
         Err(_) => return Vec::new(),
     };
-    let loop_source = match fs::read_to_string(root.join(loop_path)) {
+    let input_source = match fs::read_to_string(root.join(input_path)) {
         Ok(source) => source,
         Err(_) => return Vec::new(),
     };
@@ -1435,8 +1435,8 @@ fn collect_runtime_external_event_projection_findings(root: &Path) -> Vec<Findin
         &stdin_source,
         bridge_path,
         &bridge_source,
-        loop_path,
-        &loop_source,
+        input_path,
+        &input_source,
     )
 }
 
@@ -1445,8 +1445,8 @@ fn runtime_external_event_projection_findings_for_sources(
     stdin_source: &str,
     bridge_path: &str,
     bridge_source: &str,
-    loop_path: &str,
-    loop_source: &str,
+    input_path: &str,
+    input_source: &str,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -1507,12 +1507,12 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !loop_source
+    if !input_source
         .contains("Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks")
     {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
-            loop_path,
+            input_path,
             "input_to_append",
             "runtime loop must preserve ExternalEvent blocks as block renderables instead of flattening them to text"
                 .to_string(),

@@ -35,8 +35,10 @@ use std::sync::{Mutex, MutexGuard};
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
 use crate::ops::OperationId;
+use crate::retry::LlmRetrySchedule;
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionInput, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, TurnExecutionInput, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,9 @@ struct LocalFields {
     terminal_outcome: TurnTerminalOutcome,
     extraction_attempts: u32,
     max_extraction_retries: u32,
+    llm_retry_attempt: u32,
+    llm_retry_max_retries: u32,
+    llm_retry_selected_delay_ms: u64,
 }
 
 impl LocalFields {
@@ -82,6 +87,9 @@ impl LocalFields {
             terminal_outcome: TurnTerminalOutcome::None,
             extraction_attempts: 0,
             max_extraction_retries: 0,
+            llm_retry_attempt: 0,
+            llm_retry_max_retries: 0,
+            llm_retry_selected_delay_ms: 0,
         }
     }
 
@@ -116,12 +124,12 @@ impl LocalState {
     fn apply(&mut self, input: TurnExecutionInput) -> Result<(), DslTransitionError> {
         use TurnExecutionInput::{
             AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
-            CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction, ExtractionStart,
-            ExtractionValidationFailed, ExtractionValidationPassed, FatalFailure, ForceCancelNoRun,
-            LlmReturnedTerminal, LlmReturnedToolCalls, OpsBarrierSatisfied, PrimitiveApplied,
-            RecoverableFailure, RegisterPendingOps, RetryRequested, StartConversationRun,
-            StartImmediateAppend, StartImmediateContext, TimeBudgetExceeded, ToolCallsResolved,
-            TurnLimitReached,
+            BudgetLimitExceeded, CancelAfterBoundary, CancelNow, CancellationObserved,
+            EnterExtraction, ExtractionStart, ExtractionValidationFailed,
+            ExtractionValidationPassed, FatalFailure, ForceCancelNoRun, LlmReturnedTerminal,
+            LlmReturnedToolCalls, OpsBarrierSatisfied, PrimitiveApplied, RecoverableFailure,
+            RegisterPendingOps, RetryRequested, StartConversationRun, StartImmediateAppend,
+            StartImmediateContext, TimeBudgetExceeded, ToolCallsResolved, TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -315,10 +323,16 @@ impl LocalState {
                     Failed
                 }
             }
-            (CallingLlm | WaitingForOps | DrainingBoundary, RecoverableFailure { run_id }) => {
+            (
+                CallingLlm | WaitingForOps | DrainingBoundary,
+                RecoverableFailure { run_id, retry },
+            ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
                 }
+                fields.llm_retry_attempt = retry.plan.attempt;
+                fields.llm_retry_max_retries = retry.plan.max_retries;
+                fields.llm_retry_selected_delay_ms = retry.plan.selected_delay_ms;
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_ids.clear();
                     fields.barrier_operation_ids.clear();
@@ -327,8 +341,14 @@ impl LocalState {
                 }
                 ErrorRecovery
             }
-            (ErrorRecovery, RetryRequested { run_id }) => {
-                if !self.guard_run_matches(run_id) {
+            (
+                ErrorRecovery,
+                RetryRequested {
+                    run_id,
+                    retry_attempt,
+                },
+            ) => {
+                if !self.guard_run_matches(run_id) || *retry_attempt != fields.llm_retry_attempt {
                     return Err(invalid(phase, &input));
                 }
                 CallingLlm
@@ -336,7 +356,7 @@ impl LocalState {
             (
                 ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
                 | ErrorRecovery,
-                FatalFailure { run_id },
+                FatalFailure { run_id, .. },
             ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
@@ -437,6 +457,24 @@ impl LocalState {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::TimeBudgetExceeded;
+                Completed
+            }
+            (
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
+                BudgetLimitExceeded { run_id, exceeded },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(invalid(phase, &input));
+                }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids.clear();
+                    fields.barrier_operation_ids.clear();
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
+                }
+                fields.boundary_count += 1;
+                fields.terminal_outcome = terminal_outcome_for_budget_exceeded(*exceeded);
                 Completed
             }
             (
@@ -766,22 +804,25 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
     }
 
-    fn recoverable_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "recoverable_failure")?;
-        guard.apply(TurnExecutionInput::RecoverableFailure { run_id })
+        guard.apply(TurnExecutionInput::RecoverableFailure { run_id, retry })
     }
 
-    fn fatal_failure(&self, _error: String) -> Result<(), DslTransitionError> {
+    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "fatal_failure")?;
-        guard.apply(TurnExecutionInput::FatalFailure { run_id })
+        guard.apply(TurnExecutionInput::FatalFailure { run_id, reason })
     }
 
-    fn retry_requested(&self) -> Result<(), DslTransitionError> {
+    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "retry_requested")?;
-        guard.apply(TurnExecutionInput::RetryRequested { run_id })
+        guard.apply(TurnExecutionInput::RetryRequested {
+            run_id,
+            retry_attempt,
+        })
     }
 
     fn cancel_now(&self) -> Result<(), DslTransitionError> {
@@ -843,7 +884,11 @@ impl TurnStateHandle for TestTurnStateHandle {
         Ok(())
     }
 
-    fn run_failed(&self, _run_id: RunId, _error: String) -> Result<(), DslTransitionError> {
+    fn run_failed(
+        &self,
+        _run_id: RunId,
+        _reason: TurnFailureReason,
+    ) -> Result<(), DslTransitionError> {
         Ok(())
     }
 
@@ -859,6 +904,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         let fields = &guard.fields;
         TurnStateSnapshot {
             active_run_id: fields.active_run.clone(),
+            loop_state: loop_state_from_turn_phase(guard.phase),
             turn_phase: guard.phase,
             primitive_kind: match fields.primitive_kind {
                 TurnPrimitiveKind::None => None,
@@ -891,6 +937,24 @@ impl TurnStateHandle for TestTurnStateHandle {
             },
             extraction_attempts: u64::from(fields.extraction_attempts),
             max_extraction_retries: u64::from(fields.max_extraction_retries),
+            llm_retry_attempt: fields.llm_retry_attempt,
+            llm_retry_max_retries: fields.llm_retry_max_retries,
+            llm_retry_selected_delay_ms: fields.llm_retry_selected_delay_ms,
+        }
+    }
+}
+
+fn loop_state_from_turn_phase(phase: TurnPhase) -> crate::LoopState {
+    match phase {
+        TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
+            crate::LoopState::CallingLlm
+        }
+        TurnPhase::WaitingForOps => crate::LoopState::WaitingForOps,
+        TurnPhase::DrainingBoundary | TurnPhase::Extracting => crate::LoopState::DrainingEvents,
+        TurnPhase::ErrorRecovery => crate::LoopState::ErrorRecovery,
+        TurnPhase::Cancelling => crate::LoopState::Cancelling,
+        TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
+            crate::LoopState::Completed
         }
     }
 }

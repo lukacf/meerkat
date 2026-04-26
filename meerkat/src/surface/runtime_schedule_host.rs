@@ -50,6 +50,32 @@ struct RuntimeBackedScheduleSessionHost {
     build_template: SessionBuildOptions,
 }
 
+fn materialized_build_options(
+    template: &SessionBuildOptions,
+    create: &SessionMaterializationSpec,
+) -> SessionBuildOptions {
+    let mut build = template.clone();
+    build.provider = create.provider;
+    build.output_schema = create.output_schema.clone();
+    build.structured_output_retries = create.structured_output_retries;
+    build.comms_name = create.comms_name.clone();
+    build.peer_meta = create.peer_meta.clone();
+    build.provider_params = create.provider_params.clone();
+    if !create.preload_skills.is_empty() {
+        build.preload_skills = Some(create.preload_skills.clone());
+    }
+    build.realm_id = create.realm_id.clone();
+    build.instance_id = create.instance_id.clone();
+    build.backend = create.backend.clone();
+    build.config_generation = create.config_generation;
+    build.keep_alive = create.keep_alive;
+    build.app_context = create.app_context.clone();
+    build.additional_instructions = (!create.additional_instructions.is_empty())
+        .then(|| create.additional_instructions.clone())
+        .or(build.additional_instructions);
+    build
+}
+
 impl RuntimeBackedScheduleSessionHost {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -116,27 +142,7 @@ impl RuntimeBackedScheduleSessionHost {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> CreateSessionRequest {
-        let mut build = self.build_template.clone();
-        build.provider = create.provider;
-        build.output_schema = create.output_schema.clone();
-        build.structured_output_retries = create.structured_output_retries;
-        build.comms_name = create.comms_name.clone();
-        build.peer_meta = create.peer_meta.clone();
-        build.provider_params = create.provider_params.clone();
-        // Schedule wire type `SessionMaterializationSpec.preload_skills: Vec<String>`
-        // carries only slug halves — no lossless projection to the typed
-        // `SkillKey` (source_uuid + skill_name) required by the session
-        // build. Callers use typed `skill_refs` for per-turn skill injection.
-        build.preload_skills = None;
-        build.realm_id = create.realm_id.clone();
-        build.instance_id = create.instance_id.clone();
-        build.backend = create.backend.clone();
-        build.config_generation = create.config_generation;
-        build.keep_alive = create.keep_alive;
-        build.app_context = create.app_context.clone();
-        build.additional_instructions = (!create.additional_instructions.is_empty())
-            .then(|| create.additional_instructions.clone())
-            .or(build.additional_instructions);
+        let build = materialized_build_options(&self.build_template, create);
 
         CreateSessionRequest {
             model: create.model.clone(),
@@ -245,4 +251,47 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
 
 fn schedule_internal(error: impl std::fmt::Display) -> ScheduleDomainError {
     ScheduleDomainError::Internal(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        let skill_name = match SkillName::parse(name) {
+            Ok(skill_name) => skill_name,
+            Err(err) => unreachable!("static skill fixture is invalid: {err}"),
+        };
+        SkillKey::new(SourceUuid::builtin(), skill_name)
+    }
+
+    #[test]
+    fn materialized_build_options_forwards_preload_skill_keys() {
+        let key = fixture_skill_key("email");
+        let create = SessionMaterializationSpec {
+            model: "claude-sonnet-4-6".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: 0,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: Default::default(),
+            preload_skills: vec![key.clone()],
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        };
+
+        let build = materialized_build_options(&SessionBuildOptions::default(), &create);
+
+        assert_eq!(build.preload_skills, Some(vec![key]));
+    }
 }

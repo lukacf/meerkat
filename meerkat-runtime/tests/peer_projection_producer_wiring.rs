@@ -8,12 +8,12 @@
 //!
 //! 1. **Stager helpers** on [`MeerkatMachine`] — `stage_add_direct_peer_endpoint`,
 //!    `stage_remove_direct_peer_endpoint`, `stage_apply_mob_peer_overlay` —
-//!    apply the matching DSL input and drive the session-scoped
-//!    [`CommsTrustReconciler`] under the same critical section.
-//! 2. **Session-scoped reconciler lifetime** — one
-//!    [`CommsTrustReconciler`] per registered session, created on first
-//!    stager call and re-used across subsequent producer calls so the
-//!    applied-view watermark is monotonically advanced.
+//!    apply the matching DSL input and drive the trust-store
+//!    [`CommsTrustReconciler`] for the current [`CommsRuntime`].
+//! 2. **Rebind correctness** — reconciliation is stateless aside from the
+//!    caller-supplied runtime. When a session rebinds to a fresh runtime, the
+//!    next producer call reconciles that runtime's canonical trust snapshot
+//!    instead of pinning the first runtime observed by the session.
 //! 3. **End-to-end producer → consumer** — an
 //!    `AddDirectPeerEndpoint` stager call causes `add_trusted_peer` on
 //!    the underlying [`CommsRuntime`], and a follow-up
@@ -234,34 +234,49 @@ async fn stage_apply_mob_peer_overlay_drives_trust_store_with_delta() {
 }
 
 #[tokio::test]
-async fn reconciler_is_shared_across_stager_calls_on_the_same_session() {
-    // Regression pin for finding 3 — the reconciler has a per-session
-    // lifetime; consecutive stager calls must reuse the same
-    // reconciler so the applied-view watermark is monotonic. If a
-    // second reconciler were constructed per-call, the applied view
-    // would start empty on every call and `remove_trusted_peer`
-    // could never fire (the reconciler would see "no previous
-    // applied peers" and compute a no-op remove-set).
+async fn reconciler_uses_current_runtime_after_rebind() {
+    // Regression pin for runtime rebinds: the stager must not cache the
+    // first runtime it sees. The reconciler reads the supplied runtime's
+    // canonical trust store on every call, so a fresh runtime receives the
+    // full effective peer projection.
     let machine = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     register(&machine, &sid).await;
-    let recorder = Arc::new(RecordingCommsRuntime::default());
+    let first_runtime = Arc::new(RecordingCommsRuntime::default());
+    let rebound_runtime = Arc::new(RecordingCommsRuntime::default());
 
     let ep_a = endpoint("A", UUID_A);
     machine
-        .stage_add_direct_peer_endpoint(&sid, ep_a.clone(), recorder.clone())
+        .stage_add_direct_peer_endpoint(&sid, ep_a, first_runtime.clone())
         .await
         .expect("add A");
-    // Without a shared reconciler this remove would be a no-op
-    // (empty applied view) and `remove_trusted_peer` would not fire.
-    machine
-        .stage_remove_direct_peer_endpoint(&sid, ep_a, recorder.clone())
-        .await
-        .expect("remove A");
 
+    let ep_b = endpoint("B", UUID_B);
+    machine
+        .stage_add_direct_peer_endpoint(&sid, ep_b, rebound_runtime.clone())
+        .await
+        .expect("add B after runtime rebind");
+
+    let first_adds: Vec<_> = first_runtime
+        .add_calls()
+        .into_iter()
+        .map(|d| d.peer_id.as_str().to_owned())
+        .collect();
     assert_eq!(
-        recorder.remove_calls(),
+        first_adds,
         vec![UUID_A.to_string()],
-        "per-session reconciler must retain applied view across calls",
+        "rebound reconcile must not keep mutating the first runtime",
+    );
+
+    let mut rebound_adds: Vec<_> = rebound_runtime
+        .add_calls()
+        .into_iter()
+        .map(|d| d.peer_id.as_str().to_owned())
+        .collect();
+    rebound_adds.sort();
+    assert_eq!(
+        rebound_adds,
+        vec![UUID_A.to_string(), UUID_B.to_string()],
+        "rebound runtime must be reconciled to the full DSL-owned effective peer set",
     );
 }

@@ -239,7 +239,7 @@ pub struct ToolCallTimeoutContext {
 /// - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 ///   canonical anchor, and the server resolves the current bridge session
 ///   on every tick from the MobMachine's `member_session_bindings` map.
-///   Respawn atomically rotates the bound session via the
+///   Respawn atomically rotates the bridge session via the
 ///   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
 ///   channel survives without any SDK round-trip. A terminal
 ///   `MemberSessionBindingChanged { old: Some, new: None }` closes the

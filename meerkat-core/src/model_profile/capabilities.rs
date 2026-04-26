@@ -149,9 +149,8 @@ pub enum ThinkingSupport {
 /// Lookup a model's capabilities by provider + id.
 ///
 /// Returns `None` when the provider/model pair has no capability row.
-/// Callers that still need a `ModelProfile` should route through
-/// [`crate::profile::profile_for`], which handles legacy fallback for
-/// models without a capability row.
+/// Callers must treat `None` as unknown capability truth; uncatalogued model
+/// IDs must not synthesize semantic facts from model-name folklore.
 pub fn capabilities_for(provider: &str, model_id: &str) -> Option<&'static ModelCapabilities> {
     let table: &'static [ModelCapabilities] = match provider {
         "anthropic" => anthropic::CAPABILITIES,
@@ -221,6 +220,19 @@ mod tests {
             let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
                 .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
             assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
+        }
+    }
+
+    #[test]
+    fn claude_haiku_45_is_cataloged_with_official_limits() {
+        for model in ["claude-haiku-4-5-20251001", "claude-haiku-4-5"] {
+            let caps = capabilities_for("anthropic", model)
+                .unwrap_or_else(|| panic!("{model} must be in the Anthropic catalog"));
+            assert_eq!(caps.model_family, "claude-haiku-4");
+            assert_eq!(caps.context_window, 200_000);
+            assert_eq!(caps.max_output_tokens, 64_000);
+            assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
+            assert!(!caps.supports_compaction);
         }
     }
 }

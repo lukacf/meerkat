@@ -40,10 +40,15 @@ where
             }
         }
 
-        let report = hook_engine
+        let mut report = hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
             .map_err(Self::map_hook_engine_error)?;
+        let mut published = hook_engine
+            .drain_published_patches(&invocation.session_id)
+            .await
+            .map_err(Self::map_hook_engine_error)?;
+        report.published_patches.append(&mut published);
 
         for outcome in &report.outcomes {
             if let Some(error) = &outcome.error {

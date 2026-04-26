@@ -4,7 +4,9 @@
 //! A production implementation would use vector embeddings (e.g., HNSW).
 
 use async_trait::async_trait;
-use meerkat_core::memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+use meerkat_core::memory::{
+    MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+};
 use tokio::sync::RwLock;
 
 /// Entry in the simple memory store.
@@ -51,6 +53,7 @@ impl MemoryStore for SimpleMemoryStore {
 
     async fn search(
         &self,
+        scope: &MemorySearchScope,
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
@@ -61,6 +64,7 @@ impl MemoryStore for SimpleMemoryStore {
 
         let mut results: Vec<MemoryResult> = entries
             .iter()
+            .filter(|entry| scope.includes(&entry.metadata))
             .filter_map(|entry| {
                 let content_lower = entry.content.to_lowercase();
                 let matching_words = query_words
@@ -100,9 +104,9 @@ mod tests {
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 
-    fn meta(_label: &str) -> MemoryMetadata {
+    fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
-            session_id: SessionId::new(),
+            session_id: session_id.clone(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
         }
@@ -111,53 +115,65 @@ mod tests {
     #[tokio::test]
     async fn test_index_and_search() {
         let store = SimpleMemoryStore::new();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         store
-            .index("The user wants to implement a REST API", meta("s1"))
+            .index("The user wants to implement a REST API", meta(&session_id))
             .await
             .unwrap();
         store
-            .index("Configuration uses TOML format", meta("s2"))
+            .index("Configuration uses TOML format", meta(&session_id))
             .await
             .unwrap();
         store
-            .index("Authentication uses JWT tokens", meta("s3"))
+            .index("Authentication uses JWT tokens", meta(&SessionId::new()))
             .await
             .unwrap();
 
-        let results = store.search("REST API", 10).await.unwrap();
+        let results = store.search(&scope, "REST API", 10).await.unwrap();
         assert!(!results.is_empty());
         assert!(results[0].content.contains("REST API"));
+        assert!(
+            results
+                .iter()
+                .all(|result| scope.includes(&result.metadata))
+        );
     }
 
     #[tokio::test]
     async fn test_search_empty_store() {
         let store = SimpleMemoryStore::new();
-        let results = store.search("anything", 10).await.unwrap();
+        let scope = MemorySearchScope::for_session(SessionId::new());
+        let results = store.search(&scope, "anything", 10).await.unwrap();
         assert!(results.is_empty());
     }
 
     #[tokio::test]
     async fn test_search_limit() {
         let store = SimpleMemoryStore::new();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         for i in 0..10 {
             store
-                .index(&format!("Item {i} with keyword test"), meta("s1"))
+                .index(&format!("Item {i} with keyword test"), meta(&session_id))
                 .await
                 .unwrap();
         }
 
-        let results = store.search("test", 3).await.unwrap();
+        let results = store.search(&scope, "test", 3).await.unwrap();
         assert_eq!(results.len(), 3);
     }
 
     #[tokio::test]
     async fn test_search_no_match() {
         let store = SimpleMemoryStore::new();
-        store.index("Hello world", meta("s1")).await.unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        store.index("Hello world", meta(&session_id)).await.unwrap();
 
-        let results = store.search("quantum computing", 10).await.unwrap();
+        let results = store.search(&scope, "quantum computing", 10).await.unwrap();
         assert!(results.is_empty());
     }
 }

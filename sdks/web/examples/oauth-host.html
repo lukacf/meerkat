@@ -10,8 +10,9 @@
     1. Initialize the meerkat WASM runtime with a single realm config
        that declares an `external_resolver`-backed auth profile.
     2. Register a JS callback the runtime invokes when it needs a
-       fresh bearer token for `realm:binding`.
-    3. Run a single turn with `connection_ref: "hosted:chatgpt"` —
+       fresh bearer token for a structural connection reference.
+    3. Run a single turn with `connection_ref:
+       { realm: "hosted", binding: "chatgpt" }` —
        the runtime consults the callback for credentials and never
        touches the host's refresh token.
 
@@ -69,6 +70,7 @@
     <script type="module">
       import {
         MeerkatRuntime,
+        WASM_EXTERNAL_AUTH_RESOLVER_HANDLE as WASM_EXTERNAL_AUTH_RESOLVER_ID,
         registerExternalAuthResolver,
         withConnectionRef,
       } from '../src/index.js';
@@ -81,13 +83,14 @@
       // host's secure storage; only the short-lived access token
       // crosses into Meerkat.
       const myOAuthClient = {
-        async freshAccessToken(bindingKey) {
-          // bindingKey arrives as "hosted:chatgpt" — look up the
+        async freshAccessToken(connectionRef) {
+          // connectionRef arrives as { realm, binding, profile? } —
+          // look up the
           // matching OAuth session in your auth provider store,
           // refresh if needed, return the access token string.
           console.log(
             '[oauth-host] runtime asked for bearer for',
-            bindingKey,
+            connectionRef,
           );
           // Placeholder: real code fetches an access token here.
           return 'sk-access-placeholder-from-host-oauth';
@@ -111,7 +114,7 @@
                 auth_method: 'external_authorizer',
                 source: {
                   kind: 'external_resolver',
-                  handle: 'host_oauth',
+                  handle: WASM_EXTERNAL_AUTH_RESOLVER_ID,
                 },
               },
             },
@@ -130,15 +133,15 @@
       const rt = await MeerkatRuntime.loadFromConfig(realmConfig);
 
       // ---- Wire the host's OAuth callback into the runtime ----
-      registerExternalAuthResolver(rt.wasm, (bindingKey) =>
-        myOAuthClient.freshAccessToken(bindingKey),
+      registerExternalAuthResolver(rt.wasm, (connectionRef) =>
+        myOAuthClient.freshAccessToken(connectionRef),
       );
 
       document.getElementById('start').addEventListener('click', async () => {
         const out = document.getElementById('output');
         out.textContent = '';
 
-        const cfg = withConnectionRef('hosted:chatgpt', {
+        const cfg = withConnectionRef({ realm: 'hosted', binding: 'chatgpt' }, {
           model: 'gpt-5.2',
           systemPrompt: 'You are concise.',
         });

@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,16 @@ const LOCK_OWNER_FILE = path.join(LOCK_DIR, "owner.json");
 const LOCK_HEARTBEAT_FILE = path.join(LOCK_DIR, "heartbeat");
 const OUT_DIR = path.join(SDK_DIR, "wasm");
 const CRATE_DIR = path.resolve(SDK_DIR, "../../meerkat-web-runtime");
+const WORKSPACE_DIR = path.resolve(SDK_DIR, "../..");
+const CACHE_MANIFEST = path.join(OUT_DIR, ".meerkat-wasm-build.json");
+const REQUIRED_OUTPUTS = [
+  "meerkat_web_runtime.js",
+  "meerkat_web_runtime_bg.wasm",
+  "meerkat_web_runtime.d.ts",
+];
+const FORCE_REBUILD =
+  process.env.MEERKAT_WEB_WASM_FORCE_REBUILD === "1" ||
+  process.env.MEERKAT_WEB_WASM_CACHE === "0";
 // Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
 // wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
 // tests that all compete for this lock. 15 minutes gives comfortable headroom
@@ -129,9 +140,159 @@ async function releaseLock() {
   await rm(LOCK_DIR, { recursive: true, force: true });
 }
 
+async function fileExists(filePath) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runCapture(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      reject(
+        new Error(
+          signal
+            ? `${command} terminated by signal ${signal}`
+            : `${command} exited with code ${code ?? "unknown"}\n${stderr}`,
+        ),
+      );
+    });
+  });
+}
+
+async function collectPackageInputs(packageRoot) {
+  const inputs = [path.join(packageRoot, "Cargo.toml")];
+  const buildRs = path.join(packageRoot, "build.rs");
+  if (await fileExists(buildRs)) {
+    inputs.push(buildRs);
+  }
+  const srcDir = path.join(packageRoot, "src");
+  if (!(await fileExists(srcDir))) {
+    return inputs;
+  }
+  async function walk(dir) {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      } else if (entry.isFile()) {
+        inputs.push(entryPath);
+      }
+    }
+  }
+  await walk(srcDir);
+  return inputs;
+}
+
+async function localCargoGraphInputs() {
+  const metadataText = await runCapture("cargo", ["metadata", "--format-version", "1"], {
+    cwd: WORKSPACE_DIR,
+  });
+  const metadata = JSON.parse(metadataText);
+  const packagesById = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
+  const rootPackage = metadata.packages.find(
+    (pkg) => path.resolve(pkg.manifest_path) === path.join(CRATE_DIR, "Cargo.toml"),
+  );
+  if (!rootPackage) {
+    throw new Error(`could not find meerkat-web-runtime in cargo metadata from ${WORKSPACE_DIR}`);
+  }
+  const nodesById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+  const seen = new Set();
+  const stack = [rootPackage.id];
+  const localPackageRoots = new Set();
+  while (stack.length > 0) {
+    const packageId = stack.pop();
+    if (seen.has(packageId)) {
+      continue;
+    }
+    seen.add(packageId);
+    const pkg = packagesById.get(packageId);
+    if (!pkg || pkg.source !== null) {
+      continue;
+    }
+    localPackageRoots.add(path.dirname(pkg.manifest_path));
+    const node = nodesById.get(packageId);
+    for (const dep of node?.deps ?? []) {
+      stack.push(dep.pkg);
+    }
+  }
+
+  const inputs = [
+    path.join(WORKSPACE_DIR, "Cargo.toml"),
+    path.join(WORKSPACE_DIR, "Cargo.lock"),
+  ];
+  for (const packageRoot of [...localPackageRoots].sort()) {
+    inputs.push(...(await collectPackageInputs(packageRoot)));
+  }
+  return [...new Set(inputs)].sort();
+}
+
+async function computeSourceHash() {
+  const hash = createHash("sha256");
+  hash.update("meerkat-web-runtime-wasm-v1\n");
+  hash.update(`rustflags=--cfg getrandom_backend="wasm_js"\n`);
+  hash.update(`wasm-pack=${(await runCapture("wasm-pack", ["--version"])).trim()}\n`);
+  const inputs = await localCargoGraphInputs();
+  for (const filePath of inputs) {
+    const relativePath = path.relative(WORKSPACE_DIR, filePath);
+    hash.update(`path:${relativePath}\n`);
+    hash.update(await readFile(filePath));
+    hash.update("\n");
+  }
+  return { hash: hash.digest("hex"), inputCount: inputs.length };
+}
+
+async function cacheIsValid(sourceHash) {
+  if (FORCE_REBUILD) {
+    return false;
+  }
+  for (const output of REQUIRED_OUTPUTS) {
+    if (!(await fileExists(path.join(OUT_DIR, output)))) {
+      return false;
+    }
+  }
+  try {
+    const manifest = JSON.parse(await readFile(CACHE_MANIFEST, "utf8"));
+    return manifest.source_hash === sourceHash;
+  } catch {
+    return false;
+  }
+}
+
 async function run() {
   const heartbeat = await acquireLock();
   try {
+    const source = await computeSourceHash();
+    if (await cacheIsValid(source.hash)) {
+      console.log(
+        `meerkat web wasm already current (${source.inputCount} source inputs, ${source.hash.slice(0, 12)})`,
+      );
+      return;
+    }
+
     await rm(OUT_DIR, { recursive: true, force: true });
 
     await new Promise((resolve, reject) => {
@@ -164,6 +325,18 @@ async function run() {
     });
 
     await rm(path.join(OUT_DIR, ".gitignore"), { force: true });
+    await writeFile(
+      CACHE_MANIFEST,
+      JSON.stringify(
+        {
+          source_hash: source.hash,
+          input_count: source.inputCount,
+          built_at: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
   } finally {
     clearInterval(heartbeat);
     await releaseLock();

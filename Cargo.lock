@@ -2823,6 +2823,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-openai",
  "meerkat-providers",
+ "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",

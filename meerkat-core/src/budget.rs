@@ -18,6 +18,82 @@ pub struct BudgetLimits {
     pub max_tool_calls: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BudgetDimension {
+    Tokens,
+    Time,
+    ToolCalls,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetExceeded {
+    pub dimension: BudgetDimension,
+    pub used: u64,
+    pub limit: u64,
+}
+
+impl BudgetExceeded {
+    pub fn to_agent_error(self) -> AgentError {
+        match self.dimension {
+            BudgetDimension::Tokens => AgentError::TokenBudgetExceeded {
+                used: self.used,
+                limit: self.limit,
+            },
+            BudgetDimension::Time => AgentError::TimeBudgetExceeded {
+                elapsed_secs: self.used,
+                limit_secs: self.limit,
+            },
+            BudgetDimension::ToolCalls => AgentError::ToolCallBudgetExceeded {
+                count: saturating_usize(self.used),
+                limit: saturating_usize(self.limit),
+            },
+        }
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        match error {
+            AgentError::TokenBudgetExceeded { used, limit } => Some(Self {
+                dimension: BudgetDimension::Tokens,
+                used: *used,
+                limit: *limit,
+            }),
+            AgentError::TimeBudgetExceeded {
+                elapsed_secs,
+                limit_secs,
+            } => Some(Self {
+                dimension: BudgetDimension::Time,
+                used: *elapsed_secs,
+                limit: *limit_secs,
+            }),
+            AgentError::ToolCallBudgetExceeded { count, limit } => Some(Self {
+                dimension: BudgetDimension::ToolCalls,
+                used: *count as u64,
+                limit: *limit as u64,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BudgetObservation {
+    WithinLimit,
+    Exceeded(BudgetExceeded),
+}
+
+impl BudgetObservation {
+    pub fn exceeded(self) -> Option<BudgetExceeded> {
+        match self {
+            Self::WithinLimit => None,
+            Self::Exceeded(exceeded) => Some(exceeded),
+        }
+    }
+}
+
+fn saturating_usize(value: u64) -> usize {
+    value.min(usize::MAX as u64) as usize
+}
+
 impl BudgetLimits {
     /// Create unlimited budget
     pub fn unlimited() -> Self {
@@ -88,11 +164,25 @@ impl Budget {
 
     /// Check if budget is exhausted, returning error if so
     pub fn check(&self) -> Result<(), AgentError> {
+        if let BudgetObservation::Exceeded(exceeded) = self.observe() {
+            return Err(exceeded.to_agent_error());
+        }
+        Ok(())
+    }
+
+    /// Observe budget state as a typed fact. The caller may route an
+    /// exceeded observation through the turn authority instead of locally
+    /// choosing a terminal path.
+    pub fn observe(&self) -> BudgetObservation {
         // Check token limit
         if let Some(limit) = self.limits.max_tokens {
             let used = self.tokens_used.load(Ordering::Relaxed);
             if used >= limit {
-                return Err(AgentError::TokenBudgetExceeded { used, limit });
+                return BudgetObservation::Exceeded(BudgetExceeded {
+                    dimension: BudgetDimension::Tokens,
+                    used,
+                    limit,
+                });
             }
         }
 
@@ -100,9 +190,10 @@ impl Budget {
         if let Some(limit) = self.limits.max_duration {
             let elapsed = self.start_time.elapsed();
             if elapsed >= limit {
-                return Err(AgentError::TimeBudgetExceeded {
-                    elapsed_secs: elapsed.as_secs(),
-                    limit_secs: limit.as_secs(),
+                return BudgetObservation::Exceeded(BudgetExceeded {
+                    dimension: BudgetDimension::Time,
+                    used: elapsed.as_secs(),
+                    limit: limit.as_secs(),
                 });
             }
         }
@@ -111,11 +202,15 @@ impl Budget {
         if let Some(limit) = self.limits.max_tool_calls {
             let count = self.tool_calls_made.load(Ordering::Relaxed) as usize;
             if count >= limit {
-                return Err(AgentError::ToolCallBudgetExceeded { count, limit });
+                return BudgetObservation::Exceeded(BudgetExceeded {
+                    dimension: BudgetDimension::ToolCalls,
+                    used: count as u64,
+                    limit: limit as u64,
+                });
             }
         }
 
-        Ok(())
+        BudgetObservation::WithinLimit
     }
 
     /// Check if budget is exhausted (returns bool)
@@ -322,16 +417,19 @@ mod tests {
         let budget = Budget::new(BudgetLimits::default().with_max_tokens(100));
 
         budget.record_tokens(50);
-        assert!(budget.check().is_ok());
+        assert_eq!(budget.observe(), BudgetObservation::WithinLimit);
         assert_eq!(budget.token_usage(), Some((50, 100)));
         assert_eq!(budget.remaining_tokens(), Some(50));
 
         budget.record_tokens(50);
-        let result = budget.check();
-        assert!(matches!(
-            result,
-            Err(AgentError::TokenBudgetExceeded { .. })
-        ));
+        assert_eq!(
+            budget.observe(),
+            BudgetObservation::Exceeded(BudgetExceeded {
+                dimension: BudgetDimension::Tokens,
+                used: 100,
+                limit: 100,
+            })
+        );
     }
 
     #[test]
@@ -339,14 +437,33 @@ mod tests {
         let budget = Budget::new(BudgetLimits::default().with_max_tool_calls(5));
 
         budget.record_calls(3);
-        assert!(budget.check().is_ok());
+        assert_eq!(budget.observe(), BudgetObservation::WithinLimit);
         assert_eq!(budget.call_usage(), Some((3, 5)));
 
         budget.record_calls(2);
-        let result = budget.check();
+        assert_eq!(
+            budget.observe(),
+            BudgetObservation::Exceeded(BudgetExceeded {
+                dimension: BudgetDimension::ToolCalls,
+                used: 5,
+                limit: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn budget_exceeded_maps_to_legacy_error_for_compatibility() {
+        let exceeded = BudgetExceeded {
+            dimension: BudgetDimension::Tokens,
+            used: 10,
+            limit: 10,
+        };
         assert!(matches!(
-            result,
-            Err(AgentError::ToolCallBudgetExceeded { .. })
+            exceeded.to_agent_error(),
+            AgentError::TokenBudgetExceeded {
+                used: 10,
+                limit: 10
+            }
         ));
     }
 

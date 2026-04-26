@@ -61,11 +61,12 @@ additional canonical machines.
 
 ## Canonical compositions
 
-The cross-machine seams are modeled as **four** canonical compositions:
+The cross-machine seams are modeled as **five** canonical compositions:
 
 | Composition | Purpose |
 |-------------|---------|
 | `meerkat_mob_seam` | Session-runtime ↔ mob-runtime ownership handoffs |
+| `auth_lease_bundle` | Auth authority ↔ provider/runtime lease publication |
 | `schedule_bundle` | Scheduler aggregate lifecycle |
 | `schedule_runtime_bundle` | Scheduler ↔ runtime bridge |
 | `schedule_mob_bundle` | Scheduler ↔ mob bridge |

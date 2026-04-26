@@ -48,9 +48,6 @@ pub use meerkat_core::{
     AgentToolDispatcher,
     ArtifactRef,
     AssistantMessage,
-    // Gateway for composing dispatchers
-    Availability,
-    AvailabilityCheck,
     // Budget
     Budget,
     BudgetConfig,
@@ -366,19 +363,13 @@ pub fn compose_tools_with_comms(
     use std::sync::Arc;
     let router = material.router().clone();
     let trusted_peers = material.trusted_peers_shared();
-    let self_pubkey = material.self_pubkey();
     let runtime = material.into_runtime();
-    let comms_surface = CommsToolSurface::new_with_runtime(router, trusted_peers.clone(), runtime);
-    let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
+    let comms_surface = CommsToolSurface::new_with_runtime(router, trusted_peers, runtime);
     // Use DynamicToolComposite instead of a single ToolGateway so that
     // base_tools with dynamic tool lists (e.g. CallbackToolDispatcher backed
     // by a shared registry) can surface late additions via poll_external_updates.
-    // The comms surface is wrapped in its own ToolGateway for availability gating.
-    let comms_gateway = meerkat_core::ToolGatewayBuilder::new()
-        .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
-        .build()?;
     let composite =
-        meerkat_core::DynamicToolComposite::new(vec![base_tools, Arc::new(comms_gateway)]);
+        meerkat_core::DynamicToolComposite::new(vec![base_tools, Arc::new(comms_surface)]);
     let mut instructions = tool_usage_instructions;
     if !instructions.is_empty() {
         instructions.push_str("\n\n");

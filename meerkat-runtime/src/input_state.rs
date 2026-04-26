@@ -152,10 +152,10 @@ impl InputStateSeed {
 
 /// Persisted bundle: shell [`InputState`] plus its [`InputStateSeed`].
 ///
-/// Used at the store boundary so the three DSL-owned fields survive persistence
-/// without being re-shadowed onto `InputState` itself. Also used by recovery
-/// bootstrap, which hydrates a driver's DSL from the seed before the driver is
-/// fully alive.
+/// Used at the store boundary so the DSL-owned fields survive persistence
+/// without being re-shadowed onto `InputState` itself. Recovery treats the
+/// seed as a durable witness and re-enters the recovered facts through typed
+/// machine inputs; it does not hydrate DSL state directly from this bundle.
 #[derive(Debug, Clone)]
 pub struct StoredInputState {
     pub state: InputState,

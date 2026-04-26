@@ -112,7 +112,7 @@ To share state across processes/surfaces, pass the same explicit realm (`--realm
 
 ## Switch providers
 
-Same code, different model. The provider is inferred from the model name:
+Same code, different model. The provider is resolved from the model registry:
 
 ```bash
 rkat run --model claude-sonnet-4-6 "Explain monads"

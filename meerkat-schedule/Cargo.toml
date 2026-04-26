@@ -35,7 +35,7 @@ tokio_with_wasm = { workspace = true }
 
 [features]
 default = []
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "meerkat-core/schema"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

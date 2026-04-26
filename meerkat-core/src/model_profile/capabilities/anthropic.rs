@@ -245,6 +245,78 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(120),
     },
+    // Claude Haiku 4.5
+    //
+    // Sources:
+    //   - Models overview:
+    //     https://platform.claude.com/docs/en/about-claude/models/overview
+    //     (API ID claude-haiku-4-5-20251001, alias claude-haiku-4-5,
+    //      200k context, 64k sync output, text/image input, text output)
+    //   - Extended thinking:
+    //     https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+    //     (manual thinking supported; Claude Haiku 4.5 supports up to 64k output)
+    ModelCapabilities {
+        id: "claude-haiku-4-5-20251001",
+        provider: "anthropic",
+        display_name: "Claude Haiku 4.5",
+        tier: ModelTier::Recommended,
+        model_family: "claude-haiku-4",
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        supports_temperature: true,
+        supports_top_p: true,
+        supports_top_k: true,
+        thinking: ThinkingSupport::AnthropicEnabledOnly,
+        supports_reasoning: false,
+        effort_levels: &[],
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: true,
+        beta_headers: LEGACY_THINKING_BETAS,
+        call_timeout_secs: Some(60),
+    },
+    // Claude Haiku 4.5 alias
+    //
+    // Keep the official alias as a first-class catalog row so model/provider
+    // resolution stays registry-owned instead of falling back to prefix folklore.
+    ModelCapabilities {
+        id: "claude-haiku-4-5",
+        provider: "anthropic",
+        display_name: "Claude Haiku 4.5",
+        tier: ModelTier::Recommended,
+        model_family: "claude-haiku-4",
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        supports_temperature: true,
+        supports_top_p: true,
+        supports_top_k: true,
+        thinking: ThinkingSupport::AnthropicEnabledOnly,
+        supports_reasoning: false,
+        effort_levels: &[],
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: true,
+        beta_headers: LEGACY_THINKING_BETAS,
+        call_timeout_secs: Some(60),
+    },
     // Claude Opus 4.5
     //
     // Sources:
@@ -289,39 +361,5 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: true,
         beta_headers: LEGACY_THINKING_BETAS,
         call_timeout_secs: Some(300),
-    },
-    // Claude Haiku 4.5
-    //
-    // This row keeps provider inference catalog-driven for the mob smoke suite's
-    // fast Anthropic model while preserving the no-loose-prefix-inference rule.
-    // Capability shape intentionally matches the conservative Haiku 4 fallback.
-    ModelCapabilities {
-        id: "claude-haiku-4-5-20251001",
-        provider: "anthropic",
-        display_name: "Claude Haiku 4.5",
-        tier: ModelTier::Supported,
-        model_family: "claude-haiku-4",
-        context_window: 200_000,
-        max_output_tokens: 16_384,
-        context_window_beta: None,
-        max_output_tokens_beta: None,
-        vision: true,
-        image_tool_results: true,
-        inline_video: false,
-        realtime: false,
-        supports_temperature: true,
-        supports_top_p: false,
-        supports_top_k: true,
-        thinking: ThinkingSupport::AnthropicEnabledOnly,
-        supports_reasoning: false,
-        effort_levels: &[],
-        supports_web_search: true,
-        supports_inference_geo: false,
-        supports_compaction: false,
-        supports_structured_output: true,
-        supports_legacy_penalties: false,
-        supports_thinking_budget_legacy: true,
-        beta_headers: LEGACY_THINKING_BETAS,
-        call_timeout_secs: Some(60),
     },
 ];

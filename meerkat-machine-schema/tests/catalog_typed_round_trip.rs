@@ -25,8 +25,10 @@
 //! signal; bumps land when the schema intentionally grows.
 
 use meerkat_machine_schema::identity::{
-    ActorId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId,
-    MachineId, MachineInstanceId, PhaseId, ProtocolId, RouteId, SignalVariantId, TransitionId,
+    ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
+    EntryInputId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
+    PhaseId, ProtocolId, RouteId, SignalVariantId, StorePrimitiveId, TransactionPlanId,
+    TransactionTriggerId, TransitionId,
 };
 use meerkat_machine_schema::{
     CompositionSchema, MachineSchema, RouteVariantId, TriggerMatch, TypeRef,
@@ -260,6 +262,10 @@ fn assert_typed_composition_schema(composition: &CompositionSchema) {
         );
     }
     for entry_input in &composition.entry_inputs {
+        assert_eq!(
+            entry_input.name,
+            EntryInputId::parse(entry_input.name.as_str()).unwrap()
+        );
         assert_machine_instance_id_roundtrip(&entry_input.machine);
         assert_eq!(
             entry_input.input_variant,
@@ -275,12 +281,36 @@ fn assert_typed_composition_schema(composition: &CompositionSchema) {
         }
     }
     for plan in &composition.transaction_plans {
+        assert_eq!(
+            plan.name,
+            TransactionPlanId::parse(plan.name.as_str()).unwrap()
+        );
+        assert_eq!(
+            plan.trigger,
+            TransactionTriggerId::parse(plan.trigger.as_str()).unwrap()
+        );
+        assert_eq!(
+            plan.store_primitive,
+            StorePrimitiveId::parse(plan.store_primitive.as_str()).unwrap()
+        );
         for route in &plan.route_names {
             assert_eq!(*route, RouteId::parse(route.as_str()).unwrap());
         }
         for protocol in &plan.protocol_names {
             assert_eq!(*protocol, ProtocolId::parse(protocol.as_str()).unwrap());
         }
+    }
+    for witness in &composition.witnesses {
+        assert_eq!(
+            witness.name,
+            CompositionWitnessId::parse(witness.name.as_str()).unwrap()
+        );
+    }
+    if let Some(driver) = &composition.driver {
+        assert_eq!(
+            driver.name,
+            CompositionDriverId::parse(driver.name.as_str()).unwrap()
+        );
     }
 }
 

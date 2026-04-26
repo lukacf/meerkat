@@ -58,13 +58,6 @@ export interface MobRespawnResult {
 
 export interface MobMemberSnapshot {
   status: string;
-  /**
-   * Opaque incarnation handle. Compare for equality to detect incarnation
-   * rotation; internals are not parseable. Encoded client-side from the
-   * wire `{identity, generation}` shape, matching the `MemberRef` pattern.
-   */
-  agentRuntimeId: string;
-  fenceToken: number;
   outputPreview?: string;
   error?: string;
   tokensUsed: number;

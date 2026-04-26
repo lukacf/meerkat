@@ -1,5 +1,5 @@
 use crate::ids::{AgentRuntimeId, FenceToken};
-use crate::roster::{MemberState, MobMemberKickoffSnapshot};
+use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime::handle::{
     HelperResult, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
 };
@@ -87,7 +87,7 @@ impl CanonicalMemberSnapshotMaterial {
 #[derive(Debug, Clone)]
 pub(super) struct MobMemberLifecycleInput {
     pub(super) member_present: bool,
-    pub(super) roster_state: Option<MemberState>,
+    pub(super) machine_status: CanonicalMemberStatus,
     pub(super) session_observation: CanonicalSessionObservation,
     pub(super) restore_failure: Option<String>,
     pub(super) output_preview: Option<String>,
@@ -97,13 +97,35 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
-    pub(super) machine_state_marker: Option<crate::machines::mob_machine::MobMemberState>,
-    pub(super) machine_runtime_live: bool,
 }
 
 pub(super) struct MobMemberLifecycleProjection;
 
 impl MobMemberLifecycleProjection {
+    pub(super) fn machine_status(
+        member_present: bool,
+        runtime_id_present: bool,
+        state_marker: Option<crate::machines::mob_machine::MobMemberState>,
+        runtime_live: bool,
+    ) -> CanonicalMemberStatus {
+        if !member_present {
+            return CanonicalMemberStatus::Unknown;
+        }
+        if matches!(
+            state_marker,
+            Some(crate::machines::mob_machine::MobMemberState::Retiring)
+        ) {
+            return CanonicalMemberStatus::Retiring;
+        }
+        if runtime_id_present && runtime_live {
+            return CanonicalMemberStatus::Active;
+        }
+        if runtime_id_present {
+            return CanonicalMemberStatus::Completed;
+        }
+        CanonicalMemberStatus::Unknown
+    }
+
     pub(super) fn materialize(input: MobMemberLifecycleInput) -> CanonicalMemberSnapshotMaterial {
         if let Some(reason) = input.restore_failure {
             return CanonicalMemberSnapshotMaterial {
@@ -125,28 +147,9 @@ impl MobMemberLifecycleProjection {
             };
         }
 
-        let status = match (
-            input.member_present,
-            input.roster_state,
-            input.machine_state_marker,
-            input.machine_runtime_live,
-            input.session_observation,
-        ) {
-            (false, _, _, _, _) => CanonicalMemberStatus::Unknown,
-            (true, _, Some(crate::machines::mob_machine::MobMemberState::Retiring), _, _) => {
-                CanonicalMemberStatus::Retiring
-            }
-            (true, Some(MemberState::Retiring), _, _, _) => CanonicalMemberStatus::Retiring,
-            (true, Some(MemberState::Active), _, false, CanonicalSessionObservation::Missing) => {
-                CanonicalMemberStatus::Completed
-            }
-            (true, Some(MemberState::Active), _, _, _) => CanonicalMemberStatus::Active,
-            (true, None, _, _, _) => CanonicalMemberStatus::Unknown,
-        };
-
         CanonicalMemberSnapshotMaterial {
             member_present: input.member_present,
-            status,
+            status: input.machine_status,
             session_observation: input.session_observation,
             error: None,
             output_preview: input.output_preview,
@@ -166,12 +169,7 @@ impl MobMemberLifecycleProjection {
         match material.status {
             CanonicalMemberStatus::Retiring => MobMemberTerminalClass::Running,
             CanonicalMemberStatus::Broken => MobMemberTerminalClass::TerminalFailure,
-            CanonicalMemberStatus::Active => match material.session_observation {
-                CanonicalSessionObservation::Active
-                | CanonicalSessionObservation::Inactive
-                | CanonicalSessionObservation::Unknown => MobMemberTerminalClass::Running,
-                CanonicalSessionObservation::Missing => MobMemberTerminalClass::TerminalCompleted,
-            },
+            CanonicalMemberStatus::Active => MobMemberTerminalClass::Running,
             CanonicalMemberStatus::Completed => MobMemberTerminalClass::TerminalCompleted,
             CanonicalMemberStatus::Unknown => MobMemberTerminalClass::TerminalUnknown,
         }
@@ -196,7 +194,7 @@ mod tests {
     fn restore_failure_breaks_present_member() {
         let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
-            roster_state: Some(MemberState::Active),
+            machine_status: CanonicalMemberStatus::Active,
             session_observation: CanonicalSessionObservation::Active,
             restore_failure: Some("restore mismatch".into()),
             output_preview: Some("ignored".into()),
@@ -206,8 +204,6 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
-            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
-            machine_runtime_live: true,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
         assert_eq!(material.error.as_deref(), Some("restore mismatch"));
@@ -217,7 +213,12 @@ mod tests {
     fn missing_active_session_means_completed_not_broken() {
         let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
-            roster_state: Some(MemberState::Active),
+            machine_status: MobMemberLifecycleProjection::machine_status(
+                true,
+                true,
+                Some(crate::machines::mob_machine::MobMemberState::Active),
+                false,
+            ),
             session_observation: CanonicalSessionObservation::Missing,
             restore_failure: None,
             output_preview: None,
@@ -227,8 +228,6 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
-            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
-            machine_runtime_live: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
         assert!(MobMemberLifecycleProjection::is_terminal(&material));
@@ -238,7 +237,12 @@ mod tests {
     fn unknown_active_sessionless_member_stays_non_terminal() {
         let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
-            roster_state: Some(MemberState::Active),
+            machine_status: MobMemberLifecycleProjection::machine_status(
+                true,
+                true,
+                Some(crate::machines::mob_machine::MobMemberState::Active),
+                true,
+            ),
             session_observation: CanonicalSessionObservation::Unknown,
             restore_failure: None,
             output_preview: None,
@@ -248,8 +252,6 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
-            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Active),
-            machine_runtime_live: true,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Active);
         assert!(!MobMemberLifecycleProjection::is_terminal(&material));
@@ -259,7 +261,12 @@ mod tests {
     fn retiring_member_is_non_terminal_even_if_session_missing() {
         let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
-            roster_state: Some(MemberState::Retiring),
+            machine_status: MobMemberLifecycleProjection::machine_status(
+                true,
+                true,
+                Some(crate::machines::mob_machine::MobMemberState::Retiring),
+                false,
+            ),
             session_observation: CanonicalSessionObservation::Missing,
             restore_failure: None,
             output_preview: None,
@@ -269,8 +276,6 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
-            machine_state_marker: Some(crate::machines::mob_machine::MobMemberState::Retiring),
-            machine_runtime_live: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
         assert!(!MobMemberLifecycleProjection::is_terminal(&material));

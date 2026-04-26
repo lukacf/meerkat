@@ -52,7 +52,7 @@ machine! {
                 next_active_visibility_revision: u64,
                 tool_visibility_delta: SessionToolVisibilityDelta,
             },
-            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
             NotifyDrainExited { reason: String },
             InterruptCurrentRun,
@@ -379,7 +379,7 @@ machine! {
         // 7. PrepareBindings: different source→target mappings per phase
         // Initializing → Initializing (no guard, emits RuntimeBound)
         transition PrepareBindingsInitializing {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -390,7 +390,7 @@ machine! {
         }
         // Idle → Attached
         transition PrepareBindingsIdle {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -401,7 +401,7 @@ machine! {
         }
         // Attached → Attached
         transition PrepareBindingsAttached {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -412,7 +412,7 @@ machine! {
         }
         // Running → Running
         transition PrepareBindingsRunning {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -423,7 +423,7 @@ machine! {
         }
         // Retired → Retired
         transition PrepareBindingsRetired {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -434,7 +434,7 @@ machine! {
         }
         // Stopped → Stopped (inline in hand-written catalog)
         transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
@@ -1449,6 +1449,7 @@ mod tests {
                 agent_runtime_id: "rt-1".into(),
                 fence_token: "fence-1".into(),
                 generation: "gen-1".into(),
+                session_id: "sess-1".into(),
             },
         )
         .unwrap();
@@ -1476,6 +1477,7 @@ mod tests {
                 agent_runtime_id: "rt-1".into(),
                 fence_token: "fence-1".into(),
                 generation: "gen-1".into(),
+                session_id: "sess-1".into(),
             },
         )
         .unwrap();
@@ -1518,6 +1520,7 @@ mod tests {
                 agent_runtime_id: "rt-1".into(),
                 fence_token: "fence-1".into(),
                 generation: "gen-1".into(),
+                session_id: "sess-1".into(),
             },
         )
         .unwrap();
@@ -1633,7 +1636,43 @@ mod tests {
             }
         }
 
-        let schema = MeerkatMachineState::schema();
+        let mut schema = MeerkatMachineState::schema();
+        schema.named_types = vec![
+            meerkat_machine_schema::identity::NamedTypeBinding::u64("BoundarySequence"),
+            meerkat_machine_schema::identity::NamedTypeBinding::u64("FenceToken"),
+            meerkat_machine_schema::identity::NamedTypeBinding::u64("Generation"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("AgentRuntimeId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("CommsRuntimeId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("InputId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("McpServerId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("MeerkatPhase"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("MobId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OperationId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OperationKind"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("PeerCorrelationId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("RunId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("SessionId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string(
+                "SessionLlmCapabilitySurface",
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string(
+                "SessionLlmCapabilitySurfaceStatus",
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("SessionLlmIdentity"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string(
+                "SessionToolVisibilityDelta",
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string(
+                "SessionToolVisibilityState",
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ToolFilter"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ToolVisibilityWitness"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("WorkId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("PeerEndpoint"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("PeerName"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("PeerId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("PeerAddress"),
+        ];
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         // Run the same sequence through both dispatchers:
@@ -1688,6 +1727,7 @@ mod tests {
                 agent_runtime_id: "rt-1".into(),
                 fence_token: "ft-1".into(),
                 generation: "gen-1".into(),
+                session_id: "s1".into(),
             },
         );
         let ki = meerkat_machine_kernels::test_oracle::KernelInput {
@@ -1699,6 +1739,7 @@ mod tests {
                 ),
                 (fid("fence_token"), named_u64("FenceToken", 1)),
                 (fid("generation"), named_u64("Generation", 1)),
+                (fid("session_id"), named_string("SessionId", "s1")),
             ]),
         };
         let kr = kernel.transition(&kernel_state, &ki);

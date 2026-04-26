@@ -108,4 +108,13 @@ mod tests {
         let k = TokenKey::parse("dev", "default_openai").expect("valid slugs");
         assert_eq!(k.keyring_account(), "dev:default_openai");
     }
+
+    #[test]
+    fn token_key_profile_override_is_part_of_identity() {
+        let default_key = TokenKey::parse("dev", "default_openai").expect("valid slugs");
+        let override_key = TokenKey::parse_with_profile("dev", "default_openai", Some("work"))
+            .expect("valid slugs");
+        assert_ne!(default_key, override_key);
+        assert_eq!(override_key.keyring_account(), "dev:default_openai:work");
+    }
 }

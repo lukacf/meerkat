@@ -8,7 +8,9 @@
 
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
-use meerkat_core::memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+use meerkat_core::memory::{
+    MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -185,6 +187,7 @@ impl MemoryStore for HnswMemoryStore {
 
     async fn search(
         &self,
+        scope: &MemorySearchScope,
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
@@ -192,17 +195,19 @@ impl MemoryStore for HnswMemoryStore {
             return Ok(Vec::new());
         }
         let query = query.to_owned();
+        let scope = scope.clone();
         let db_path = self.db_path.clone();
         let index = Arc::clone(&self.index);
 
         tokio::task::spawn_blocking(move || {
             let embedding = text_to_embedding(&query);
-            let ef_search = limit.max(EF_CONSTRUCTION);
+            let candidate_limit = limit.saturating_mul(8).max(limit).max(1);
+            let ef_search = candidate_limit.max(EF_CONSTRUCTION);
             let neighbors = {
                 let index = index
                     .read()
                     .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
-                index.search(&embedding, limit, ef_search)
+                index.search(&embedding, candidate_limit, ef_search)
             };
 
             let conn = open_connection(&db_path)?;
@@ -237,6 +242,9 @@ impl MemoryStore for HnswMemoryStore {
                         .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
                     None => continue,
                 };
+                if !scope.includes(&metadata) {
+                    continue;
+                }
 
                 // HNSW distance is cosine distance (0 = identical, 2 = opposite).
                 // Convert to a 0..1 similarity score.
@@ -247,6 +255,9 @@ impl MemoryStore for HnswMemoryStore {
                     metadata,
                     score,
                 });
+                if results.len() >= limit {
+                    break;
+                }
             }
 
             Ok::<Vec<MemoryResult>, MemoryStoreError>(results)
@@ -292,9 +303,9 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::TempDir;
 
-    fn meta() -> MemoryMetadata {
+    fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
-            session_id: SessionId::new(),
+            session_id: session_id.clone(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
         }
@@ -304,25 +315,41 @@ mod tests {
     async fn test_hnsw_index_and_search() {
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         store
             .index(
                 "The user wants to implement a REST API with authentication",
-                meta(),
+                meta(&session_id),
             )
             .await
             .unwrap();
         store
-            .index("Configuration files use TOML format for settings", meta())
+            .index(
+                "Configuration files use TOML format for settings",
+                meta(&session_id),
+            )
             .await
             .unwrap();
         store
-            .index("JWT tokens handle authentication and authorization", meta())
+            .index(
+                "JWT tokens handle authentication and authorization",
+                meta(&SessionId::new()),
+            )
             .await
             .unwrap();
 
-        let results = store.search("REST API authentication", 10).await.unwrap();
+        let results = store
+            .search(&scope, "REST API authentication", 10)
+            .await
+            .unwrap();
         assert!(!results.is_empty());
+        assert!(
+            results
+                .iter()
+                .all(|result| scope.includes(&result.metadata))
+        );
         assert!(
             results[0].content.contains("REST") || results[0].content.contains("authentication"),
             "Top result should be relevant: {}",
@@ -334,8 +361,9 @@ mod tests {
     async fn test_hnsw_search_empty_store() {
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let scope = MemorySearchScope::for_session(SessionId::new());
 
-        let results = store.search("anything", 10).await.unwrap();
+        let results = store.search(&scope, "anything", 10).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -343,15 +371,20 @@ mod tests {
     async fn test_hnsw_search_limit() {
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         for i in 0..10 {
             store
-                .index(&format!("Item {i} with keyword test data"), meta())
+                .index(
+                    &format!("Item {i} with keyword test data"),
+                    meta(&session_id),
+                )
                 .await
                 .unwrap();
         }
 
-        let results = store.search("test", 3).await.unwrap();
+        let results = store.search(&scope, "test", 3).await.unwrap();
         assert!(results.len() <= 3);
     }
 
@@ -359,18 +392,23 @@ mod tests {
     async fn test_hnsw_persists_across_reopen() {
         let dir = TempDir::new().unwrap();
         let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         {
             let store = HnswMemoryStore::open(&memory_dir).unwrap();
             store
-                .index("Persistent memory entry about Rust programming", meta())
+                .index(
+                    "Persistent memory entry about Rust programming",
+                    meta(&session_id),
+                )
                 .await
                 .unwrap();
         }
 
         {
             let store = HnswMemoryStore::open(&memory_dir).unwrap();
-            let results = store.search("Rust programming", 5).await.unwrap();
+            let results = store.search(&scope, "Rust programming", 5).await.unwrap();
             assert!(!results.is_empty(), "Data should survive reopen");
             assert!(results[0].content.contains("Rust"));
         }
@@ -380,14 +418,16 @@ mod tests {
     async fn test_hnsw_score_range() {
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
 
         store
-            .index("Exact match query text here", meta())
+            .index("Exact match query text here", meta(&session_id))
             .await
             .unwrap();
 
         let results = store
-            .search("Exact match query text here", 1)
+            .search(&scope, "Exact match query text here", 1)
             .await
             .unwrap();
         assert!(!results.is_empty());

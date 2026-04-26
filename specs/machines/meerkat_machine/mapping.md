@@ -192,6 +192,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Destroy`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+- `RecoverInputLifecycleIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecoverInputLifecycleAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+- `RecoverInputLifecycleRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+- `RecoverInputLifecycleRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecoverInputLifecycleStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
 - `EnsureSessionWithExecutorIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -529,6 +544,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `RequireRealtimeReattachStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RequireRealtimeReattachForAuthorityIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RequireRealtimeReattachForAuthorityAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RequireRealtimeReattachForAuthorityRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RequireRealtimeReattachForAuthorityRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RequireRealtimeReattachForAuthorityStopped`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `PublishRealtimeSignalIdle`

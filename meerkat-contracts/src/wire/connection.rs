@@ -89,7 +89,7 @@ pub struct WireAuthProfile {
     pub id: String,
     pub provider: String,
     pub auth_method: String,
-    /// Discriminator: "inline_secret" / "env" /
+    /// Discriminator: "inline_secret" / "managed_store" / "env" /
     /// "external_resolver" / "platform_default" / "command" /
     /// "file_descriptor".
     pub source_kind: String,
@@ -99,6 +99,7 @@ impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
     fn from(value: &meerkat_core::AuthProfile) -> Self {
         let source_kind = match &value.source {
             meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+            meerkat_core::CredentialSourceSpec::ManagedStore => "managed_store",
             meerkat_core::CredentialSourceSpec::Env { .. } => "env",
             meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
             meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",

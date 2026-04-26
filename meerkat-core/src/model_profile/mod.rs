@@ -11,9 +11,9 @@
 //! After the refactor, capability data lives in
 //! [`crate::capabilities`] as a per-model table, and the JSON Schema is
 //! derived from it by [`schema_builder::build_params_schema`]. The
-//! per-provider modules now hold only family-detection + fallback logic
-//! for ad-hoc model IDs that aren't in the static catalog (e.g., dated
-//! snapshots such as `claude-haiku-4-5-20251001`).
+//! per-provider modules now hold only request-shaping helpers that read the
+//! same catalog. Uncatalogued model IDs do not receive synthesized semantic
+//! capabilities.
 
 pub mod anthropic;
 pub mod capabilities;
@@ -92,25 +92,14 @@ impl From<&BetaHeader> for ModelBetaHeader {
 
 /// Look up the profile for a model by provider string and model ID.
 ///
-/// - Catalog models project directly from their capability row.
-/// - Non-catalog models (e.g., dated snapshots) fall back to a per-provider
-///   heuristic that synthesizes a capability record matching the pre-refactor
-///   shape for that family. This keeps the runtime workable for model IDs that
-///   the user passes in before a new catalog entry is added.
+/// Catalog models project directly from their capability row. Uncatalogued
+/// model IDs return `None`; semantic capability facts must come from the
+/// capability catalog, not model-name prefixes.
 ///
 /// Returns `None` if the provider is unknown or the model doesn't match any
 /// recognized family.
 pub fn profile_for(provider: &str, model: &str) -> Option<ModelProfile> {
-    if let Some(caps) = capabilities_for(provider, model) {
-        return Some(project_to_profile(caps));
-    }
-    let owned = match provider {
-        "anthropic" => anthropic::fallback_caps(model)?,
-        "openai" => openai::fallback_caps(model)?,
-        "gemini" => gemini::fallback_caps(model)?,
-        _ => return None,
-    };
-    Some(project_to_profile(&owned))
+    capabilities_for(provider, model).map(project_to_profile)
 }
 
 /// Project a capability record into the [`ModelProfile`] surface.
@@ -160,6 +149,13 @@ mod tests {
     }
 
     #[test]
+    fn uncatalogued_model_returns_none_for_known_provider() {
+        assert!(profile_for("openai", "gpt-5.9-future").is_none());
+        assert!(profile_for("anthropic", "claude-opus-4-7-20260501-preview").is_none());
+        assert!(profile_for("gemini", "gemini-4-future").is_none());
+    }
+
+    #[test]
     fn claude_profile_vision_and_image_tool_results_true() {
         let profile = profile_for("anthropic", "claude-opus-4-6")
             .expect("claude-opus-4-6 must have a profile");
@@ -181,7 +177,7 @@ mod tests {
 
     #[test]
     fn gpt_profile_vision_true_image_tool_results_false() {
-        let profile = profile_for("openai", "gpt-5.2").expect("gpt-5.2 must have a profile");
+        let profile = profile_for("openai", "gpt-5.4").expect("gpt-5.4 must have a profile");
         assert!(profile.vision, "OpenAI models must support vision");
         assert!(
             !profile.image_tool_results,
@@ -251,11 +247,11 @@ mod tests {
 
     #[test]
     fn openai_pro_has_longer_timeout_than_standard_gpt5() {
-        let pro = profile_for("openai", "gpt-5.4-pro").unwrap();
-        let standard = profile_for("openai", "gpt-5.4").unwrap();
+        let pro = profile_for("openai", "gpt-5.5-pro").unwrap();
+        let standard = profile_for("openai", "gpt-5.5").unwrap();
         assert!(
             pro.call_timeout_secs.unwrap() > standard.call_timeout_secs.unwrap(),
-            "gpt-5.4-pro ({}) should have a much longer timeout than gpt-5.4 ({})",
+            "gpt-5.5-pro ({}) should have a much longer timeout than gpt-5.5 ({})",
             pro.call_timeout_secs.unwrap(),
             standard.call_timeout_secs.unwrap(),
         );
@@ -263,7 +259,7 @@ mod tests {
 
     #[test]
     fn gemini_flash_has_shorter_timeout_than_pro() {
-        let flash = profile_for("gemini", "gemini-3.1-flash-lite").unwrap();
+        let flash = profile_for("gemini", "gemini-3.1-flash-lite-preview").unwrap();
         let pro = profile_for("gemini", "gemini-3.1-pro-preview").unwrap();
         assert!(
             flash.call_timeout_secs.unwrap() < pro.call_timeout_secs.unwrap(),

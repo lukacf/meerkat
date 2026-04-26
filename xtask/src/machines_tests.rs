@@ -33,6 +33,21 @@ fn output_paths_land_under_canonical_specs_dirs() {
     );
 }
 
+#[cfg(all(unix, feature = "machine-authority"))]
+#[test]
+fn tlc_success_uses_process_status_not_stdout_folklore() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let failed = std::process::ExitStatus::from_raw(1 << 8);
+    assert!(
+        !tlc_run_succeeded(&failed),
+        "failed TLC process status must not be overridden by parsed stdout"
+    );
+
+    let succeeded = std::process::ExitStatus::from_raw(0);
+    assert!(tlc_run_succeeded(&succeeded));
+}
+
 #[test]
 fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let meerkat = owner_test_specs_for_machine("meerkat_machine");
@@ -399,6 +414,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
             ],
         },
         surface_only_inputs: vec![],
+        runtime_internal_inputs: vec![],
         signals: EnumSchema {
             name: "Signal".into(),
             variants: vec![],

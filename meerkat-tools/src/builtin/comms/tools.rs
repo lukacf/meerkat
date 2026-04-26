@@ -41,13 +41,13 @@ fn get_tool_def(name: &str) -> ToolDef {
         .find(|t| t["name"].as_str() == Some(name))
         .map_or_else(
             || ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: String::new(),
                 input_schema: empty_object_schema(),
                 provenance: comms_provenance(),
             },
             |t| ToolDef {
-                name: t["name"].as_str().unwrap_or_default().to_string(),
+                name: t["name"].as_str().unwrap_or_default().into(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
                 provenance: comms_provenance(),
@@ -134,7 +134,7 @@ mod tests {
         let peer_keypair = Keypair::generate();
         let trusted_peers = TrustedPeers {
             peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
+                name: "test-peer".into(),
                 pubkey: peer_keypair.public_key(),
                 addr: "tcp://127.0.0.1:4200".to_string(),
                 meta: meerkat_comms::PeerMeta::default(),

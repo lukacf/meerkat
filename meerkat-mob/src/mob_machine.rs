@@ -226,17 +226,46 @@ pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
         .iter()
         .copied()
         .collect();
-    for excluded in [
-        "FlowTrackerCounts",
-        "OrchestratorSnapshot",
-        "LifecycleSnapshot",
-        "EnsureMember",
-        "Reconcile",
-        "ListMembersMatching",
-        "Wire",
-        "Unwire",
-    ] {
-        variants.shift_remove(excluded);
+    for exemption in MOB_MACHINE_COMMAND_MANIFEST_EXEMPTIONS {
+        variants.shift_remove(exemption.variant_name());
     }
     variants
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobMachineCommandManifestExemption {
+    FlowTrackerCounts,
+    OrchestratorSnapshot,
+    LifecycleSnapshot,
+    EnsureMember,
+    Reconcile,
+    ListMembersMatching,
+    Wire,
+    Unwire,
+}
+
+const MOB_MACHINE_COMMAND_MANIFEST_EXEMPTIONS: &[MobMachineCommandManifestExemption] = &[
+    MobMachineCommandManifestExemption::FlowTrackerCounts,
+    MobMachineCommandManifestExemption::OrchestratorSnapshot,
+    MobMachineCommandManifestExemption::LifecycleSnapshot,
+    MobMachineCommandManifestExemption::EnsureMember,
+    MobMachineCommandManifestExemption::Reconcile,
+    MobMachineCommandManifestExemption::ListMembersMatching,
+    MobMachineCommandManifestExemption::Wire,
+    MobMachineCommandManifestExemption::Unwire,
+];
+
+impl MobMachineCommandManifestExemption {
+    const fn variant_name(self) -> &'static str {
+        match self {
+            Self::FlowTrackerCounts => "FlowTrackerCounts",
+            Self::OrchestratorSnapshot => "OrchestratorSnapshot",
+            Self::LifecycleSnapshot => "LifecycleSnapshot",
+            Self::EnsureMember => "EnsureMember",
+            Self::Reconcile => "Reconcile",
+            Self::ListMembersMatching => "ListMembersMatching",
+            Self::Wire => "Wire",
+            Self::Unwire => "Unwire",
+        }
+    }
 }

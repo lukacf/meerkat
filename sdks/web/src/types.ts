@@ -37,6 +37,13 @@ export interface InitResult {
 
 // ─── Session config ─────────────────────────────────────────────
 
+/** Structural reference to a realm binding. */
+export interface ConnectionRef {
+  realm: string;
+  binding: string;
+  profile?: string;
+}
+
 /** Configuration for creating a direct (non-mob) session.
  *
  * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
@@ -47,8 +54,8 @@ export interface InitResult {
 export interface SessionConfig {
   /** LLM model identifier. */
   model: string;
-  /** Optional realm-qualified auth binding reference (`realm:binding[:profile]`). */
-  connectionRef?: string;
+  /** Optional structural auth binding reference. */
+  connectionRef?: ConnectionRef;
   /** System prompt. */
   systemPrompt?: string;
   /** Max tokens per response. Default: 4096. */
@@ -389,14 +396,12 @@ export interface MobPeerConnectivitySnapshot {
 /** Point-in-time execution snapshot for a mob member. */
 export interface MobMemberSnapshot {
   status: string;
+  member_ref: MobMemberRef;
   /**
    * Opaque incarnation handle. Compare for equality to detect incarnation
-   * rotation; internals are not parseable. Encoded client-side from the
-   * wire `{identity, generation}` shape, matching the `MemberRef`
-   * pattern.
+   * rotation; internals are not parseable.
    */
-  agent_runtime_id: string;
-  fence_token: number;
+  incarnation_ref?: string;
   output_preview?: string;
   error?: string;
   tokens_used: number;
@@ -418,13 +423,12 @@ export interface MobHelperResult {
 /** Envelope wrapping an agent event with metadata. */
 export interface EventEnvelope {
   agent_identity?: string;
+  member_ref?: MobMemberRef;
   /**
    * Opaque incarnation handle. Compare for equality to detect incarnation
-   * rotation; internals are not parseable. Matches the `MemberRef`
-   * pattern.
+   * rotation; internals are not parseable.
    */
-  agent_runtime_id?: string;
-  fence_token?: number;
+  incarnation_ref?: string;
   cursor?: string | number;
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
@@ -444,7 +448,7 @@ export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
   source: string;
-  source_fence_token?: number;
+  source_incarnation_ref?: string;
   role: string;
   envelope: EventEnvelope;
 }

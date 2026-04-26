@@ -4,8 +4,12 @@
 //! authority/state-machine surface. It holds the stable enums and transition
 //! payloads shared by the standalone core fallback and runtime-backed handles.
 
+use crate::budget::{BudgetDimension, BudgetExceeded};
+use crate::error::AgentError;
+use crate::event::AgentErrorClass;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
+use crate::retry::LlmRetrySchedule;
 
 /// Canonical phases for turn execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,19 +34,6 @@ impl TurnPhase {
 
     pub fn is_extracting(self) -> bool {
         matches!(self, Self::Extracting)
-    }
-
-    /// Convert turn phase to the observable `LoopState`.
-    pub fn to_loop_state(self) -> crate::state::LoopState {
-        use crate::state::LoopState;
-        match self {
-            Self::Ready | Self::ApplyingPrimitive | Self::CallingLlm => LoopState::CallingLlm,
-            Self::WaitingForOps => LoopState::WaitingForOps,
-            Self::DrainingBoundary | Self::Extracting => LoopState::DrainingEvents,
-            Self::ErrorRecovery => LoopState::ErrorRecovery,
-            Self::Cancelling => LoopState::Cancelling,
-            Self::Completed | Self::Failed | Self::Cancelled => LoopState::Completed,
-        }
     }
 }
 
@@ -84,6 +75,75 @@ pub enum TurnTerminalOutcome {
     BudgetExhausted,
     TimeBudgetExceeded,
     StructuredOutputValidationFailed,
+}
+
+/// Typed reason for a turn failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailureReason {
+    pub class: AgentErrorClass,
+    pub message: String,
+}
+
+impl TurnFailureReason {
+    pub fn new(class: AgentErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        Self::new(AgentErrorClass::from(error), error.to_string())
+    }
+
+    pub fn budget_exceeded(exceeded: BudgetExceeded) -> Self {
+        let class = AgentErrorClass::Budget;
+        let message = match exceeded.dimension {
+            BudgetDimension::Tokens => {
+                format!(
+                    "token budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+            BudgetDimension::Time => {
+                format!(
+                    "time budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+            BudgetDimension::ToolCalls => {
+                format!(
+                    "tool call budget exceeded: {} > {}",
+                    exceeded.used, exceeded.limit
+                )
+            }
+        };
+        Self::new(class, message)
+    }
+
+    pub fn terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
+        match outcome {
+            TurnTerminalOutcome::BudgetExhausted => {
+                Self::new(AgentErrorClass::Budget, "budget exhausted")
+            }
+            TurnTerminalOutcome::TimeBudgetExceeded => {
+                Self::new(AgentErrorClass::Budget, "time budget exceeded")
+            }
+            TurnTerminalOutcome::StructuredOutputValidationFailed => Self::new(
+                AgentErrorClass::StructuredOutput,
+                "structured output validation failed",
+            ),
+            TurnTerminalOutcome::Cancelled => Self::new(AgentErrorClass::Cancelled, "cancelled"),
+            TurnTerminalOutcome::Completed | TurnTerminalOutcome::None => {
+                Self::new(AgentErrorClass::Terminal, "terminal outcome")
+            }
+            TurnTerminalOutcome::Failed => Self::new(AgentErrorClass::Terminal, "turn failed"),
+        }
+    }
+
+    pub fn to_dsl_error(&self) -> String {
+        format!("{:?}: {}", self.class, self.message)
+    }
 }
 
 /// Content shape admitted by the primitive.
@@ -136,12 +196,15 @@ pub enum TurnExecutionInput {
     },
     RecoverableFailure {
         run_id: RunId,
+        retry: LlmRetrySchedule,
     },
     FatalFailure {
         run_id: RunId,
+        reason: TurnFailureReason,
     },
     RetryRequested {
         run_id: RunId,
+        retry_attempt: u32,
     },
     CancelNow {
         run_id: RunId,
@@ -163,6 +226,10 @@ pub enum TurnExecutionInput {
     },
     TimeBudgetExceeded {
         run_id: RunId,
+    },
+    BudgetLimitExceeded {
+        run_id: RunId,
+        exceeded: BudgetExceeded,
     },
     EnterExtraction {
         run_id: RunId,
@@ -196,6 +263,7 @@ pub enum TurnExecutionEffect {
     },
     RunFailed {
         run_id: RunId,
+        reason: TurnFailureReason,
     },
     RunCancelled {
         run_id: RunId,
@@ -209,4 +277,42 @@ pub struct TurnExecutionTransition {
     pub prev_phase: TurnPhase,
     pub next_phase: TurnPhase,
     pub effects: Vec<TurnExecutionEffect>,
+}
+
+pub fn terminal_outcome_for_budget_exceeded(exceeded: BudgetExceeded) -> TurnTerminalOutcome {
+    match exceeded.dimension {
+        BudgetDimension::Time => TurnTerminalOutcome::TimeBudgetExceeded,
+        BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
+            TurnTerminalOutcome::BudgetExhausted
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exceeded(dimension: BudgetDimension) -> BudgetExceeded {
+        BudgetExceeded {
+            dimension,
+            used: 1,
+            limit: 1,
+        }
+    }
+
+    #[test]
+    fn budget_terminal_classification_is_turn_authority_owned() {
+        assert_eq!(
+            terminal_outcome_for_budget_exceeded(exceeded(BudgetDimension::Tokens)),
+            TurnTerminalOutcome::BudgetExhausted
+        );
+        assert_eq!(
+            terminal_outcome_for_budget_exceeded(exceeded(BudgetDimension::ToolCalls)),
+            TurnTerminalOutcome::BudgetExhausted
+        );
+        assert_eq!(
+            terminal_outcome_for_budget_exceeded(exceeded(BudgetDimension::Time)),
+            TurnTerminalOutcome::TimeBudgetExceeded
+        );
+    }
 }

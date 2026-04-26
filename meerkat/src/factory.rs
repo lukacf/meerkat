@@ -39,9 +39,9 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BindingId, BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry,
-    OutputSchema, Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity,
-    SessionMetadata, SessionTooling, ToolCategoryOverride,
+    BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
+    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
+    SessionTooling, ToolCategoryOverride,
 };
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::{SessionId, SessionMeta};
@@ -862,69 +862,29 @@ impl std::fmt::Debug for AgentFactory {
 }
 
 impl AgentFactory {
-    fn env_default_connection_ref() -> Result<ConnectionRef, String> {
-        Ok(ConnectionRef {
-            realm: RealmId::parse("env_default").map_err(|e| e.to_string())?,
-            binding: BindingId::parse("default").map_err(|e| e.to_string())?,
-            profile: None,
-        })
-    }
-
     fn resolve_realm_binding_for_provider(
         config: &Config,
         provider: Provider,
         connection_ref: Option<&ConnectionRef>,
         preferred_realm: Option<&str>,
     ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
-        if let Some(conn_ref) = connection_ref {
-            if let Some(section) = config.realm.get(conn_ref.realm.as_str()) {
-                let realm = RealmConnectionSet::from_config(conn_ref.realm.as_str(), section)
-                    .map_err(|e| e.to_string())?;
-                return Ok((realm, conn_ref.binding.to_string(), conn_ref.clone()));
-            }
-            if conn_ref.realm.as_str() == "env_default" && conn_ref.binding.as_str() == "default" {
-                let realm = RealmConnectionSet::synthesize_env_default(provider);
-                return Ok((realm, "default".to_string(), conn_ref.clone()));
-            }
-            return Err(format!(
-                "realm '{}' not found in config.realm",
-                conn_ref.realm
-            ));
-        }
-
-        for realm_id in preferred_realm
-            .into_iter()
-            .chain(std::iter::once("default"))
-        {
-            let Some(section) = config.realm.get(realm_id) else {
-                continue;
-            };
-            let Some(binding_id) = section.default_binding.as_deref() else {
-                continue;
-            };
-            let realm =
-                RealmConnectionSet::from_config(realm_id, section).map_err(|e| e.to_string())?;
-            let (_binding, backend, auth) = realm
-                .lookup_binding(binding_id)
-                .map_err(|e| e.to_string())?;
-            if backend.provider != provider || auth.provider != provider {
-                return Err(format!(
-                    "default binding '{realm_id}:{binding_id}' is for provider {:?}, \
-                     but model resolution selected provider {:?}",
-                    backend.provider, provider
-                ));
-            }
-            let connection_ref = ConnectionRef {
-                realm: RealmId::parse(realm_id).map_err(|e| e.to_string())?,
-                binding: BindingId::parse(binding_id).map_err(|e| e.to_string())?,
-                profile: None,
-            };
-            return Ok((realm, binding_id.to_string(), connection_ref));
-        }
-
-        let connection_ref = Self::env_default_connection_ref()?;
-        let realm = RealmConnectionSet::synthesize_env_default(provider);
-        Ok((realm, "default".to_string(), connection_ref))
+        let preferred_realm = preferred_realm
+            .map(RealmId::parse)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let target = meerkat_core::resolve_connection_ref_or_default_for_provider(
+            config,
+            provider,
+            connection_ref,
+            preferred_realm.as_ref(),
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok((
+            target.realm,
+            target.connection_ref.binding.to_string(),
+            target.connection_ref,
+        ))
     }
 
     #[cfg(all(
@@ -1052,6 +1012,12 @@ impl AgentFactory {
     ) -> Self {
         self.token_store = Some(store);
         self
+    }
+
+    pub fn provider_runtime_registry(
+        &self,
+    ) -> Arc<meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry> {
+        Arc::clone(&self.provider_registry)
     }
 
     /// Register an external auth resolver that surfaces bindings whose
@@ -1244,7 +1210,7 @@ impl AgentFactory {
     pub async fn build_skill_runtime(
         &self,
         config: &Config,
-    ) -> Option<Arc<meerkat_core::skills::SkillRuntime>> {
+    ) -> Result<Option<Arc<meerkat_core::skills::SkillRuntime>>, BuildAgentError> {
         let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
             if self.skill_source.is_some() {
                 self.skill_source.clone()
@@ -1282,24 +1248,26 @@ impl AgentFactory {
                 None
             };
 
-        skill_source.map(|source| {
-            let available_caps = self.effective_skill_capabilities(config, None);
-            let registry = match config.skills.build_source_identity_registry() {
-                Ok(registry) => Some(Arc::new(registry)),
-                Err(e) => {
-                    tracing::warn!("Failed to build skill source identity registry: {e}");
-                    None
-                }
-            };
-            let mut engine = meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                .with_inventory_threshold(config.skills.inventory_threshold)
-                .with_max_injection_bytes(config.skills.max_injection_bytes);
-            if let Some(registry) = registry {
-                engine = engine.with_source_identity_registry(registry);
-            }
-            let engine = Arc::new(engine);
-            Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
-        })
+        skill_source
+            .map(|source| {
+                let available_caps = self.effective_skill_capabilities(config, None);
+                let registry = Arc::new(config.skills.build_source_identity_registry().map_err(
+                    |e| {
+                        BuildAgentError::Config(format!(
+                            "failed to build skill source identity registry: {e}"
+                        ))
+                    },
+                )?);
+                let engine = meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                    .with_inventory_threshold(config.skills.inventory_threshold)
+                    .with_max_injection_bytes(config.skills.max_injection_bytes)
+                    .with_source_identity_registry(registry);
+                let engine = Arc::new(engine);
+                Ok::<Arc<meerkat_core::skills::SkillRuntime>, BuildAgentError>(Arc::new(
+                    meerkat_core::skills::SkillRuntime::new(engine),
+                ))
+            })
+            .transpose()
     }
 
     /// Override the default session store.
@@ -1472,6 +1440,28 @@ impl AgentFactory {
         provider_registry
             .build_client(connection)
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))
+    }
+
+    pub fn request_policy_for_llm_identity(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        explicit_meerkat_tool_policy: bool,
+    ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
+        let registry = config
+            .model_registry()
+            .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
+        let model_profile = registry.profile_for(&identity.model);
+        Ok(meerkat_core::SessionLlmRequestPolicy {
+            model: identity.model.clone(),
+            provider_params: identity.provider_params.clone(),
+            provider_tool_defaults: provider_tool_defaults_for(
+                identity.provider,
+                config,
+                model_profile.as_ref(),
+                explicit_meerkat_tool_policy,
+            ),
+        })
     }
 
     fn model_registry(&self, config: &Config) -> Result<ModelRegistry, BuildAgentError> {
@@ -1830,7 +1820,7 @@ impl AgentFactory {
         let resumed_self_hosted_server_id = resumed_session_metadata
             .as_ref()
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
-        let (provider, resolved_self_hosted_server_id) =
+        let (mut provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
         let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
             build_config
@@ -1901,6 +1891,7 @@ impl AgentFactory {
                         .resolve(&realm, &resolved_connection_ref, &env)
                         .await
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    provider = connection.provider;
 
                     // Phase 1.5-rev loop closure — refresh-loop middle:
                     // The DSL tracks per-binding auth lifecycle state.
@@ -2023,57 +2014,61 @@ impl AgentFactory {
 
         // 6a. Build skill engine (override > factory > config > filesystem).
         #[cfg(feature = "skills")]
-        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = if let Some(engine) =
-            build_config.skill_engine_override.take()
-        {
-            Some(engine)
-        } else {
-            let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
-                if self.skill_source.is_some() {
-                    self.skill_source.clone()
-                } else if !config.skills.enabled {
-                    None
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        match meerkat_skills::resolve_repositories_with_roots(
-                            &config.skills,
-                            _conventions_context_root,
-                            _conventions_user_root,
-                            Some(_realm_scope_root.as_path()),
-                        )
-                        .await
+        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> =
+            if let Some(engine) = build_config.skill_engine_override.take() {
+                Some(engine)
+            } else {
+                let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
+                    if self.skill_source.is_some() {
+                        self.skill_source.clone()
+                    } else if !config.skills.enabled {
+                        None
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
                         {
-                            Ok(source) => source.map(Arc::new),
-                            Err(e) => {
-                                tracing::warn!("Failed to resolve skill repositories: {e}");
-                                None
+                            match meerkat_skills::resolve_repositories_with_roots(
+                                &config.skills,
+                                _conventions_context_root,
+                                _conventions_user_root,
+                                Some(_realm_scope_root.as_path()),
+                            )
+                            .await
+                            {
+                                Ok(source) => source.map(Arc::new),
+                                Err(e) => {
+                                    tracing::warn!("Failed to resolve skill repositories: {e}");
+                                    None
+                                }
                             }
                         }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    None
-                };
-
-            skill_source.map(|source| {
-                let available_caps = self.effective_skill_capabilities(config, Some(&build_config));
-                let registry = match config.skills.build_source_identity_registry() {
-                    Ok(registry) => Some(Arc::new(registry)),
-                    Err(e) => {
-                        tracing::warn!("Failed to build skill source identity registry: {e}");
+                        #[cfg(target_arch = "wasm32")]
                         None
-                    }
-                };
-                let mut engine = meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                    .with_inventory_threshold(config.skills.inventory_threshold)
-                    .with_max_injection_bytes(config.skills.max_injection_bytes);
-                if let Some(registry) = registry {
-                    engine = engine.with_source_identity_registry(registry);
-                }
-                let engine = Arc::new(engine);
-                Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
-            })
-        }; // end else (filesystem resolution fallthrough)
+                    };
+
+                skill_source
+                    .map(|source| {
+                        let available_caps =
+                            self.effective_skill_capabilities(config, Some(&build_config));
+                        let registry =
+                            Arc::new(config.skills.build_source_identity_registry().map_err(
+                                |e| {
+                                    BuildAgentError::Config(format!(
+                                        "failed to build skill source identity registry: {e}"
+                                    ))
+                                },
+                            )?);
+                        let engine =
+                            meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                                .with_inventory_threshold(config.skills.inventory_threshold)
+                                .with_max_injection_bytes(config.skills.max_injection_bytes)
+                                .with_source_identity_registry(registry);
+                        let engine = Arc::new(engine);
+                        Ok::<Arc<meerkat_core::skills::SkillRuntime>, BuildAgentError>(Arc::new(
+                            meerkat_core::skills::SkillRuntime::new(engine),
+                        ))
+                    })
+                    .transpose()?
+            }; // end else (filesystem resolution fallthrough)
         #[cfg(not(feature = "skills"))]
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
@@ -2767,6 +2762,8 @@ impl AgentFactory {
             builder = builder.output_schema(schema);
         }
         let _is_resumed = build_config.resume_session.is_some();
+        #[cfg(feature = "memory-store-session")]
+        let session_id = session.id().clone();
         builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
@@ -2789,8 +2786,12 @@ impl AgentFactory {
                     builder = builder.memory_store(Arc::clone(&store));
 
                     // Compose memory_search tool into the dispatcher
-                    let memory_dispatcher =
-                        meerkat_memory::MemorySearchDispatcher::new(Arc::clone(&store));
+                    let memory_scope =
+                        meerkat_core::memory::MemorySearchScope::for_session(session_id.clone());
+                    let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::new(
+                        Arc::clone(&store),
+                        memory_scope,
+                    );
                     let gateway = meerkat_core::ToolGatewayBuilder::new()
                         .add_dispatcher(tools)
                         .add_dispatcher(Arc::new(memory_dispatcher))
@@ -2975,8 +2976,9 @@ impl AgentFactory {
 mod tests {
     use super::*;
     use meerkat_core::{
-        BackendProfileConfig, CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection,
-        SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
+        BackendProfileConfig, BindingId, CredentialSourceSpec, ProviderBindingConfig,
+        RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
+        SelfHostedTransport,
     };
 
     #[test]
@@ -3006,8 +3008,11 @@ mod tests {
     #[test]
     fn persisted_env_default_connection_ref_rehydrates_without_config_realm() {
         let config = Config::default();
-        let connection_ref = AgentFactory::env_default_connection_ref()
-            .expect("static env_default connection ref should parse");
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("env_default").expect("valid realm"),
+            binding: BindingId::parse("default").expect("valid binding"),
+            profile: None,
+        };
         let (realm, binding_id, resolved_ref) = AgentFactory::resolve_realm_binding_for_provider(
             &config,
             Provider::OpenAI,
@@ -3090,6 +3095,7 @@ mod tests {
         let runtime = factory
             .build_skill_runtime(&Config::default())
             .await
+            .expect("skill runtime build should not fail")
             .expect("skills-enabled config should build a runtime");
         let skill_key = meerkat_core::skills::SkillKey::builtin(
             meerkat_core::skills::SkillName::parse("mob-communication").unwrap(),
@@ -3142,7 +3148,7 @@ mod tests {
             SelfHostedModelConfig {
                 server: "local".to_string(),
                 remote_model: "gemma4:e2b".to_string(),
-                display_name: "Gemma 4 E2B".to_string(),
+                display_name: "Gemma 4 E2B".into(),
                 family: "gemma-4".to_string(),
                 tier: meerkat_models::ModelTier::Supported,
                 context_window: Some(128_000),
@@ -3333,8 +3339,8 @@ mod prompt_tests {
     use meerkat_core::ops::ToolDispatchOutcome;
     use meerkat_core::types::{StopReason, ToolCallView, ToolDef, ToolResult};
     use meerkat_core::{
-        AgentToolDispatcher, Config, Message, ToolCatalogCapabilities,
-        ToolCatalogDeferredEligibility, ToolCatalogEntry, ToolCategoryOverride, ToolPlaneClass,
+        AgentToolDispatcher, Config, Message, ToolCatalogCapabilities, ToolCatalogEntry,
+        ToolCategoryOverride,
     };
     use std::pin::Pin;
     use std::sync::Arc;
@@ -3374,12 +3380,7 @@ mod prompt_tests {
                             "callback:registered".to_string(),
                         )
                     } else {
-                        ToolCatalogEntry {
-                            tool: Arc::clone(tool),
-                            plane: ToolPlaneClass::Session,
-                            currently_callable: true,
-                            deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
-                        }
+                        ToolCatalogEntry::session_inline(Arc::clone(tool), true)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -3424,7 +3425,7 @@ mod prompt_tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
                     provenance: None,
@@ -3484,13 +3485,13 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
-            name: "secret_lookup".to_string(),
+            name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
         });
         let secret_audit = Arc::new(ToolDef {
-            name: "secret_audit".to_string(),
+            name: "secret_audit".into(),
             description: "Audit a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
@@ -3530,7 +3531,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let visible = Arc::new(ToolDef {
-            name: "visible".to_string(),
+            name: "visible".into(),
             description: "Always-inline tool".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
@@ -3586,7 +3587,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
-            name: "secret_lookup".to_string(),
+            name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,

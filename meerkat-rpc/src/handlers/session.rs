@@ -391,8 +391,8 @@ pub async fn handle_create(
     if let Some(context) = request_context.as_ref() {
         let runtime_for_cancel = Arc::clone(&runtime);
         let session_id_for_cancel = session_id.clone();
-        let phase = context
-            .install_cancel_action(request_action(move || {
+        let install = context
+            .install_cancel_action_or_cancelled(request_action(move || {
                 let runtime = Arc::clone(&runtime_for_cancel);
                 let session_id = session_id_for_cancel.clone();
                 async move {
@@ -410,7 +410,7 @@ pub async fn handle_create(
                 let _ = runtime.archive_session(&session_id).await;
             }
         }));
-        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
+        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             let _ = runtime.archive_session(&session_id).await;
             runtime_adapter.unregister_session(&session_id).await;
             return RpcResponse::error(

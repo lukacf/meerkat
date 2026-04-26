@@ -302,7 +302,7 @@ fn test_tool_def_serialization() {
     }
 
     let tool_def = ToolDef {
-        name: "test_tool".to_string(),
+        name: "test_tool".into(),
         description: "A test tool".to_string(),
         input_schema: schema_for::<TestToolDefInput>(),
         provenance: None,
@@ -323,7 +323,7 @@ fn test_tool_def_empty_schema_serialization() {
     struct EmptyObject {}
 
     let tool_def = ToolDef {
-        name: "empty_tool".to_string(),
+        name: "empty_tool".into(),
         description: "An empty tool".to_string(),
         input_schema: schema_for::<EmptyObject>(),
         provenance: None,
@@ -808,7 +808,7 @@ mod ordered_transcript_types {
         let args = RawValue::from_string(r#"{"path":"/tmp/test.txt"}"#.to_string()).unwrap();
         let block = AssistantBlock::ToolUse {
             id: "tool_123".to_string(),
-            name: "read_file".to_string(),
+            name: "read_file".into(),
             args,
             meta: None,
         };
@@ -862,7 +862,7 @@ mod ordered_transcript_types {
         let args = RawValue::from_string(r#"{"query":"test"}"#.to_string()).unwrap();
         let block = AssistantBlock::ToolUse {
             id: "tool_456".to_string(),
-            name: "search".to_string(),
+            name: "search".into(),
             args,
             meta: Some(Box::new(ProviderMeta::Gemini {
                 thought_signature: "first_parallel_call_sig".to_string(),
@@ -904,7 +904,7 @@ mod ordered_transcript_types {
                     },
                     AssistantBlock::ToolUse {
                         id: case_id.to_string(),
-                        name: "read_dir".to_string(),
+                        name: "read_dir".into(),
                         args: RawValue::from_string(args_json.to_string()).unwrap(),
                         meta: None,
                     },
@@ -1002,7 +1002,7 @@ mod ordered_transcript_types {
                 },
                 AssistantBlock::ToolUse {
                     id: "tc_1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "read_file".into(),
                     args: args1,
                     meta: None,
                 },
@@ -1012,7 +1012,7 @@ mod ordered_transcript_types {
                 },
                 AssistantBlock::ToolUse {
                     id: "tc_2".to_string(),
-                    name: "search".to_string(),
+                    name: "search".into(),
                     args: args2,
                     meta: None,
                 },
@@ -1049,7 +1049,7 @@ mod ordered_transcript_types {
         let msg_with_tools = BlockAssistantMessage {
             blocks: vec![AssistantBlock::ToolUse {
                 id: "tc_1".to_string(),
-                name: "test".to_string(),
+                name: "test".into(),
                 args,
                 meta: None,
             }],
@@ -1076,13 +1076,13 @@ mod ordered_transcript_types {
             blocks: vec![
                 AssistantBlock::ToolUse {
                     id: "tc_first".to_string(),
-                    name: "tool_a".to_string(),
+                    name: "tool_a".into(),
                     args: args1,
                     meta: None,
                 },
                 AssistantBlock::ToolUse {
                     id: "tc_second".to_string(),
-                    name: "tool_b".to_string(),
+                    name: "tool_b".into(),
                     args: args2,
                     meta: None,
                 },
@@ -1123,7 +1123,7 @@ mod ordered_transcript_types {
                 },
                 AssistantBlock::ToolUse {
                     id: "tc_1".to_string(),
-                    name: "test".to_string(),
+                    name: "test".into(),
                     args,
                     meta: None,
                 },
@@ -1170,7 +1170,7 @@ mod ordered_transcript_types {
                 },
                 AssistantBlock::ToolUse {
                     id: "tc_1".to_string(),
-                    name: "test".to_string(),
+                    name: "test".into(),
                     args,
                     meta: None,
                 },
@@ -1577,6 +1577,29 @@ mod content_block_tests {
     // -----------------------------------------------------------------------
     // ToolProvenance / ToolDef provenance
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_name_and_set_keep_string_wire_shape() {
+        use super::{ToolName, ToolNameSet};
+
+        let name = ToolName::new("read_file");
+        assert_eq!(serde_json::to_string(&name).unwrap(), "\"read_file\"");
+        let parsed: ToolName = serde_json::from_str("\"read_file\"").unwrap();
+        assert_eq!(parsed.as_str(), "read_file");
+
+        let names: ToolNameSet = ["read_file", "shell"].into_iter().collect();
+        let value = serde_json::to_value(&names).unwrap();
+        let array = value
+            .as_array()
+            .expect("tool name set remains array-shaped");
+        assert_eq!(array.len(), 2);
+        assert!(array.contains(&serde_json::json!("read_file")));
+        assert!(array.contains(&serde_json::json!("shell")));
+
+        let parsed: ToolNameSet = serde_json::from_value(value).unwrap();
+        assert!(parsed.contains("read_file"));
+        assert!(parsed.contains("shell"));
+    }
 
     #[test]
     fn tool_provenance_roundtrip_all_kinds() {

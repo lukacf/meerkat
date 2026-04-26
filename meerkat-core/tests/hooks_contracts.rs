@@ -1,9 +1,10 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use meerkat_core::{
-    AgentEvent, Config, HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId,
-    HookInvocation, HookLlmRequest, HookOutcome, HookPatch, HookPoint, HookReasonCode,
-    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, SessionId,
+    AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookCapability,
+    HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation, HookLlmRequest,
+    HookOutcome, HookPatch, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeConfig,
+    HookRuntimeKind, HooksConfig, SessionId,
 };
 use serde_json::json;
 
@@ -43,8 +44,15 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         point: HookPoint::PreLlmRequest,
         session_id: SessionId::new(),
         turn_number: Some(1),
-        prompt: None,
-        error: None,
+        prompt_input: Some(ContentInput::Text("hello typed prompt".to_string())),
+        prompt: Some("legacy prompt projection".to_string()),
+        error_report: Some(AgentErrorReport {
+            class: AgentErrorClass::Llm,
+            reason: None,
+            message: "typed failure".to_string(),
+        }),
+        error_class: Some(AgentErrorClass::Llm),
+        error: Some("legacy failure projection".to_string()),
         llm_request: Some(HookLlmRequest {
             max_tokens: 512,
             temperature: Some(0.1),
@@ -76,6 +84,18 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
     let out_rt: HookOutcome = serde_json::from_value(serde_json::to_value(outcome.clone())?)?;
 
     assert_eq!(inv_rt, invocation);
+    assert_eq!(
+        inv_rt.prompt_input,
+        Some(ContentInput::Text("hello typed prompt".to_string()))
+    );
+    assert_eq!(
+        inv_rt.error_report,
+        Some(AgentErrorReport {
+            class: AgentErrorClass::Llm,
+            reason: None,
+            message: "typed failure".to_string(),
+        })
+    );
     assert_eq!(out_rt, outcome);
     Ok(())
 }

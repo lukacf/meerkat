@@ -14,14 +14,13 @@ use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
 use crate::{Router, Status, TrustedPeers};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute};
+use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerId, PeerName, PeerRoute};
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::types::HandlingMode;
 
@@ -47,11 +46,14 @@ fn schema_for<T: JsonSchema>() -> Value {
 
 /// Send a message to a peer.
 ///
-/// Example: `{"to": "helper-1", "body": "What is the current time?", "handling_mode": "steer"}`
+/// Example: `{"peer_id": "<peer-id-from-peers>", "body": "What is the current time?", "handling_mode": "steer"}`
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageInput {
-    /// Peer name to send to
-    pub to: String,
+    /// Canonical peer ID from the `peers` tool
+    pub peer_id: PeerId,
+    /// Optional display name retained only for diagnostics
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Message body
     pub body: String,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
@@ -60,11 +62,14 @@ pub struct SendMessageInput {
 
 /// Send a structured request to a peer and expect a correlated response.
 ///
-/// Example: `{"to": "analyzer", "intent": "review", "params": {"file": "main.rs"}, "handling_mode": "steer"}`
+/// Example: `{"peer_id": "<peer-id-from-peers>", "intent": "review", "params": {"file": "main.rs"}, "handling_mode": "steer"}`
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendRequestInput {
-    /// Peer name to send to
-    pub to: String,
+    /// Canonical peer ID from the `peers` tool
+    pub peer_id: PeerId,
+    /// Optional display name retained only for diagnostics
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Request intent (e.g. "review", "analyze")
     pub intent: String,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
@@ -76,11 +81,14 @@ pub struct SendRequestInput {
 
 /// Send a response to a previous peer request.
 ///
-/// Example: `{"to": "requester", "in_reply_to": "<request-id>", "status": "completed", "result": {"answer": 42}}`
+/// Example: `{"peer_id": "<peer-id-from-peers>", "in_reply_to": "<request-id>", "status": "completed", "result": {"answer": 42}}`
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendResponseInput {
-    /// Peer name to send to
-    pub to: String,
+    /// Canonical peer ID from the `peers` tool
+    pub peer_id: PeerId,
+    /// Optional display name retained only for diagnostics
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// ID of the request being responded to (from the original request)
     pub in_reply_to: String,
     /// Response status: "accepted", "completed", or "failed"
@@ -110,22 +118,22 @@ pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "send_message",
-            "description": "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration — status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use for urgent or time-sensitive collaboration.\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for non-urgent follow-ups where you do not want to interrupt the peer's current task.\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"to\": \"helper-1\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"steer\"}\n2. Queued follow-up (non-urgent):\n   {\"to\": \"reporter\", \"body\": \"When you finish, include the error counts from section 3.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer name does not match any known peer. Call peers first to verify available names.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.",
+            "description": "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration — status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use for urgent or time-sensitive collaboration.\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for non-urgent follow-ups where you do not want to interrupt the peer's current task.\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"steer\"}\n2. Queued follow-up (non-urgent):\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"reporter\", \"body\": \"When you finish, include the error counts from section 3.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.",
             "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
             "name": "send_request",
-            "description": "Send a structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request when you need the peer to perform work and return a structured result. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n\nExample — structured request/reply:\n  {\"to\": \"analyzer\", \"intent\": \"review\", \"params\": {\"file\": \"main.rs\", \"focus\": \"error handling\"}, \"handling_mode\": \"steer\"}\n  The peer receives this, performs the review, and sends back:\n  {\"to\": \"<your-name>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"issues\": [...]}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer name does not match any known peer. Call peers first to verify available names.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message.",
+            "description": "Send a structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request when you need the peer to perform work and return a structured result. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n\nExample — structured request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"analyzer\", \"intent\": \"review\", \"params\": {\"file\": \"main.rs\", \"focus\": \"error handling\"}, \"handling_mode\": \"steer\"}\n  The peer receives this, performs the review, and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"issues\": [...]}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message.",
             "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
-            "description": "Send a response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a send_request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later.\n- \"completed\": The request succeeded. Include the result in the result field.\n- \"failed\": The request could not be fulfilled. Include error details in the result field.\n\nhandling_mode (optional): Override how the requester processes this response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.\n\nExamples:\n1. Completed response:\n   {\"to\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"answer\": 42}}\n2. Acceptance then later completion:\n   {\"to\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"to\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"report\": \"done\"}}\n3. Failure response:\n   {\"to\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"error\": \"file not found\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error.",
+            "description": "Send a response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a send_request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later.\n- \"completed\": The request succeeded. Include the result in the result field.\n- \"failed\": The request could not be fulfilled. Include error details in the result field.\n\nhandling_mode (optional): Override how the requester processes this response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.\n\nExamples:\n1. Completed response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"answer\": 42}}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"report\": \"done\"}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"error\": \"file not found\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error.",
             "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
             "name": "peers",
-            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities, reachability).\n\nAlways call peers before sending any message to verify the peer name exists and is reachable. The returned list includes:\n- name: The peer name to use in the \"to\" field of send_message / send_request / send_response.\n- peer_id: Unique cryptographic identity.\n- address: Transport address.\n- reachability: Whether the peer is currently reachable.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"abc123\", \"address\": \"tcp://...\", \"reachability\": \"reachable\", \"meta\": {\"description\": \"Code review helper\"}}]}",
+            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities, reachability).\n\nAlways call peers before sending any message to pick the canonical peer_id. Names are display labels and may not be unique. The returned list includes:\n- peer_id: Unique cryptographic identity to use in send_message / send_request / send_response.\n- name: Display label only.\n- address: Transport address.\n- reachability: Whether the peer is currently reachable.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"018f...\", \"address\": \"tcp://...\", \"reachability\": \"reachable\", \"meta\": {\"description\": \"Code review helper\"}}]}",
             "inputSchema": schema_for::<PeersInput>()
         }),
     ]
@@ -141,7 +149,7 @@ pub async fn handle_tools_call(
         "send_message" => {
             let input: SendMessageInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_route(ctx, &input.to)?;
+            let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let command = CommsCommand::PeerMessage {
                 to,
                 body: input.body,
@@ -153,7 +161,7 @@ pub async fn handle_tools_call(
         "send_request" => {
             let input: SendRequestInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_route(ctx, &input.to)?;
+            let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let command = CommsCommand::PeerRequest {
                 to,
                 intent: input.intent,
@@ -166,7 +174,7 @@ pub async fn handle_tools_call(
         "send_response" => {
             let input: SendResponseInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
-            let to = peer_route(ctx, &input.to)?;
+            let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let in_reply_to_uuid = uuid::Uuid::parse_str(&input.in_reply_to)
                 .map_err(|_| format!("invalid UUID for in_reply_to: {}", input.in_reply_to))?;
             // Accepted progress responses reject a handling_mode override
@@ -193,14 +201,23 @@ pub async fn handle_tools_call(
     }
 }
 
-fn peer_name(value: &str) -> Result<PeerName, String> {
-    PeerName::new(value).map_err(|err| format!("invalid to: {err}"))
+fn peer_name(value: &str, field: &str) -> Result<PeerName, String> {
+    PeerName::new(value).map_err(|err| format!("invalid {field}: {err}"))
 }
 
-fn peer_route(ctx: &ToolContext, value: &str) -> Result<PeerRoute, String> {
-    let name = peer_name(value)?;
-    let peer_id = resolve_name_to_peer_id(ctx, &name)?;
-    Ok(PeerRoute::with_display_name(peer_id, name))
+fn peer_route(
+    ctx: &ToolContext,
+    peer_id: PeerId,
+    display_name: Option<&str>,
+) -> Result<PeerRoute, String> {
+    ensure_peer_id_is_trusted(ctx, &peer_id)?;
+    match display_name {
+        Some(name) => Ok(PeerRoute::with_display_name(
+            peer_id,
+            peer_name(name, "display_name")?,
+        )),
+        None => Ok(PeerRoute::new(peer_id)),
+    }
 }
 
 async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, String> {
@@ -330,26 +347,13 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
     }
 }
 
-/// Resolve a typed [`PeerName`] against the runtime-facing trust set.
-///
-/// Delegates to [`crate::trust::TrustedPeers`] via the read lock —
-/// duplicate names are not routing-legal, so this returns the first
-/// matching entry's derived [`meerkat_core::comms::PeerId`] and lets the
-/// router refuse if no entry matches. Runtime-backed surfaces that care
-/// about the name ambiguity should use
-/// [`crate::trust::TrustStore::resolve_name`] and surface the typed
-/// [`crate::trust::TrustResolveError::Ambiguous`] before reaching the
-/// router.
-fn resolve_name_to_peer_id(
-    ctx: &ToolContext,
-    name: &PeerName,
-) -> Result<meerkat_core::comms::PeerId, String> {
+/// Validate a canonical [`PeerId`] against the runtime-facing trust set.
+fn ensure_peer_id_is_trusted(ctx: &ToolContext, peer_id: &PeerId) -> Result<(), String> {
     let peers = ctx.trusted_peers.read();
-    match peers.get_by_name(name.as_str()) {
-        Some(peer) => Ok(crate::router::peer_id_from_pubkey(&peer.pubkey)),
+    match peers.find_by_peer_id(peer_id) {
+        Some(_) => Ok(()),
         None => Err(format!(
-            "peer_not_found_or_not_trusted: peer '{}' is not found or not trusted",
-            name.as_str()
+            "peer_not_found_or_not_trusted: peer '{peer_id}' is not found or not trusted",
         )),
     }
 }
@@ -415,7 +419,7 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
-    let peer_map: BTreeMap<String, Value> = peers
+    let peer_list: Vec<Value> = peers
         .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
@@ -431,12 +435,11 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
             if !p.meta.labels.is_empty() {
                 entry["labels"] = json!(p.meta.labels);
             }
-            (p.name.clone(), entry)
+            entry
         })
         .collect();
     drop(peers);
 
-    let peer_list: Vec<Value> = peer_map.into_values().collect();
     Ok(json!({ "peers": peer_list }))
 }
 
@@ -466,7 +469,8 @@ mod tests {
             required_names.contains(&"handling_mode"),
             "send_message must require handling_mode, got required: {required_names:?}"
         );
-        assert!(required_names.contains(&"to"));
+        assert!(required_names.contains(&"peer_id"));
+        assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"body"));
     }
 
@@ -479,7 +483,8 @@ mod tests {
             required_names.contains(&"handling_mode"),
             "send_request must require handling_mode, got required: {required_names:?}"
         );
-        assert!(required_names.contains(&"to"));
+        assert!(required_names.contains(&"peer_id"));
+        assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"intent"));
     }
 
@@ -492,7 +497,8 @@ mod tests {
             !required_names.contains(&"handling_mode"),
             "send_response must not require handling_mode"
         );
-        assert!(required_names.contains(&"to"));
+        assert!(required_names.contains(&"peer_id"));
+        assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"in_reply_to"));
         assert!(required_names.contains(&"status"));
     }
@@ -501,12 +507,20 @@ mod tests {
     async fn test_handle_peers() {
         let keypair = Keypair::generate();
         let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: PubKey::new([1u8; 32]),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
+            peers: vec![
+                TrustedPeer {
+                    name: "test-peer".to_string(),
+                    pubkey: PubKey::new([1u8; 32]),
+                    addr: "tcp://127.0.0.1:4200".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: "test-peer".to_string(),
+                    pubkey: PubKey::new([2u8; 32]),
+                    addr: "tcp://127.0.0.1:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+            ],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));
         let (_, inbox_sender) = crate::Inbox::new();
@@ -529,13 +543,21 @@ mod tests {
         let val = result.unwrap();
         let peers = val["peers"].as_array().expect("peers should be array");
         assert!(peers.iter().any(|p| p["name"] == "test-peer"));
+        assert_eq!(
+            peers.iter().filter(|p| p["name"] == "test-peer").count(),
+            2,
+            "peers must preserve duplicate display names; peer_id is the routing key",
+        );
+        assert!(
+            peers.iter().all(|p| p["peer_id"].is_string()),
+            "peers must expose canonical peer_id for routing",
+        );
     }
 
     #[tokio::test]
     async fn test_send_message_fails_when_recipient_is_not_trusted() {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let receiver_name = format!("receiver-{suffix}");
         let sender_keypair = Keypair::generate();
+        let receiver_id = PeerId::new();
 
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, router_inbox_sender) = crate::Inbox::new();
@@ -557,7 +579,7 @@ mod tests {
             &ctx,
             "send_message",
             &json!({
-                "to": receiver_name,
+                "peer_id": receiver_id,
                 "body": "hello",
                 "handling_mode": "steer"
             }),
@@ -595,7 +617,7 @@ mod tests {
             &ctx,
             "send_message",
             &json!({
-                "to": "alice",
+                "peer_id": PeerId::new(),
                 "body": "hello",
                 "handling_mode": "almost"
             }),

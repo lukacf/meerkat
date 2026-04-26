@@ -6,7 +6,10 @@
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
-use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
+    RuntimeTurnMetadata,
+};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
@@ -367,30 +370,70 @@ pub enum PeerConvention {
     },
 }
 
-/// Phase of a response progress update.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ResponseProgressPhase {
-    /// Request was accepted.
-    Accepted,
-    /// Work is in progress.
-    InProgress,
-    /// Partial result available.
-    PartialResult,
+/// Phase of a response progress update. This is the core projection enum, not
+/// a runtime-local duplicate.
+pub type ResponseProgressPhase = PeerResponseProgressProjectionPhase;
+
+/// Terminal status of a response. This is the core projection enum, not a
+/// runtime-local duplicate.
+pub type ResponseTerminalStatus = PeerResponseTerminalProjectionStatus;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PeerResponseTerminalInputError {
+    #[error("request_id cannot be empty")]
+    EmptyRequestId,
 }
 
-/// Terminal status of a response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ResponseTerminalStatus {
-    /// Request completed successfully.
-    Completed,
-    /// Request failed.
-    Failed,
-    /// Request was cancelled.
-    Cancelled,
+pub fn response_terminal_status_from_wire(
+    status: meerkat_contracts::PeerResponseTerminalStatusWire,
+) -> ResponseTerminalStatus {
+    match status {
+        meerkat_contracts::PeerResponseTerminalStatusWire::Completed => {
+            PeerResponseTerminalProjectionStatus::Completed
+        }
+        meerkat_contracts::PeerResponseTerminalStatusWire::Failed => {
+            PeerResponseTerminalProjectionStatus::Failed
+        }
+        meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled => {
+            PeerResponseTerminalProjectionStatus::Cancelled
+        }
+    }
+}
+
+pub fn peer_response_terminal_input(
+    peer_name: &meerkat_core::comms::PeerName,
+    request_id: impl Into<String>,
+    status: meerkat_contracts::PeerResponseTerminalStatusWire,
+    result: serde_json::Value,
+) -> Result<Input, PeerResponseTerminalInputError> {
+    let request_id = request_id.into();
+    if request_id.trim().is_empty() {
+        return Err(PeerResponseTerminalInputError::EmptyRequestId);
+    }
+
+    Ok(Input::Peer(PeerInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: peer_name.as_string(),
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(PeerConvention::ResponseTerminal {
+            request_id,
+            status: response_terminal_status_from_wire(status),
+        }),
+        body: String::new(),
+        payload: Some(result),
+        blocks: None,
+        handling_mode: None,
+    }))
 }
 
 /// Flow step input from mob orchestration.
@@ -515,17 +558,7 @@ pub(crate) fn peer_projection_from_peer_input(
             Some(PeerConversationProjection::ResponseProgress {
                 peer_id: peer_id.clone(),
                 request_id: request_id.clone(),
-                phase: match phase {
-                    ResponseProgressPhase::Accepted => {
-                        PeerResponseProgressProjectionPhase::Accepted
-                    }
-                    ResponseProgressPhase::InProgress => {
-                        PeerResponseProgressProjectionPhase::InProgress
-                    }
-                    ResponseProgressPhase::PartialResult => {
-                        PeerResponseProgressProjectionPhase::PartialResult
-                    }
-                },
+                phase: *phase,
                 payload: peer.payload.clone(),
             })
         }
@@ -533,15 +566,7 @@ pub(crate) fn peer_projection_from_peer_input(
             Some(PeerConversationProjection::ResponseTerminal {
                 peer_id: peer_id.clone(),
                 request_id: request_id.clone(),
-                status: match status {
-                    ResponseTerminalStatus::Completed => {
-                        PeerResponseTerminalProjectionStatus::Completed
-                    }
-                    ResponseTerminalStatus::Failed => PeerResponseTerminalProjectionStatus::Failed,
-                    ResponseTerminalStatus::Cancelled => {
-                        PeerResponseTerminalProjectionStatus::Cancelled
-                    }
-                },
+                status: *status,
                 payload: peer.payload.clone(),
             })
         }
@@ -577,25 +602,111 @@ pub(crate) fn peer_block_prefix_text(peer: &PeerInput) -> Option<String> {
     peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
 }
 
-/// Classify an input's typed execution intent for the runtime loop.
-///
-/// `Input::Continuation` is the only variant that resumes a pending
-/// `CallbackPending`-style turn; every other variant carries fresh
-/// content and is a full `ContentTurn`. Terminal peer responses, even
-/// when carrying `HandlingMode::Steer`, always classify as
-/// `ContentTurn` — the steer discriminator gates the run boundary
-/// (`RunCheckpoint` vs `RunStart`), not the execution kind.
-///
-/// This function is the single classification site consulted by
-/// `runtime_loop::inputs_to_primitive_with_boundary` when it computes
-/// the `execution_kind` for a staged batch (any `ContentTurn` in the
-/// batch wins).
-pub(crate) fn classify_execution_kind(
-    input: &Input,
-) -> meerkat_core::lifecycle::RuntimeExecutionKind {
+pub(crate) fn input_prompt_text(input: &Input) -> String {
     match input {
-        Input::Continuation(_) => meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
-        _ => meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        Input::Prompt(p) => p.text.clone(),
+        Input::Peer(p) => peer_prompt_text(p),
+        Input::FlowStep(f) => f.instructions.clone(),
+        Input::ExternalEvent(e) => external_event_projection_text(e),
+        Input::Continuation(continuation) => format!("[Continuation] {}", continuation.reason),
+        Input::Operation(operation) => {
+            format!(
+                "[Operation {}] {:?}",
+                operation.operation_id, operation.event
+            )
+        }
+    }
+}
+
+fn external_event_projection_text(event: &ExternalEventInput) -> String {
+    let source_name = match &event.header.source {
+        InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
+            source_name.as_str()
+        }
+        _ => event.event_type.as_str(),
+    };
+    let body = event
+        .payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim);
+
+    meerkat_core::interaction::format_external_event_projection(source_name, body)
+}
+
+fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+    if matches!(
+        input,
+        Input::Peer(PeerInput {
+            convention: Some(PeerConvention::ResponseTerminal { .. }),
+            ..
+        })
+    ) {
+        return None;
+    }
+
+    let content = match input {
+        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: p.blocks.clone().unwrap_or_default(),
+        },
+        Input::Peer(p) if p.blocks.is_some() => {
+            let raw_blocks = p.blocks.clone().unwrap_or_default();
+            if let Some(prefix) = peer_block_prefix_text(p) {
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                blocks.extend(raw_blocks);
+                CoreRenderable::Blocks { blocks }
+            } else {
+                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
+                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
+                });
+                if p.body.is_empty() || body_already_in_blocks {
+                    CoreRenderable::Blocks { blocks: raw_blocks }
+                } else {
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                        text: p.body.clone(),
+                    }];
+                    blocks.extend(raw_blocks);
+                    CoreRenderable::Blocks { blocks }
+                }
+            }
+        }
+        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: f.blocks.clone().unwrap_or_default(),
+        },
+        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: e.blocks.clone().unwrap_or_default(),
+        },
+        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+            CoreRenderable::Text {
+                text: input_prompt_text(input),
+            }
+        }
+        Input::Continuation(_) | Input::Operation(_) => return None,
+    };
+
+    Some(ConversationAppend {
+        role: ConversationAppendRole::User,
+        content,
+    })
+}
+
+fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
+    let projection = peer_projection(input)?;
+
+    Some(ConversationContextAppend {
+        key: projection.context_key()?,
+        content: CoreRenderable::Text {
+            text: projection.prompt_text(),
+        },
+    })
+}
+
+pub(crate) fn runtime_input_projection(
+    input: &Input,
+) -> crate::ingress_types::RuntimeInputProjection {
+    crate::ingress_types::RuntimeInputProjection {
+        append: input_to_append(input),
+        context_append: input_to_context_append(input),
     }
 }
 
@@ -974,6 +1085,53 @@ mod tests {
     }
 
     #[test]
+    fn peer_response_terminal_input_owns_wire_status_mapping() {
+        let peer_name = meerkat_core::comms::PeerName::new("analyst").unwrap();
+        let input = peer_response_terminal_input(
+            &peer_name,
+            "req-1",
+            meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled,
+            serde_json::json!({"ok": false}),
+        )
+        .unwrap();
+
+        match input {
+            Input::Peer(PeerInput {
+                header:
+                    InputHeader {
+                        source: InputOrigin::Peer { peer_id, .. },
+                        durability: InputDurability::Durable,
+                        ..
+                    },
+                convention: Some(PeerConvention::ResponseTerminal { request_id, status }),
+                payload: Some(payload),
+                handling_mode: None,
+                ..
+            }) => {
+                assert_eq!(peer_id, "analyst");
+                assert_eq!(request_id, "req-1");
+                assert_eq!(status, ResponseTerminalStatus::Cancelled);
+                assert_eq!(payload["ok"], false);
+            }
+            other => panic!("expected terminal peer input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_response_terminal_input_rejects_empty_request_id() {
+        let peer_name = meerkat_core::comms::PeerName::new("analyst").unwrap();
+        let err = peer_response_terminal_input(
+            &peer_name,
+            " ",
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({}),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, PeerResponseTerminalInputError::EmptyRequestId);
+    }
+
+    #[test]
     fn peer_input_with_steer_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
             header: make_header(),
@@ -1004,100 +1162,5 @@ mod tests {
         });
         let json = serde_json::to_value(&input).unwrap();
         assert!(json.get("handling_mode").is_none());
-    }
-
-    // --- classify_execution_kind tests ---
-
-    #[test]
-    fn classify_prompt_is_content_turn() {
-        let input = Input::Prompt(PromptInput {
-            header: make_header(),
-            text: "hello".into(),
-            blocks: None,
-            turn_metadata: None,
-        });
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
-    }
-
-    #[test]
-    fn classify_peer_terminal_is_content_turn() {
-        let input = Input::Peer(PeerInput {
-            header: make_header(),
-            convention: Some(PeerConvention::ResponseTerminal {
-                request_id: "r".into(),
-                status: ResponseTerminalStatus::Completed,
-            }),
-            body: "done".into(),
-            payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
-            handling_mode: None,
-        });
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
-    }
-
-    #[test]
-    fn classify_peer_terminal_with_steer_is_content_turn() {
-        let input = Input::Peer(PeerInput {
-            header: make_header(),
-            convention: Some(PeerConvention::ResponseTerminal {
-                request_id: "r".into(),
-                status: ResponseTerminalStatus::Completed,
-            }),
-            body: "done".into(),
-            payload: Some(serde_json::json!({"ok": true})),
-            blocks: None,
-            handling_mode: Some(HandlingMode::Steer),
-        });
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
-    }
-
-    #[test]
-    fn classify_continuation_is_resume_pending() {
-        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
-        );
-    }
-
-    #[test]
-    fn classify_peer_message_is_content_turn() {
-        let input = Input::Peer(PeerInput {
-            header: make_header(),
-            convention: Some(PeerConvention::Message),
-            body: "hi".into(),
-            payload: None,
-            blocks: None,
-            handling_mode: None,
-        });
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
-    }
-
-    #[test]
-    fn classify_operation_is_content_turn() {
-        let input = Input::Operation(OperationInput {
-            header: make_header(),
-            operation_id: OperationId::new(),
-            event: OpEvent::Started {
-                id: OperationId::new(),
-                kind: meerkat_core::ops::WorkKind::ToolCall,
-            },
-        });
-        assert_eq!(
-            classify_execution_kind(&input),
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
     }
 }

@@ -1,7 +1,7 @@
 use meerkat::contracts::{
-    RealtimeCapabilities, RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeClientFrame, RealtimeEvent,
-    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOutputKind,
+    RealtimeCapabilities, RealtimeChannelClosedFrame, RealtimeChannelOpenFrame,
+    RealtimeChannelOpenedFrame, RealtimeChannelState, RealtimeChannelStatus, RealtimeClientFrame,
+    RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOutputKind,
     RealtimeServerFrame, RealtimeTextChunk,
 };
 use meerkat::{
@@ -204,6 +204,16 @@ async fn realtime_channel_connects_and_exchanges_frames()
             }
         };
         assert_eq!(close_frame, RealtimeClientFrame::ChannelClose);
+        websocket
+            .send(Message::Text(
+                serde_json::to_string(&RealtimeServerFrame::ChannelClosed(
+                    RealtimeChannelClosedFrame {
+                        reason: Some("client_closed".to_string()),
+                    },
+                ))?
+                .into(),
+            ))
+            .await?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
 

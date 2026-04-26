@@ -210,8 +210,12 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                self.set_session_silent_intents_inner(&session_id, intents)
-                    .await;
+                if previous_dsl_state.lifecycle_phase
+                    != crate::meerkat_machine::dsl::MeerkatPhase::Stopped
+                {
+                    self.set_session_silent_intents_inner(&session_id, intents)
+                        .await;
+                }
                 // set_session_silent_intents_inner is infallible — no rollback needed.
                 let _ = previous_dsl_state;
                 Ok(MeerkatMachineCommandResult::Unit)
@@ -312,15 +316,19 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                self.stage_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
-                    "StopRuntimeExecutor",
-                )
-                .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                self.stop_runtime_executor_inner(&session_id, command)
-                    .await?;
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
+                        "StopRuntimeExecutor",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                if let Err(err) = self.stop_runtime_executor_inner(&session_id, command).await {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(err);
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::ContainsSession { session_id } => {

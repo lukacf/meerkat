@@ -9,21 +9,11 @@
 //! * `RequestRuntimeDestroy` — producer `mob`, consumer `meerkat.Destroy`
 //!
 //! Wave-b B-5 landed the typed [`CompositionDispatcher`][cd] trait +
-//! [`CompositionBinding`][cb] discriminant in `meerkat-runtime`. Wave-c
-//! C-6p wires the producer end: the actor converts each emitted
-//! `MobMachineEffect::Request*` variant into a typed [`MobSeamEffect`]
-//! payload and routes it through the dispatcher instead of silently
-//! dropping the routed-effect slot on the effect-drain path.
-//!
-//! `MobSeamEffect` is hand-authored here to match the shape that
-//! [`render_composition_driver`][rcd] emits from the driver declaration
-//! added to `meerkat_mob_seam_composition()` in this same task. When the
-//! workspace-wide codegen cascade re-enables (see wave-c-prep plan:
-//! serial spine `C-6p → C-6c → C-6r`), C-6c / C-6r can opt into the
-//! generated producer enum at the dispatcher wire-up site without
-//! changing this module's interface — the variant/field shape is
-//! identical and the `ProducerEffect` impl projects the same
-//! [`FieldId`] → [`FieldValue`] bindings the composition route declares.
+//! [`CompositionBinding`][cb] discriminant in `meerkat-runtime`. The mob
+//! producer now carries the canonical DSL `MobMachineEffect` directly across
+//! the composition seam; this module only supplies the dispatcher trait
+//! projection that turns schema-declared [`FieldId`] bindings into typed
+//! [`FieldValue`]s.
 //!
 //! The consumer side (`MeerkatMachine` implementing [`ConsumerSurface`][cs])
 //! lands with task `#5` (C-6c). Until then,
@@ -103,113 +93,77 @@ pub fn mob_producer_instance() -> ProducerInstance {
 /// also declares a `meerkat` producer for signal-kind routes, which the
 /// dispatcher excludes — signals are the signal surface's concern).
 ///
-/// Matches the codegen-emitted shape asserted by
-/// `meerkat-machine-codegen/tests/routed_effect_module_shape.rs` so the
-/// downstream switch-over (C-6c / C-6r) is a literal rename.
+/// The variant payload is the canonical DSL effect emitted by
+/// `MobMachine`; do not introduce a second producer-effect mirror here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MobSeamEffect {
-    /// Producer `mob` emitted an effect body.
-    Mob(MobProducerEffect),
+    /// Producer `mob` emitted an effect body from the canonical machine.
+    Mob(mob_dsl::MobMachineEffect),
 }
 
-/// Producer-side effect body for the `mob` instance.
-///
-/// Mirrors the four routed `MobMachineEffect::Request*` variants from
-/// the mob DSL at `meerkat-mob/src/machines/mob_machine.rs:1014-1018`.
-/// Field names match the composition schema's route bindings verbatim
-/// so [`ProducerEffect::field`] can look them up by [`FieldId`] without
-/// a translation table. Values live as DSL-bridging types (the flat
-/// string/u64 forms) — consumers rehydrate them into domain types via
-/// the `ConsumerSurface` impl.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MobProducerEffect {
-    /// Route `binding_request_reaches_meerkat` — target
-    /// `meerkat.PrepareBindings`.
-    RequestRuntimeBinding {
-        agent_identity: mob_dsl::AgentIdentity,
-        agent_runtime_id: mob_dsl::AgentRuntimeId,
-        fence_token: mob_dsl::FenceToken,
-        generation: mob_dsl::Generation,
-        session_id: mob_dsl::SessionId,
-    },
-    /// Route `work_request_reaches_meerkat` — target `meerkat.Ingest`.
-    /// The route binds producer `runtime_id` to consumer
-    /// `agent_runtime_id`, producer `work_id` to consumer `work_id`,
-    /// and producer `origin` to consumer `origin`.
-    RequestRuntimeIngress {
-        agent_runtime_id: mob_dsl::AgentRuntimeId,
-        fence_token: mob_dsl::FenceToken,
-        work_id: mob_dsl::WorkId,
-        origin: mob_dsl::WorkOrigin,
-    },
-    /// Route `retire_request_reaches_meerkat` — target `meerkat.Retire`.
-    /// Carries `session_id` so the consumer surface can resolve the target
-    /// MeerkatMachine (previously relied on surface pinning, which wasn't
-    /// wired for the mob actor's shared consumer surface).
-    RequestRuntimeRetire { session_id: mob_dsl::SessionId },
-    /// Route `destroy_request_reaches_meerkat` — target `meerkat.Destroy`.
-    /// Carries `session_id` (same pattern as Retire).
-    RequestRuntimeDestroy { session_id: mob_dsl::SessionId },
-}
-
-impl MobProducerEffect {
+impl MobSeamEffect {
     /// Typed [`EffectVariantId`] for this producer body. Matches the
     /// effect-variant slugs declared on `MobMachine`'s schema and the
     /// `meerkat_mob_seam` route declarations.
     pub fn variant_id(&self) -> EffectVariantId {
         let slug = match self {
-            Self::RequestRuntimeBinding { .. } => "RequestRuntimeBinding",
-            Self::RequestRuntimeIngress { .. } => "RequestRuntimeIngress",
-            Self::RequestRuntimeRetire { .. } => "RequestRuntimeRetire",
-            Self::RequestRuntimeDestroy { .. } => "RequestRuntimeDestroy",
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }) => {
+                "RequestRuntimeBinding"
+            }
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }) => {
+                "RequestRuntimeIngress"
+            }
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }) => {
+                "RequestRuntimeRetire"
+            }
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { .. }) => {
+                "RequestRuntimeDestroy"
+            }
+            Self::Mob(other) => unreachable!("non-routed mob effect reached seam: {other:?}"),
         };
         EffectVariantId::parse(slug).expect("producer effect slug is hand-authored constant")
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
         match self {
-            Self::RequestRuntimeBinding {
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
                 agent_identity: _,
                 agent_runtime_id,
                 fence_token,
                 generation,
                 session_id,
-            } => match id.as_str() {
+            }) => match id.as_str() {
                 "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
                 "fence_token" => Some(FieldValue::U64(fence_token.0)),
                 "generation" => Some(FieldValue::U64(generation.0)),
                 "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
                 _ => None,
             },
-            Self::RequestRuntimeIngress {
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id,
                 fence_token,
                 work_id,
                 origin,
-            } => match id.as_str() {
-                // The composition's route binding for
-                // `work_request_reaches_meerkat` projects producer field
-                // `runtime_id` → consumer field `agent_runtime_id`. Surface
-                // both slugs against the same backing runtime-id so the
-                // dispatcher's field-binding walk resolves whether the
-                // caller asks by route-producer name (`runtime_id`) or by
-                // consumer-field name (`agent_runtime_id`).
-                "agent_runtime_id" | "runtime_id" => {
-                    Some(FieldValue::Str(agent_runtime_id.as_str()))
-                }
+            }) => match id.as_str() {
+                "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
                 "fence_token" => Some(FieldValue::U64(fence_token.0)),
                 "work_id" => Some(FieldValue::Str(work_id.0.as_str())),
                 "origin" => Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin)))),
                 _ => None,
             },
-            Self::RequestRuntimeRetire { session_id } => match id.as_str() {
-                "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
-                _ => None,
-            },
-            Self::RequestRuntimeDestroy { session_id } => match id.as_str() {
-                "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
-                _ => None,
-            },
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }) => {
+                match id.as_str() {
+                    "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
+                    _ => None,
+                }
+            }
+            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }) => {
+                match id.as_str() {
+                    "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
+                    _ => None,
+                }
+            }
+            Self::Mob(_) => None,
         }
     }
 }
@@ -224,15 +178,11 @@ fn meerkat_work_origin(origin: &mob_dsl::WorkOrigin) -> meerkat_dsl::WorkOrigin 
 
 impl ProducerEffect for MobSeamEffect {
     fn variant_id(&self) -> EffectVariantId {
-        match self {
-            Self::Mob(body) => body.variant_id(),
-        }
+        MobSeamEffect::variant_id(self)
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
-        match self {
-            Self::Mob(body) => body.field(id),
-        }
+        MobSeamEffect::field(self, id)
     }
 }
 
@@ -242,42 +192,13 @@ impl ProducerEffect for MobSeamEffect {
 /// effect-drain path and never cross the composition seam.
 pub fn lift_routed_effect(effect: &mob_dsl::MobMachineEffect) -> Option<MobSeamEffect> {
     use mob_dsl::MobMachineEffect as DslEffect;
-    let body = match effect {
-        DslEffect::RequestRuntimeBinding {
-            agent_identity,
-            agent_runtime_id,
-            fence_token,
-            generation,
-            session_id,
-        } => MobProducerEffect::RequestRuntimeBinding {
-            agent_identity: agent_identity.clone(),
-            agent_runtime_id: agent_runtime_id.clone(),
-            fence_token: *fence_token,
-            generation: *generation,
-            session_id: session_id.clone(),
-        },
-        DslEffect::RequestRuntimeIngress {
-            agent_runtime_id,
-            fence_token,
-            work_id,
-            origin,
-        } => MobProducerEffect::RequestRuntimeIngress {
-            agent_runtime_id: agent_runtime_id.clone(),
-            fence_token: *fence_token,
-            work_id: work_id.clone(),
-            origin: *origin,
-        },
-        DslEffect::RequestRuntimeRetire { session_id } => MobProducerEffect::RequestRuntimeRetire {
-            session_id: session_id.clone(),
-        },
-        DslEffect::RequestRuntimeDestroy { session_id } => {
-            MobProducerEffect::RequestRuntimeDestroy {
-                session_id: session_id.clone(),
-            }
-        }
-        _ => return None,
-    };
-    Some(MobSeamEffect::Mob(body))
+    match effect {
+        DslEffect::RequestRuntimeBinding { .. }
+        | DslEffect::RequestRuntimeIngress { .. }
+        | DslEffect::RequestRuntimeRetire { .. }
+        | DslEffect::RequestRuntimeDestroy { .. } => Some(MobSeamEffect::Mob(effect.clone())),
+        _ => None,
+    }
 }
 
 /// Wave-c C-6c — build a production [`MobCompositionBinding`] that
@@ -525,14 +446,13 @@ mod tests {
 
     #[test]
     fn request_runtime_binding_variant_id_matches_schema_slug() {
-        let body = MobProducerEffect::RequestRuntimeBinding {
+        let body = mob_dsl::MobMachineEffect::RequestRuntimeBinding {
             agent_identity: mob_dsl::AgentIdentity::from("agent"),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
             generation: mob_dsl::Generation(3),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
-        assert_eq!(body.variant_id(), ev("RequestRuntimeBinding"));
         assert_eq!(
             MobSeamEffect::Mob(body).variant_id(),
             ev("RequestRuntimeBinding"),
@@ -541,7 +461,7 @@ mod tests {
 
     #[test]
     fn request_runtime_binding_projects_all_route_field_bindings() {
-        let body = MobProducerEffect::RequestRuntimeBinding {
+        let body = mob_dsl::MobMachineEffect::RequestRuntimeBinding {
             agent_identity: mob_dsl::AgentIdentity::from("agent"),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
@@ -567,10 +487,10 @@ mod tests {
 
     #[test]
     fn retire_and_destroy_have_no_fields() {
-        let retire = MobSeamEffect::Mob(MobProducerEffect::RequestRuntimeRetire {
+        let retire = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
-        let destroy = MobSeamEffect::Mob(MobProducerEffect::RequestRuntimeDestroy {
+        let destroy = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         assert_eq!(retire.variant_id(), ev("RequestRuntimeRetire"));
@@ -580,13 +500,8 @@ mod tests {
     }
 
     #[test]
-    fn ingress_exposes_both_runtime_id_and_agent_runtime_id_aliases() {
-        // Route bindings carry `(to_field, from_field)` pairs; the
-        // `work_request_reaches_meerkat` route translates producer field
-        // `runtime_id` into consumer field `agent_runtime_id`, so the
-        // producer surfaces under BOTH slugs that the route-binding walk
-        // may probe.
-        let body = MobProducerEffect::RequestRuntimeIngress {
+    fn ingress_exposes_schema_declared_producer_fields() {
+        let body = mob_dsl::MobMachineEffect::RequestRuntimeIngress {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-x"),
             fence_token: mob_dsl::FenceToken(1),
             work_id: mob_dsl::WorkId::from("w-1"),
@@ -595,15 +510,12 @@ mod tests {
         let effect = MobSeamEffect::Mob(body);
 
         assert!(matches!(
-            effect.field(&fid("runtime_id")).expect("runtime_id alias"),
-            FieldValue::Str("rt-x"),
-        ));
-        assert!(matches!(
             effect
                 .field(&fid("agent_runtime_id"))
-                .expect("agent_runtime_id alias"),
+                .expect("agent_runtime_id"),
             FieldValue::Str("rt-x"),
         ));
+        assert!(effect.field(&fid("runtime_id")).is_none());
         match effect.field(&fid("origin")).expect("origin") {
             FieldValue::Opaque(value) => assert!(matches!(
                 value.downcast_ref::<meerkat_dsl::WorkOrigin>(),
@@ -627,7 +539,7 @@ mod tests {
         assert!(matches!(
             lift_routed_effect(&binding_in),
             Some(MobSeamEffect::Mob(
-                MobProducerEffect::RequestRuntimeBinding { .. }
+                mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }
             )),
         ));
 
@@ -637,7 +549,7 @@ mod tests {
         assert!(matches!(
             lift_routed_effect(&retire_in),
             Some(MobSeamEffect::Mob(
-                MobProducerEffect::RequestRuntimeRetire { .. }
+                mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }
             )),
         ));
 
@@ -653,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn standalone_binding_skips_dispatch_without_error() {
         let binding: MobCompositionBinding = CompositionBinding::Standalone;
-        let effect = MobSeamEffect::Mob(MobProducerEffect::RequestRuntimeRetire {
+        let effect = MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         let outcome = dispatch_routed_effect(&binding, effect)

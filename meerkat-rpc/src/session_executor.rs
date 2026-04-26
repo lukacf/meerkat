@@ -264,9 +264,6 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
-            execution_kind: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.execution_kind),
         };
 
         let result = self

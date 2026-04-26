@@ -980,6 +980,22 @@ pub struct SessionLlmIdentity {
     pub connection_ref: Option<crate::ConnectionRef>,
 }
 
+/// Live request policy paired with a session LLM identity hot-swap.
+///
+/// `SessionLlmIdentity` is the durable semantic identity. This projection is
+/// the per-turn request policy the live agent must use for the next LLM call,
+/// including provider params and provider-native tool defaults resolved for
+/// the same target model/provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionLlmRequestPolicy {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tool_defaults: Option<serde_json::Value>,
+}
+
 impl SessionMetadata {
     /// Return the current durable LLM identity for this session.
     pub fn llm_identity(&self) -> SessionLlmIdentity {

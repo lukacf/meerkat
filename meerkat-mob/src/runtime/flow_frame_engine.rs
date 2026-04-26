@@ -1967,7 +1967,7 @@ fn collect_frame_step_statuses(
         let Some(status) = kernel_state.node_status.get(node_id) else {
             continue;
         };
-        let Some(step_status) = node_terminal_step_status(status.as_str()) else {
+        let Some(step_status) = node_terminal_step_status(*status) else {
             continue;
         };
         merge_step_status(&mut step_statuses, step_spec.step_id.clone(), step_status);
@@ -1975,11 +1975,11 @@ fn collect_frame_step_statuses(
     step_statuses
 }
 
-fn node_terminal_step_status(value: &str) -> Option<StepRunStatus> {
-    match value {
-        "Completed" => Some(StepRunStatus::Completed),
-        "Skipped" => Some(StepRunStatus::Skipped),
-        "Failed" => Some(StepRunStatus::Failed),
+fn node_terminal_step_status(status: flow_frame::NodeRunStatus) -> Option<StepRunStatus> {
+    match status {
+        flow_frame::NodeRunStatus::Completed => Some(StepRunStatus::Completed),
+        flow_frame::NodeRunStatus::Skipped => Some(StepRunStatus::Skipped),
+        flow_frame::NodeRunStatus::Failed => Some(StepRunStatus::Failed),
         _ => None,
     }
 }
@@ -2096,16 +2096,24 @@ fn loop_transition_outcome(
     })
 }
 
-fn has_effect_variant(effects: &[flow_frame::Effect], variant: &str) -> bool {
-    effects.iter().any(|effect| {
-        matches!(
-            (variant, effect),
-            (
-                "NodeExecutionReleased",
-                flow_frame::Effect::NodeExecutionReleased(_)
-            )
-        )
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowFrameEffectKind {
+    NodeExecutionReleased,
+}
+
+impl FlowFrameEffectKind {
+    fn parse(effect: &flow_frame::Effect) -> Option<Self> {
+        match effect {
+            flow_frame::Effect::NodeExecutionReleased(_) => Some(Self::NodeExecutionReleased),
+            _ => None,
+        }
+    }
+}
+
+fn has_flow_frame_effect(effects: &[flow_frame::Effect], expected: FlowFrameEffectKind) -> bool {
+    effects
+        .iter()
+        .any(|effect| FlowFrameEffectKind::parse(effect) == Some(expected))
 }
 
 fn effect_admit_step_node_id(effects: &[flow_frame::Effect]) -> Option<FlowNodeId> {
@@ -2179,13 +2187,22 @@ fn frame_ready(state: &flow_frame::State) -> bool {
 }
 
 fn all_nodes_terminal(state: &flow_frame::State, spec: &FrameSpec) -> bool {
-    let terminal = ["Completed", "Failed", "Skipped", "Canceled"];
     spec.nodes.keys().all(|node_id| {
         state
             .node_status
             .get(node_id)
-            .is_some_and(|status| terminal.contains(&status.as_str()))
+            .is_some_and(|status| node_status_is_terminal(*status))
     })
+}
+
+fn node_status_is_terminal(status: flow_frame::NodeRunStatus) -> bool {
+    matches!(
+        status,
+        flow_frame::NodeRunStatus::Completed
+            | flow_frame::NodeRunStatus::Failed
+            | flow_frame::NodeRunStatus::Skipped
+            | flow_frame::NodeRunStatus::Canceled
+    )
 }
 
 fn register_ready_frame_if_needed(
@@ -2260,7 +2277,7 @@ fn pending_until_obligation(
     loop_snapshot: &LoopSnapshot,
 ) -> Result<Option<FlowLoopUntilEvaluationObligation>, MobError> {
     if loop_snapshot.kernel_state.phase != loop_iteration::Phase::Running
-        || loop_snapshot.kernel_state.stage.as_str() != "AwaitingUntil"
+        || loop_snapshot.kernel_state.stage != loop_iteration::LoopIterationStage::AwaitingUntil
     {
         return Ok(None);
     }
@@ -2310,7 +2327,10 @@ fn acknowledge_node_grant(
     };
     let mut next_run_state = grant.next_run_state.clone();
 
-    if has_effect_variant(&admit_outcome.effects, "NodeExecutionReleased") {
+    if has_flow_frame_effect(
+        &admit_outcome.effects,
+        FlowFrameEffectKind::NodeExecutionReleased,
+    ) {
         next_run_state = run_transition_state(
             &next_run_state,
             flow_run::Input::NodeExecutionReleased(flow_run::inputs::NodeExecutionReleased {
@@ -2472,6 +2492,50 @@ fn acknowledge_body_frame_start(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFrameTerminalProjection {
+    Completed,
+    Failed,
+    Canceled,
+}
+
+impl BodyFrameTerminalProjection {
+    fn from_frame_phase(phase: FlowFrameTerminalPhase) -> Self {
+        match phase {
+            FlowFrameTerminalPhase::Completed => Self::Completed,
+            FlowFrameTerminalPhase::Failed => Self::Failed,
+            FlowFrameTerminalPhase::Canceled => Self::Canceled,
+        }
+    }
+
+    fn loop_input(
+        self,
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+    ) -> loop_iteration::Input {
+        match self {
+            Self::Completed => loop_iteration::Input::BodyFrameCompleted(
+                loop_iteration::inputs::BodyFrameCompleted {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                },
+            ),
+            Self::Failed => {
+                loop_iteration::Input::BodyFrameFailed(loop_iteration::inputs::BodyFrameFailed {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                })
+            }
+            Self::Canceled => loop_iteration::Input::BodyFrameCanceled(
+                loop_iteration::inputs::BodyFrameCanceled {
+                    loop_instance_id: loop_instance_id.clone(),
+                    iteration,
+                },
+            ),
+        }
+    }
+}
+
 fn advance_body_frame_after_seal(
     run_state: &flow_run::State,
     body_frame_id: &FrameId,
@@ -2492,11 +2556,8 @@ fn advance_body_frame_after_seal(
     }
 
     let iteration = frame_iteration(&body_frame.kernel_state)?;
-    let first_variant = match terminal_phase(&body_frame.kernel_state)? {
-        FlowFrameTerminalPhase::Completed => "BodyFrameCompleted",
-        FlowFrameTerminalPhase::Failed => "BodyFrameFailed",
-        FlowFrameTerminalPhase::Canceled => "BodyFrameCanceled",
-    };
+    let body_terminal =
+        BodyFrameTerminalProjection::from_frame_phase(terminal_phase(&body_frame.kernel_state)?);
     let next_run_state = flow_run::transition(
         run_state,
         flow_run::Input::FrameTerminated(flow_run::inputs::FrameTerminated {
@@ -2508,27 +2569,7 @@ fn advance_body_frame_after_seal(
     .next_state;
     let loop_outcome = loop_iteration::transition(
         &loop_snapshot.kernel_state,
-        match first_variant {
-            "BodyFrameCompleted" => loop_iteration::Input::BodyFrameCompleted(
-                loop_iteration::inputs::BodyFrameCompleted {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                },
-            ),
-            "BodyFrameFailed" => {
-                loop_iteration::Input::BodyFrameFailed(loop_iteration::inputs::BodyFrameFailed {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                })
-            }
-            "BodyFrameCanceled" => loop_iteration::Input::BodyFrameCanceled(
-                loop_iteration::inputs::BodyFrameCanceled {
-                    loop_instance_id: loop_instance_id.clone(),
-                    iteration: iteration as u32,
-                },
-            ),
-            _ => unreachable!(),
-        },
+        body_terminal.loop_input(&loop_instance_id, iteration as u32),
         &loop_iteration::EmptyContext,
     )
     .map_err(|error| MobError::Internal(format!("loop_iteration transition refused: {error:?}")))?;
@@ -2571,7 +2612,7 @@ fn advance_body_frame_after_seal(
             let loop_terminal = first_matching_loop_terminal_effect(&loop_outcome.effects)
                 .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "loop '{loop_instance_id}' did not emit a terminal effect after '{first_variant}'"
+                        "loop '{loop_instance_id}' did not emit a terminal effect after '{body_terminal:?}'"
                     ))
                 })?;
             let parent_frame_id = loop_parent_frame_id(&loop_outcome.next_state)?;
@@ -2745,8 +2786,27 @@ fn recover_pending_body_frame_request(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopTerminalEffect {
+    Completed,
+    Exhausted,
+    Failed,
+    Canceled,
+}
+
+impl std::fmt::Display for LoopTerminalEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Completed => "LoopCompleted",
+            Self::Exhausted => "LoopExhausted",
+            Self::Failed => "LoopFailed",
+            Self::Canceled => "LoopCanceled",
+        })
+    }
+}
+
 struct CompleteLoopDecisionRequest<'a> {
-    loop_terminal: &'a str,
+    loop_terminal: LoopTerminalEffect,
     expected_run_state: &'a flow_run::State,
     next_run_state: flow_run::State,
     loop_instance_id: &'a LoopInstanceId,
@@ -2771,24 +2831,7 @@ fn build_complete_loop_decision(
         expected_parent_frame,
         parent_node_id,
     } = request;
-    let parent_input = match loop_terminal {
-        "LoopCompleted" => flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
-            node_id: parent_node_id.clone(),
-        }),
-        "LoopExhausted" | "LoopFailed" => {
-            flow_frame::Input::FailNode(flow_frame::inputs::FailNode {
-                node_id: parent_node_id.clone(),
-            })
-        }
-        "LoopCanceled" => flow_frame::Input::CancelNode(flow_frame::inputs::CancelNode {
-            node_id: parent_node_id.clone(),
-        }),
-        other => {
-            return Err(MobError::Internal(format!(
-                "unknown loop terminal effect '{other}'"
-            )));
-        }
-    };
+    let parent_input = loop_parent_input(loop_terminal, parent_node_id);
     let parent_outcome = flow_frame::transition(
         &expected_parent_frame.kernel_state,
         parent_input,
@@ -2828,6 +2871,29 @@ fn build_complete_loop_decision(
             frame_id: parent_frame_id.clone(),
         }],
     })
+}
+
+fn loop_parent_input(
+    loop_terminal: LoopTerminalEffect,
+    parent_node_id: &FlowNodeId,
+) -> flow_frame::Input {
+    match loop_terminal {
+        LoopTerminalEffect::Completed => {
+            flow_frame::Input::CompleteNode(flow_frame::inputs::CompleteNode {
+                node_id: parent_node_id.clone(),
+            })
+        }
+        LoopTerminalEffect::Exhausted | LoopTerminalEffect::Failed => {
+            flow_frame::Input::FailNode(flow_frame::inputs::FailNode {
+                node_id: parent_node_id.clone(),
+            })
+        }
+        LoopTerminalEffect::Canceled => {
+            flow_frame::Input::CancelNode(flow_frame::inputs::CancelNode {
+                node_id: parent_node_id.clone(),
+            })
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -3007,12 +3073,14 @@ fn maybe_effect_request_body_frame_start_depth(effects: &[loop_iteration::Effect
     })
 }
 
-fn first_matching_loop_terminal_effect(effects: &[loop_iteration::Effect]) -> Option<&'static str> {
+fn first_matching_loop_terminal_effect(
+    effects: &[loop_iteration::Effect],
+) -> Option<LoopTerminalEffect> {
     effects.iter().find_map(|effect| match effect {
-        loop_iteration::Effect::LoopCompleted(_) => Some("LoopCompleted"),
-        loop_iteration::Effect::LoopExhausted(_) => Some("LoopExhausted"),
-        loop_iteration::Effect::LoopFailed(_) => Some("LoopFailed"),
-        loop_iteration::Effect::LoopCanceled(_) => Some("LoopCanceled"),
+        loop_iteration::Effect::LoopCompleted(_) => Some(LoopTerminalEffect::Completed),
+        loop_iteration::Effect::LoopExhausted(_) => Some(LoopTerminalEffect::Exhausted),
+        loop_iteration::Effect::LoopFailed(_) => Some(LoopTerminalEffect::Failed),
+        loop_iteration::Effect::LoopCanceled(_) => Some(LoopTerminalEffect::Canceled),
         _ => None,
     })
 }
@@ -3028,16 +3096,53 @@ fn terminal_phase(state: &flow_frame::State) -> Result<FlowFrameTerminalPhase, M
     }
 }
 
-fn loop_terminal_effect(phase: &loop_iteration::Phase) -> Option<&'static str> {
+fn loop_terminal_effect(phase: &loop_iteration::Phase) -> Option<LoopTerminalEffect> {
     match phase {
-        loop_iteration::Phase::Completed => Some("LoopCompleted"),
-        loop_iteration::Phase::Exhausted => Some("LoopExhausted"),
-        loop_iteration::Phase::Failed => Some("LoopFailed"),
-        loop_iteration::Phase::Canceled => Some("LoopCanceled"),
+        loop_iteration::Phase::Completed => Some(LoopTerminalEffect::Completed),
+        loop_iteration::Phase::Exhausted => Some(LoopTerminalEffect::Exhausted),
+        loop_iteration::Phase::Failed => Some(LoopTerminalEffect::Failed),
+        loop_iteration::Phase::Canceled => Some(LoopTerminalEffect::Canceled),
         _ => None,
     }
 }
 
 fn state_is_awaiting_body_frame(state: &loop_iteration::State) -> bool {
     state.stage == loop_iteration::LoopIterationStage::AwaitingBodyFrame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loop_completed_effect() -> loop_iteration::Effect {
+        loop_iteration::Effect::LoopCompleted(loop_iteration::effects::LoopCompleted {
+            loop_instance_id: LoopInstanceId::from("loop-1"),
+            parent_frame_id: FrameId::from("frame-1"),
+            parent_node_id: FlowNodeId::from("node-1"),
+        })
+    }
+
+    #[test]
+    fn loop_terminal_effects_project_to_typed_terminal() {
+        assert_eq!(
+            first_matching_loop_terminal_effect(&[loop_completed_effect()]),
+            Some(LoopTerminalEffect::Completed)
+        );
+        assert_eq!(
+            loop_terminal_effect(&loop_iteration::Phase::Exhausted),
+            Some(LoopTerminalEffect::Exhausted)
+        );
+    }
+
+    #[test]
+    fn node_terminal_status_maps_from_typed_node_status() {
+        assert_eq!(
+            node_terminal_step_status(flow_frame::NodeRunStatus::Completed),
+            Some(StepRunStatus::Completed)
+        );
+        assert_eq!(
+            node_terminal_step_status(flow_frame::NodeRunStatus::Running),
+            None
+        );
+    }
 }

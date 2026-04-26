@@ -160,12 +160,12 @@ impl McpConnection {
                 let inner_map = std::sync::Arc::unwrap_or_clone(t.input_schema);
                 let schema = Value::Object(inner_map);
                 ToolDef {
-                    name: t.name.to_string(),
+                    name: t.name.to_string().into(),
                     description: t.description.unwrap_or_default().to_string(),
                     input_schema: schema,
                     provenance: Some(ToolProvenance {
                         kind: ToolSourceKind::Mcp,
-                        source_id: server_name.to_string(),
+                        source_id: server_name.into(),
                     }),
                 }
             })

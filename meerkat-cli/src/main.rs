@@ -51,14 +51,14 @@ use meerkat_mcp::McpRouterAdapter;
 use meerkat_mob::{FlowId, MobDefinition, RunId};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::archive::MobpackArchive;
+#[cfg(all(feature = "mob", test))]
+use meerkat_mob_pack::pack::compute_archive_digest;
 #[cfg(feature = "mob")]
-use meerkat_mob_pack::pack::{
-    compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
-};
+use meerkat_mob_pack::pack::{inspect_archive_bytes, pack_directory_with_excludes};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
 #[cfg(feature = "mob")]
-use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
+use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_extracted_pack_trust};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
@@ -1039,7 +1039,7 @@ enum Commands {
         #[arg(long, short = 'm', help_heading = "Common options")]
         model: Option<String>,
 
-        /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
+        /// LLM provider (anthropic, openai, gemini). Inferred from the model registry when omitted.
         #[arg(
             long,
             short = 'p',
@@ -1692,11 +1692,11 @@ enum SkillsCommands {
     },
     /// Inspect a skill's full content
     Inspect {
-        /// Skill ID (e.g. "extraction/email")
-        id: String,
-        /// Load from a specific source (bypasses first-wins resolution)
+        /// Skill name (for example "email-extractor")
+        skill_name: String,
+        /// Canonical source UUID for the skill source
         #[arg(long)]
-        source: Option<String>,
+        source_uuid: String,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1792,7 +1792,11 @@ enum MobCommands {
     /// Inspect a .mobpack archive.
     Inspect { pack: PathBuf },
     /// Validate a .mobpack archive.
-    Validate { pack: PathBuf },
+    Validate {
+        pack: PathBuf,
+        #[arg(long, value_enum)]
+        trust_policy: Option<TrustPolicyArg>,
+    },
     /// Deploy a .mobpack archive with a prompt.
     Deploy {
         pack: PathBuf,
@@ -1926,6 +1930,8 @@ enum MobWebCommands {
         pack: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
+        #[arg(long, value_enum)]
+        trust_policy: Option<TrustPolicyArg>,
     },
 }
 
@@ -2216,7 +2222,7 @@ async fn handle_run_command(
 
     let model = model.unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-    let resolved_provider = resolve_cli_provider(&config, &model, provider);
+    let resolved_provider = resolve_cli_provider(&config, &model, provider)?;
 
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
@@ -3918,6 +3924,7 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
 fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static str {
     match source {
         meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        meerkat_core::CredentialSourceSpec::ManagedStore => "managed_store",
         meerkat_core::CredentialSourceSpec::Env { .. } => "env",
         meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
@@ -4525,12 +4532,12 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
 /// For ephemeral sessions: delegates to `SessionService::start_turn()` and fabricates
 /// a placeholder receipt (no snapshot, no digest).
 ///
-/// For persistent sessions: delegates to `PersistentSessionService::apply_runtime_turn_with_result()`
+/// For persistent sessions: delegates to `PersistentSessionService::apply_runtime_turn()`
 /// which exports the committed session snapshot and real receipt.
 struct CliRuntimeExecutor {
     service: Arc<dyn meerkat_core::service::SessionService>,
     /// Persistent service reference for durable boundary commits.
-    /// When `Some`, `apply()` uses `apply_runtime_turn_with_result()`.
+    /// When `Some`, `apply()` uses `apply_runtime_turn()`.
     #[cfg(feature = "session-store")]
     persistent_service:
         Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
@@ -4564,12 +4571,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
-            execution_kind: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.execution_kind),
         };
 
-        // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.
+        // Persistent path: use apply_runtime_turn for real receipt + snapshot.
         #[cfg(feature = "session-store")]
         if let Some(ref persistent) = self.persistent_service {
             let boundary = match &primitive {
@@ -4578,8 +4582,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 }
                 _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
             };
-            let (_run_result, output) = persistent
-                .apply_runtime_turn_with_result(
+            let output = persistent
+                .apply_runtime_turn(
                     &self.session_id,
                     run_id,
                     turn_req,
@@ -4925,11 +4929,12 @@ fn compose_external_tool_dispatchers(
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
         (Some(a), Some(b)) => {
-            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let primary_names: HashSet<String> =
+                a.tools().iter().map(|t| t.name.to_string()).collect();
             let secondary_tools = b.tools();
             let secondary_unique: Vec<String> = secondary_tools
                 .iter()
-                .map(|t| t.name.clone())
+                .map(|t| t.name.to_string())
                 .filter(|name| !primary_names.contains(name))
                 .collect();
 
@@ -5800,10 +5805,11 @@ async fn resume_session_with_llm_override(
             .as_ref()
             .map_or(config.agent.max_tokens_per_turn, |meta| meta.max_tokens);
 
-        let provider_core = stored_metadata
-            .as_ref()
-            .map(|meta| meta.provider)
-            .unwrap_or_else(|| resolve_cli_provider(&config, &model, None).as_core());
+        let provider_core = if let Some(meta) = stored_metadata.as_ref() {
+            meta.provider
+        } else {
+            resolve_cli_provider(&config, &model, None)?.as_core()
+        };
 
         tracing::info!(
             "Resuming session {} with {} messages (provider: {:?}, model: {})",
@@ -7336,7 +7342,42 @@ async fn handle_skills_command(
 ) -> anyhow::Result<()> {
     // Wave-c C-12: the canonical runtime identity for a skill is
     // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
-    use meerkat_core::skills::{SkillFilter, SkillKey, SkillName};
+    use meerkat_core::skills::{
+        SkillFilter, SkillIntrospectionEntry, SkillKey, SkillName, SourceUuid,
+    };
+
+    fn skill_source_provenance(
+        source_uuid: SourceUuid,
+        display_name: impl Into<String>,
+    ) -> meerkat_contracts::SkillSourceProvenance {
+        let display_name = display_name.into();
+        meerkat_contracts::SkillSourceProvenance {
+            identity: meerkat_core::skills::SourceIdentityRecord {
+                source_uuid,
+                display_name: display_name.clone(),
+                transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
+                fingerprint: format!("cli:{display_name}"),
+                status: meerkat_core::skills::SourceIdentityStatus::Active,
+            },
+        }
+    }
+
+    fn skill_entry(entry: &SkillIntrospectionEntry) -> meerkat_contracts::SkillEntry {
+        meerkat_contracts::SkillEntry {
+            key: entry.descriptor.key.clone(),
+            name: entry.descriptor.name.clone(),
+            description: entry.descriptor.description.clone(),
+            scope: entry.descriptor.scope.to_string(),
+            source: skill_source_provenance(
+                entry.descriptor.key.source_uuid.clone(),
+                entry.descriptor.source_name.clone(),
+            ),
+            is_active: entry.is_active,
+            shadowed_by: entry.shadowed_by_source_uuid.clone().map(|source_uuid| {
+                skill_source_provenance(source_uuid, entry.shadowed_by.clone().unwrap_or_default())
+            }),
+        }
+    }
 
     // Load config from the active realm (not global defaults)
     let (config, realm_root) = load_config(scope).await?;
@@ -7432,7 +7473,7 @@ async fn handle_skills_command(
         f
     };
 
-    let skill_runtime = factory.build_skill_runtime(&config).await;
+    let skill_runtime = factory.build_skill_runtime(&config).await?;
 
     let skill_runtime = match skill_runtime {
         Some(rt) => rt,
@@ -7450,22 +7491,15 @@ async fn handle_skills_command(
                 .map_err(|e| anyhow::anyhow!("Failed to list skills: {e}"))?;
 
             if json {
-                let wire: Vec<meerkat_contracts::SkillEntry> = entries
-                    .iter()
-                    .map(|e| meerkat_contracts::SkillEntry {
-                        id: e.descriptor.key.skill_name.as_str().to_owned(),
-                        name: e.descriptor.name.clone(),
-                        description: e.descriptor.description.clone(),
-                        scope: e.descriptor.scope.to_string(),
-                        source: e.descriptor.source_name.clone(),
-                        is_active: e.is_active,
-                        shadowed_by: e.shadowed_by.clone(),
-                    })
-                    .collect();
+                let wire: Vec<meerkat_contracts::SkillEntry> =
+                    entries.iter().map(skill_entry).collect();
                 println!("{}", serde_json::to_string_pretty(&wire)?);
             } else {
-                // Fixed-width table: ID, SOURCE, SCOPE, STATUS
-                println!("{:<40} {:<15} {:<10} STATUS", "ID", "SOURCE", "SCOPE");
+                // Fixed-width table: NAME, SOURCE_UUID, SCOPE, STATUS
+                println!(
+                    "{:<40} {:<36} {:<10} STATUS",
+                    "NAME", "SOURCE_UUID", "SCOPE"
+                );
                 println!("{}", "-".repeat(80));
                 for entry in &entries {
                     let status = if entry.is_active {
@@ -7477,9 +7511,9 @@ async fn handle_skills_command(
                         )
                     };
                     println!(
-                        "{:<40} {:<15} {:<10} {}",
+                        "{:<40} {:<36} {:<10} {}",
                         entry.descriptor.key.skill_name.as_str(),
-                        entry.descriptor.source_name,
+                        entry.descriptor.key.source_uuid,
                         entry.descriptor.scope,
                         status,
                     );
@@ -7487,31 +7521,37 @@ async fn handle_skills_command(
                 println!("\n{} skill(s) total", entries.len());
             }
         }
-        SkillsCommands::Inspect { id, source, json } => {
-            // Wave-c C-12: parse the user-supplied slug into a typed
-            // `SkillName` and build a builtin-source `SkillKey`. Explicit
-            // source-scoped selection comes through the `source` flag
-            // forwarded as the second arg to `load_from_source`.
-            let skill_name = SkillName::parse(id.as_str())
-                .map_err(|e| anyhow::anyhow!("invalid skill id `{id}`: {e}"))?;
-            let key = SkillKey::builtin(skill_name);
+        SkillsCommands::Inspect {
+            skill_name,
+            source_uuid,
+            json,
+        } => {
+            let skill_name = SkillName::parse(skill_name.as_str())
+                .map_err(|e| anyhow::anyhow!("invalid skill name `{skill_name}`: {e}"))?;
+            let source_uuid = SourceUuid::parse(source_uuid.as_str())
+                .map_err(|e| anyhow::anyhow!("invalid source UUID `{source_uuid}`: {e}"))?;
+            let key = SkillKey::new(source_uuid, skill_name);
             let doc = skill_runtime
-                .load_from_source(&key, source.as_deref())
+                .load_from_source(&key, None)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to inspect skill: {e}"))?;
 
             if json {
                 let wire = meerkat_contracts::SkillInspectResponse {
-                    id: doc.descriptor.key.skill_name.as_str().to_owned(),
+                    key: doc.descriptor.key.clone(),
                     name: doc.descriptor.name.clone(),
                     description: doc.descriptor.description.clone(),
                     scope: doc.descriptor.scope.to_string(),
-                    source: doc.descriptor.source_name.clone(),
+                    source: skill_source_provenance(
+                        doc.descriptor.key.source_uuid.clone(),
+                        doc.descriptor.source_name.clone(),
+                    ),
                     body: doc.body,
                 };
                 println!("{}", serde_json::to_string_pretty(&wire)?);
             } else {
-                println!("ID:          {}", doc.descriptor.key.skill_name);
+                println!("Source UUID: {}", doc.descriptor.key.source_uuid);
+                println!("Skill Name:  {}", doc.descriptor.key.skill_name);
                 println!("Name:        {}", doc.descriptor.name);
                 println!("Description: {}", doc.descriptor.description);
                 println!("Scope:       {}", doc.descriptor.scope);
@@ -8048,6 +8088,38 @@ fn render_flow_status_json(run: Option<meerkat_mob::MobRun>) -> anyhow::Result<S
 }
 
 #[cfg(feature = "mob")]
+fn helper_result_json_value(
+    mob_id: &str,
+    output: &Option<String>,
+    tokens_used: u64,
+    agent_identity: &meerkat_mob::AgentIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "output": output,
+        "tokens_used": tokens_used,
+        "agent_identity": agent_identity.as_str(),
+        "member_ref": meerkat_contracts::WireMemberRef::encode(
+            mob_id,
+            agent_identity.as_str(),
+        ),
+    })
+}
+
+#[cfg(feature = "mob")]
+fn render_helper_result_json(
+    mob_id: &str,
+    result: &meerkat_mob::HelperResult,
+) -> anyhow::Result<String> {
+    serde_json::to_string_pretty(&helper_result_json_value(
+        mob_id,
+        &result.output,
+        result.tokens_used,
+        &result.agent_identity,
+    ))
+    .map_err(|e| anyhow::anyhow!("failed to encode helper result: {e}"))
+}
+
+#[cfg(feature = "mob")]
 async fn wait_for_terminal_flow_run(
     state: &meerkat_mob_mcp::MobMcpState,
     mob_id: &str,
@@ -8100,8 +8172,11 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         return Ok(());
     }
 
-    if let MobCommands::Validate { pack } = &command {
-        println!("{}", execute_mob_validate(pack).await?);
+    if let MobCommands::Validate { pack, trust_policy } = &command {
+        println!(
+            "{}",
+            execute_mob_validate(scope, pack, *trust_policy).await?
+        );
         return Ok(());
     }
 
@@ -8144,10 +8219,18 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     }
 
     if let MobCommands::Web {
-        command: MobWebCommands::Build { pack, output },
+        command:
+            MobWebCommands::Build {
+                pack,
+                output,
+                trust_policy,
+            },
     } = &command
     {
-        println!("{}", execute_mob_web_build(pack, output).await?);
+        println!(
+            "{}",
+            execute_mob_web_build(scope, pack, output, *trust_policy).await?
+        );
         return Ok(());
     }
 
@@ -8274,15 +8357,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "output": result.output,
-                        "tokens_used": result.tokens_used,
-                        "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.binding_atoms().1.get(),
-                    }))?
-                );
+                println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
                 println!("{output}");
             }
@@ -8333,15 +8408,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "output": result.output,
-                        "tokens_used": result.tokens_used,
-                        "agent_identity": result.agent_identity.as_str(),
-                        "fence_token": result.binding_atoms().1.get(),
-                    }))?
-                );
+                println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
                 println!("{output}");
             }
@@ -8514,36 +8581,72 @@ async fn execute_mob_inspect(pack: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[cfg(feature = "mob")]
-async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> {
+struct VerifiedMobpack {
+    bytes: Vec<u8>,
+    archive: MobpackArchive,
+    digest: meerkat_mob_pack::digest::MobpackDigest,
+    trust_warnings: Vec<String>,
+}
+
+#[cfg(feature = "mob")]
+async fn load_verified_mobpack(
+    scope: &RuntimeScope,
+    pack: &std::path::Path,
+    cli_trust_policy: Option<TrustPolicyArg>,
+    action: &'static str,
+) -> anyhow::Result<VerifiedMobpack> {
     let bytes = tokio::fs::read(pack)
         .await
         .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    // Post-wave-a dogma: `validate_archive_bytes` was retired along with the
-    // web-build bypass (commit 82bb88166). The canonical structural gate is
-    // `inspect_archive_bytes`, which runs the same required-file + manifest +
-    // definition checks and additionally surfaces the file list. We discard
-    // the inspection payload here; `rkat mob validate` is the trust/structural
-    // CLI seam and only reports pass/fail + digest.
-    let _ = inspect_archive_bytes(&bytes)
-        .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
-    let digest = compute_archive_digest(&bytes)
-        .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
-    Ok(format!("valid\t{digest}"))
+    let files = extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    let archive = MobpackArchive::from_extracted_files(&files)
+        .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    let config_trust = read_config_trust_policy(scope)?;
+    let trust_policy = resolve_trust_policy(
+        cli_trust_policy,
+        |key| std::env::var(key).ok(),
+        config_trust,
+    )?;
+    let trusted_signers = load_trusted_signers(
+        &user_trust_store_path(scope),
+        &project_trust_store_path(scope),
+    )
+    .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    let trust_verification = verify_extracted_pack_trust(&files, trust_policy, &trusted_signers)
+        .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    Ok(VerifiedMobpack {
+        bytes,
+        archive,
+        digest: trust_verification.digest,
+        trust_warnings: trust_verification.warnings,
+    })
+}
+
+#[cfg(feature = "mob")]
+async fn execute_mob_validate(
+    scope: &RuntimeScope,
+    pack: &std::path::Path,
+    cli_trust_policy: Option<TrustPolicyArg>,
+) -> anyhow::Result<String> {
+    let verified =
+        load_verified_mobpack(scope, pack, cli_trust_policy, "mob validate failed").await?;
+    let mut rendered = format!("valid\t{}", verified.digest);
+    for warning in verified.trust_warnings {
+        rendered.push_str(&format!("\nwarning\t{warning}"));
+    }
+    Ok(rendered)
 }
 
 #[cfg(feature = "mob")]
 async fn execute_mob_web_build(
+    scope: &RuntimeScope,
     pack: &std::path::Path,
     output: &std::path::Path,
+    cli_trust_policy: Option<TrustPolicyArg>,
 ) -> anyhow::Result<String> {
-    let bytes = tokio::fs::read(pack)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let files =
-        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    let archive = MobpackArchive::from_extracted_files(&files)
-        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
-    if let Some(requires) = &archive.manifest.requires {
+    let verified =
+        load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
+    if let Some(requires) = &verified.archive.manifest.requires {
         for cap in &requires.capabilities {
             if matches!(cap.as_str(), "shell" | "mcp_stdio" | "process_spawn") {
                 anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
@@ -8554,12 +8657,12 @@ async fn execute_mob_web_build(
     tokio::fs::create_dir_all(output).await.map_err(|err| {
         anyhow::anyhow!("failed creating web output '{}': {err}", output.display())
     })?;
-    tokio::fs::write(output.join("mobpack.bin"), &bytes)
+    tokio::fs::write(output.join("mobpack.bin"), &verified.bytes)
         .await
         .map_err(|err| anyhow::anyhow!("failed writing mobpack.bin: {err}"))?;
     tokio::fs::write(
         output.join("manifest.web.toml"),
-        toml::to_string(&archive.manifest)
+        toml::to_string(&verified.archive.manifest)
             .map_err(|err| anyhow::anyhow!("failed encoding web manifest: {err}"))?,
     )
     .await
@@ -8580,7 +8683,11 @@ async fn execute_mob_web_build(
         .await
         .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
 
-    Ok(format!("web\t{}", output.display()))
+    let mut rendered = format!("web\t{}", output.display());
+    for warning in verified.trust_warnings {
+        rendered.push_str(&format!("\nwarning\t{warning}"));
+    }
+    Ok(rendered)
 }
 
 #[cfg(feature = "mob")]
@@ -8630,28 +8737,17 @@ async fn execute_mob_deploy_internal(
     prompt: &str,
     invocation: DeployInvocation,
 ) -> anyhow::Result<String> {
-    let bytes = tokio::fs::read(pack)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let files =
-        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let archive = MobpackArchive::from_extracted_files(&files)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let digest = compute_archive_digest(&bytes)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let config_trust = read_config_trust_policy(scope)?;
-    let trust_policy = resolve_trust_policy(
+    let VerifiedMobpack {
+        archive,
+        trust_warnings: warnings,
+        ..
+    } = load_verified_mobpack(
+        scope,
+        pack,
         invocation.cli_trust_policy,
-        |key| std::env::var(key).ok(),
-        config_trust,
-    )?;
-    let trusted_signers = load_trusted_signers(
-        &user_trust_store_path(scope),
-        &project_trust_store_path(scope),
+        "mob deploy failed",
     )
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let warnings = verify_pack_trust(&files, digest, trust_policy, &trusted_signers)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    .await?;
     validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
     let effective_config = load_deploy_config_with_pack_defaults(
@@ -8934,7 +9030,7 @@ where
         factory = factory.user_config_root(user_root);
     }
 
-    let skill_runtime = factory.build_skill_runtime(&config).await;
+    let skill_runtime = factory.build_skill_runtime(&config).await?;
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store),
         paths.root.join("config_state.json"),
@@ -9095,31 +9191,11 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Infer provider from model name prefix.
-    /// Returns None if the model name doesn't match any known pattern.
+    /// Infer provider from the built-in model catalog.
+    /// Returns None for uncatalogued models; self-hosted aliases resolve
+    /// through `Config::model_registry()` in `resolve_cli_provider`.
     pub fn infer_from_model(model: &str) -> Option<Self> {
-        let model_lower = model.to_lowercase();
-
-        // OpenAI patterns: gpt-*, o1-*, o3-*, chatgpt-*
-        if model_lower.starts_with("gpt-")
-            || model_lower.starts_with("o1-")
-            || model_lower.starts_with("o3-")
-            || model_lower.starts_with("chatgpt-")
-        {
-            return Some(Provider::Openai);
-        }
-
-        // Anthropic patterns: claude-*
-        if model_lower.starts_with("claude-") {
-            return Some(Provider::Anthropic);
-        }
-
-        // Gemini patterns: gemini-*
-        if model_lower.starts_with("gemini-") {
-            return Some(Provider::Gemini);
-        }
-
-        None
+        meerkat_core::Provider::infer_from_model(model).and_then(Provider::from_core)
     }
 
     /// Convert to string for storage in session metadata
@@ -9164,17 +9240,28 @@ impl Provider {
     }
 }
 
-fn resolve_cli_provider(config: &Config, model: &str, explicit: Option<Provider>) -> Provider {
-    explicit
-        .or_else(|| {
-            config
-                .model_registry()
-                .ok()
-                .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
-                .and_then(Provider::from_core)
-        })
+fn resolve_cli_provider(
+    config: &Config,
+    model: &str,
+    explicit: Option<Provider>,
+) -> anyhow::Result<Provider> {
+    if let Some(provider) = explicit {
+        return Ok(provider);
+    }
+
+    if let Some(provider) = config
+        .model_registry()
+        .ok()
+        .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
+        .and_then(Provider::from_core)
         .or_else(|| Provider::infer_from_model(model))
-        .unwrap_or_default()
+    {
+        return Ok(provider);
+    }
+
+    Err(anyhow::anyhow!(
+        "Cannot infer provider from model '{model}'. Use --provider or register a self-hosted model alias."
+    ))
 }
 
 #[cfg(test)]
@@ -9375,7 +9462,7 @@ mod tests {
             .expect("test-realm is a valid realm id");
         let result = completion_outcome_to_cli_runtime_turn_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                tool_name: "external_mock".to_string(),
+                tool_name: "external_mock".into(),
                 args: serde_json::json!({ "value": "browser" }),
             },
             &session_id,
@@ -9411,7 +9498,7 @@ mod tests {
     impl StaticDispatcher {
         fn new(name: &str) -> Self {
             let tool = Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -9445,7 +9532,7 @@ mod tests {
     impl EchoDispatcher {
         fn new(name: &str, content: &str) -> Self {
             let tool = Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -9500,7 +9587,11 @@ mod tests {
             &'a self,
             request: &'a LlmRequest,
         ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-            let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+            let names: Vec<String> = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
             let mut captured = self
                 .captured_tool_names
                 .lock()
@@ -9620,7 +9711,12 @@ mod tests {
             &self,
             req: CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
-            let sid = SessionId::new();
+            let sid = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default();
             let n = self
                 .counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -11074,11 +11170,17 @@ mod tests {
             Commands::Mob {
                 command:
                     MobCommands::Web {
-                        command: MobWebCommands::Build { pack, output },
+                        command:
+                            MobWebCommands::Build {
+                                pack,
+                                output,
+                                trust_policy,
+                            },
                     },
             } => {
                 assert_eq!(pack, PathBuf::from("./fixture.mobpack"));
                 assert_eq!(output, PathBuf::from("./web-out"));
+                assert_eq!(trust_policy, None);
             }
             _ => unreachable!("expected mob web build command"),
         }
@@ -11167,18 +11269,41 @@ mod tests {
     #[tokio::test]
     async fn test_mob_validate_success_and_failure_behaviors() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
         let mob_dir = create_mobpack_fixture_dir(temp.path());
         let valid_pack = temp.path().join("valid.mobpack");
         execute_mob_pack(&mob_dir, &valid_pack, None)
             .await
             .expect("pack before validate");
 
-        let ok_output = execute_mob_validate(&valid_pack)
+        let ok_output = execute_mob_validate(&scope, &valid_pack, None)
             .await
             .expect("validate should succeed");
         assert!(
             ok_output.starts_with("valid\t"),
             "validate success should report digest"
+        );
+        assert!(
+            ok_output.contains("warning\tunsigned pack accepted in permissive mode"),
+            "validate should surface trust verification warnings: {ok_output}"
+        );
+
+        let strict_err = execute_mob_validate(&scope, &valid_pack, Some(TrustPolicyArg::Strict))
+            .await
+            .expect_err("strict validate should reject unsigned packs");
+        assert!(
+            strict_err.to_string().contains("unsigned pack"),
+            "strict validate should fail through trust verification: {strict_err}"
+        );
+
+        let web_out = temp.path().join("web-out");
+        let web_err =
+            execute_mob_web_build(&scope, &valid_pack, &web_out, Some(TrustPolicyArg::Strict))
+                .await
+                .expect_err("strict web build should reject unsigned packs");
+        assert!(
+            web_err.to_string().contains("unsigned pack"),
+            "web build should share the trust verification seam: {web_err}"
         );
 
         let invalid_pack = temp.path().join("invalid.mobpack");
@@ -11192,7 +11317,7 @@ mod tests {
             .await
             .expect("write invalid archive");
 
-        let err = execute_mob_validate(&invalid_pack)
+        let err = execute_mob_validate(&scope, &invalid_pack, None)
             .await
             .expect_err("validate should fail when definition.json is missing");
         assert!(
@@ -12008,6 +12133,7 @@ capabilities = ["definitely_missing_capability"]
     #[tokio::test]
     async fn test_e2e_validate_missing_definition() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
         let invalid_pack = temp.path().join("missing-definition.mobpack");
         let archive = meerkat_mob_pack::targz::create_targz(&std::collections::BTreeMap::from([(
             "manifest.toml".to_string(),
@@ -12018,7 +12144,7 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("write archive");
 
-        let err = execute_mob_validate(&invalid_pack)
+        let err = execute_mob_validate(&scope, &invalid_pack, None)
             .await
             .expect_err("validate should reject missing definition");
         assert!(
@@ -12185,7 +12311,7 @@ capabilities = ["definitely_missing_capability"]
             .expect("compose should succeed")
             .expect("merged dispatcher should be present");
         let names: std::collections::BTreeSet<String> =
-            merged.tools().iter().map(|t| t.name.clone()).collect();
+            merged.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains("alpha_tool"));
         assert!(names.contains("beta_tool"));
     }
@@ -12199,8 +12325,11 @@ capabilities = ["definitely_missing_capability"]
         let composed = compose_external_tool_dispatchers(None, Some(mob_dispatcher))
             .expect("compose should succeed")
             .expect("mob dispatcher should be present");
-        let names: std::collections::BTreeSet<String> =
-            composed.tools().iter().map(|t| t.name.clone()).collect();
+        let names: std::collections::BTreeSet<String> = composed
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
         assert!(names.contains("mob_create"));
         assert!(names.contains("mob_spawn_member"));
     }
@@ -12215,7 +12344,7 @@ capabilities = ["definitely_missing_capability"]
             .expect("compose should succeed")
             .expect("merged dispatcher should be present");
 
-        let names: Vec<String> = merged.tools().iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = merged.tools().iter().map(|t| t.name.to_string()).collect();
         assert_eq!(names, vec!["mob_list".to_string()]);
 
         let args =
@@ -12390,6 +12519,29 @@ capabilities = ["definitely_missing_capability"]
             out.result.text_content()
         );
         serde_json::from_str(&out.result.text_content()).expect("tool content should be valid json")
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_helper_json_uses_member_ref_not_binding_atoms() {
+        let identity = meerkat_mob::AgentIdentity::from("helper-json");
+        let output = Some("done".to_string());
+        let value = helper_result_json_value("mob-json", &output, 7, &identity);
+
+        assert_eq!(value["agent_identity"], "helper-json");
+        assert_eq!(value["tokens_used"], 7);
+        assert_eq!(value["output"], "done");
+        assert!(value.get("agent_runtime_id").is_none());
+        assert!(value.get("fence_token").is_none());
+        let member_ref = value["member_ref"]
+            .as_str()
+            .expect("helper json should include member_ref");
+        let member_ref: meerkat_contracts::WireMemberRef =
+            serde_json::from_value(serde_json::Value::String(member_ref.to_string()))
+                .expect("member_ref should deserialize");
+        let (mob_id, member_id) = member_ref.decode().expect("member_ref should decode");
+        assert_eq!(mob_id, "mob-json");
+        assert_eq!(member_id, "helper-json");
     }
 
     #[cfg(feature = "mob")]
@@ -12640,81 +12792,62 @@ capabilities = ["definitely_missing_capability"]
     #[test]
     fn test_infer_provider_anthropic() {
         assert_eq!(
-            Provider::infer_from_model("claude-3-opus"),
+            Provider::infer_from_model("claude-opus-4-7"),
             Some(Provider::Anthropic)
         );
         assert_eq!(
-            Provider::infer_from_model("claude-sonnet-4"),
+            Provider::infer_from_model("claude-sonnet-4-6"),
             Some(Provider::Anthropic)
         );
         assert_eq!(
-            Provider::infer_from_model("claude-sonnet-4-20250514"),
+            Provider::infer_from_model("claude-haiku-4-5-20251001"),
             Some(Provider::Anthropic)
         );
         assert_eq!(
-            Provider::infer_from_model("claude-opus-4-5"),
+            Provider::infer_from_model("claude-haiku-4-5"),
             Some(Provider::Anthropic)
         );
-        assert_eq!(
-            Provider::infer_from_model("Claude-3-Opus"),
-            Some(Provider::Anthropic)
-        ); // case insensitive
+        assert_eq!(Provider::infer_from_model("Claude-3-Opus"), None);
     }
 
     #[test]
     fn test_infer_provider_openai() {
-        assert_eq!(Provider::infer_from_model("gpt-4"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("gpt-4o"), Some(Provider::Openai));
         assert_eq!(
-            Provider::infer_from_model("gpt-4-turbo"),
+            Provider::infer_from_model("gpt-5.5"),
             Some(Provider::Openai)
         );
         assert_eq!(
-            Provider::infer_from_model("gpt-5.2"),
+            Provider::infer_from_model("gpt-5.4"),
             Some(Provider::Openai)
         );
         assert_eq!(
-            Provider::infer_from_model("o1-preview"),
+            Provider::infer_from_model("gpt-5.3-codex"),
             Some(Provider::Openai)
         );
         assert_eq!(
-            Provider::infer_from_model("o1-mini"),
+            Provider::infer_from_model("gpt-realtime"),
             Some(Provider::Openai)
         );
-        assert_eq!(
-            Provider::infer_from_model("o3-mini"),
-            Some(Provider::Openai)
-        );
-        assert_eq!(
-            Provider::infer_from_model("chatgpt-4o-latest"),
-            Some(Provider::Openai)
-        );
-        assert_eq!(Provider::infer_from_model("GPT-4"), Some(Provider::Openai));
-        // case insensitive
+        assert_eq!(Provider::infer_from_model("gpt-4"), None);
+        assert_eq!(Provider::infer_from_model("GPT-4"), None);
     }
 
     #[test]
     fn test_infer_provider_gemini() {
         assert_eq!(
-            Provider::infer_from_model("gemini-pro"),
+            Provider::infer_from_model("gemini-3-flash-preview"),
             Some(Provider::Gemini)
         );
         assert_eq!(
-            Provider::infer_from_model("gemini-1.5-pro"),
+            Provider::infer_from_model("gemini-3.1-pro-preview"),
             Some(Provider::Gemini)
         );
         assert_eq!(
-            Provider::infer_from_model("gemini-2.0-flash"),
+            Provider::infer_from_model("gemini-3.1-flash-lite-preview"),
             Some(Provider::Gemini)
         );
-        assert_eq!(
-            Provider::infer_from_model("gemini-2.0-flash-exp"),
-            Some(Provider::Gemini)
-        );
-        assert_eq!(
-            Provider::infer_from_model("Gemini-Pro"),
-            Some(Provider::Gemini)
-        ); // case insensitive
+        assert_eq!(Provider::infer_from_model("gemini-pro"), None);
+        assert_eq!(Provider::infer_from_model("Gemini-Pro"), None);
     }
 
     #[test]
@@ -12755,9 +12888,17 @@ supports_reasoning = true
             .expect("valid self-hosted config");
 
         assert_eq!(
-            resolve_cli_provider(&config, "gemma-4-e2b", None),
+            resolve_cli_provider(&config, "gemma-4-e2b", None).expect("self-hosted alias resolves"),
             Provider::SelfHosted
         );
+    }
+
+    #[test]
+    fn test_resolve_cli_provider_rejects_uncatalogued_model_without_provider() {
+        let config = Config::default();
+        let error = resolve_cli_provider(&config, "gpt-4", None)
+            .expect_err("uncatalogued model must not silently choose a provider");
+        assert!(error.to_string().contains("Cannot infer provider"));
     }
 
     #[cfg(feature = "comms")]

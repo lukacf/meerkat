@@ -53,6 +53,7 @@ fn build_app() -> axum::Router {
         .builtins(false)
         .shell(false)
         .project_root(project_root.clone());
+    let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence =
@@ -122,6 +123,7 @@ fn build_app() -> axum::Router {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_registry,
         realtime_rpc_tcp_addr: None,
     };
 

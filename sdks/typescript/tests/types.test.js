@@ -1250,27 +1250,16 @@ describe("Mob kickoff wait wrappers", () => {
       timeout_ms: 99,
     });
     assert.equal(direct[0].agentIdentity, "lead");
-    assert.equal(direct[0].agentRuntimeId, encodeLeadRef());
-    assert.equal(direct[0].fenceToken, 1);
+    assert.equal(direct[0].agentRuntimeId, undefined);
+    assert.equal(direct[0].fenceToken, undefined);
     assert.equal(direct[0].tokensUsed, 42);
     assert.equal(direct[0].status, "active");
     assert.equal(legacy[0].agentIdentity, "lead");
-    assert.equal(legacy[0].agentRuntimeId, encodeLeadRef());
+    assert.equal(legacy[0].agentRuntimeId, undefined);
     assert.equal(fromHandle[0].agentIdentity, "lead");
-    assert.equal(fromHandle[0].agentRuntimeId, encodeLeadRef());
+    assert.equal(fromHandle[0].agentRuntimeId, undefined);
   });
 });
-
-function encodeLeadRef() {
-  // Opaque AgentRuntimeRef for {identity:"lead", generation:1}. Matches
-  // `encodeAgentRuntimeRef` in the SDK.
-  const payload = JSON.stringify({ i: "lead", g: 1 });
-  return Buffer.from(payload, "utf-8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
 
 describe("Mob ready wait wrappers", () => {
   it("waitMobReady/wait_mob_ready/mob.waitForReady preserve canonical call shape", async () => {

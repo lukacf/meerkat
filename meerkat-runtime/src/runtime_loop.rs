@@ -7,69 +7,19 @@
 //! under the hood).
 
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
-use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
-    RunApplyBoundary, RunPrimitive, StagedRunInput,
-};
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
 use meerkat_core::lifecycle::{InputId, RunId};
 
-use crate::input::{Input, peer_block_prefix_text, peer_projection, peer_prompt_text};
+#[cfg(test)]
+use crate::input::input_prompt_text;
+use crate::input::{Input, runtime_input_projection};
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
+#[cfg(test)]
 pub(crate) fn input_to_prompt(input: &Input) -> String {
-    match input {
-        Input::Prompt(p) => p.text.clone(),
-        Input::Peer(p) => peer_prompt_text(p),
-        Input::FlowStep(f) => f.instructions.clone(),
-        Input::ExternalEvent(e) => external_event_projection_text(e),
-        Input::Continuation(c) => format!("[Continuation] {}", c.reason),
-        Input::Operation(operation) => {
-            format!(
-                "[Operation {}] {:?}",
-                operation.operation_id, operation.event
-            )
-        }
-    }
-}
-
-fn input_boundary(input: &Input) -> RunApplyBoundary {
-    match input {
-        Input::Peer(peer)
-            if matches!(
-                peer.convention,
-                Some(crate::input::PeerConvention::ResponseProgress { .. })
-            ) =>
-        {
-            RunApplyBoundary::RunCheckpoint
-        }
-        Input::Continuation(continuation) => match continuation.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => RunApplyBoundary::RunStart,
-            meerkat_core::types::HandlingMode::Steer => RunApplyBoundary::RunCheckpoint,
-        },
-        Input::Prompt(prompt) => {
-            match prompt.turn_metadata.as_ref().and_then(|m| m.handling_mode) {
-                Some(meerkat_core::types::HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
-                _ => RunApplyBoundary::RunStart,
-            }
-        }
-        Input::FlowStep(flow_step) => {
-            match flow_step
-                .turn_metadata
-                .as_ref()
-                .and_then(|m| m.handling_mode)
-            {
-                Some(meerkat_core::types::HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
-                _ => RunApplyBoundary::RunStart,
-            }
-        }
-        Input::ExternalEvent(event) => match event.handling_mode {
-            meerkat_core::types::HandlingMode::Steer => RunApplyBoundary::RunCheckpoint,
-            meerkat_core::types::HandlingMode::Queue => RunApplyBoundary::RunStart,
-        },
-        _ => RunApplyBoundary::RunStart,
-    }
+    input_prompt_text(input)
 }
 
 /// Canonical runtime-side constructor for [`RuntimeTurnMetadata`].
@@ -258,114 +208,31 @@ async fn prepare_turn_state_for_primitive(
         })
 }
 
-fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
-    let source_name = match &event.header.source {
-        crate::input::InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
-            source_name.as_str()
-        }
-        _ => event.event_type.as_str(),
-    };
-    let body = event
-        .payload
-        .get("body")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim);
-
-    meerkat_core::interaction::format_external_event_projection(source_name, body)
-}
-
-/// Convert an `Input` into a `ConversationAppend` on the `User` role,
-/// or `None` if the input contributes no user-visible append. The
-/// main exclusion is `ResponseTerminal` peer inputs — those land on
-/// the typed context-append path (`input_to_context_append`) so the
-/// LLM sees them as system context, not as a fresh user turn.
-fn input_to_append(input: &Input) -> Option<ConversationAppend> {
-    if matches!(
-        input,
-        Input::Peer(crate::input::PeerInput {
-            convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
-            ..
-        })
-    ) {
-        return None;
-    }
-
-    let content = match input {
-        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: p.blocks.clone().unwrap_or_default(),
-        },
-        Input::Peer(p) if p.blocks.is_some() => {
-            let raw_blocks = p.blocks.clone().unwrap_or_default();
-            if let Some(prefix) = peer_block_prefix_text(p) {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
-                blocks.extend(raw_blocks);
-                CoreRenderable::Blocks { blocks }
-            } else {
-                // Non-peer-identified peer inputs: keep the body-as-prefix
-                // fallback that predated the typed peer projection; the
-                // projection seam is limited to conventioned peer-origin
-                // inputs. Empty or already-embedded body is a no-op.
-                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
-                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
-                });
-                if p.body.is_empty() || body_already_in_blocks {
-                    CoreRenderable::Blocks { blocks: raw_blocks }
-                } else {
-                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                        text: p.body.clone(),
-                    }];
-                    blocks.extend(raw_blocks);
-                    CoreRenderable::Blocks { blocks }
-                }
-            }
-        }
-        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: f.blocks.clone().unwrap_or_default(),
-        },
-        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: e.blocks.clone().unwrap_or_default(),
-        },
-        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
-            CoreRenderable::Text {
-                text: input_to_prompt(input),
-            }
-        }
-        Input::Continuation(_) | Input::Operation(_) => return None,
-    };
-
-    Some(ConversationAppend {
-        role: ConversationAppendRole::User,
-        content,
-    })
-}
-
-/// Convert an `Input` into a `ConversationContextAppend` when the
-/// input is a peer `ResponseTerminal` (the only current context-append
-/// shape). The context key and rendered text are both owned by the
-/// core projection; the runtime-loop shell only maps from the typed
-/// projection into the core-renderable payload.
-fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let projection = peer_projection(input)?;
-
-    Some(ConversationContextAppend {
-        key: projection.context_key()?,
-        content: CoreRenderable::Text {
-            text: projection.prompt_text(),
-        },
-    })
-}
-
 pub(crate) fn try_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
+    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
-    let appends = inputs
+    let projections = inputs
         .iter()
-        .filter_map(|(_, input)| input_to_append(input))
+        .map(|(_, input)| runtime_input_projection(input))
         .collect::<Vec<_>>();
-    let context_appends = inputs
+    try_projected_inputs_to_primitive_with_boundary(inputs, &projections, boundary, execution_kind)
+}
+
+pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
+    inputs: &[(InputId, Input)],
+    projections: &[crate::ingress_types::RuntimeInputProjection],
+    boundary: RunApplyBoundary,
+    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    let appends = projections
         .iter()
-        .filter_map(|(_, input)| input_to_context_append(input))
+        .filter_map(|projection| projection.append.clone())
+        .collect::<Vec<_>>();
+    let context_appends = projections
+        .iter()
+        .filter_map(|projection| projection.context_append.clone())
         .collect::<Vec<_>>();
     let contributing_input_ids = inputs
         .iter()
@@ -375,19 +242,6 @@ pub(crate) fn try_inputs_to_primitive_with_boundary(
     // Scalar conflicts are typed errors; collection fields accumulate.
     let turn_metadata = merge_batch_turn_metadata(inputs)?;
 
-    // Derive typed execution intent from the full batch.
-    // If ANY input is ContentTurn, the whole batch is ContentTurn (safe default).
-    // Only a fully-homogeneous ResumePending batch becomes ResumePending.
-    let execution_kind = if inputs.is_empty() {
-        None
-    } else if inputs.iter().all(|(_, input)| {
-        crate::input::classify_execution_kind(input)
-            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
-    }) {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
-    } else {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
-    };
     let turn_metadata = {
         let mut meta = turn_metadata.unwrap_or_default();
         meta.execution_kind = execution_kind;
@@ -407,7 +261,8 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
-    try_inputs_to_primitive_with_boundary(inputs, boundary)
+    let execution_kind = fallback_batch_execution_kind(inputs);
+    try_inputs_to_primitive_with_boundary(inputs, boundary, execution_kind)
 }
 
 pub(crate) fn inputs_to_primitive(
@@ -415,9 +270,30 @@ pub(crate) fn inputs_to_primitive(
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let boundary = inputs
         .first()
-        .map(|(_, input)| input_boundary(input))
+        .map(|(_, input)| fallback_unadmitted_semantics(input).boundary)
         .unwrap_or(RunApplyBoundary::RunStart);
     inputs_to_primitive_with_boundary(inputs, boundary)
+}
+
+fn fallback_unadmitted_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
+    let policy = crate::policy_table::DefaultPolicyTable::resolve(input, true);
+    crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind())
+}
+
+fn fallback_batch_execution_kind(
+    inputs: &[(InputId, Input)],
+) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
+    if inputs.is_empty() {
+        return None;
+    }
+    if inputs.iter().all(|(_, input)| {
+        fallback_unadmitted_semantics(input).execution_kind
+            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
+    }) {
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+    } else {
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+    }
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
@@ -758,7 +634,16 @@ async fn process_queue(
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())
                 .collect::<Vec<_>>();
-            let primitive = try_inputs_to_primitive_with_boundary(&staged_inputs, boundary);
+            let execution_kind =
+                crate::meerkat_machine::machine_batch_execution_kind(&d, &staged_ids);
+            let projections =
+                crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_ids);
+            let primitive = try_projected_inputs_to_primitive_with_boundary(
+                &staged_inputs,
+                &projections,
+                boundary,
+                execution_kind,
+            );
             Some((contributing_input_ids, staged_ids, run_id, primitive))
         };
 
@@ -909,6 +794,7 @@ mod tests {
     use super::*;
     use crate::input::*;
     use chrono::Utc;
+    use meerkat_core::lifecycle::run_primitive::{ConversationAppendRole, CoreRenderable};
     use std::sync::Arc;
 
     use meerkat_core::ops_lifecycle::{
@@ -1288,8 +1174,6 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-
-        assert_eq!(input_boundary(&input), RunApplyBoundary::RunStart);
 
         let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
             .expect("single input metadata cannot conflict");
@@ -2000,8 +1884,12 @@ mod tests {
         }
         let inputs = vec![(first.id().clone(), first), (second.id().clone(), second)];
 
-        let err = try_inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunStart)
-            .expect_err("conflicting batch metadata should be rejected");
+        let err = try_inputs_to_primitive_with_boundary(
+            &inputs,
+            RunApplyBoundary::RunStart,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+        )
+        .expect_err("conflicting batch metadata should be rejected");
 
         assert_eq!(err.field, "model");
     }

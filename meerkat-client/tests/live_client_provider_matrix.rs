@@ -168,7 +168,7 @@ async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
-        name: "get_weather".to_string(),
+        name: "get_weather".into(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
         provenance: None,
@@ -463,7 +463,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
-        name: "get_weather".to_string(),
+        name: "get_weather".into(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
         provenance: None,
@@ -543,7 +543,7 @@ async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
-        name: "get_weather".to_string(),
+        name: "get_weather".into(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
         provenance: None,

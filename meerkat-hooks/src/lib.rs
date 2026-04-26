@@ -33,12 +33,13 @@ inventory::submit! {
 
 use chrono::Utc;
 use futures::StreamExt;
+use meerkat_core::config::HookInProcessRuntimeConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
     HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HookRuntimeKind,
-    HooksConfig,
+    HooksConfig, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -54,6 +55,8 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
+pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
+
 /// Response returned by runtime adapters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -62,11 +65,6 @@ pub struct RuntimeHookResponse {
     pub decision: Option<HookDecision>,
     #[serde(default)]
     pub patches: Vec<HookPatch>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct InProcessRuntimeConfig {
-    name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +96,67 @@ type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, Str
 
 pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HookPatchDeliveryTarget {
+    session_id: SessionId,
+}
+
+impl HookPatchDeliveryTarget {
+    pub fn for_session(session_id: SessionId) -> Self {
+        Self { session_id }
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeliveredHookPatch {
+    target: HookPatchDeliveryTarget,
+    envelope: HookPatchEnvelope,
+}
+
+#[derive(Debug, Clone)]
+struct LocalHookPatchDelivery {
+    queue: Arc<Mutex<Vec<DeliveredHookPatch>>>,
+}
+
+impl LocalHookPatchDelivery {
+    fn new() -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn publish(&self, target: HookPatchDeliveryTarget, patches: Vec<HookPatchEnvelope>) {
+        if patches.is_empty() {
+            return;
+        }
+
+        let mut guard = self.queue.lock().await;
+        guard.extend(patches.into_iter().map(|envelope| DeliveredHookPatch {
+            target: target.clone(),
+            envelope,
+        }));
+    }
+
+    async fn drain(&self, target: &HookPatchDeliveryTarget) -> Vec<HookPatchEnvelope> {
+        let mut guard = self.queue.lock().await;
+        let mut remaining = Vec::new();
+        let mut drained = Vec::new();
+        for published in guard.drain(..) {
+            if &published.target == target {
+                drained.push(published.envelope);
+            } else {
+                remaining.push(published);
+            }
+        }
+        *guard = remaining;
+        drained
+    }
+}
+
 /// Deterministic hook engine used by all control surfaces.
 #[derive(Clone)]
 pub struct DefaultHookEngine {
@@ -105,8 +164,9 @@ pub struct DefaultHookEngine {
     base_entries: Arc<Vec<HookEntryConfig>>,
     base_validation_error: Option<String>,
     http_client: Arc<OnceLock<reqwest::Client>>,
-    in_process_handlers: Arc<std::sync::RwLock<HashMap<String, InProcessHookHandler>>>,
-    published_patches: Arc<Mutex<Vec<HookPatchEnvelope>>>,
+    in_process_handlers:
+        Arc<std::sync::RwLock<HashMap<InProcessHookHandlerId, InProcessHookHandler>>>,
+    background_patch_delivery: LocalHookPatchDelivery,
     background_slots: Arc<Semaphore>,
     revision: Arc<AtomicU64>,
 }
@@ -126,7 +186,7 @@ impl DefaultHookEngine {
             base_validation_error,
             http_client: Arc::new(OnceLock::new()),
             in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            published_patches: Arc::new(Mutex::new(Vec::new())),
+            background_patch_delivery: LocalHookPatchDelivery::new(),
             background_slots: Arc::new(Semaphore::new(background_max_concurrency)),
             revision: Arc::new(AtomicU64::new(1)),
         }
@@ -134,7 +194,7 @@ impl DefaultHookEngine {
 
     pub fn with_in_process_handler(
         self,
-        name: impl Into<String>,
+        name: impl Into<InProcessHookHandlerId>,
         handler: InProcessHookHandler,
     ) -> Self {
         let next = self;
@@ -152,7 +212,7 @@ impl DefaultHookEngine {
 
     pub async fn register_in_process_handler(
         &self,
-        name: impl Into<String>,
+        name: impl Into<InProcessHookHandlerId>,
         handler: InProcessHookHandler,
     ) {
         match self.in_process_handlers.write() {
@@ -233,17 +293,22 @@ impl DefaultHookEngine {
         Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()))
     }
 
-    async fn drain_published_patches(&self) -> Vec<HookPatchEnvelope> {
-        let mut guard = self.published_patches.lock().await;
-        std::mem::take(&mut *guard)
+    async fn drain_published_patches_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<HookPatchEnvelope> {
+        let target = HookPatchDeliveryTarget::for_session(session_id.clone());
+        self.background_patch_delivery.drain(&target).await
     }
 
-    async fn publish_patches(&self, patches: Vec<HookPatchEnvelope>) {
-        if patches.is_empty() {
-            return;
-        }
-        let mut guard = self.published_patches.lock().await;
-        guard.extend(patches);
+    async fn publish_patches(
+        &self,
+        target: HookPatchDeliveryTarget,
+        patches: Vec<HookPatchEnvelope>,
+    ) {
+        self.background_patch_delivery
+            .publish(target, patches)
+            .await;
     }
 
     fn validate_entry(entry: &HookEntryConfig) -> Result<(), HookEngineError> {
@@ -381,12 +446,16 @@ impl DefaultHookEngine {
 
         match entry.runtime.kind {
             HookRuntimeKind::InProcess => {
-                let cfg: InProcessRuntimeConfig =
-                    serde_json::from_value(runtime_config).map_err(|err| {
-                        HookEngineError::ExecutionFailed {
-                            hook_id: entry.id.clone(),
-                            reason: format!("invalid in_process runtime config: {err}"),
-                        }
+                let cfg: HookInProcessRuntimeConfig = entry
+                    .runtime
+                    .in_process_config()
+                    .map_err(|err| HookEngineError::ExecutionFailed {
+                        hook_id: entry.id.clone(),
+                        reason: format!("invalid in_process runtime config: {err}"),
+                    })?
+                    .ok_or_else(|| HookEngineError::ExecutionFailed {
+                        hook_id: entry.id.clone(),
+                        reason: "runtime kind is not in_process".to_string(),
                     })?;
                 let handler = {
                     let handlers = self.in_process_handlers.read().map_err(|err| {
@@ -395,10 +464,10 @@ impl DefaultHookEngine {
                             reason: format!("in-process handler lock poisoned: {err}"),
                         }
                     })?;
-                    handlers.get(&cfg.name).cloned().ok_or_else(|| {
+                    handlers.get(&cfg.handler).cloned().ok_or_else(|| {
                         HookEngineError::ExecutionFailed {
                             hook_id: entry.id.clone(),
-                            reason: format!("in-process handler '{}' not registered", cfg.name),
+                            reason: format!("in-process handler '{}' not registered", cfg.handler),
                         }
                     })?
                 };
@@ -686,9 +755,7 @@ impl HookEngine for DefaultHookEngine {
             .collect::<Vec<_>>();
 
         if entries.is_empty() {
-            let mut report = HookExecutionReport::empty();
-            report.published_patches = self.drain_published_patches().await;
-            return Ok(report);
+            return Ok(HookExecutionReport::empty());
         }
 
         let mut foreground = Vec::new();
@@ -748,6 +815,8 @@ impl HookEngine for DefaultHookEngine {
                 let invocation_cloned = invocation.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let delivery_target =
+                        HookPatchDeliveryTarget::for_session(invocation_cloned.session_id.clone());
                     let outcome = engine
                         .execute_one(entry, registration_index, invocation_cloned)
                         .await;
@@ -760,14 +829,22 @@ impl HookEngine for DefaultHookEngine {
                         );
                     }
                     if !outcome.published_patches.is_empty() {
-                        engine.publish_patches(outcome.published_patches).await;
+                        engine
+                            .publish_patches(delivery_target, outcome.published_patches)
+                            .await;
                     }
                 });
             }
         }
-        merged.published_patches = self.drain_published_patches().await;
 
         Ok(merged)
+    }
+
+    async fn drain_published_patches(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
+        Ok(self.drain_published_patches_for_session(session_id).await)
     }
 }
 
@@ -803,11 +880,19 @@ mod tests {
     }
 
     fn runtime_in_process(name: &str) -> HookRuntimeConfig {
-        HookRuntimeConfig::new(
-            HookRuntimeKind::InProcess,
-            Some(serde_json::json!({"name": name})),
-        )
-        .unwrap_or_default()
+        HookRuntimeConfig::in_process(name).unwrap_or_default()
+    }
+
+    #[test]
+    fn in_process_handler_id_preserves_string_wire_shape() {
+        let id: InProcessHookHandlerId = serde_json::from_value(serde_json::json!("handler-a"))
+            .expect("handler id should deserialize from string");
+
+        assert_eq!(id.as_str(), "handler-a");
+        assert_eq!(
+            serde_json::to_value(&id).expect("handler id should serialize"),
+            serde_json::json!("handler-a")
+        );
     }
 
     #[tokio::test]
@@ -866,7 +951,10 @@ mod tests {
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
@@ -924,7 +1012,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -965,13 +1056,17 @@ mod tests {
             )
             .await;
 
+        let session_id = SessionId::new();
         let first = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PostToolExecution,
-                    session_id: SessionId::new(),
+                    session_id: session_id.clone(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -990,26 +1085,73 @@ mod tests {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let follow_up = engine
-                .execute(
-                    HookInvocation {
-                        point: HookPoint::TurnBoundary,
-                        session_id: SessionId::new(),
-                        turn_number: Some(1),
-                        prompt: None,
-                        error: None,
-                        llm_request: None,
-                        llm_response: None,
-                        tool_call: None,
-                        tool_result: None,
-                    },
-                    None,
-                )
-                .await
-                .unwrap();
-            published.extend(follow_up.published_patches);
+            published.extend(engine.drain_published_patches(&session_id).await.unwrap());
         }
         assert_eq!(published.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_patches_are_drained_by_session() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("hook-post-bg-session"),
+            point: HookPoint::PostToolExecution,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Observe,
+            runtime: runtime_in_process("post-bg-session"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        engine
+            .register_in_process_handler(
+                "post-bg-session",
+                static_handler(RuntimeHookResponse {
+                    decision: None,
+                    patches: vec![HookPatch::ToolResult {
+                        content: "patched".to_string(),
+                        is_error: Some(false),
+                    }],
+                }),
+            )
+            .await;
+
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PostToolExecution,
+                    session_id: session_a.clone(),
+                    turn_number: Some(1),
+                    prompt_input: None,
+                    prompt: None,
+                    error_report: None,
+                    error_class: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut drained_b = Vec::new();
+        let mut drained_a = Vec::new();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drained_b.extend(engine.drain_published_patches(&session_b).await.unwrap());
+            drained_a.extend(engine.drain_published_patches(&session_a).await.unwrap());
+            if !drained_a.is_empty() {
+                break;
+            }
+        }
+
+        assert!(drained_b.is_empty());
+        assert_eq!(drained_a.len(), 1);
     }
 
     #[tokio::test]
@@ -1074,7 +1216,10 @@ mod tests {
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
@@ -1120,7 +1265,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1155,7 +1303,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1238,7 +1389,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1274,7 +1428,10 @@ mod tests {
                     point: HookPoint::RunStarted,
                     session_id: SessionId::new(),
                     turn_number: Some(0),
+                    prompt_input: None,
                     prompt: Some("hi".to_string()),
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1308,7 +1465,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1345,7 +1505,10 @@ mod tests {
                     point: HookPoint::PostToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1385,7 +1548,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -1459,7 +1625,10 @@ mod tests {
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
+                    prompt_input: None,
                     prompt: None,
+                    error_report: None,
+                    error_class: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,

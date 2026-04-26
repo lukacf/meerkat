@@ -81,6 +81,20 @@ impl HarnessRuntimeStore {
         }
     }
 
+    fn failing_lifecycle_commit() -> Self {
+        Self {
+            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
+            fail_atomic_apply: false,
+            // Session registration/recovery performs the first lifecycle
+            // commit. Let that seed succeed, then fail the command commit.
+            fail_atomic_lifecycle_commit_after: Some(1),
+            atomic_lifecycle_commit_calls: AtomicUsize::new(0),
+            load_input_states_delay: Duration::ZERO,
+            fail_persist_input_state_after: None,
+            persist_input_state_calls: AtomicUsize::new(0),
+        }
+    }
+
     fn failing_terminal_snapshot() -> Self {
         Self {
             inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
@@ -289,6 +303,41 @@ async fn persistent_adapter_accept() {
     let input = make_prompt("hello");
     let outcome = adapter.accept_input(&sid, input).await.unwrap();
     assert!(outcome.is_accepted());
+}
+
+#[tokio::test]
+async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
+    let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+
+    let input = make_prompt("retire rollback");
+    let input_id = input.id().clone();
+    adapter
+        .accept_input_without_wake(&sid, input)
+        .await
+        .expect("input admission should succeed before lifecycle failure");
+
+    let err = meerkat_runtime::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
+        .await
+        .expect_err("retire should surface lifecycle commit failure");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "failed retire must restore the session DSL phase",
+    );
+    assert_eq!(
+        adapter.list_active_inputs(&sid).await.unwrap(),
+        vec![input_id],
+        "failed retire must restore active input projection",
+    );
 }
 
 #[tokio::test]

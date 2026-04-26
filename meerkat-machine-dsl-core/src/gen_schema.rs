@@ -130,6 +130,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                         variants: vec![#(#input_variants),*],
                     },
                     surface_only_inputs: vec![#(#surface_only_ids),*],
+                    runtime_internal_inputs: vec![],
                     signals: EnumSchema {
                         name: #signal_name.into(),
                         variants: vec![#(#signal_variants),*],

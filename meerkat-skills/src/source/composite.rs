@@ -4,15 +4,29 @@ use crate::source::SourceNode;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
     SkillIntrospectionEntry, SkillKey, SkillQuarantineDiagnostic, SkillSource,
-    SourceHealthSnapshot, SourceHealthState, SourceUuid, apply_filter,
+    SourceHealthSnapshot, SourceHealthState, SourceIdentityRecord, SourceIdentityStatus,
+    SourceTransportKind, SourceUuid, apply_filter,
 };
 use std::collections::HashMap;
 
 /// A named skill source for provenance tracking.
 pub struct NamedSource {
-    pub name: String,
-    pub source_uuid: SourceUuid,
+    pub identity: SourceIdentityRecord,
     pub source: SourceNode,
+}
+
+impl NamedSource {
+    pub fn new(identity: SourceIdentityRecord, source: SourceNode) -> Self {
+        Self { identity, source }
+    }
+
+    fn display_name(&self) -> &str {
+        &self.identity.display_name
+    }
+
+    fn source_uuid(&self) -> &SourceUuid {
+        &self.identity.source_uuid
+    }
 }
 
 /// Merges skills from multiple named sources with precedence.
@@ -35,8 +49,13 @@ impl CompositeSkillSource {
             .into_iter()
             .enumerate()
             .map(|(i, source)| NamedSource {
-                name: format!("source_{i}"),
-                source_uuid: SourceUuid::builtin(),
+                identity: SourceIdentityRecord {
+                    source_uuid: SourceUuid::builtin(),
+                    display_name: format!("source_{i}"),
+                    transport_kind: SourceTransportKind::Embedded,
+                    fingerprint: format!("legacy:source_{i}"),
+                    status: SourceIdentityStatus::Active,
+                },
                 source,
             })
             .collect();
@@ -55,7 +74,7 @@ impl SkillSource for CompositeSkillSource {
                     continue;
                 }
                 seen.insert(desc.key.clone(), merged.len());
-                desc.source_name = named.name.clone();
+                desc.source_name = named.display_name().to_string();
                 merged.push(desc);
             }
         }
@@ -66,7 +85,7 @@ impl SkillSource for CompositeSkillSource {
         for named in &self.sources {
             match named.source.load(key).await {
                 Ok(mut doc) => {
-                    doc.descriptor.source_name = named.name.clone();
+                    doc.descriptor.source_name = named.display_name().to_string();
                     return Ok(doc);
                 }
                 Err(SkillError::NotFound { .. }) => continue,
@@ -81,7 +100,7 @@ impl SkillSource for CompositeSkillSource {
         for named in &self.sources {
             let mut diagnostics = named.source.quarantined_diagnostics().await?;
             for diag in &mut diagnostics {
-                diag.location = format!("{}:{}", named.name, diag.location);
+                diag.location = format!("{}:{}", named.display_name(), diag.location);
             }
             all.extend(diagnostics);
         }
@@ -165,28 +184,27 @@ impl SkillSource for CompositeSkillSource {
         filter: &SkillFilter,
     ) -> Result<Vec<SkillIntrospectionEntry>, SkillError> {
         let mut entries: Vec<SkillIntrospectionEntry> = Vec::new();
-        let mut active_by_key: HashMap<SkillKey, (String, SourceUuid)> = HashMap::new();
+        let mut active_by_key: HashMap<SkillKey, SourceIdentityRecord> = HashMap::new();
 
         for named in &self.sources {
             let items = named.source.list(filter).await?;
             for mut desc in items {
-                desc.source_name = named.name.clone();
+                desc.source_name = named.display_name().to_string();
                 let (is_active, shadowed_by) = match active_by_key.get(&desc.key) {
-                    Some((active_source, active_uuid)) => {
-                        (false, Some((active_source.clone(), active_uuid.clone())))
-                    }
+                    Some(active_source) => (false, Some(active_source.clone())),
                     None => {
-                        active_by_key.insert(
-                            desc.key.clone(),
-                            (named.name.clone(), named.source_uuid.clone()),
-                        );
+                        active_by_key.insert(desc.key.clone(), named.identity.clone());
                         (true, None)
                     }
                 };
                 entries.push(SkillIntrospectionEntry {
                     descriptor: desc,
-                    shadowed_by: shadowed_by.as_ref().map(|(name, _)| name.clone()),
-                    shadowed_by_source_uuid: shadowed_by.map(|(_, source_uuid)| source_uuid),
+                    source_identity: Some(named.identity.clone()),
+                    shadowed_by: shadowed_by
+                        .as_ref()
+                        .map(|identity| identity.display_name.clone()),
+                    shadowed_by_identity: shadowed_by.clone(),
+                    shadowed_by_source_uuid: shadowed_by.map(|identity| identity.source_uuid),
                     is_active,
                 });
             }
@@ -205,9 +223,9 @@ impl SkillSource for CompositeSkillSource {
         };
         let target_uuid = SourceUuid::parse(target)?;
         for named in &self.sources {
-            if named.source_uuid == target_uuid {
+            if named.source_uuid() == &target_uuid {
                 let mut doc = named.source.load(key).await?;
-                doc.descriptor.source_name = named.name.clone();
+                doc.descriptor.source_name = named.display_name().to_string();
                 return Ok(doc);
             }
         }

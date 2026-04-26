@@ -25,16 +25,20 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::LoopState;
 use crate::comms::InputSource;
 use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };
+use crate::retry::LlmRetrySchedule;
 use crate::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
 };
-use crate::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
+use crate::turn_execution_authority::{
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+};
 use crate::types::SessionId;
 
 // ---------------------------------------------------------------------------
@@ -168,7 +172,8 @@ impl DslTransitionError {
 // Cross-crate peer prompt/context projection seam
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PeerResponseProgressProjectionPhase {
     Accepted,
     InProgress,
@@ -185,7 +190,8 @@ impl PeerResponseProgressProjectionPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PeerResponseTerminalProjectionStatus {
     Completed,
     Failed,
@@ -300,6 +306,12 @@ fn format_peer_projection_payload(payload: Option<&serde_json::Value>) -> String
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
     pub active_run_id: Option<RunId>,
+    /// Observable loop-state projection supplied by the turn-state owner.
+    ///
+    /// Consumers should not reclassify [`TurnPhase`] locally. Runtime-backed
+    /// handles derive this from the same DSL snapshot as `turn_phase`; test
+    /// handles do the same from their in-core test state.
+    pub loop_state: LoopState,
     pub turn_phase: TurnPhase,
     /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means no primitive is currently in flight.
@@ -319,6 +331,9 @@ pub struct TurnStateSnapshot {
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
+    pub llm_retry_attempt: u32,
+    pub llm_retry_max_retries: u32,
+    pub llm_retry_selected_delay_ms: u64,
 }
 
 /// Turn-execution DSL handle.
@@ -376,11 +391,11 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
 
-    fn recoverable_failure(&self, error: String) -> Result<(), DslTransitionError>;
+    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 
-    fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError>;
+    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError>;
 
-    fn retry_requested(&self) -> Result<(), DslTransitionError>;
+    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError>;
 
     fn cancel_now(&self) -> Result<(), DslTransitionError>;
 
@@ -400,7 +415,11 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn run_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError>;
+    fn run_failed(
+        &self,
+        run_id: RunId,
+        reason: TurnFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
     fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 

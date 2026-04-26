@@ -29,8 +29,8 @@ fn prepared_meerkat_state() -> meerkat::State {
         &registered,
         meerkat::Input::PrepareBindings(meerkat::inputs::PrepareBindings {
             agent_runtime_id: "runtime-7".into(),
-            fence_token: 3,
-            generation: 1,
+            fence_token: meerkat::FenceToken(3),
+            generation: meerkat::Generation(1),
         }),
         &meerkat::EmptyContext,
     )

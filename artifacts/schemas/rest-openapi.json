@@ -5,9 +5,37 @@
   },
   "openapi": "3.0.0",
   "paths": {
+    "/auth/bindings/{binding_id}": {
+      "delete": {
+        "summary": "Delete binding-scoped credentials"
+      },
+      "get": {
+        "summary": "Get binding-scoped auth profile"
+      }
+    },
+    "/auth/bindings/{binding_id}/logout": {
+      "post": {
+        "summary": "Log out a binding"
+      }
+    },
+    "/auth/bindings/{binding_id}/status": {
+      "get": {
+        "summary": "Get binding auth status"
+      }
+    },
+    "/auth/bindings/{binding_id}/test": {
+      "post": {
+        "summary": "Test a binding resolve path"
+      }
+    },
     "/auth/login/complete": {
       "post": {
         "summary": "Finish OAuth login with an authorization code"
+      }
+    },
+    "/auth/login/device/complete": {
+      "post": {
+        "summary": "Complete device-code OAuth login"
       }
     },
     "/auth/login/device/start": {
@@ -20,35 +48,12 @@
         "summary": "Begin OAuth login (loopback flow)"
       }
     },
-    "/auth/logout/{id}": {
-      "post": {
-        "summary": "Revoke + remove persisted credentials"
-      }
-    },
     "/auth/profiles": {
       "get": {
         "summary": "List auth profiles"
       },
       "post": {
         "summary": "Create an auth profile"
-      }
-    },
-    "/auth/profiles/{id}": {
-      "delete": {
-        "summary": "Delete an auth profile"
-      },
-      "get": {
-        "summary": "Get one auth profile"
-      }
-    },
-    "/auth/profiles/{id}/test": {
-      "post": {
-        "summary": "Dry-run the profile's resolve path"
-      }
-    },
-    "/auth/status/{id}": {
-      "get": {
-        "summary": "Get auth status"
       }
     },
     "/capabilities": {
@@ -95,16 +100,6 @@
     "/mob/{id}/members/{agent_identity}/cancel": {
       "post": {
         "summary": "Force-cancel a mob member"
-      }
-    },
-    "/mob/{id}/members/{agent_identity}/realtime/attach": {
-      "post": {
-        "summary": "Attach realtime attachment intent to a mob member"
-      }
-    },
-    "/mob/{id}/members/{agent_identity}/realtime/detach": {
-      "post": {
-        "summary": "Detach realtime attachment intent from a mob member"
       }
     },
     "/mob/{id}/members/{agent_identity}/respawn": {
@@ -318,11 +313,6 @@
     "/skills": {
       "get": {
         "summary": "List available skills"
-      }
-    },
-    "/skills/{id}": {
-      "get": {
-        "summary": "Inspect a skill"
       }
     }
   }

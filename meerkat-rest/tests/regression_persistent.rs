@@ -41,6 +41,7 @@ fn build_state(
         .builtins(true)
         .shell(true)
         .project_root(project_root.to_path_buf());
+    let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence =
@@ -116,6 +117,7 @@ fn build_state(
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_registry,
     }
 }
 

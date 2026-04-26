@@ -38,6 +38,22 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
+
+fn skill_source_provenance(
+    source_uuid: meerkat_core::skills::SourceUuid,
+    display_name: impl Into<String>,
+) -> meerkat_contracts::SkillSourceProvenance {
+    let display_name = display_name.into();
+    meerkat_contracts::SkillSourceProvenance {
+        identity: meerkat_core::skills::SourceIdentityRecord {
+            source_uuid,
+            display_name: display_name.clone(),
+            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
+            fingerprint: format!("mcp:{display_name}"),
+            status: meerkat_core::skills::SourceIdentityStatus::Active,
+        },
+    }
+}
 use meerkat_client::TestClient;
 use tokio::sync::Mutex;
 
@@ -569,7 +585,7 @@ impl MeerkatMcpState {
             factory = factory.user_config_root(user_root);
         }
 
-        let skill_runtime = factory.build_skill_runtime(&config).await;
+        let skill_runtime = factory.build_skill_runtime(&config).await?;
 
         let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         builder.default_llm_client = default_llm_client;
@@ -1156,7 +1172,7 @@ fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
         .iter()
         .filter(|tool| tool.handler_kind() == "callback")
         .map(|tool| ToolDef {
-            name: tool.name.clone(),
+            name: tool.name.clone().into(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
             provenance: Some(meerkat_core::types::ToolProvenance {
@@ -1607,19 +1623,21 @@ async fn handle_meerkat_skills(
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
                 .map(|e| meerkat_contracts::SkillEntry {
-                    // Project the typed `SkillKey` to the wire's
-                    // stringified `<source_uuid>/<skill_name>` form.
-                    // `SkillEntry.id` is owned by `meerkat-contracts`;
-                    // retyping it to `SkillKey` is a wire-type change
-                    // that belongs to the contracts cleanup track, not
-                    // mcp-server. This projection preserves wire shape.
-                    id: e.descriptor.key.to_string(),
+                    key: e.descriptor.key.clone(),
                     name: e.descriptor.name.clone(),
                     description: e.descriptor.description.clone(),
                     scope: e.descriptor.scope.to_string(),
-                    source: e.descriptor.source_name.clone(),
+                    source: skill_source_provenance(
+                        e.descriptor.key.source_uuid.clone(),
+                        e.descriptor.source_name.clone(),
+                    ),
                     is_active: e.is_active,
-                    shadowed_by: e.shadowed_by.clone(),
+                    shadowed_by: e.shadowed_by_source_uuid.clone().map(|source_uuid| {
+                        skill_source_provenance(
+                            source_uuid,
+                            e.shadowed_by.clone().unwrap_or_default(),
+                        )
+                    }),
                 })
                 .collect();
             serde_json::to_value(meerkat_contracts::SkillListResponse { skills: wire })
@@ -1643,11 +1661,14 @@ async fn handle_meerkat_skills(
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
-                id: doc.descriptor.key.to_string(),
+                key: doc.descriptor.key.clone(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
                 scope: doc.descriptor.scope.to_string(),
-                source: doc.descriptor.source_name.clone(),
+                source: skill_source_provenance(
+                    doc.descriptor.key.source_uuid.clone(),
+                    doc.descriptor.source_name.clone(),
+                ),
                 body: doc.body,
             })
             .map_err(|e| format!("serialization failed: {e}"))
@@ -2614,8 +2635,8 @@ async fn handle_meerkat_run(
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
         let session_id_for_cancel = session_id.clone();
-        let phase = context
-            .install_cancel_action(request_action(move || {
+        let install = context
+            .install_cancel_action_or_cancelled(request_action(move || {
                 let service = service.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
@@ -2635,7 +2656,7 @@ async fn handle_meerkat_run(
                 ingress.clear_session(&session_id).await;
             }
         }));
-        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
+        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             let _ = state.service.archive(&session_id).await;
             ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
@@ -2798,8 +2819,8 @@ async fn handle_meerkat_resume(
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
         let session_id_for_cancel = session_id.clone();
-        let phase = context
-            .install_cancel_action(request_action(move || {
+        let install = context
+            .install_cancel_action_or_cancelled(request_action(move || {
                 let service = service.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
@@ -2807,7 +2828,7 @@ async fn handle_meerkat_resume(
                 }
             }))
             .await;
-        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
+        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             return Err(request_cancelled_tool_error());
         }
     }
@@ -3063,7 +3084,6 @@ async fn handle_meerkat_resume(
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
             turn_metadata: None,
-            execution_kind: None,
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),
@@ -3143,12 +3163,13 @@ fn compose_external_tool_dispatchers(
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
         (Some(a), Some(b)) => {
-            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let primary_names: HashSet<String> =
+                a.tools().iter().map(|t| t.name.to_string()).collect();
             let secondary_tools = b.tools();
             let secondary_unique: Vec<String> = secondary_tools
                 .iter()
-                .map(|t| t.name.clone())
-                .filter(|name| !primary_names.contains(name))
+                .map(|t| t.name.to_string())
+                .filter(|name| !primary_names.contains(name.as_str()))
                 .collect();
 
             if secondary_unique.is_empty() {
@@ -3194,7 +3215,7 @@ impl MpcToolDispatcher {
             .iter()
             .map(|t| {
                 Arc::new(ToolDef {
-                    name: t.name.clone(),
+                    name: t.name.clone().into(),
                     description: t.description.clone(),
                     input_schema: t.input_schema.clone(),
                     provenance: Some(meerkat_core::types::ToolProvenance {
@@ -3387,14 +3408,14 @@ mod tests {
                 .expect("uuid");
         config.skills.repositories = vec![
             meerkat_core::skills_config::SkillRepositoryConfig {
-                name: "a".to_string(),
+                name: "a".into(),
                 source_uuid: source_uuid.clone(),
                 transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
                     path: "/tmp/a".to_string(),
                 },
             },
             meerkat_core::skills_config::SkillRepositoryConfig {
-                name: "b".to_string(),
+                name: "b".into(),
                 source_uuid,
                 transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
                     path: "/tmp/b".to_string(),
@@ -3737,13 +3758,13 @@ mod tests {
     fn test_mpc_tool_dispatcher_creates_tool_defs() {
         let mcp_tools = vec![
             McpToolDef {
-                name: "get_weather".to_string(),
+                name: "get_weather".into(),
                 description: "Get weather".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
                 handler: Some("callback".to_string()),
             },
             McpToolDef {
-                name: "search".to_string(),
+                name: "search".into(),
                 description: "Search".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
                 handler: Some("callback".to_string()),
@@ -3761,7 +3782,7 @@ mod tests {
     #[tokio::test]
     async fn test_mpc_tool_dispatcher_returns_callback_error() {
         let mcp_tools = vec![McpToolDef {
-            name: "get_weather".to_string(),
+            name: "get_weather".into(),
             description: "Get weather".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
             handler: Some("callback".to_string()),
@@ -4425,7 +4446,7 @@ mod tests {
                 content: "legacy ok".to_string(),
                 tool_calls: vec![meerkat_core::types::ToolCall {
                     id: "tool-1".to_string(),
-                    name: "search".to_string(),
+                    name: "search".into(),
                     args: serde_json::json!({ "query": "history" }),
                 }],
                 stop_reason: meerkat_core::types::StopReason::ToolUse,
@@ -4436,7 +4457,7 @@ mod tests {
             meerkat_core::types::BlockAssistantMessage {
                 blocks: vec![meerkat_core::types::AssistantBlock::ToolUse {
                     id: "tool-2".to_string(),
-                    name: "lookup".to_string(),
+                    name: "lookup".into(),
                     args: serde_json::value::RawValue::from_string(
                         serde_json::json!({ "item": "transcript" }).to_string(),
                     )

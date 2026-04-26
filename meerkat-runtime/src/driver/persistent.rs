@@ -110,6 +110,26 @@ impl PersistentRuntimeDriver {
         }
     }
 
+    async fn commit_lifecycle_with_rollback(
+        &mut self,
+        checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
+        target_state: RuntimeState,
+        context: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        let input_states = self.inner.stored_input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .atomic_lifecycle_commit(&self.runtime_id, target_state, &input_states)
+            .await
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "{context} persist failed: {err}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_control_projection(
         &mut self,
         next_phase: RuntimeState,
@@ -351,17 +371,35 @@ impl PersistentRuntimeDriver {
     pub async fn finalize_retire(
         &mut self,
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.finalize_retire();
-        let input_states = self.inner.stored_input_states_snapshot();
-        self.store
-            .atomic_lifecycle_commit(
-                &self.runtime_id,
-                self.runtime_state_for_persistence(),
-                &input_states,
-            )
-            .await
-            .map_err(|err| RuntimeDriverError::Internal(format!("retire persist failed: {err}")))?;
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            self.runtime_state_for_persistence(),
+            "retire",
+        )
+        .await?;
         Ok(report)
+    }
+
+    pub(crate) async fn realize_retire_lifecycle(
+        &mut self,
+    ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        self.inner
+            .set_control_projection(RuntimeState::Retired, None, None);
+        let report = self.inner.finalize_retire();
+        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Retired, "retire")
+            .await?;
+        Ok(report)
+    }
+
+    /// Low-level lifecycle realization shim for external contract tests.
+    #[doc(hidden)]
+    pub async fn contract_realize_retire_lifecycle(
+        &mut self,
+    ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
+        self.realize_retire_lifecycle().await
     }
 
     /// Low-level retire realization shim for external contract tests.
@@ -377,17 +415,35 @@ impl PersistentRuntimeDriver {
     pub async fn finalize_reset(
         &mut self,
     ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.reset_cleanup();
-        let input_states = self.inner.stored_input_states_snapshot();
-        self.store
-            .atomic_lifecycle_commit(
-                &self.runtime_id,
-                self.runtime_state_for_persistence(),
-                &input_states,
-            )
-            .await
-            .map_err(|err| RuntimeDriverError::Internal(format!("reset persist failed: {err}")))?;
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            self.runtime_state_for_persistence(),
+            "reset",
+        )
+        .await?;
         Ok(report)
+    }
+
+    pub(crate) async fn realize_reset_lifecycle(
+        &mut self,
+    ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        self.inner
+            .set_control_projection(RuntimeState::Idle, None, None);
+        let report = self.inner.reset_cleanup();
+        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Idle, "reset")
+            .await?;
+        Ok(report)
+    }
+
+    /// Low-level lifecycle realization shim for external contract tests.
+    #[doc(hidden)]
+    pub async fn contract_realize_reset_lifecycle(
+        &mut self,
+    ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
+        self.realize_reset_lifecycle().await
     }
 
     /// Low-level reset realization shim for external contract tests.
@@ -401,8 +457,8 @@ impl PersistentRuntimeDriver {
     }
 
     pub async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
         let abandoned = self.inner.destroy_cleanup();
-        let input_states = self.inner.stored_input_states_snapshot();
         // Persist the intent-carrying terminal phase (`Destroyed`),
         // not the pre-destroy shell phase from
         // `runtime_state_for_persistence()`. `e5c5ecaf3` removed the
@@ -413,15 +469,8 @@ impl PersistentRuntimeDriver {
         // here, the store records the wrong phase and cold restarts
         // (`cold_reregister_preserves_destroyed_runtime_state`) resurrect
         // the session as non-Destroyed.
-        if let Err(err) = self
-            .store
-            .atomic_lifecycle_commit(&self.runtime_id, RuntimeState::Destroyed, &input_states)
-            .await
-        {
-            return Err(RuntimeDriverError::Internal(format!(
-                "destroy persist failed: {err}"
-            )));
-        }
+        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Destroyed, "destroy")
+            .await?;
         Ok(DestroyReport {
             inputs_abandoned: abandoned,
         })
@@ -436,17 +485,29 @@ impl PersistentRuntimeDriver {
     }
 
     pub async fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
         self.inner.stop_runtime_cleanup();
-        let input_states = self.inner.stored_input_states_snapshot();
-        self.store
-            .atomic_lifecycle_commit(
-                &self.runtime_id,
-                self.runtime_state_for_persistence(),
-                &input_states,
-            )
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            self.runtime_state_for_persistence(),
+            "stop",
+        )
+        .await
+    }
+
+    pub(crate) async fn realize_stop_lifecycle(&mut self) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        self.inner
+            .set_control_projection(RuntimeState::Stopped, None, None);
+        self.inner.stop_runtime_cleanup();
+        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Stopped, "stop")
             .await
-            .map_err(|err| RuntimeDriverError::Internal(format!("stop persist failed: {err}")))?;
-        Ok(())
+    }
+
+    /// Low-level lifecycle realization shim for external contract tests.
+    #[doc(hidden)]
+    pub async fn contract_realize_stop_lifecycle(&mut self) -> Result<(), RuntimeDriverError> {
+        self.realize_stop_lifecycle().await
     }
 
     /// Low-level stop realization shim for external contract tests.
@@ -618,6 +679,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
         let report = crate::meerkat_machine::machine_recover_persistent_driver(
             self.store.as_ref(),
             &self.runtime_id,
@@ -626,15 +688,12 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         .await?;
 
         // Persist recovered state atomically
-        let input_states = self.inner.stored_input_states_snapshot();
-        self.store
-            .atomic_lifecycle_commit(
-                &self.runtime_id,
-                self.runtime_state_for_persistence(),
-                &input_states,
-            )
-            .await
-            .map_err(|e| RuntimeDriverError::Internal(format!("recovery persist failed: {e}")))?;
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            self.runtime_state_for_persistence(),
+            "recovery",
+        )
+        .await?;
         Ok(report)
     }
 

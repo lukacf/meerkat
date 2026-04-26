@@ -45,12 +45,12 @@ impl McpProtocol {
                 let inner_map = Arc::unwrap_or_clone(tool.input_schema);
                 let schema = Value::Object(inner_map);
                 ToolDef {
-                    name: tool.name.to_string(),
+                    name: tool.name.to_string().into(),
                     description: tool.description.unwrap_or_default().to_string(),
                     input_schema: schema,
                     provenance: Some(ToolProvenance {
                         kind: ToolSourceKind::Mcp,
-                        source_id: server_name.to_string(),
+                        source_id: server_name.into(),
                     }),
                 }
             })

@@ -4,9 +4,9 @@ use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
-use crate::runtime::mob_member_lifecycle_authority::{
+#[cfg(test)]
+use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
-    MobMemberLifecycleInput, MobMemberLifecycleProjection,
 };
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
@@ -30,18 +30,6 @@ use std::time::Duration;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PeerConnectivityProjection {
-    Omit,
-    Include,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionObservationProjection {
-    Omit,
-    Full,
-}
 
 /// Point-in-time snapshot of a mob member's execution state.
 /// Serializable projection of the member's current realtime attachment
@@ -232,10 +220,10 @@ impl MobMemberListEntry {
         self
     }
 
-    /// Typed helper for external consumers (mob-mcp, mob-pack verify, rpc
-    /// surface) that legitimately need the binding-era atoms to drive work
-    /// lane calls. Keeps the fields `pub(crate)` + `#[serde(skip)]` so they
-    /// never leak through Serialize/Debug-derived paths.
+    /// Typed helper for server-side control dispatch that resolves an
+    /// app-facing `WireMemberRef` into the current incarnation before it
+    /// enters the work lane. Keeps the fields `pub(crate)` + `#[serde(skip)]`
+    /// so they never leak through Serialize/Debug-derived paths.
     pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
         (self.agent_runtime_id.clone(), self.fence_token)
     }
@@ -668,17 +656,6 @@ pub struct HelperResult {
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
     #[serde(skip)]
     pub(crate) fence_token: FenceToken,
-}
-
-impl HelperResult {
-    /// Typed helper for external consumers (CLI, mob-mcp, rpc surface) that
-    /// legitimately need the binding-era atoms to drive work-lane calls.
-    /// Keeps the fields `pub(crate)` + `#[serde(skip)]` so they never leak
-    /// through Serialize/Debug-derived paths. Mirrors
-    /// `MobMemberListEntry::binding_atoms`.
-    pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
-        (self.agent_runtime_id.clone(), self.fence_token)
-    }
 }
 
 /// Target for a wire operation from a local mob member.
@@ -1315,19 +1292,21 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::RosterSnapshot(roster))
             }
             MobMachineCommand::ListMembers => {
-                let entries: Vec<_> = {
-                    let roster = self.roster.read().await;
-                    roster.list().cloned().collect()
-                };
-                let members = self.project_member_list(entries.iter()).await;
+                let members = self
+                    .send_actor_command(|reply_tx| MobCommand::ProjectMemberList {
+                        include_retiring: false,
+                        reply_tx,
+                    })
+                    .await?;
                 Ok(MobMachineCommandResult::ListMembers(members))
             }
             MobMachineCommand::ListMembersIncludingRetiring => {
-                let entries: Vec<_> = {
-                    let roster = self.roster.read().await;
-                    roster.list_all().cloned().collect()
-                };
-                let members = self.project_member_list(entries.iter()).await;
+                let members = self
+                    .send_actor_command(|reply_tx| MobCommand::ProjectMemberList {
+                        include_retiring: true,
+                        reply_tx,
+                    })
+                    .await?;
                 Ok(MobMachineCommandResult::ListMembersIncludingRetiring(
                     members,
                 ))
@@ -1338,11 +1317,12 @@ impl MobHandle {
             }
             MobMachineCommand::MemberStatus { agent_identity } => {
                 let snapshot = self
-                    .canonical_member_snapshot_material(&agent_identity)
-                    .await;
-                Ok(MobMachineCommandResult::MemberStatus(
-                    snapshot.to_snapshot(),
-                ))
+                    .send_actor_command(|reply_tx| MobCommand::ProjectMemberStatus {
+                        agent_identity: AgentIdentity::from(agent_identity.as_str()),
+                        reply_tx,
+                    })
+                    .await?;
+                Ok(MobMachineCommandResult::MemberStatus(snapshot))
             }
             MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
                 let stream = self
@@ -1678,54 +1658,36 @@ impl MobHandle {
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
     /// for deep per-member inspection including live comms reachability.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListMembersIncludingRetiring)
+        self.roster
+            .read()
             .await
-        {
-            Ok(MobMachineCommandResult::ListMembersIncludingRetiring(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
-    async fn project_member_list<'a>(
-        &self,
-        entries: impl Iterator<Item = &'a crate::roster::RosterEntry>,
-    ) -> Vec<MobMemberListEntry> {
-        let entries: Vec<_> = entries.cloned().collect();
-        let mut projected = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let snapshot = self
-                .canonical_member_list_material(&entry.agent_identity)
-                .await
-                .to_snapshot();
-            let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
-            projected.push(
+            .list_all()
+            .map(|entry| {
+                let status = match entry.state {
+                    crate::roster::MemberState::Active => MobMemberStatus::Active,
+                    crate::roster::MemberState::Retiring => MobMemberStatus::Retiring,
+                };
                 MobMemberListEntry {
-                    agent_identity: entry.agent_identity,
-                    agent_runtime_id: entry.agent_runtime_id,
+                    agent_identity: entry.agent_identity.clone(),
+                    agent_runtime_id: entry.agent_runtime_id.clone(),
                     fence_token: entry.fence_token,
-                    role: entry.role,
+                    role: entry.role.clone(),
                     runtime_mode: entry.runtime_mode,
-                    peer_id: entry.peer_id,
+                    peer_id: entry.peer_id.clone(),
                     state: entry.state,
-                    wired_to: entry.wired_to,
-                    external_peer_specs: entry.external_peer_specs,
-                    labels: entry.labels,
-                    status: snapshot.status,
-                    error: snapshot.error,
-                    is_final: snapshot.is_final,
+                    wired_to: entry.wired_to.clone(),
+                    external_peer_specs: entry.external_peer_specs.clone(),
+                    labels: entry.labels.clone(),
+                    status,
+                    error: None,
+                    is_final: false,
                     current_session_id: None,
                     current_bridge_session_id: None,
-                    kickoff: snapshot.kickoff,
+                    kickoff: entry.kickoff.clone(),
                 }
-                .with_current_bridge_session_id(current_bridge_session_id),
-            );
-        }
-        projected
+                .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned())
+            })
+            .collect()
     }
 
     /// List members currently eligible for runtime work dispatch.
@@ -1749,218 +1711,7 @@ impl MobHandle {
     /// `Retiring`. Use this for observability and membership inspection where
     /// in-flight retires should be visible.
     pub async fn list_all_members(&self) -> Vec<RosterEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListAllMembers)
-            .await
-        {
-            Ok(MobMachineCommandResult::ListAllMembers(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
-    async fn canonical_member_list_material(
-        &self,
-        agent_identity: &MeerkatId,
-    ) -> CanonicalMemberSnapshotMaterial {
-        self.canonical_member_material(
-            agent_identity,
-            PeerConnectivityProjection::Omit,
-            SessionObservationProjection::Omit,
-        )
-        .await
-    }
-
-    async fn canonical_member_snapshot_material(
-        &self,
-        agent_identity: &MeerkatId,
-    ) -> CanonicalMemberSnapshotMaterial {
-        self.canonical_member_material(
-            agent_identity,
-            PeerConnectivityProjection::Include,
-            SessionObservationProjection::Full,
-        )
-        .await
-    }
-
-    async fn canonical_member_material(
-        &self,
-        agent_identity: &MeerkatId,
-        connectivity: PeerConnectivityProjection,
-        observation: SessionObservationProjection,
-    ) -> CanonicalMemberSnapshotMaterial {
-        let (roster_snapshot, roster_entry, roster_state, current_bridge_session_id) = {
-            let roster = self.roster.read().await;
-            match roster.get(agent_identity) {
-                Some(entry) => (
-                    roster.snapshot(),
-                    Some(entry.clone()),
-                    Some(entry.state),
-                    entry.member_ref.bridge_session_id().cloned(),
-                ),
-                None => (roster.snapshot(), None, None, None),
-            }
-        };
-        let machine_projection = self.member_machine_projection(agent_identity).await;
-        let machine_bridge_session_id = machine_projection
-            .bound_session_id
-            .as_ref()
-            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
-        let current_bridge_session_id = current_bridge_session_id.or(machine_bridge_session_id);
-
-        let restore_failure = {
-            self.restore_diagnostics
-                .read()
-                .await
-                .get(agent_identity)
-                .cloned()
-        };
-        if let Some(diag) = restore_failure {
-            return MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-                member_present: roster_state.is_some(),
-                roster_state,
-                session_observation: CanonicalSessionObservation::Missing,
-                restore_failure: Some(diag.reason),
-                output_preview: None,
-                tokens_used: 0,
-                agent_runtime_id: roster_entry
-                    .as_ref()
-                    .map(|e| e.agent_runtime_id.clone())
-                    .unwrap_or_else(|| {
-                        AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()))
-                    }),
-                fence_token: roster_entry
-                    .as_ref()
-                    .map(|e| e.fence_token)
-                    .unwrap_or(FenceToken::new(0)),
-                current_bridge_session_id: diag.bridge_session_id,
-                peer_connectivity: None,
-                kickoff: roster_entry
-                    .as_ref()
-                    .and_then(|entry| entry.kickoff.clone()),
-                machine_state_marker: machine_projection.state_marker,
-                machine_runtime_live: machine_projection.live_runtime,
-            });
-        }
-
-        match (roster_state, current_bridge_session_id) {
-            (None, _) => MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-                member_present: false,
-                roster_state: None,
-                session_observation: CanonicalSessionObservation::Missing,
-                restore_failure: None,
-                output_preview: None,
-                tokens_used: 0,
-                agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from(
-                    agent_identity.as_str(),
-                )),
-                fence_token: FenceToken::new(0),
-                current_bridge_session_id: None,
-                peer_connectivity: None,
-                kickoff: None,
-                machine_state_marker: machine_projection.state_marker,
-                machine_runtime_live: machine_projection.live_runtime,
-            }),
-            (Some(roster_state), None) => {
-                let session_observation = match roster_entry.as_ref().map(|entry| &entry.member_ref)
-                {
-                    Some(MemberRef::BackendPeer {
-                        session_id: None, ..
-                    }) => CanonicalSessionObservation::Unknown,
-                    _ => CanonicalSessionObservation::Missing,
-                };
-                MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-                    member_present: true,
-                    roster_state: Some(roster_state),
-                    session_observation,
-                    restore_failure: None,
-                    output_preview: None,
-                    tokens_used: 0,
-                    agent_runtime_id: roster_entry
-                        .as_ref()
-                        .map(|e| e.agent_runtime_id.clone())
-                        .unwrap_or_else(|| {
-                            AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()))
-                        }),
-                    fence_token: roster_entry
-                        .as_ref()
-                        .map(|e| e.fence_token)
-                        .unwrap_or(FenceToken::new(0)),
-                    current_bridge_session_id: None,
-                    peer_connectivity: None,
-                    kickoff: roster_entry
-                        .as_ref()
-                        .and_then(|entry| entry.kickoff.clone()),
-                    machine_state_marker: machine_projection.state_marker,
-                    machine_runtime_live: machine_projection.live_runtime,
-                })
-            }
-            (Some(roster_state), Some(bridge_session_id)) => {
-                let (output_preview, tokens_used, observation) = match observation {
-                    SessionObservationProjection::Omit => {
-                        (None, 0, CanonicalSessionObservation::Unknown)
-                    }
-                    SessionObservationProjection::Full => {
-                        match self.session_service.read(&bridge_session_id).await {
-                            Ok(view) => (
-                                view.state.last_assistant_text.clone(),
-                                view.billing.total_tokens,
-                                if view.state.is_active {
-                                    CanonicalSessionObservation::Active
-                                } else {
-                                    CanonicalSessionObservation::Inactive
-                                },
-                            ),
-                            Err(SessionError::NotFound { .. }) => {
-                                (None, 0, CanonicalSessionObservation::Missing)
-                            }
-                            Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
-                        }
-                    }
-                };
-                let peer_connectivity = if connectivity == PeerConnectivityProjection::Include {
-                    match roster_entry.as_ref() {
-                        Some(entry) => {
-                            self.resolve_peer_connectivity(
-                                entry,
-                                &bridge_session_id,
-                                &roster_snapshot,
-                            )
-                            .await
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-                    member_present: true,
-                    roster_state: Some(roster_state),
-                    session_observation: observation,
-                    restore_failure: None,
-                    output_preview,
-                    tokens_used,
-                    agent_runtime_id: roster_entry
-                        .as_ref()
-                        .map(|e| e.agent_runtime_id.clone())
-                        .unwrap_or_else(|| {
-                            AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()))
-                        }),
-                    fence_token: roster_entry
-                        .as_ref()
-                        .map(|e| e.fence_token)
-                        .unwrap_or(FenceToken::new(0)),
-                    current_bridge_session_id: Some(bridge_session_id),
-                    peer_connectivity,
-                    kickoff: roster_entry.and_then(|entry| entry.kickoff),
-                    machine_state_marker: machine_projection.state_marker,
-                    machine_runtime_live: machine_projection.live_runtime,
-                })
-            }
-        }
+        self.roster.read().await.list_all().cloned().collect()
     }
 
     /// Get a specific member entry by identity.
@@ -2777,11 +2528,11 @@ impl MobHandle {
         let meerkat_id = MeerkatId::from(&identity);
         self.internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
-        let material = self.canonical_member_list_material(&meerkat_id).await;
+        let snapshot = self.member_status(&identity).await?;
         Ok(MemberDeliveryReceipt {
             identity,
-            agent_runtime_id: material.agent_runtime_id,
-            fence_token: material.fence_token,
+            agent_runtime_id: snapshot.agent_runtime_id,
+            fence_token: snapshot.fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }
@@ -2793,10 +2544,12 @@ impl MobHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<(), MobError> {
-        let material = self.canonical_member_list_material(&agent_identity).await;
+        let snapshot = self
+            .member_status(&AgentIdentity::from(agent_identity.as_str()))
+            .await?;
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: material.agent_runtime_id,
-            fence_token: material.fence_token,
+            runtime_id: snapshot.agent_runtime_id,
+            fence_token: snapshot.fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
@@ -2825,10 +2578,12 @@ impl MobHandle {
                 _ => {}
             }
         }
-        let material = self.canonical_member_list_material(&agent_identity).await;
+        let snapshot = self
+            .member_status(&AgentIdentity::from(agent_identity.as_str()))
+            .await?;
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: material.agent_runtime_id,
-            fence_token: material.fence_token,
+            runtime_id: snapshot.agent_runtime_id,
+            fence_token: snapshot.fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::Internal),
             handling_mode: HandlingMode::Queue,
@@ -3212,39 +2967,39 @@ impl MobHandle {
 
     fn kickoff_wait_is_satisfied(
         entry: &RosterEntry,
-        material: &CanonicalMemberSnapshotMaterial,
+        snapshot: &MobMemberSnapshot,
         pending_kickoff_member_ids: &BTreeSet<String>,
     ) -> bool {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        match material.status {
-            CanonicalMemberStatus::Unknown => false,
-            CanonicalMemberStatus::Active => {
+        match snapshot.status {
+            MobMemberStatus::Unknown => false,
+            MobMemberStatus::Active => {
                 !pending_kickoff_member_ids.contains(entry.agent_identity.as_str())
             }
-            CanonicalMemberStatus::Retiring
-            | CanonicalMemberStatus::Broken
-            | CanonicalMemberStatus::Completed => true,
+            MobMemberStatus::Retiring | MobMemberStatus::Broken | MobMemberStatus::Completed => {
+                true
+            }
         }
     }
 
     fn ready_wait_is_satisfied(
         entry: &RosterEntry,
-        material: &CanonicalMemberSnapshotMaterial,
+        snapshot: &MobMemberSnapshot,
         ready_runtime_ids: &BTreeSet<String>,
     ) -> bool {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        match material.status {
-            CanonicalMemberStatus::Unknown => false,
-            CanonicalMemberStatus::Active => {
+        match snapshot.status {
+            MobMemberStatus::Unknown => false,
+            MobMemberStatus::Active => {
                 ready_runtime_ids.contains(&entry.agent_runtime_id.to_string())
             }
-            CanonicalMemberStatus::Retiring
-            | CanonicalMemberStatus::Broken
-            | CanonicalMemberStatus::Completed => true,
+            MobMemberStatus::Retiring | MobMemberStatus::Broken | MobMemberStatus::Completed => {
+                true
+            }
         }
     }
 
@@ -3259,7 +3014,7 @@ impl MobHandle {
 
         let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
         loop {
-            let snapshot = self.startup_kickoff_snapshot().await?;
+            let kickoff_snapshot = self.startup_kickoff_snapshot().await?;
             let entries = self
                 .list_all_members()
                 .await
@@ -3272,11 +3027,13 @@ impl MobHandle {
                 let Some(entry) = entries.get(id) else {
                     continue;
                 };
-                let material = self.canonical_member_list_material(id).await;
+                let member_snapshot = self
+                    .member_status(&AgentIdentity::from(id.as_str()))
+                    .await?;
                 if !Self::kickoff_wait_is_satisfied(
                     entry,
-                    &material,
-                    &snapshot.pending_kickoff_member_ids,
+                    &member_snapshot,
+                    &kickoff_snapshot.pending_kickoff_member_ids,
                 ) {
                     pending_member_ids.push(id.clone());
                 }
@@ -3319,8 +3076,14 @@ impl MobHandle {
                 let Some(entry) = entries.get(id) else {
                     continue;
                 };
-                let material = self.canonical_member_list_material(id).await;
-                if !Self::ready_wait_is_satisfied(entry, &material, &snapshot.ready_runtime_ids) {
+                let member_snapshot = self
+                    .member_status(&AgentIdentity::from(id.as_str()))
+                    .await?;
+                if !Self::ready_wait_is_satisfied(
+                    entry,
+                    &member_snapshot,
+                    &snapshot.ready_runtime_ids,
+                ) {
                     pending_member_ids.push(id.clone());
                 }
             }
@@ -3338,14 +3101,16 @@ impl MobHandle {
         }
     }
 
-    async fn wait_one_material(
+    async fn wait_one_snapshot(
         &self,
         agent_identity: &MeerkatId,
-    ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
+    ) -> Result<MobMemberSnapshot, MobError> {
         loop {
-            let material = self.canonical_member_list_material(agent_identity).await;
-            if MobMemberLifecycleProjection::is_terminal(&material) {
-                return Ok(material);
+            let snapshot = self
+                .member_status(&AgentIdentity::from(agent_identity.as_str()))
+                .await?;
+            if snapshot.is_final {
+                return Ok(snapshot);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -3361,6 +3126,9 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
+        if let Some(snapshot) = self.inflight_retiring_snapshot(identity).await {
+            return Ok(snapshot);
+        }
         let mut snapshot = match self
             .execute_machine_command(MobMachineCommand::MemberStatus {
                 agent_identity: MeerkatId::from(identity),
@@ -3374,12 +3142,85 @@ impl MobHandle {
                 ));
             }
         };
+        self.apply_inflight_member_projection(identity, &mut snapshot)
+            .await;
+        snapshot.peer_connectivity = self
+            .project_member_peer_connectivity(identity, &snapshot)
+            .await;
         snapshot.realtime_attachment_status =
             self.project_realtime_attachment_status(&snapshot).await;
         snapshot.external_member = self
             .project_external_member_observation(identity, &snapshot)
             .await;
         Ok(snapshot)
+    }
+
+    async fn inflight_retiring_snapshot(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<MobMemberSnapshot> {
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&MeerkatId::from(identity)).cloned()
+        }?;
+        if entry.state != crate::roster::MemberState::Retiring {
+            return None;
+        }
+        Some(
+            MobMemberSnapshot {
+                status: MobMemberStatus::Retiring,
+                agent_runtime_id: entry.agent_runtime_id,
+                fence_token: entry.fence_token,
+                output_preview: None,
+                error: None,
+                tokens_used: 0,
+                is_final: false,
+                realtime_attachment_status: None,
+                current_session_id: None,
+                current_bridge_session_id: None,
+                peer_connectivity: None,
+                kickoff: entry.kickoff,
+                external_member: None,
+            }
+            .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned()),
+        )
+    }
+
+    async fn apply_inflight_member_projection(
+        &self,
+        identity: &AgentIdentity,
+        snapshot: &mut MobMemberSnapshot,
+    ) {
+        if snapshot.status != MobMemberStatus::Unknown {
+            return;
+        }
+        let is_retiring = {
+            let roster = self.roster.read().await;
+            roster
+                .get(&MeerkatId::from(identity))
+                .is_some_and(|entry| entry.state == crate::roster::MemberState::Retiring)
+        };
+        if is_retiring {
+            snapshot.status = MobMemberStatus::Retiring;
+            snapshot.is_final = false;
+        }
+    }
+
+    async fn project_member_peer_connectivity(
+        &self,
+        identity: &AgentIdentity,
+        snapshot: &MobMemberSnapshot,
+    ) -> Option<MobPeerConnectivitySnapshot> {
+        let bridge_session_id = snapshot.current_bridge_session_id().cloned()?;
+        let (entry, roster_snapshot) = {
+            let roster = self.roster.read().await;
+            (
+                roster.get(&MeerkatId::from(identity)).cloned()?,
+                roster.snapshot(),
+            )
+        };
+        self.resolve_peer_connectivity(&entry, &bridge_session_id, &roster_snapshot)
+            .await
     }
 
     /// Project the current realtime attachment status for the given member
@@ -3559,8 +3400,7 @@ impl MobHandle {
     /// Polls canonical member classification until terminal.
     pub async fn wait_one(&self, identity: &AgentIdentity) -> Result<MobMemberSnapshot, MobError> {
         let meerkat_id = MeerkatId::from(identity);
-        let material = self.wait_one_material(&meerkat_id).await?;
-        Ok(material.to_snapshot())
+        self.wait_one_snapshot(&meerkat_id).await
     }
 
     /// Wait for all specified members to reach terminal states.
@@ -3571,13 +3411,10 @@ impl MobHandle {
         let meerkat_ids: Vec<MeerkatId> = identities.iter().map(MeerkatId::from).collect();
         let futs = meerkat_ids
             .iter()
-            .map(|mid| self.wait_one_material(mid))
+            .map(|mid| self.wait_one_snapshot(mid))
             .collect::<Vec<_>>();
         let results = futures::future::join_all(futs).await;
-        results
-            .into_iter()
-            .map(|result| result.map(|material| material.to_snapshot()))
-            .collect()
+        results.into_iter().collect()
     }
 
     /// Collect snapshots for all members that have reached terminal states.
@@ -3626,10 +3463,16 @@ impl MobHandle {
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
-        let helper_material = self.canonical_member_list_material(&meerkat_id).await;
+        let helper_snapshot = self.member_status(&identity).await?;
         let _ = self.retire(identity).await;
 
-        Ok(helper_material.to_helper_result())
+        Ok(HelperResult {
+            output: helper_snapshot.output_preview,
+            tokens_used: helper_snapshot.tokens_used,
+            agent_identity: helper_snapshot.agent_runtime_id.identity.clone(),
+            agent_runtime_id: helper_snapshot.agent_runtime_id,
+            fence_token: helper_snapshot.fence_token,
+        })
     }
 
     /// Fork from an existing member's context, wait for completion, retire, and return.
@@ -3670,10 +3513,16 @@ impl MobHandle {
         };
 
         self.spawn_spec(spec).await?;
-        let helper_material = self.canonical_member_list_material(&meerkat_id).await;
+        let helper_snapshot = self.member_status(&identity).await?;
         let _ = self.retire(identity).await;
 
-        Ok(helper_material.to_helper_result())
+        Ok(HelperResult {
+            output: helper_snapshot.output_preview,
+            tokens_used: helper_snapshot.tokens_used,
+            agent_identity: helper_snapshot.agent_runtime_id.identity.clone(),
+            agent_runtime_id: helper_snapshot.agent_runtime_id,
+            fence_token: helper_snapshot.fence_token,
+        })
     }
 
     pub(crate) async fn project_machine_input(
@@ -3719,14 +3568,14 @@ impl MemberHandle {
                 render_metadata,
             )
             .await?;
-        let material = self
+        let snapshot = self
             .mob
-            .canonical_member_list_material(&self.agent_identity)
-            .await;
+            .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
+            .await?;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            agent_runtime_id: material.agent_runtime_id,
-            fence_token: material.fence_token,
+            agent_runtime_id: snapshot.agent_runtime_id,
+            fence_token: snapshot.fence_token,
             handling_mode,
         })
     }
@@ -3739,14 +3588,14 @@ impl MemberHandle {
         self.mob
             .internal_turn_for_member(self.agent_identity.clone(), content.into())
             .await?;
-        let material = self
+        let snapshot = self
             .mob
-            .canonical_member_list_material(&self.agent_identity)
-            .await;
+            .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
+            .await?;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            agent_runtime_id: material.agent_runtime_id,
-            fence_token: material.fence_token,
+            agent_runtime_id: snapshot.agent_runtime_id,
+            fence_token: snapshot.fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }

@@ -36,6 +36,11 @@ fn k(realm: &str, binding: &str) -> TokenKey {
     TokenKey::parse(realm, binding).expect("valid slugs in test fixture")
 }
 
+fn kp(realm: &str, binding: &str, profile: &str) -> TokenKey {
+    TokenKey::parse_with_profile(realm, binding, Some(profile))
+        .expect("valid slugs in test fixture")
+}
+
 // --- EphemeralTokenStore (4a.4) ----------------------------------------
 
 #[tokio::test]
@@ -89,6 +94,39 @@ async fn ephemeral_list_returns_saved_keys() {
 }
 
 #[tokio::test]
+async fn ephemeral_profile_override_does_not_collide_with_default_binding() {
+    let store = EphemeralTokenStore::new();
+    let default_key = k("dev", "default_openai");
+    let work_key = kp("dev", "default_openai", "work");
+
+    store
+        .save(&default_key, &PersistedTokens::api_key("sk-default"))
+        .await
+        .unwrap();
+    store
+        .save(&work_key, &PersistedTokens::api_key("sk-work"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .load(&default_key)
+            .await
+            .unwrap()
+            .and_then(|tokens| tokens.primary_secret),
+        Some("sk-default".to_string())
+    );
+    assert_eq!(
+        store
+            .load(&work_key)
+            .await
+            .unwrap()
+            .and_then(|tokens| tokens.primary_secret),
+        Some("sk-work".to_string())
+    );
+}
+
+#[tokio::test]
 async fn ephemeral_load_missing_returns_none() {
     let store = EphemeralTokenStore::new();
     assert_eq!(store.load(&k("dev", "missing")).await.unwrap(), None);
@@ -118,6 +156,32 @@ async fn file_round_trip_oauth_with_metadata() {
     store.save(&key, &tokens).await.unwrap();
     let loaded = store.load(&key).await.unwrap();
     assert_eq!(loaded, Some(tokens));
+}
+
+#[tokio::test]
+async fn file_profile_override_does_not_collide_with_default_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileTokenStore::new(temp.path().to_path_buf());
+    let default_key = k("dev", "default_openai");
+    let work_key = kp("dev", "default_openai", "work");
+
+    store
+        .save(&default_key, &PersistedTokens::api_key("sk-default"))
+        .await
+        .unwrap();
+    store
+        .save(&work_key, &PersistedTokens::api_key("sk-work"))
+        .await
+        .unwrap();
+
+    let default_loaded = store.load(&default_key).await.unwrap().unwrap();
+    let work_loaded = store.load(&work_key).await.unwrap().unwrap();
+    assert_eq!(default_loaded.primary_secret.as_deref(), Some("sk-default"));
+    assert_eq!(work_loaded.primary_secret.as_deref(), Some("sk-work"));
+
+    let mut keys = store.list().await.unwrap();
+    keys.sort();
+    assert_eq!(keys, vec![default_key, work_key]);
 }
 
 #[tokio::test]

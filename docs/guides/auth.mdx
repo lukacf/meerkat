@@ -67,12 +67,12 @@ backend_kind = "openai_api"
 [realm.prod.auth.anthropic_oauth]
 provider = "anthropic"
 auth_method = "claude_ai_oauth"
-source = { kind = "managed_store", profile = "anthropic_oauth" }
+source = { kind = "managed_store" }
 
 [realm.prod.auth.openai_apikey]
 provider = "openai"
 auth_method = "api_key"
-source = { kind = "managed_store", profile = "openai_apikey" }
+source = { kind = "managed_store" }
 
 [realm.prod.binding.default]
 backend_profile = "anthropic_primary"
@@ -202,7 +202,7 @@ realm or binding.
     "session_id": "...",
     "prompt": "...",
     "model": "gpt-5.4",
-    "connection_ref": {"realm_id": "prod", "binding_id": "openai"}
+    "connection_ref": {"realm": "prod", "binding": "openai"}
   }
 }
 ```
@@ -223,15 +223,16 @@ specific binding:
     "mob_id": "research",
     "profile": "analyst",
     "agent_identity": "a1",
-    "connection_ref": "prod:openai"
+    "connection_ref": {"realm": "prod", "binding": "openai"}
   }
 }
 ```
 
 Members in the same mob can use different providers or tenants
-without cross-contamination. The `connection_ref` string form
-(`realm:binding`) and struct form (`{"realm_id": ..., "binding_id":
-...}`) are both accepted.
+without cross-contamination. Public wire surfaces accept the structural
+`connection_ref` object only; the colon-joined `realm:binding[:profile]`
+form is a CLI input convenience and is converted before it crosses the
+wire boundary.
 
 ## Refresh coordination
 

@@ -12,9 +12,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
 - `active_run_count`: `u64`
 - `pending_spawn_count`: `u64`
+- `pending_spawn_sessions`: `Map<AgentIdentity, SessionId>`
 - `coordinator_bound`: `Bool`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
+- `external_peer_edges`: `Set<ExternalPeerEdge>`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
 - `tasks`: `Map<TaskId, MobTask>`
 - `in_progress_task_ids`: `Set<TaskId>`
@@ -33,6 +35,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireAll`
 - `WireMembers`(edge: WiringEdge)
 - `UnwireMembers`(edge: WiringEdge)
+- `WireExternalPeer`(edge: ExternalPeerEdge)
+- `UnwireExternalPeer`(edge: ExternalPeerEdge)
 - `BindMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
 - `RotateMemberSession`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
 - `ReleaseMemberSession`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -98,8 +102,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InitializeOrchestrator`
 - `BindCoordinator`
 - `UnbindCoordinator`
-- `StageSpawn`
-- `CompleteSpawn`
+- `StageSpawn`(agent_identity: AgentIdentity, session_id: SessionId)
+- `CompleteSpawn`(agent_identity: AgentIdentity)
 - `StartFlow`
 - `CompleteFlow`
 - `StopOrchestrator`
@@ -133,6 +137,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
+- `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -152,6 +157,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `edge_currently_wired`
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `WireExternalPeerRunning`
+- From: `Running`
+- On: `WireExternalPeer`(edge)
+- Guards:
+  - `external_peer_not_already_wired`
+- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- To: `Running`
+
+### `UnwireExternalPeerRunning`
+- From: `Running`
+- On: `UnwireExternalPeer`(edge)
+- Guards:
+  - `external_peer_currently_wired`
+- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
 ### `BindMemberSessionRunning`
@@ -511,7 +532,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StageSpawnRunning`
 - From: `Running`
-- On: `StageSpawn`()
+- On: `StageSpawn`(agent_identity, session_id)
+- Guards:
+  - `pending_identity_unused`
 - Emits: `ExposePendingSpawn`
 - To: `Running`
 
@@ -797,9 +820,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CompleteSpawnRunning`
 - From: `Running`, `Stopped`
-- On: `CompleteSpawn`()
+- On: `CompleteSpawn`(agent_identity)
 - Guards:
   - `pending_spawns_present`
+  - `pending_identity_present`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 

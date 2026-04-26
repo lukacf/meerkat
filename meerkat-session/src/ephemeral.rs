@@ -95,6 +95,7 @@ enum SessionCommand {
     HotSwapLlmIdentity {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     StageToolFilter {
@@ -363,6 +364,7 @@ pub trait SessionAgent: Send {
         &mut self,
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError>;
 
     /// Stage an external tool visibility filter for subsequent turns.
@@ -1729,11 +1731,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
             });
-            let execution_kind = req.execution_kind.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.execution_kind)
-            });
+            let execution_kind = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.execution_kind);
 
             handle
                 .command_tx
@@ -1796,6 +1796,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
         let sessions = self.sessions.read().await;
         let handle = sessions
@@ -1807,6 +1808,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .send(SessionCommand::HotSwapLlmIdentity {
                 client,
                 identity,
+                request_policy,
                 reply_tx,
             })
             .await
@@ -2405,9 +2407,10 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::HotSwapLlmIdentity {
                 client,
                 identity,
+                request_policy,
                 reply_tx,
             } => {
-                let result = agent.hot_swap_llm_identity(client, identity.clone());
+                let result = agent.hot_swap_llm_identity(client, identity.clone(), request_policy);
                 if result.is_ok() {
                     control.llm_identity_tx.send_replace(identity);
                 }

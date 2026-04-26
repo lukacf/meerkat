@@ -51,6 +51,20 @@ impl IngressView<'_> {
         self.driver.admitted_handling_mode(input_id)
     }
 
+    pub(crate) fn runtime_semantics(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::ingress_types::RuntimeInputSemantics> {
+        self.driver.admitted_runtime_semantics(input_id)
+    }
+
+    pub(crate) fn primitive_projection(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::ingress_types::RuntimeInputProjection> {
+        self.driver.admitted_primitive_projection(input_id)
+    }
+
     pub(crate) fn is_prompt(&self, input_id: &InputId) -> bool {
         self.driver.admitted_is_prompt(input_id)
     }
@@ -432,20 +446,6 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) async fn finalize_retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => Ok(d.finalize_retire()),
-            DriverEntry::Persistent(d) => d.finalize_retire().await,
-        }
-    }
-
-    pub(crate) async fn finalize_reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => Ok(d.reset_cleanup()),
-            DriverEntry::Persistent(d) => d.finalize_reset().await,
-        }
-    }
-
     pub(crate) async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
@@ -706,12 +706,51 @@ pub(crate) fn machine_input_boundary(
     driver: &DriverEntry,
     work_id: &InputId,
 ) -> meerkat_core::lifecycle::run_primitive::RunApplyBoundary {
-    match driver.driver_ingress().handling_mode(work_id) {
-        Some(meerkat_core::types::HandlingMode::Steer) => {
-            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
-        }
-        _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+    driver
+        .driver_ingress()
+        .runtime_semantics(work_id)
+        .map(|semantics| semantics.boundary)
+        .unwrap_or(meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart)
+}
+
+pub(crate) fn machine_input_execution_kind(
+    driver: &DriverEntry,
+    work_id: &InputId,
+) -> meerkat_core::lifecycle::RuntimeExecutionKind {
+    driver
+        .driver_ingress()
+        .runtime_semantics(work_id)
+        .map(|semantics| semantics.execution_kind)
+        .unwrap_or(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+}
+
+pub(crate) fn machine_batch_execution_kind(
+    driver: &DriverEntry,
+    work_ids: &[InputId],
+) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
+    if work_ids.is_empty() {
+        return None;
     }
+
+    if work_ids.iter().all(|id| {
+        machine_input_execution_kind(driver, id)
+            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
+    }) {
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+    } else {
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+    }
+}
+
+pub(crate) fn machine_batch_primitive_projections(
+    driver: &DriverEntry,
+    work_ids: &[InputId],
+) -> Vec<crate::ingress_types::RuntimeInputProjection> {
+    let ingress = driver.driver_ingress();
+    work_ids
+        .iter()
+        .map(|id| ingress.primitive_projection(id).unwrap_or_default())
+        .collect()
 }
 
 pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<InputId> {
@@ -731,9 +770,13 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             return Vec::new();
         }
         let target_boundary = machine_input_boundary(driver, first);
+        let target_execution_kind = machine_input_execution_kind(driver, first);
         return steer
             .iter()
-            .take_while(|id| machine_input_boundary(driver, id) == target_boundary)
+            .take_while(|id| {
+                machine_input_boundary(driver, id) == target_boundary
+                    && machine_input_execution_kind(driver, id) == target_execution_kind
+            })
             .cloned()
             .collect();
     }
@@ -747,7 +790,11 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         }
         return queue[..]
             .iter()
-            .take_while(|id| !ingress.is_prompt(id))
+            .take_while(|id| {
+                !ingress.is_prompt(id)
+                    && machine_input_execution_kind(driver, id)
+                        == meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+            })
             .cloned()
             .collect();
     }
@@ -1016,6 +1063,8 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 pub(crate) struct RecoveredIngressEntry {
     pub content_shape: crate::ingress_types::ContentShape,
     pub handling_mode: meerkat_core::types::HandlingMode,
+    pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
     pub is_prompt: bool,
     pub policy: crate::policy::PolicyDecision,
 }
@@ -1040,10 +1089,24 @@ pub(crate) fn machine_build_recovered_ingress_entry(
             None => return None,
         },
     };
+    let recovered_kind = state
+        .persisted_input
+        .as_ref()
+        .map(Input::kind)
+        .unwrap_or(crate::identifiers::InputKind::Prompt);
+    let runtime_semantics =
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, recovered_kind);
+    let primitive_projection = state
+        .persisted_input
+        .as_ref()
+        .map(crate::input::runtime_input_projection)
+        .unwrap_or_default();
 
     Some(RecoveredIngressEntry {
         content_shape,
         handling_mode,
+        runtime_semantics,
+        primitive_projection,
         is_prompt: matches!(
             state.persisted_input.as_ref(),
             Some(crate::input::Input::Prompt(_))
@@ -1058,16 +1121,47 @@ pub(crate) fn machine_realize_recovered_runtime_state(
 ) {
     match runtime_state {
         RuntimeState::Retired if driver.runtime_state() != RuntimeState::Retired => {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(session_id) = auth.state.session_id.clone() {
+                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut *auth,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
+                );
+            }
+            drop(auth);
             driver.set_control_projection(RuntimeState::Retired, None, None);
         }
         RuntimeState::Stopped
             if driver.runtime_state() != RuntimeState::Stopped
                 && driver.runtime_state() != RuntimeState::Destroyed =>
         {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *auth,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
+            );
+            drop(auth);
             driver.set_control_projection(RuntimeState::Stopped, None, None);
             driver.stop_runtime_cleanup();
         }
         RuntimeState::Destroyed if driver.runtime_state() != RuntimeState::Destroyed => {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(session_id) = auth.state.session_id.clone() {
+                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut *auth,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
+                );
+            }
+            drop(auth);
             driver.set_control_projection(RuntimeState::Destroyed, None, None);
             driver.destroy_cleanup();
         }
@@ -1085,7 +1179,7 @@ pub(crate) fn machine_recover_ephemeral_driver(
     // Normalize every active input. Build a bundle from the live driver
     // (ledger + DSL) so the normalization can read/rewrite the seed, then
     // push the normalized bundle back through `admit_recovered_to_ingress`
-    // to re-seed the DSL maps.
+    // so recovery facts re-enter via typed DSL input.
     let active_ids: Vec<InputId> = driver.active_input_ids();
 
     let mut normalized: Vec<(InputId, StoredInputState)> = Vec::with_capacity(active_ids.len());
@@ -1105,10 +1199,10 @@ pub(crate) fn machine_recover_ephemeral_driver(
         normalized.push((input_id.clone(), bundle));
     }
 
-    // Re-seed the driver's local ingress state directly from the ledger.
-    // No rebuilt authority — the DSL is the only owner; `admit_recovered_to_ingress`
-    // writes the recovered phase, run/boundary associations, typed terminal
-    // metadata, attempt count, and the appropriate lane.
+    // Replay recovered lifecycle facts through the driver's DSL authority.
+    // No rebuilt authority — the DSL is the only owner of recovered phase,
+    // run/boundary associations, typed terminal metadata, attempt count, and
+    // lane membership.
     let recovered_entries: Vec<(InputId, RecoveredIngressEntry, InputState, InputStateSeed)> =
         normalized
             .into_iter()
@@ -1123,6 +1217,8 @@ pub(crate) fn machine_recover_ephemeral_driver(
             input_id,
             entry.content_shape,
             entry.handling_mode,
+            entry.runtime_semantics,
+            entry.primitive_projection,
             entry.is_prompt,
             &state,
             &seed,
@@ -1176,6 +1272,8 @@ pub(crate) async fn machine_recover_persistent_driver(
                 bundle.state.input_id.clone(),
                 entry.content_shape,
                 entry.handling_mode,
+                entry.runtime_semantics,
+                entry.primitive_projection,
                 entry.is_prompt,
                 &bundle.state,
                 &bundle.seed,
@@ -1262,12 +1360,17 @@ pub(crate) async fn machine_stop_runtime(
         }
     }
 
-    // The session DSL has already accepted `StopRuntimeExecutor` before this
-    // realization path runs. Mirror that machine-owned terminal phase into the
-    // concrete control projection before finalizing so persistent drivers commit
-    // `Stopped`, not the pre-stop shell cache value.
-    driver.set_control_projection(RuntimeState::Stopped, None, None);
-    driver.finalize_stop_runtime().await
+    match driver {
+        DriverEntry::Ephemeral(d) => {
+            // The session DSL has already accepted `StopRuntimeExecutor`
+            // before this realization path runs. Mirror that machine-owned
+            // terminal phase into the concrete projection before finalizing.
+            d.set_control_projection(RuntimeState::Stopped, None, None);
+            d.finalize_stop_runtime();
+            Ok(())
+        }
+        DriverEntry::Persistent(d) => d.realize_stop_lifecycle().await,
+    }
 }
 
 pub(crate) async fn machine_destroy(
@@ -1312,11 +1415,15 @@ pub(crate) async fn machine_retire(
         }
     }
 
-    // Retire legality and phase ownership live in the session DSL. The driver
-    // projection is the concrete cache used for drain gating and durable
-    // lifecycle commits.
-    driver.set_control_projection(RuntimeState::Retired, None, None);
-    driver.finalize_retire().await
+    match driver {
+        DriverEntry::Ephemeral(d) => {
+            // Retire legality and phase ownership live in the session DSL. The
+            // driver projection is the concrete cache used for drain gating.
+            d.set_control_projection(RuntimeState::Retired, None, None);
+            Ok(d.finalize_retire())
+        }
+        DriverEntry::Persistent(d) => d.realize_retire_lifecycle().await,
+    }
 }
 
 pub(crate) async fn machine_reset(
@@ -1338,10 +1445,15 @@ pub(crate) async fn machine_reset(
         }
     }
 
-    // Reset is machine-owned; mirror the accepted DSL phase into the concrete
-    // projection before cleanup/persistence observes the lifecycle state.
-    driver.set_control_projection(RuntimeState::Idle, None, None);
-    driver.finalize_reset().await
+    match driver {
+        DriverEntry::Ephemeral(d) => {
+            // Reset is machine-owned; mirror the accepted DSL phase into the
+            // concrete projection before cleanup observes the lifecycle state.
+            d.set_control_projection(RuntimeState::Idle, None, None);
+            Ok(d.reset_cleanup())
+        }
+        DriverEntry::Persistent(d) => d.realize_reset_lifecycle().await,
+    }
 }
 
 pub(crate) fn machine_prepare_bindings_projection(

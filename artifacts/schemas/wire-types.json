@@ -485,6 +485,597 @@
     "title": "ExecutionPlacementIdentity",
     "type": "object"
   },
+  "InputListResult": {
+    "$defs": {
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "WireInputDurability": {
+        "description": "Typed wire projection of an input's durability class.",
+        "enum": [
+          "durable",
+          "volatile",
+          "ephemeral"
+        ],
+        "type": "string"
+      },
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputPolicy": {
+        "description": "Typed wire projection of the input admission policy.\n\nFormerly `serde_json::Value`; wave-b retyped it so callers can pattern\nmatch on admission behavior instead of parsing opaque JSON.",
+        "enum": [
+          "stage",
+          "queue",
+          "immediate"
+        ],
+        "type": "string"
+      },
+      "WireInputState": {
+        "description": "RPC-facing input state snapshot.\n\nAll fields are typed. Wave B replaced six former `serde_json::Value`\nfields with typed projections so the wire carries no untyped carriers.",
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "current_state": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputDurability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "history": {
+            "items": {
+              "$ref": "#/$defs/WireInputStateHistoryEntry"
+            },
+            "type": "array"
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "last_boundary_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persisted_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePersistedInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reconstruction_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReconstructionSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_id",
+          "current_state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WireInputStateHistoryEntry": {
+        "description": "Input transition history entry for RPC-facing snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          }
+        },
+        "required": [
+          "timestamp",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WirePersistedInput": {
+        "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "prompt",
+                "type": "string"
+              },
+              "text_preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "peer_message",
+                "type": "string"
+              },
+              "peer_name": {
+                "$ref": "#/$defs/PeerName"
+              }
+            },
+            "required": [
+              "kind",
+              "peer_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "continuation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "carrier": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "carrier"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReconstructionSource": {
+        "description": "Typed wire projection of where an input state was reconstructed from.",
+        "enum": [
+          "live",
+          "event_store",
+          "snapshot",
+          "replay"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/session_submissions`.",
+    "properties": {
+      "inputs": {
+        "items": {
+          "$ref": "#/$defs/WireInputState"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "inputs"
+    ],
+    "title": "InputListResult",
+    "type": "object"
+  },
+  "InputStateResult": {
+    "$defs": {
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "WireInputDurability": {
+        "description": "Typed wire projection of an input's durability class.",
+        "enum": [
+          "durable",
+          "volatile",
+          "ephemeral"
+        ],
+        "type": "string"
+      },
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputPolicy": {
+        "description": "Typed wire projection of the input admission policy.\n\nFormerly `serde_json::Value`; wave-b retyped it so callers can pattern\nmatch on admission behavior instead of parsing opaque JSON.",
+        "enum": [
+          "stage",
+          "queue",
+          "immediate"
+        ],
+        "type": "string"
+      },
+      "WireInputState": {
+        "description": "RPC-facing input state snapshot.\n\nAll fields are typed. Wave B replaced six former `serde_json::Value`\nfields with typed projections so the wire carries no untyped carriers.",
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "current_state": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputDurability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "history": {
+            "items": {
+              "$ref": "#/$defs/WireInputStateHistoryEntry"
+            },
+            "type": "array"
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "last_boundary_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persisted_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePersistedInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reconstruction_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReconstructionSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_id",
+          "current_state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WireInputStateHistoryEntry": {
+        "description": "Input transition history entry for RPC-facing snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          }
+        },
+        "required": [
+          "timestamp",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WirePersistedInput": {
+        "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "prompt",
+                "type": "string"
+              },
+              "text_preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "peer_message",
+                "type": "string"
+              },
+              "peer_name": {
+                "$ref": "#/$defs/PeerName"
+              }
+            },
+            "required": [
+              "kind",
+              "peer_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "continuation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "carrier": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "carrier"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReconstructionSource": {
+        "description": "Typed wire projection of where an input state was reconstructed from.",
+        "enum": [
+          "live",
+          "event_store",
+          "snapshot",
+          "replay"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "$ref": "#/$defs/WireInputState"
+      },
+      {
+        "type": "null"
+      }
+    ],
+    "title": "Nullable_WireInputState"
+  },
   "McpLiveOpResponse": {
     "$defs": {
       "McpLiveOpStatus": {
@@ -4482,7 +5073,7 @@
   },
   "RealtimeChannelTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
+    "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bridge session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
     "oneOf": [
       {
         "properties": {
@@ -5373,7 +5964,7 @@
         "type": "object"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bridge session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -6670,7 +7261,7 @@
   },
   "RuntimeAcceptOutcomeType": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Discriminator for `session/submit` responses.",
+    "description": "Discriminator for `runtime/session_submit` responses.",
     "enum": [
       "accepted",
       "deduplicated",
@@ -6686,7 +7277,7 @@
         "type": "string"
       },
       "RuntimeAcceptOutcomeType": {
-        "description": "Discriminator for `session/submit` responses.",
+        "description": "Discriminator for `runtime/session_submit` responses.",
         "enum": [
           "accepted",
           "deduplicated",
@@ -6971,7 +7562,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/submit`.",
+    "description": "Response payload for `runtime/session_submit`.",
     "properties": {
       "existing_id": {
         "type": [
@@ -7047,6 +7638,73 @@
       "status"
     ],
     "title": "RuntimeRealtimeAttachmentStatusResult",
+    "type": "object"
+  },
+  "RuntimeResetResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/session_reset`.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned"
+    ],
+    "title": "RuntimeResetResult",
+    "type": "object"
+  },
+  "RuntimeRetireResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/session_retire`.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "inputs_pending_drain": {
+        "default": 0,
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned"
+    ],
+    "title": "RuntimeRetireResult",
+    "type": "object"
+  },
+  "RuntimeStateResult": {
+    "$defs": {
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/session_status`.",
+    "properties": {
+      "state": {
+        "$ref": "#/$defs/WireRuntimeState"
+      }
+    },
+    "required": [
+      "state"
+    ],
+    "title": "RuntimeStateResult",
     "type": "object"
   },
   "ScheduleListResult": {
@@ -7989,7 +8647,7 @@
           },
           "preload_skills": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/SkillKey"
             },
             "type": "array"
           },
@@ -8198,10 +8856,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -8218,10 +8873,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -8231,6 +8883,18 @@
             "type": "object"
           }
         ]
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
       },
       "TriggerSpec": {
         "oneOf": [
@@ -9464,7 +10128,7 @@
           },
           "preload_skills": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/SkillKey"
             },
             "type": "array"
           },
@@ -9673,10 +10337,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -9693,10 +10354,7 @@
                 "type": "string"
               },
               "value": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "$ref": "#/$defs/ToolNameSet"
               }
             },
             "required": [
@@ -9706,6 +10364,18 @@
             "type": "object"
           }
         ]
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
       },
       "TriggerSpec": {
         "oneOf": [
@@ -10167,7 +10837,7 @@
         "type": "string"
       },
       "source_kind": {
-        "description": "Discriminator: \"inline_secret\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
+        "description": "Discriminator: \"inline_secret\" / \"managed_store\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
         "type": "string"
       }
     },
@@ -11242,7 +11912,7 @@
             "type": "string"
           },
           "source_kind": {
-            "description": "Discriminator: \"inline_secret\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
+            "description": "Discriminator: \"inline_secret\" / \"managed_store\" / \"env\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
             "type": "string"
           }
         },

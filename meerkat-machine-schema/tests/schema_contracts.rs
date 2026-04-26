@@ -13,8 +13,9 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
 };
 use meerkat_machine_schema::identity::{
-    ActorId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId,
-    MachineId, MachineInstanceId, NamedTypeId, PhaseId, ProtocolId, RouteId, TransitionId,
+    ActorId, CompositionDriverId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId,
+    FieldId, InputVariantId, MachineId, MachineInstanceId, NamedTypeId, PhaseId, ProtocolId,
+    RouteId, TransitionId,
 };
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, CompositionSchemaError, DriverDispatchRoute,
@@ -807,7 +808,7 @@ fn noop_driver_on_meerkat_mob_seam() -> CompositionDriver {
     // the next commit — the framework here only cares that the declared
     // watched variant exists on the producer machine.
     CompositionDriver {
-        name: "noop_driver".into(),
+        name: CompositionDriverId::parse("noop_driver").expect("valid driver name"),
         rust: sample_driver_rust_binding(),
         watched_effects: vec![WatchedEffect {
             producer_instance: MachineInstanceId::parse("mob").expect("valid producer_instance"),

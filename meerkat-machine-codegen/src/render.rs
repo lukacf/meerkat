@@ -431,12 +431,7 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
                 continue;
             }
             if let Some(atom) = lookup_named_type_atom(schema, &alias) {
-                pushln!(
-                    &mut out,
-                    "pub type {} = {};",
-                    rust_ident(&alias),
-                    render_rust_type_atom(atom)
-                );
+                render_named_type_definition(&mut out, &alias, atom);
             }
         }
         pushln!(&mut out);
@@ -836,8 +831,22 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
 }
 
 pub use crate::ids::{AgentRuntimeId, SessionId, ToolFilter, ToolVisibilityWitness};
-pub type FenceToken = u64;
-pub type Generation = u64;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FenceToken(pub u64);
+impl From<u64> for FenceToken {
+    fn from(value: u64) -> Self { Self(value) }
+}
+impl std::fmt::Display for FenceToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Generation(pub u64);
+impl From<u64> for Generation {
+    fn from(value: u64) -> Self { Self(value) }
+}
+impl std::fmt::Display for Generation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -1155,7 +1164,7 @@ pub fn transition<C: Context>(
 
 #[cfg(not(test))]
 fn direct_default_value_expr(
-    schema: &MachineSchema,
+    _schema: &MachineSchema,
     ty: &TypeRef,
     enum_defaults: &std::collections::BTreeMap<String, String>,
 ) -> String {
@@ -1163,8 +1172,7 @@ fn direct_default_value_expr(
         TypeRef::Bool => "false".to_string(),
         TypeRef::U32 | TypeRef::U64 => "0".to_string(),
         TypeRef::String => "String::new()".to_string(),
-        TypeRef::Named(name) if named_type_lowers_to_u64(schema, name.as_str()) => "0".to_string(),
-        TypeRef::Named(name) => format!("{}::from(String::new())", rust_ident(name.as_str())),
+        TypeRef::Named(name) => format!("{}::default()", rust_ident(name.as_str())),
         TypeRef::Enum(name) => enum_defaults
             .get(name.as_str())
             .cloned()
@@ -1777,6 +1785,69 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
     }
 }
 
+#[cfg(not(test))]
+fn render_named_type_definition(
+    out: &mut String,
+    name: &str,
+    atom: &meerkat_machine_schema::RustTypeAtom,
+) {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    let rust_name = rust_ident(name);
+    match atom {
+        RustTypeAtom::TypePath(path) => {
+            pushln!(out, "pub type {} = {};", rust_name, path);
+        }
+        RustTypeAtom::String => {
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub struct {}(pub String);", rust_name);
+            pushln!(out, "impl From<String> for {} {{", rust_name);
+            pushln!(out, "    fn from(value: String) -> Self {{ Self(value) }}");
+            pushln!(out, "}}");
+            pushln!(out, "impl From<&str> for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn from(value: &str) -> Self {{ Self(value.to_owned()) }}"
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.write_str(&self.0) }}"
+            );
+            pushln!(out, "}}");
+        }
+        RustTypeAtom::Bool
+        | RustTypeAtom::U8
+        | RustTypeAtom::U16
+        | RustTypeAtom::U32
+        | RustTypeAtom::U64 => {
+            let inner = render_rust_type_atom(atom);
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub struct {}(pub {});", rust_name, inner);
+            pushln!(out, "impl From<{}> for {} {{", inner, rust_name);
+            pushln!(
+                out,
+                "    fn from(value: {}) -> Self {{ Self(value) }}",
+                inner
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{}}\", self.0) }}"
+            );
+            pushln!(out, "}}");
+        }
+    }
+}
+
 /// Look up the authoritative Rust atom for a `TypeRef::Named` slug.
 ///
 #[cfg(not(test))]
@@ -1789,20 +1860,6 @@ fn lookup_named_type_atom<'a>(
         .iter()
         .find(|binding| binding.name.as_str() == name)
         .map(|binding| &binding.rust)
-}
-
-/// Named-type slugs whose authoritative binding resolves to `u64`.
-/// Convenience predicate consumed by the default-value and RawValue
-/// helpers.
-#[cfg(not(test))]
-fn named_type_lowers_to_u64(schema: &MachineSchema, name: &str) -> bool {
-    use meerkat_machine_schema::RustTypeAtom;
-    lookup_named_type_atom(schema, name).is_some_and(|atom| {
-        matches!(
-            atom,
-            RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8
-        )
-    })
 }
 
 #[cfg(not(test))]
@@ -2118,6 +2175,7 @@ mod tests {
                 ],
             },
             surface_only_inputs: vec![],
+            runtime_internal_inputs: vec![],
             signals: EnumSchema {
                 name: "TurnExecutionSignal".to_owned(),
                 variants: vec![],

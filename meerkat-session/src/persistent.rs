@@ -538,9 +538,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         identity: meerkat_core::SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
         self.inner
-            .hot_swap_session_llm_identity(id, client, identity)
+            .hot_swap_session_llm_identity(id, client, identity, request_policy)
             .await?;
         self.persist_full_session(id).await.map(|_| ())
     }
@@ -606,27 +607,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         Ok(match (store_snapshot, runtime_snapshot) {
-            (Some(store_session), Some(mut runtime_session)) => {
-                if runtime_session.session_metadata().is_none()
-                    && let Some(metadata) = store_session.session_metadata()
-                    && let Err(err) = runtime_session.set_session_metadata(metadata)
+            (Some(store), Some(runtime)) => {
+                if metadata_marks_archived(store.metadata())
+                    || store.updated_at() >= runtime.updated_at()
                 {
-                    tracing::warn!(
-                        session_id = %id,
-                        error = %err,
-                        "failed to restore session metadata from durable session-store snapshot onto newer runtime snapshot"
-                    );
-                }
-                if runtime_session.updated_at() >= store_session.updated_at() {
-                    Some(runtime_session)
+                    Some(store)
                 } else {
-                    Some(store_session)
+                    Some(Self::runtime_session_with_store_metadata(runtime, &store))
                 }
             }
-            (Some(store_session), None) => Some(store_session),
-            (None, Some(runtime_session)) => Some(runtime_session),
+            (Some(store), None) => Some(store),
+            (None, Some(runtime)) => Some(runtime),
             (None, None) => None,
         })
+    }
+
+    fn runtime_session_with_store_metadata(mut runtime: Session, store: &Session) -> Session {
+        for (key, value) in store.metadata() {
+            if !runtime.metadata().contains_key(key) {
+                runtime.set_metadata(key, value.clone());
+            }
+        }
+        runtime
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -1103,54 +1105,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
-    pub async fn apply_runtime_turn_with_result(
-        &self,
-        id: &SessionId,
-        run_id: RunId,
-        req: StartTurnRequest,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-    ) -> Result<(RunResult, CoreApplyOutput), SessionError> {
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
-        match self.inner.start_turn(id, req).await {
-            Ok(run_result) => {
-                let output = self
-                    .build_runtime_output(
-                        id,
-                        run_id,
-                        boundary,
-                        contributing_input_ids,
-                        Some(CoreApplyTerminal::RunResult(run_result.clone())),
-                    )
-                    .await?;
-                Ok((run_result, output))
-            }
-            Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
-                let output = self
-                    .build_runtime_output(
-                        id,
-                        run_id,
-                        boundary,
-                        contributing_input_ids,
-                        Some(CoreApplyTerminal::NoPendingBoundary),
-                    )
-                    .await?;
-                let noop_result = RunResult {
-                    text: String::new(),
-                    session_id: id.clone(),
-                    usage: meerkat_core::types::Usage::default(),
-                    turns: 0,
-                    tool_calls: 0,
-                    structured_output: None,
-                    schema_warnings: None,
-                    skill_diagnostics: None,
-                };
-                Ok((noop_result, output))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     pub async fn apply_runtime_turn_outcome(
         &self,
         id: &SessionId,
@@ -1336,8 +1290,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         };
 
         // Always persist after a direct start_turn call. Runtime-backed sessions
-        // that go through apply_runtime_turn_with_result() have their own atomic
-        // boundary commit path and don't call start_turn on PersistentSessionService.
+        // that go through apply_runtime_turn() have their own atomic boundary
+        // commit path and don't call start_turn on PersistentSessionService.
         let _ = self.persist_full_session(id).await?;
 
         Ok(result)
@@ -1364,6 +1318,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         _id: &SessionId,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
             "hot_swap_session_llm_identity is a bespoke metadata seam that bypasses the canonical RuntimeTurnMetadata carrier; model/provider/provider_params must travel through the single runtime-backed turn seam instead".to_string(),
@@ -2076,11 +2031,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Load the authoritative durable session view.
     ///
-    /// In runtime-backed mode, the runtime store can hold a newer canonical
-    /// boundary snapshot than the plain session-store row. Recovery and
-    /// post-turn inspection must therefore read through the same store/runtime
-    /// reconciliation seam instead of assuming the raw session-store row is
-    /// authoritative.
+    /// The raw `SessionStore` row is the durable session authority. Runtime
+    /// snapshots are boundary-commit companions retained for recovery
+    /// compatibility and are only consulted when no session-store row exists.
     pub async fn load_authoritative_session(
         &self,
         id: &SessionId,
@@ -2094,8 +2047,34 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// `last_saved_len` without a second export round-trip.
     async fn persist_full_session(&self, id: &SessionId) -> Result<usize, SessionError> {
         let session = self.export_session_with_labels(id).await?;
-        let message_count = session.messages().len();
-        let _ = self.save_normalized_session(session).await?;
+        let persisted = self.normalized_session_for_persistence(session).await?;
+        let message_count = persisted.messages().len();
+        if let Some(runtime_store) = self.runtime_store.as_ref() {
+            let session_snapshot = serde_json::to_vec(&persisted).map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to serialize session snapshot for runtime persistence: {err}"
+                )))
+            })?;
+            runtime_store
+                .commit_session_boundary(
+                    &Self::runtime_id_for_session(id),
+                    SessionDelta { session_snapshot },
+                    RunId::new(),
+                    RunApplyBoundary::Immediate,
+                    vec![],
+                    vec![],
+                )
+                .await
+                .map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "runtime snapshot persistence failed: {err}"
+                    )))
+                })?;
+        }
+        self.store
+            .save(&persisted)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
 
         Ok(message_count)
     }
@@ -2350,6 +2329,7 @@ mod tests {
             &mut self,
             _client: Arc<dyn meerkat_core::AgentLlmClient>,
             identity: meerkat_core::SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
         ) -> Result<(), meerkat_core::error::AgentError> {
             let mut session = match self.session.lock() {
                 Ok(guard) => guard,
@@ -2559,8 +2539,10 @@ mod tests {
             &mut self,
             client: Arc<dyn meerkat_core::AgentLlmClient>,
             identity: meerkat_core::SessionLlmIdentity,
+            request_policy: meerkat_core::SessionLlmRequestPolicy,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            self.inner.hot_swap_llm_identity(client, identity)
+            self.inner
+                .hot_swap_llm_identity(client, identity, request_policy)
         }
 
         fn stage_external_tool_filter(
@@ -2759,6 +2741,7 @@ mod tests {
             &mut self,
             _client: Arc<dyn meerkat_core::AgentLlmClient>,
             identity: meerkat_core::SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
         ) -> Result<(), meerkat_core::error::AgentError> {
             let mut session = match self.session.lock() {
                 Ok(guard) => guard,
@@ -2988,6 +2971,7 @@ mod tests {
             &mut self,
             _client: Arc<dyn meerkat_core::AgentLlmClient>,
             identity: meerkat_core::SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
         ) -> Result<(), meerkat_core::error::AgentError> {
             let mut session = match self.session.lock() {
                 Ok(guard) => guard,
@@ -3177,7 +3161,6 @@ mod tests {
             skill_references: None,
             flow_tool_overlay: None,
             turn_metadata: None,
-            execution_kind: None,
         }
     }
 
@@ -3194,7 +3177,6 @@ mod tests {
             skill_references: None,
             flow_tool_overlay: None,
             turn_metadata: None,
-            execution_kind: None,
         }
     }
 
@@ -3464,7 +3446,7 @@ mod tests {
 
         let run_id = RunId::new();
         service
-            .apply_runtime_turn_with_result(
+            .apply_runtime_turn(
                 &created.session_id,
                 run_id,
                 StartTurnRequest {
@@ -3489,6 +3471,55 @@ mod tests {
         let persisted: Session =
             serde_json::from_slice(&snapshot).expect("runtime snapshot should deserialize");
         assert_no_inline_images_in_session(&persisted);
+    }
+
+    #[tokio::test]
+    async fn test_apply_runtime_turn_resume_pending_without_boundary_is_not_run_result() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let run_id = RunId::new();
+        let contributing_input_ids = vec![meerkat_core::lifecycle::InputId::new()];
+        let mut req = start_turn_request("resume");
+        req.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending),
+                ..Default::default()
+            },
+        );
+
+        let output = service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id.clone(),
+                req,
+                RunApplyBoundary::RunStart,
+                contributing_input_ids.clone(),
+            )
+            .await
+            .expect("runtime apply should commit typed no-pending terminal");
+
+        assert_eq!(output.receipt.run_id, run_id);
+        assert_eq!(
+            output.receipt.contributing_input_ids,
+            contributing_input_ids
+        );
+        assert!(output.run_result.is_none());
+        assert!(matches!(
+            output.terminal,
+            Some(CoreApplyTerminal::NoPendingBoundary)
+        ));
     }
 
     #[tokio::test]
@@ -4113,7 +4144,7 @@ mod tests {
             .expect("create_session should succeed");
 
         service
-            .apply_runtime_turn_with_result(
+            .apply_runtime_turn(
                 &result.session_id,
                 RunId::new(),
                 start_turn_request("runtime committed turn"),
@@ -4264,7 +4295,7 @@ mod tests {
             .expect("create_session should succeed");
 
         service
-            .apply_runtime_turn_with_result(
+            .apply_runtime_turn(
                 &result.session_id,
                 RunId::new(),
                 start_turn_request("runtime committed turn"),

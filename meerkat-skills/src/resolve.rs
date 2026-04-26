@@ -6,7 +6,10 @@ use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills::SkillScope;
-use meerkat_core::skills::{SkillError, SourceUuid};
+use meerkat_core::skills::{
+    ResolveError, SkillError, SkillKey, SkillName, SourceIdentityRecord, SourceIdentityRegistry,
+    SourceUuid,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills_config::GitRefType;
 use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
@@ -38,6 +41,9 @@ pub async fn resolve_repositories_with_roots(
         return Ok(None);
     }
 
+    let registry = config.build_source_identity_registry()?;
+    let records = config.source_identity_records();
+
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (context_root, user_root, cache_root);
@@ -50,21 +56,24 @@ pub async fn resolve_repositories_with_roots(
             };
             return Err(error);
         }
-        Ok(Some(CompositeSkillSource::from_named(vec![NamedSource {
-            name: "embedded".to_string(),
-            source_uuid: SourceUuid::builtin(),
-            source: SourceNode::Embedded(EmbeddedSkillSource::new()),
-        }])))
+        let builtin_identity = active_source_identity(&registry, &records, &SourceUuid::builtin())?;
+        Ok(Some(CompositeSkillSource::from_named(vec![
+            NamedSource::new(
+                builtin_identity,
+                SourceNode::Embedded(EmbeddedSkillSource::new()),
+            ),
+        ])))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut sources: Vec<NamedSource> = vec![NamedSource {
-            name: "embedded".to_string(),
-            source_uuid: SourceUuid::builtin(),
-            source: SourceNode::Embedded(EmbeddedSkillSource::new()),
-        }];
+        let builtin_identity = active_source_identity(&registry, &records, &SourceUuid::builtin())?;
+        let mut sources: Vec<NamedSource> = vec![NamedSource::new(
+            builtin_identity,
+            SourceNode::Embedded(EmbeddedSkillSource::new()),
+        )];
         for repo in &config.repositories {
+            let source_identity = active_source_identity(&registry, &records, &repo.source_uuid)?;
             match &repo.transport {
                 SkillRepoTransport::Filesystem { path } => {
                     let resolution_root = context_root
@@ -75,16 +84,15 @@ pub async fn resolve_repositories_with_roots(
                     } else {
                         path.into()
                     };
-                    sources.push(NamedSource {
-                        name: repo.name.clone(),
-                        source_uuid: repo.source_uuid.clone(),
-                        source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
+                    sources.push(NamedSource::new(
+                        source_identity,
+                        SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                             full_path,
                             SkillScope::Project,
                             repo.source_uuid.clone(),
                             config.health_thresholds,
                         )),
-                    });
+                    ));
                 }
                 SkillRepoTransport::Http {
                     url,
@@ -103,20 +111,17 @@ pub async fn resolve_repositories_with_roots(
                             (None, Some(value)) => Some(HttpSkillAuth::Bearer(value.clone())),
                             _ => None,
                         };
-                        sources.push(NamedSource {
-                            name: repo.name.clone(),
-                            source_uuid: repo.source_uuid.clone(),
-                            source: SourceNode::Http(Box::new(
-                                HttpSkillSource::new_with_thresholds(
-                                    repo.source_uuid.clone(),
-                                    url.clone(),
-                                    auth,
-                                    Duration::from_secs(*refresh_seconds),
-                                    Duration::from_secs(*timeout_seconds),
-                                    config.health_thresholds,
-                                ),
-                            )),
-                        });
+                        sources.push(NamedSource::new(
+                            source_identity,
+                            SourceNode::Http(Box::new(HttpSkillSource::new_with_thresholds(
+                                repo.source_uuid.clone(),
+                                url.clone(),
+                                auth,
+                                Duration::from_secs(*refresh_seconds),
+                                Duration::from_secs(*timeout_seconds),
+                                config.health_thresholds,
+                            ))),
+                        ));
                     }
                     #[cfg(any(not(feature = "skills-http"), target_arch = "wasm32"))]
                     {
@@ -157,16 +162,15 @@ pub async fn resolve_repositories_with_roots(
                         resolved_cwd,
                         Duration::from_secs(*timeout_seconds),
                     );
-                    sources.push(NamedSource {
-                        name: repo.name.clone(),
-                        source_uuid: repo.source_uuid.clone(),
-                        source: SourceNode::External(ExternalSkillSource::new_with_source_uuid(
+                    sources.push(NamedSource::new(
+                        source_identity,
+                        SourceNode::External(ExternalSkillSource::new_with_source_uuid(
                             client,
                             repo.source_uuid.clone(),
                             Duration::from_secs(300),
                             config.health_thresholds,
                         )),
-                    });
+                    ));
                 }
                 SkillRepoTransport::Git {
                     url,
@@ -196,10 +200,9 @@ pub async fn resolve_repositories_with_roots(
                                 .as_ref()
                                 .map(|key| GitSkillAuth::SshKey(key.clone()))
                         });
-                    sources.push(NamedSource {
-                        name: repo.name.clone(),
-                        source_uuid: repo.source_uuid.clone(),
-                        source: SourceNode::Git(Box::new(GitSkillSource::new(GitSkillConfig {
+                    sources.push(NamedSource::new(
+                        source_identity,
+                        SourceNode::Git(Box::new(GitSkillSource::new(GitSkillConfig {
                             repo_url: url.clone(),
                             git_ref,
                             cache_dir: cache_base,
@@ -210,7 +213,7 @@ pub async fn resolve_repositories_with_roots(
                             source_uuid: repo.source_uuid.clone(),
                             health_thresholds: config.health_thresholds,
                         }))),
-                    });
+                    ));
                 }
             }
         }
@@ -218,21 +221,52 @@ pub async fn resolve_repositories_with_roots(
         if let Some(root) = context_root {
             let default_project_skills = root.join(".rkat/skills");
             if default_project_skills.is_dir() {
-                sources.push(NamedSource {
-                    name: "project".to_string(),
-                    source_uuid: SourceUuid::project_local(),
-                    source: SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
+                let project_identity =
+                    active_source_identity(&registry, &records, &SourceUuid::project_local())?;
+                sources.push(NamedSource::new(
+                    project_identity,
+                    SourceNode::Filesystem(FilesystemSkillSource::new_with_identity(
                         default_project_skills,
                         SkillScope::Project,
                         SourceUuid::project_local(),
                         config.health_thresholds,
                     )),
-                });
+                ));
             }
         }
 
         Ok(Some(CompositeSkillSource::from_named(sources)))
     }
+}
+
+fn active_source_identity(
+    registry: &SourceIdentityRegistry,
+    records: &[SourceIdentityRecord],
+    source_uuid: &SourceUuid,
+) -> Result<SourceIdentityRecord, SkillError> {
+    let probe = SkillKey::new(
+        source_uuid.clone(),
+        SkillName::parse("source-identity-probe")?,
+    );
+    let resolved = registry
+        .resolve(&probe)
+        .map_err(source_identity_resolution_error)?;
+    records
+        .iter()
+        .find(|record| record.source_uuid == resolved.source.source_uuid)
+        .cloned()
+        .ok_or_else(|| {
+            SkillError::Load(
+                format!(
+                    "source identity registry resolved {source_uuid} without a canonical record"
+                )
+                .into(),
+            )
+        })
+}
+
+fn source_identity_resolution_error(error: ResolveError) -> SkillError {
+    SkillError::Load(format!("source identity resolution failed: {error}").into())
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -73,7 +73,7 @@ impl SessionAgent for MockAgent {
 
         if self.callback_pending {
             return Err(meerkat_core::error::AgentError::CallbackPending {
-                tool_name: "external_mock".to_string(),
+                tool_name: "external_mock".into(),
                 args: json!({ "value": "browser" }),
             });
         }
@@ -125,6 +125,7 @@ impl SessionAgent for MockAgent {
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
     }
@@ -296,7 +297,7 @@ impl StaticToolDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: (*name).to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: json!({
                         "type": "object",
@@ -391,7 +392,7 @@ impl AgentLlmClient for RecordingLlmClient {
         _temperature: Option<f32>,
         _provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
-        let names = tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        let names = tools.iter().map(|t| t.name.to_string()).collect::<Vec<_>>();
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
@@ -476,6 +477,7 @@ impl SessionAgent for RealSessionAgent {
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
     }
@@ -555,6 +557,7 @@ impl SessionAgent for CompactionSessionAgent {
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
         _identity: meerkat_core::SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
     }
@@ -809,7 +812,6 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         skill_references: None,
         flow_tool_overlay: None,
         turn_metadata: None,
-        execution_kind: None,
     }
 }
 
@@ -1464,7 +1466,12 @@ async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() 
     let run_id = meerkat_core::lifecycle::RunId::new();
     let contributing_input_ids = vec![meerkat_core::lifecycle::InputId::new()];
     let mut req = turn_req("");
-    req.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending);
+    req.turn_metadata = Some(
+        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending),
+            ..Default::default()
+        },
+    );
 
     let output = service
         .apply_runtime_turn(

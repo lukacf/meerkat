@@ -345,15 +345,14 @@ impl AgentMobToolSurface {
                         ));
                     }
                 }
-                let comms_tools: std::collections::HashSet<String> = [
+                let comms_tools = [
                     "send",
                     "send_message",
                     "send_request",
                     "send_response",
                     "peers",
                 ]
-                .iter()
-                .map(ToString::to_string)
+                .into_iter()
                 .collect();
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter: Some(meerkat_core::tool_scope::ToolFilter::Allow(
@@ -1030,14 +1029,14 @@ impl AgentMobToolSurface {
                         .ok()
                         .and_then(|v| v.as_str().map(String::from))
                         .unwrap_or_else(|| format!("{:?}", p.kind));
-                    (kind_str, p.source_id.clone())
+                    (kind_str, p.source_id.to_string())
                 }
                 None => ("unknown".to_string(), "unknown".to_string()),
             };
             groups
                 .entry((kind, source_id))
                 .or_default()
-                .push(tool.name.clone());
+                .push(tool.name.to_string());
         }
         let sources: Vec<serde_json::Value> = groups
             .into_iter()
@@ -1166,7 +1165,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
 
 fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
     Arc::new(ToolDef {
-        name: name.to_string(),
+        name: name.into(),
         description: description.to_string(),
         input_schema,
         provenance: Some(ToolProvenance {
@@ -1950,7 +1949,7 @@ mod tests {
     impl TestCommsRuntime {
         async fn new(name: &str, registry: Arc<TestCommsRegistry>) -> Arc<Self> {
             let runtime = Arc::new(Self {
-                name: name.to_string(),
+                name: name.into(),
                 key: meerkat_core::comms::PeerId::new().to_string(),
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
@@ -2109,7 +2108,12 @@ mod tests {
             &self,
             req: meerkat_core::service::CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
-            let sid = SessionId::new();
+            let sid = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let name = req
                 .build
@@ -2957,6 +2961,10 @@ mod tests {
             spawn_payload.get("agent_runtime_id").is_none(),
             "Mob-MCP operator results must not leak the binding-era agent_runtime_id"
         );
+        assert!(
+            spawn_payload.get("fence_token").is_none(),
+            "Mob-MCP operator results must not leak the binding-era fence_token"
+        );
 
         let handle = state.handle_for(&mob_id).await.expect("handle");
         let audit_events = handle
@@ -3371,21 +3379,21 @@ mod tests {
             fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
                 vec![
                     Arc::new(ToolDef {
-                        name: "tool_a".to_string(),
+                        name: "tool_a".into(),
                         description: "Tool A".to_string(),
                         input_schema: json!({"type": "object"}),
                         provenance: Some(ToolProvenance {
                             kind: ToolSourceKind::Builtin,
-                            source_id: "core".to_string(),
+                            source_id: "core".into(),
                         }),
                     }),
                     Arc::new(ToolDef {
-                        name: "tool_b".to_string(),
+                        name: "tool_b".into(),
                         description: "Tool B".to_string(),
                         input_schema: json!({"type": "object"}),
                         provenance: Some(ToolProvenance {
                             kind: ToolSourceKind::Mob,
-                            source_id: "mob".to_string(),
+                            source_id: "mob".into(),
                         }),
                     }),
                 ]
@@ -3445,7 +3453,7 @@ mod tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
-                    name: name.to_string(),
+                    name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: json!({"type": "object"}),
                     provenance: None,

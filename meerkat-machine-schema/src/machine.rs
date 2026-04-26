@@ -13,6 +13,9 @@ pub struct MachineSchema {
     pub state: StateSchema,
     pub inputs: EnumSchema,
     pub surface_only_inputs: Vec<InputVariantId>,
+    /// Inputs that are part of the DSL alphabet but intentionally internal to
+    /// machine/composition drivers rather than public runtime command surfaces.
+    pub runtime_internal_inputs: Vec<InputVariantId>,
     pub signals: EnumSchema,
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
@@ -49,6 +52,10 @@ impl MachineSchema {
         let surface_only_inputs = unique_names(
             self.surface_only_inputs.iter().map(AsRef::as_ref),
             "surface-only input",
+        )?;
+        let _runtime_internal_inputs = unique_names(
+            self.runtime_internal_inputs.iter().map(AsRef::as_ref),
+            "runtime-internal input",
         )?;
         let signal_variants = self.signals.variants_by_name()?;
         let effect_variants = self.effects.variants_by_name()?;
@@ -90,6 +97,17 @@ impl MachineSchema {
             {
                 return Err(MachineSchemaError::UnknownSurfaceOnlyInputVariant {
                     variant: surface_only_input.as_str().to_owned(),
+                });
+            }
+        }
+
+        for runtime_internal_input in &self.runtime_internal_inputs {
+            if !input_variants
+                .iter()
+                .any(|variant| *variant == runtime_internal_input.as_str())
+            {
+                return Err(MachineSchemaError::UnknownRuntimeInternalInputVariant {
+                    variant: runtime_internal_input.as_str().to_owned(),
                 });
             }
         }
@@ -1197,6 +1215,7 @@ pub enum MachineSchemaError {
     UnknownField { field: String },
     UnknownInputVariant { variant: String },
     UnknownSurfaceOnlyInputVariant { variant: String },
+    UnknownRuntimeInternalInputVariant { variant: String },
     UnknownSignalVariant { variant: String },
     UnknownEffectVariant { variant: String },
     UnknownHelper { helper: String },
@@ -1224,6 +1243,9 @@ impl fmt::Display for MachineSchemaError {
             }
             Self::UnknownSurfaceOnlyInputVariant { variant } => {
                 write!(f, "unknown surface-only input variant `{variant}`")
+            }
+            Self::UnknownRuntimeInternalInputVariant { variant } => {
+                write!(f, "unknown runtime-internal input variant `{variant}`")
             }
             Self::UnknownSignalVariant { variant } => {
                 write!(f, "unknown signal variant `{variant}`")

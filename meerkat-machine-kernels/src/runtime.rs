@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_machine_schema::identity::{
-    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, PhaseId,
-    SignalVariantId, TransitionId,
+    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, NamedTypeId,
+    PhaseId, SignalVariantId, TransitionId,
 };
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, RouteVariantId, TransitionSchema,
@@ -138,7 +138,11 @@ fn option_some(value: KernelValue) -> KernelValue {
     )]))
 }
 
-fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
+fn option_map_matches_inner(
+    schema: &MachineSchema,
+    value: &KernelValue,
+    inner_ty: &TypeRef,
+) -> bool {
     let KernelValue::Map(entries) = value else {
         return false;
     };
@@ -148,7 +152,7 @@ fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
     let Some(inner) = entries.get(&KernelValue::String("value".to_string())) else {
         return false;
     };
-    value_matches_type(inner, inner_ty)
+    value_matches_type(schema, inner, inner_ty)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +272,7 @@ impl GeneratedMachineKernel {
                 .state
                 .fields
                 .iter()
-                .map(|field| (field.name.clone(), default_value_for_type(&field.ty)))
+                .map(|field| (field.name.clone(), self.default_value_for_type(&field.ty)))
                 .collect(),
         };
 
@@ -329,7 +333,7 @@ impl GeneratedMachineKernel {
                     self.payload_refusal(trigger, format!("missing field `{}`", field.name))
                 );
             };
-            if !value_matches_type(value, &field.ty) {
+            if !self.value_matches_type(value, &field.ty) {
                 return Err(self.payload_refusal(
                     trigger,
                     format!("field `{}` does not match declared type", field.name),
@@ -475,7 +479,7 @@ impl GeneratedMachineKernel {
                     reason: format!("missing helper arg `{}`", param.name),
                 });
             };
-            if !value_matches_type(value, &param.ty) {
+            if !self.value_matches_type(value, &param.ty) {
                 return Err(TransitionRefusal::EvaluationError {
                     machine: self.schema.machine.clone(),
                     transition: helper_transition.clone(),
@@ -1084,6 +1088,14 @@ impl GeneratedMachineKernel {
             reason: reason.into(),
         }
     }
+
+    fn default_value_for_type(&self, ty: &TypeRef) -> KernelValue {
+        default_value_for_type(&self.schema, ty)
+    }
+
+    fn value_matches_type(&self, value: &KernelValue, ty: &TypeRef) -> bool {
+        value_matches_type(&self.schema, value, ty)
+    }
 }
 
 /// Synthetic transition id used in error contexts that are not raised from a
@@ -1206,18 +1218,14 @@ impl KernelValue {
     }
 }
 
-fn default_value_for_type(ty: &TypeRef) -> KernelValue {
+fn default_value_for_type(schema: &MachineSchema, ty: &TypeRef) -> KernelValue {
     match ty {
         TypeRef::Bool => KernelValue::Bool(false),
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) => KernelValue::Named {
             type_name: name.clone(),
-            value: Box::new(if named_type_is_u64(name.as_str()) {
-                KernelValue::U64(0)
-            } else {
-                KernelValue::String(String::new())
-            }),
+            value: Box::new(default_value_for_named_type(schema, name)),
         },
         TypeRef::Enum(name) =>
         {
@@ -1234,45 +1242,81 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
     }
 }
 
-fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
+fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef) -> bool {
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
         (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::Named { type_name, value }, TypeRef::Named(name)) if type_name == name => {
-            if named_type_is_u64(name.as_str()) {
-                matches!(value.as_ref(), KernelValue::U64(_))
-            } else {
-                matches!(value.as_ref(), KernelValue::String(_))
-            }
+            named_type_inner_matches(schema, name, value.as_ref())
         }
         (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) if enum_name == name => {
             true
         }
         (KernelValue::None, TypeRef::Option(_)) => true,
         (inner, TypeRef::Option(inner_ty)) => {
-            value_matches_type(inner, inner_ty) || option_map_matches_inner(inner, inner_ty)
+            value_matches_type(schema, inner, inner_ty)
+                || option_map_matches_inner(schema, inner, inner_ty)
         }
         (KernelValue::Set(values), TypeRef::Set(inner_ty)) => values
             .iter()
-            .all(|value| value_matches_type(value, inner_ty)),
+            .all(|value| value_matches_type(schema, value, inner_ty)),
         (KernelValue::Seq(values), TypeRef::Seq(inner_ty)) => values
             .iter()
-            .all(|value| value_matches_type(value, inner_ty)),
+            .all(|value| value_matches_type(schema, value, inner_ty)),
         (KernelValue::Map(values), TypeRef::Map(key_ty, value_ty)) => {
             values.iter().all(|(key, value)| {
-                value_matches_type(key, key_ty) && value_matches_type(value, value_ty)
+                value_matches_type(schema, key, key_ty)
+                    && value_matches_type(schema, value, value_ty)
             })
         }
         _ => false,
     }
 }
 
-fn named_type_is_u64(name: &str) -> bool {
-    matches!(
-        name,
-        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
-    )
+fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> KernelValue {
+    match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::Bool) => KernelValue::Bool(false),
+        Some(
+            meerkat_machine_schema::RustTypeAtom::U8
+            | meerkat_machine_schema::RustTypeAtom::U16
+            | meerkat_machine_schema::RustTypeAtom::U32
+            | meerkat_machine_schema::RustTypeAtom::U64,
+        ) => KernelValue::U64(0),
+        Some(
+            meerkat_machine_schema::RustTypeAtom::String
+            | meerkat_machine_schema::RustTypeAtom::TypePath(_),
+        )
+        | None => KernelValue::String(String::new()),
+    }
+}
+
+fn named_type_inner_matches(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    value: &KernelValue,
+) -> bool {
+    match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::Bool) => matches!(value, KernelValue::Bool(_)),
+        Some(
+            meerkat_machine_schema::RustTypeAtom::U8
+            | meerkat_machine_schema::RustTypeAtom::U16
+            | meerkat_machine_schema::RustTypeAtom::U32
+            | meerkat_machine_schema::RustTypeAtom::U64,
+        ) => matches!(value, KernelValue::U64(_)),
+        Some(
+            meerkat_machine_schema::RustTypeAtom::String
+            | meerkat_machine_schema::RustTypeAtom::TypePath(_),
+        )
+        | None => matches!(value, KernelValue::String(_)),
+    }
+}
+
+fn named_type_atom<'a>(
+    schema: &'a MachineSchema,
+    name: &NamedTypeId,
+) -> Option<&'a meerkat_machine_schema::RustTypeAtom> {
+    schema.named_type_binding(name).map(|binding| &binding.rust)
 }
 
 #[cfg(test)]
@@ -1365,18 +1409,21 @@ mod tests {
     #[allow(clippy::expect_used)]
     #[test]
     fn named_type_defaults_are_typed_kernel_values() {
+        let schema = meerkat_machine();
         assert!(matches!(
-            default_value_for_type(&meerkat_machine_schema::TypeRef::Named(named_type_id(
-                "AgentRuntimeId"
-            ))),
+            default_value_for_type(
+                &schema,
+                &meerkat_machine_schema::TypeRef::Named(named_type_id("AgentRuntimeId"))
+            ),
             KernelValue::Named { type_name, value }
                 if type_name == named_type_id("AgentRuntimeId")
                     && matches!(value.as_ref(), KernelValue::String(value) if value.is_empty())
         ));
         assert!(matches!(
-            default_value_for_type(&meerkat_machine_schema::TypeRef::Named(named_type_id(
-                "FenceToken"
-            ))),
+            default_value_for_type(
+                &schema,
+                &meerkat_machine_schema::TypeRef::Named(named_type_id("FenceToken"))
+            ),
             KernelValue::Named { type_name, value }
                 if type_name == named_type_id("FenceToken")
                     && matches!(value.as_ref(), KernelValue::U64(0))

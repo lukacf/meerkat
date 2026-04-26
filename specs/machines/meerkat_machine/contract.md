@@ -63,6 +63,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Reset`
 - `StopRuntimeExecutor`
 - `Destroy`(session_id: SessionId)
+- `RecoverInputLifecycle`(input_id: InputId, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<InputId>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<BoundarySequence>, lane: Option<InputLane>)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -76,9 +77,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Wait`(session_id: SessionId)
 - `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: WorkOrigin)
 - `PublishEvent`(kind: String)
-- `RuntimeState`(runtime_id: String)
+- `RuntimeState`(runtime_id: AgentRuntimeId)
 - `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
-- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
+- `LoadBoundaryReceipt`(runtime_id: AgentRuntimeId, sequence: BoundarySequence)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Prepare`(session_id: SessionId, run_id: RunId)
@@ -90,6 +91,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplaceRealtimeBinding`
 - `DetachRealtimeBinding`
 - `RequireRealtimeReattach`
+- `RequireRealtimeReattachForAuthority`(authority_epoch: u64)
 - `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: RealtimeBindingState)
 - `ProjectRealtimeReconnectProgress`(attempt_count: u64, next_retry_at_ms: Option<u64>, deadline_at_ms: Option<u64>)
 - `ClearRealtimeReconnectProgress`
@@ -634,6 +636,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_is_bound`
 - Emits: `RuntimeDestroyed`
 - To: `Destroyed`
+
+### `RecoverInputLifecycleIdle`
+- From: `Idle`
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Emits: `InputLifecycleNotice`
+- To: `Idle`
+
+### `RecoverInputLifecycleAttached`
+- From: `Attached`
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Emits: `InputLifecycleNotice`
+- To: `Attached`
+
+### `RecoverInputLifecycleRunning`
+- From: `Running`
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Emits: `InputLifecycleNotice`
+- To: `Running`
+
+### `RecoverInputLifecycleRetired`
+- From: `Retired`
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Emits: `InputLifecycleNotice`
+- To: `Retired`
+
+### `RecoverInputLifecycleStopped`
+- From: `Stopped`
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Emits: `InputLifecycleNotice`
+- To: `Stopped`
 
 ### `EnsureSessionWithExecutorIdle`
 - From: `Idle`
@@ -1507,6 +1539,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequireRealtimeReattach`()
 - Guards:
   - `session_registered`
+- To: `Stopped`
+
+### `RequireRealtimeReattachForAuthorityIdle`
+- From: `Idle`
+- On: `RequireRealtimeReattachForAuthority`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+- To: `Idle`
+
+### `RequireRealtimeReattachForAuthorityAttached`
+- From: `Attached`
+- On: `RequireRealtimeReattachForAuthority`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+- To: `Attached`
+
+### `RequireRealtimeReattachForAuthorityRunning`
+- From: `Running`
+- On: `RequireRealtimeReattachForAuthority`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+- To: `Running`
+
+### `RequireRealtimeReattachForAuthorityRetired`
+- From: `Retired`
+- On: `RequireRealtimeReattachForAuthority`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+- To: `Retired`
+
+### `RequireRealtimeReattachForAuthorityStopped`
+- From: `Stopped`
+- On: `RequireRealtimeReattachForAuthority`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
 - To: `Stopped`
 
 ### `PublishRealtimeSignalIdle`
@@ -3437,7 +3509,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AttachSessionIngress`(comms_runtime_id)
 - Guards:
   - `session_registered`
-  - `owner_is_unattached`
+  - `owner_allows_session_attach`
 - To: `Idle`
 
 ### `AttachSessionIngressAttached`
@@ -3445,7 +3517,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AttachSessionIngress`(comms_runtime_id)
 - Guards:
   - `session_registered`
-  - `owner_is_unattached`
+  - `owner_allows_session_attach`
 - To: `Attached`
 
 ### `AttachSessionIngressRunning`
@@ -3453,7 +3525,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AttachSessionIngress`(comms_runtime_id)
 - Guards:
   - `session_registered`
-  - `owner_is_unattached`
+  - `owner_allows_session_attach`
 - To: `Running`
 
 ### `AttachSessionIngressRetired`
@@ -3461,7 +3533,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AttachSessionIngress`(comms_runtime_id)
 - Guards:
   - `session_registered`
-  - `owner_is_unattached`
+  - `owner_allows_session_attach`
 - To: `Retired`
 
 ### `AttachSessionIngressStopped`
@@ -3469,7 +3541,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AttachSessionIngress`(comms_runtime_id)
 - Guards:
   - `session_registered`
-  - `owner_is_unattached`
+  - `owner_allows_session_attach`
 - To: `Stopped`
 
 ### `AttachMobIngressIdle`
@@ -3517,7 +3589,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DetachIngress`()
 - Guards:
   - `session_registered`
-  - `owner_is_attached`
 - To: `Idle`
 
 ### `DetachIngressAttached`
@@ -3525,7 +3596,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DetachIngress`()
 - Guards:
   - `session_registered`
-  - `owner_is_attached`
 - To: `Attached`
 
 ### `DetachIngressRunning`
@@ -3533,7 +3603,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DetachIngress`()
 - Guards:
   - `session_registered`
-  - `owner_is_attached`
 - To: `Running`
 
 ### `DetachIngressRetired`
@@ -3541,7 +3610,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DetachIngress`()
 - Guards:
   - `session_registered`
-  - `owner_is_attached`
 - To: `Retired`
 
 ### `DetachIngressStopped`
@@ -3549,7 +3617,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DetachIngress`()
 - Guards:
   - `session_registered`
-  - `owner_is_attached`
 - To: `Stopped`
 
 ### `BindSupervisorIdle`

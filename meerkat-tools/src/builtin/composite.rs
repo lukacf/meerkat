@@ -105,7 +105,7 @@ impl CompositeDispatcher {
             .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
-                name: "apply_patch".to_string(),
+                name: "apply_patch".into(),
                 message: "failed to resolve project root".to_string(),
             })?;
 
@@ -266,7 +266,7 @@ impl CompositeDispatcher {
         if let Some(ref ext) = self.external {
             let mut wrote_external_header = false;
             for tool in ext.tools().iter() {
-                if seen_names.contains(&tool.name) {
+                if seen_names.contains(tool.name.as_str()) {
                     continue;
                 }
                 if !wrote_external_header {
@@ -275,7 +275,7 @@ impl CompositeDispatcher {
                     );
                     wrote_external_header = true;
                 }
-                seen_names.insert(tool.name.clone());
+                seen_names.insert(tool.name.to_string());
                 {
                     use std::fmt::Write;
                     let _ = write!(out, "## {}\n{}\n\n", tool.name, tool.description);
@@ -321,8 +321,8 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // Add external tools, skipping duplicates to avoid LLM confusion
         if let Some(ref ext) = self.external {
             for tool in ext.tools().iter() {
-                if !seen_names.contains(&tool.name) {
-                    seen_names.insert(tool.name.clone());
+                if !seen_names.contains(tool.name.as_str()) {
+                    seen_names.insert(tool.name.to_string());
                     tools.push(Arc::clone(tool));
                 }
                 // Note: duplicates are silently skipped; builtins take precedence
@@ -378,13 +378,13 @@ impl AgentToolDispatcher for CompositeDispatcher {
         if let Some(ref ext) = self.external {
             if ext.tool_catalog_capabilities().exact_catalog {
                 for entry in ext.tool_catalog().iter() {
-                    if seen_names.insert(entry.tool.name.clone()) {
+                    if seen_names.insert(entry.tool.name.to_string()) {
                         catalog.push(entry.clone());
                     }
                 }
             } else {
                 for tool in ext.tools().iter() {
-                    if seen_names.insert(tool.name.clone()) {
+                    if seen_names.insert(tool.name.to_string()) {
                         catalog.push(ToolCatalogEntry::session_inline(Arc::clone(tool), true));
                     }
                 }
@@ -397,7 +397,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
-                name: call.name.to_string(),
+                name: call.name.into(),
                 reason: e.to_string(),
             })?;
         // Check builtin tools. Wave B (V7): a builtin tool that exists but
@@ -407,12 +407,12 @@ impl AgentToolDispatcher for CompositeDispatcher {
             if tool.name() == call.name {
                 if !self.allowed_tools.contains(tool.name()) {
                     return Err(ToolError::AccessDenied {
-                        name: call.name.to_string(),
+                        name: call.name.into(),
                     });
                 }
                 let output = tool.call(args.clone()).await.map_err(|e| match e {
                     BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                        name: call.name.to_string(),
+                        name: call.name.into(),
                         reason: msg,
                     },
                     BuiltinToolError::ExecutionFailed(msg) => {
@@ -448,12 +448,12 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 if tool.name() == call.name {
                     if !self.allowed_tools.contains(tool.name()) {
                         return Err(ToolError::AccessDenied {
-                            name: call.name.to_string(),
+                            name: call.name.into(),
                         });
                     }
                     let output = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                            name: call.name.to_string(),
+                            name: call.name.into(),
                             reason: msg,
                         },
                         BuiltinToolError::ExecutionFailed(msg) => {
@@ -485,14 +485,25 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
         }
 
-        if let Some(ref ext) = self.external
-            && ext.tools().iter().any(|t| t.name == call.name)
-        {
-            return ext.dispatch(call).await;
+        if let Some(ref ext) = self.external {
+            if ext.tool_catalog_capabilities().exact_catalog {
+                if let Some(entry) = ext
+                    .tool_catalog()
+                    .iter()
+                    .find(|entry| entry.tool.name == call.name)
+                {
+                    if let Some(reason) = entry.callability.unavailable_reason() {
+                        return Err(ToolError::unavailable(call.name, reason.to_string()));
+                    }
+                    return ext.dispatch(call).await;
+                }
+            } else if ext.tools().iter().any(|t| t.name == call.name) {
+                return ext.dispatch(call).await;
+            }
         }
 
         Err(ToolError::NotFound {
-            name: call.name.to_string(),
+            name: call.name.into(),
         })
     }
 
@@ -628,7 +639,7 @@ mod tests {
     impl MockExternalDispatcher {
         fn new(name: &str, description: &str) -> Self {
             let tools: Arc<[Arc<ToolDef>]> = Arc::from([Arc::new(ToolDef {
-                name: name.to_string(),
+                name: name.into(),
                 description: description.to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -652,7 +663,7 @@ mod tests {
                 .map(|(name, currently_callable)| {
                     meerkat_core::ToolCatalogEntry::session_inline(
                         Arc::new(ToolDef {
-                            name: (*name).to_string(),
+                            name: (*name).into(),
                             description: format!("external tool: {name}"),
                             input_schema: json!({
                                 "type": "object",
@@ -676,7 +687,7 @@ mod tests {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             self.catalog
                 .iter()
-                .filter(|entry| entry.currently_callable)
+                .filter(|entry| entry.currently_callable())
                 .map(|entry| Arc::clone(&entry.tool))
                 .collect::<Vec<_>>()
                 .into()
@@ -697,7 +708,7 @@ mod tests {
             if self
                 .catalog
                 .iter()
-                .any(|entry| entry.tool.name == call.name && entry.currently_callable)
+                .any(|entry| entry.tool.name == call.name && entry.currently_callable())
             {
                 return Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into());
             }
@@ -769,7 +780,7 @@ mod tests {
         let catalog = dispatcher.tool_catalog();
         let names: Vec<_> = catalog
             .iter()
-            .map(|entry| entry.tool.name.clone())
+            .map(|entry| entry.tool.name.to_string())
             .collect();
         assert!(
             names.contains(&"datetime".to_string()),
@@ -787,6 +798,42 @@ mod tests {
             1,
             "collision losers must be absent from the exact catalog"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_external_non_callable_winner_dispatches_unavailable() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(ExactExternalDispatcher::new(&[("external_only", false)]));
+
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        let catalog = dispatcher.tool_catalog();
+        assert!(
+            !catalog
+                .iter()
+                .find(|entry| entry.tool.name == "external_only")
+                .expect("external catalog entry")
+                .currently_callable()
+        );
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-unavailable",
+            name: "external_only",
+            args: &call_json,
+        };
+        let result = dispatcher.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::Unavailable { .. })));
     }
 
     #[tokio::test]
@@ -1045,7 +1092,7 @@ mod tests {
             .expect("composite dispatcher should build");
 
             let tools = dispatcher.tools();
-            let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
             assert!(
                 tool_names.contains(&"view_image".to_string()),
                 "view_image should always be in base tool set (image_tool_results={image_tool_results}), but found: {tool_names:?}"

@@ -7,6 +7,14 @@
 
 import type {
   Mob,
+  AuthBindingIdentity,
+  AuthCredentialsCleared,
+  AuthProfileCreated,
+  AuthProfileDetail,
+  AuthProfilesList,
+  AuthLoginReady,
+  AuthStatus,
+  AuthTransport,
   RuntimeConfig,
   SessionConfig,
   SessionState,
@@ -22,6 +30,7 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
 } from '../src/index.js';
+import { Auth } from '../src/index.js';
 
 // ─── RuntimeConfig ──────────────────────────────────────────────
 
@@ -46,11 +55,48 @@ const fullConfig: RuntimeConfig = {
 
 const sessionConfig: SessionConfig = {
   model: 'claude-sonnet-4-5',
-  connectionRef: 'default:anthropic',
+  connectionRef: { realm: 'default', binding: 'anthropic' },
   systemPrompt: 'You are helpful.',
   maxTokens: 1024,
   labels: { env: 'test' },
   additionalInstructions: ['Be concise.'],
+};
+
+// ─── Auth RPC helpers ───────────────────────────────────────────
+
+const authTransport: AuthTransport = {
+  async request<P, R>(_method: string, _params?: P): Promise<R> {
+    return {} as R;
+  },
+};
+const auth = new Auth(authTransport);
+const authList: Promise<AuthProfilesList> = auth.listProfiles('default');
+const authGet: Promise<AuthProfileDetail> = auth.getProfile('default', 'openai');
+const authCreate: Promise<AuthProfileCreated> = auth.createProfile({
+  realm_id: 'default',
+  binding_id: 'openai',
+  auth_method: 'api_key',
+  secret: 'sk-test',
+});
+const authDelete: Promise<AuthCredentialsCleared> = auth.deleteProfile(
+  'default',
+  'openai',
+);
+const authLogin: Promise<AuthLoginReady> = auth.loginComplete({
+  provider: 'openai',
+  code: 'oauth-code',
+  state: 'oauth-state',
+  redirect_uri: 'http://localhost:1455/callback',
+  realm_id: 'default',
+  binding_id: 'openai',
+});
+const authStatus: Promise<AuthStatus> = auth.status('default', 'openai');
+const authLogout: Promise<AuthCredentialsCleared> = auth.logout('default', 'openai');
+const authBinding: AuthBindingIdentity = {
+  realm_id: 'default',
+  binding_id: 'openai',
+  connection_ref: { realm: 'default', binding: 'openai' },
+  profile_id: 'openai_apikey',
 };
 
 const appendSystemContextOptions: AppendSystemContextOptions = {
@@ -117,7 +163,9 @@ function handleEvent(event: AgentEvent): string {
     case 'run_started':
       return typeof event.prompt === 'string'
         ? event.prompt
-        : event.prompt.map((block) => (block.type === 'text' ? block.text : '')).join('');
+        : event.prompt
+            .map((block) => ('type' in block && block.type === 'text' ? block.text : ''))
+            .join('');
     case 'hook_started':
       return `${event.hook_id}:${event.point}`;
     case 'hook_completed':
@@ -204,9 +252,14 @@ declare const mob: Mob;
 const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
 const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
 const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
+  'Summarize using the OpenAI binding.',
+  { connectionRef: { realm: 'default', binding: 'openai', profile: 'work' } },
+);
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
+  { connectionRef: { realm: 'default', binding: 'anthropic' } },
 );
 const memberSubscription = mob.member('worker-1').subscribe();
 const mobSubscription = mob.subscribeEvents();
@@ -216,6 +269,14 @@ const mobSubscription = mob.subscribeEvents();
 void minimalConfig;
 void fullConfig;
 void sessionConfig;
+void authList;
+void authGet;
+void authCreate;
+void authDelete;
+void authLogin;
+void authStatus;
+void authLogout;
+void authBinding;
 void sessionState;
 void appendSystemContextOptions;
 void appendSystemContextResult;
@@ -228,6 +289,7 @@ void actions;
 void memberSendResult;
 void memberStatusResult;
 void helperResult;
+void helperWithConnectionResult;
 void forkedHelperResult;
 void memberSubscription;
 void mobSubscription;

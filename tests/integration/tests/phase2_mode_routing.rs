@@ -91,7 +91,12 @@ impl SubscribableInjector for MockInjector {
 #[async_trait]
 impl SessionService for MockSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let sid = SessionId::new();
+        let sid = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone())
+            .unwrap_or_default();
         self.sessions.write().await.insert(sid.clone(), ());
         let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
         if is_keep_alive {

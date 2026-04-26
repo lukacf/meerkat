@@ -21,14 +21,6 @@ def _make_member_ref(mob_id: str, agent_identity: str) -> str:
     return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
-def _encode_expected_runtime_ref(identity: str, generation: int) -> str:
-    """Mirror the SDK's `_encode_agent_runtime_ref` encoding so test
-    fixtures can assert the deterministic opaque `AgentRuntimeRef` token
-    without reaching into the SDK helper directly.
-    """
-    payload = json.dumps({"i": identity, "g": generation}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
-
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
@@ -1096,9 +1088,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "member_ref": _make_member_ref("mob-1", "agent-a"),
             }
         if method == "mob/member_status":
-            # `mob/member_status` is a diagnostic snapshot endpoint, not an
-            # app-routing surface — binding-era `agent_runtime_id` /
-            # `fence_token` intentionally pass through for observability.
             return {
                 "status": "active",
                 "tokens_used": 5,
@@ -1180,12 +1169,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     }
     await client.retire_mob_member("mob-1", "agent-a")
     status = await client.mob_member_status("mob-1", "agent-a")
-    # mob/member_status is a diagnostic snapshot; `agent_runtime_id` is
-    # surfaced as an opaque `AgentRuntimeRef` handle (compare-for-equality
-    # only; dogma round 4, row 31).
-    expected_agent_a_runtime_ref = _encode_expected_runtime_ref("agent-a", 1)
-    assert status["agent_runtime_id"] == expected_agent_a_runtime_ref
-    assert status["fence_token"] == 7
+    assert "agent_runtime_id" not in status
+    assert "fence_token" not in status
     assert status["realtime_attachment_status"] == "binding_ready"
 
     runtime_status = await client.runtime_realtime_attachment_status("session-1")
@@ -1207,7 +1192,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     )
     assert wait_members[0]["agent_identity"] == "agent-a"
     assert wait_members[0]["status"] == "active"
-    assert wait_members[0]["agent_runtime_id"] == expected_agent_a_runtime_ref
+    assert "agent_runtime_id" not in wait_members[0]
+    assert "fence_token" not in wait_members[0]
 
     mob_handle = client.mob("mob-1")
     scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)

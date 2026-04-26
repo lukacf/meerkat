@@ -1,6 +1,8 @@
 //! File-backed token store.
 //!
-//! Layout: `<root>/<realm_id>/<binding_id>.json`.
+//! Layout: default binding credentials live at
+//! `<root>/<realm_id>/<binding_id>.json`; profile override credentials live at
+//! `<root>/<realm_id>/<binding_id>@<profile_id>.json`.
 //! Permissions: 0o600 on Unix; atomic rename (`.tmp` → target) on save.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
@@ -29,8 +31,12 @@ impl FileTokenStore {
     }
 
     fn path_for(&self, key: &TokenKey) -> PathBuf {
+        let stem = match &key.profile {
+            Some(profile) => format!("{}@{}", key.binding.as_str(), profile.as_str()),
+            None => key.binding.as_str().to_string(),
+        };
         self.realm_dir(key.realm.as_str())
-            .join(format!("{}.json", key.binding.as_str()))
+            .join(format!("{stem}.json"))
     }
 }
 
@@ -51,7 +57,7 @@ impl TokenStore for FileTokenStore {
         let dir = self.realm_dir(key.realm.as_str());
         tokio::fs::create_dir_all(&dir).await?;
         let final_path = self.path_for(key);
-        let tmp_path = dir.join(format!("{}.json.tmp", key.binding.as_str()));
+        let tmp_path = final_path.with_extension("json.tmp");
 
         let mut bytes = serde_json::to_vec_pretty(tokens)?;
         bytes.push(b'\n');
@@ -102,15 +108,26 @@ impl TokenStore for FileTokenStore {
                 if path.extension().and_then(|s| s.to_str()) != Some("json") {
                     continue;
                 }
-                let binding_raw = match path.file_stem().and_then(|s| s.to_str()) {
+                let stem = match path.file_stem().and_then(|s| s.to_str()) {
                     Some(s) => s,
                     None => continue,
+                };
+                let (binding_raw, profile_raw) = match stem.split_once('@') {
+                    Some((binding, profile)) => (binding, Some(profile)),
+                    None => (stem, None),
                 };
                 let binding = match meerkat_core::connection::BindingId::parse(binding_raw) {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
-                out.push(TokenKey::new(realm.clone(), binding));
+                let profile = match profile_raw {
+                    Some(raw) => match meerkat_core::connection::ProfileId::parse(raw) {
+                        Ok(profile) => Some(profile),
+                        Err(_) => continue,
+                    },
+                    None => None,
+                };
+                out.push(TokenKey::new_with_profile(realm.clone(), binding, profile));
             }
         }
         Ok(out)

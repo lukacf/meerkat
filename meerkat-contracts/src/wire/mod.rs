@@ -102,11 +102,22 @@ pub use realtime::{
 };
 pub use result::WireRunResult;
 pub use runtime::{
+    InputListParams,
+    InputListResult,
+    InputStateParams,
+    InputStateResult,
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,
+    RuntimeAcceptParams,
     RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusParams,
     RuntimeRealtimeAttachmentStatusResult,
+    RuntimeResetParams,
+    RuntimeResetResult,
+    RuntimeRetireParams,
+    RuntimeRetireResult,
+    RuntimeStateParams,
+    RuntimeStateResult,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,
     // Re-export of the `StructuredProviderExtension` core relocation
@@ -127,7 +138,7 @@ pub use session::{
     WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
     WireToolResult, WireToolResultContent,
 };
-pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse};
+pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,

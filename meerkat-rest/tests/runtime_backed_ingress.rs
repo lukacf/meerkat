@@ -85,6 +85,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         .builtins(true)
         .shell(true)
         .project_root(project_root.clone());
+    let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     let llm = Arc::new(FirstTurnOnlyClient::new());
     builder.default_llm_client = Some(llm.clone());
@@ -150,6 +151,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
             std::time::Duration::from_secs(5),
         )),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_registry,
         #[cfg(feature = "mob")]
         mob_state,
         #[cfg(feature = "mcp")]

@@ -46,6 +46,21 @@ catalog_methods = {
 
 router_methods.discard("initialized")
 
+# Router-only compatibility shims intentionally remain absent from the public
+# catalog and docs. The runtime/session_* handlers are v9-internal control
+# paths, and skills/inspect is a retired method that returns method-not-found
+# from the router for clearer legacy-client errors.
+router_only_compat = {
+    "runtime/session_status",
+    "runtime/session_submit",
+    "runtime/session_retire",
+    "runtime/session_reset",
+    "runtime/session_submission",
+    "runtime/session_submissions",
+    "skills/inspect",
+}
+router_methods -= router_only_compat
+
 method_overview_match = re.search(
     r"## Method overview(.*?)## Protocol",
     docs_text,

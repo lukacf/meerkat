@@ -24,8 +24,10 @@ use meerkat_contracts::{
     WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding, WireRealmConnectionSet,
     WireRealmList, WireRealmSummary,
 };
-use meerkat_core::connection::{BindingId, RealmId};
-use meerkat_core::{ConnectionRef, RealmConnectionSet};
+use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
+use meerkat_core::{
+    ConnectionRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
+};
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
@@ -36,6 +38,13 @@ use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey
 use meerkat_providers::oauth_flow::{OAuthFlowError, global_oauth_flow_registry};
 
 use crate::AppState;
+
+type ProviderEndpointResolution = (
+    Provider,
+    OAuthEndpoints,
+    PersistedAuthMode,
+    Option<&'static str>,
+);
 
 async fn load_config(state: &AppState) -> Result<meerkat_core::Config, (StatusCode, String)> {
     state
@@ -68,24 +77,11 @@ async fn resolve_realm(
     })
 }
 
-fn default_oauth_binding(mode: PersistedAuthMode) -> &'static str {
-    match mode {
-        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
-        PersistedAuthMode::ChatgptOauth => "openai_oauth",
-        PersistedAuthMode::GoogleOauth => "google_oauth",
-        _ => "oauth_profile",
-    }
-}
-
-fn default_oauth_binding_id(mode: PersistedAuthMode) -> BindingId {
-    BindingId::parse(default_oauth_binding(mode))
-        .expect("default oauth binding slug is a valid BindingId")
-}
-
 async fn resolve_binding_identity(
     state: &AppState,
     realm_id: &RealmId,
     binding_id: &BindingId,
+    profile_id: Option<&ProfileId>,
 ) -> Result<
     (
         ConnectionRef,
@@ -95,30 +91,94 @@ async fn resolve_binding_identity(
     (StatusCode, String),
 > {
     let realm = resolve_realm(state, realm_id).await?;
-    let (binding, _, auth_profile) = realm.lookup_binding(binding_id.as_str()).map_err(|e| {
+    let connection_ref = ConnectionRef {
+        realm: realm_id.clone(),
+        binding: binding_id.clone(),
+        profile: profile_id.cloned(),
+    };
+    let (binding, _, auth_profile) = realm.lookup_connection_ref(&connection_ref).map_err(|e| {
         (
             StatusCode::NOT_FOUND,
-            format!("Unknown binding {realm_id}:{binding_id}: {e}"),
+            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
         )
     })?;
-    let binding_atom = BindingId::parse(&binding.id).map_err(|e| {
+    Ok((connection_ref, binding.clone(), auth_profile.clone()))
+}
+
+fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
+    match error {
+        ConnectionTargetError::UnknownRealm(_)
+        | ConnectionTargetError::MissingDefaultBinding { .. }
+        | ConnectionTargetError::BindingInvalid { .. } => StatusCode::NOT_FOUND,
+        ConnectionTargetError::RealmConfigInvalid { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        ConnectionTargetError::MissingRealm
+        | ConnectionTargetError::InvalidRealmId { .. }
+        | ConnectionTargetError::InvalidBindingId { .. }
+        | ConnectionTargetError::ProviderMismatch { .. } => StatusCode::BAD_REQUEST,
+    }
+}
+
+async fn resolve_oauth_target(
+    state: &AppState,
+    provider: Provider,
+    realm_id: Option<&RealmId>,
+    binding_id: Option<&BindingId>,
+    profile_id: Option<&ProfileId>,
+) -> Result<ResolvedConnectionTarget, (StatusCode, String)> {
+    let config = load_config(state).await?;
+    meerkat_core::resolve_realm_binding_target_for_provider(
+        &config, provider, realm_id, binding_id, profile_id, None, false,
+    )
+    .map_err(|error| (target_error_status(&error), error.to_string()))
+}
+
+fn require_explicit_oauth_identity<'a>(
+    realm_id: Option<&'a RealmId>,
+    binding_id: Option<&'a BindingId>,
+) -> Result<(&'a RealmId, &'a BindingId), (StatusCode, String)> {
+    let realm_id = realm_id.ok_or_else(|| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "Binding id '{}' from config is not a valid slug: {e}",
-                binding.id
-            ),
+            StatusCode::BAD_REQUEST,
+            "realm_id is required for OAuth login completion".to_string(),
         )
     })?;
-    Ok((
-        ConnectionRef {
-            realm: realm_id.clone(),
-            binding: binding_atom,
-            profile: None,
-        },
-        binding.clone(),
-        auth_profile.clone(),
+    let binding_id = binding_id.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "binding_id is required for OAuth login completion".to_string(),
+        )
+    })?;
+    Ok((realm_id, binding_id))
+}
+
+fn require_managed_store_source(
+    binding_id: &BindingId,
+    auth_profile: &meerkat_core::AuthProfile,
+) -> Result<(), (StatusCode, String)> {
+    if matches!(&auth_profile.source, CredentialSourceSpec::ManagedStore) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "binding {binding_id} resolves auth profile '{}' with source '{}'; \
+             POST /auth/profiles can only persist credentials for source.kind = 'managed_store'",
+            auth_profile.id,
+            source_kind_label(&auth_profile.source),
+        ),
     ))
+}
+
+fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        CredentialSourceSpec::ManagedStore => "managed_store",
+        CredentialSourceSpec::Env { .. } => "env",
+        CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
+        CredentialSourceSpec::PlatformDefault => "platform_default",
+        CredentialSourceSpec::Command { .. } => "command",
+        CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
 }
 
 // --- Realm endpoints -------------------------------------------------
@@ -161,6 +221,8 @@ pub async fn get_realm(
 #[derive(serde::Deserialize)]
 pub struct RealmQuery {
     pub realm_id: RealmId,
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
 pub async fn list_auth_profiles(
@@ -203,30 +265,34 @@ pub async fn list_auth_profiles(
 pub struct CreateAuthProfileBody {
     pub realm_id: RealmId,
     pub binding_id: BindingId,
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
     pub provider: String,
     pub auth_method: String,
     pub secret: String,
 }
 
 /// Create an auth credential entry by writing the secret into the
-/// TokenStore under the binding-scoped `ConnectionRef`. The caller is
-/// expected to have already declared the corresponding
-/// `[realm.<id>.binding.<binding>]` entry in the config with an auth
-/// profile whose `source.kind = "managed_store"` so `resolve_binding`
-/// picks it up;
-/// for `inline_secret` sources the TOML itself carries the secret and
-/// this endpoint is a no-op (hence its 400 below).
+/// TokenStore under the binding-scoped `ConnectionRef`. The resolved
+/// auth profile must declare `source.kind = "managed_store"`; otherwise
+/// the provider runtime would read a different credential source.
 pub async fn create_auth_profile(
     State(state): State<AppState>,
     Json(body): Json<CreateAuthProfileBody>,
 ) -> impl IntoResponse {
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(&state, &body.realm_id, &body.binding_id).await {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        &state,
+        &body.realm_id,
+        &body.binding_id,
+        body.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
     if body.provider != auth_profile.provider.as_str() {
         return (
             StatusCode::BAD_REQUEST,
@@ -254,6 +320,9 @@ pub async fn create_auth_profile(
             })),
         )
             .into_response();
+    }
+    if let Err((status, msg)) = require_managed_store_source(&body.binding_id, &auth_profile) {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let auth_mode = match body.auth_method.as_str() {
         "api_key" => PersistedAuthMode::ApiKey,
@@ -283,7 +352,7 @@ pub async fn create_auth_profile(
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+    let key = TokenKey::from_connection_ref(&connection_ref);
     match state.token_store.save(&key, &tokens).await {
         Ok(()) => {
             tracing::info!(
@@ -298,7 +367,7 @@ pub async fn create_auth_profile(
                 StatusCode::CREATED,
                 Json(WireAuthProfileCreated {
                     identity: WireBindingIdentity::from(&connection_ref),
-                    profile_id: binding.auth_profile.clone(),
+                    profile_id: auth_profile.id.clone(),
                     provider: auth_profile.provider.as_str().to_string(),
                     auth_method: auth_profile.auth_method.clone(),
                     stored: true,
@@ -319,13 +388,20 @@ pub async fn get_auth_profile(
     Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
-    match resolve_binding_identity(&state, &query.realm_id, &binding_id).await {
+    match resolve_binding_identity(
+        &state,
+        &query.realm_id,
+        &binding_id,
+        query.profile_id.as_ref(),
+    )
+    .await
+    {
         Ok((connection_ref, binding, auth_profile)) => (
             StatusCode::OK,
             Json(WireAuthProfileDetail {
                 connection_ref: connection_ref.into(),
                 binding_id: binding.id.clone(),
-                profile_id: binding.auth_profile.clone(),
+                profile_id: auth_profile.id.clone(),
                 auth_profile: WireAuthProfile::from(&auth_profile),
             }),
         )
@@ -339,14 +415,20 @@ pub async fn delete_auth_profile(
     Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
-    let (connection_ref, binding, _) =
-        match resolve_binding_identity(&state, &query.realm_id, &binding_id).await {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
-    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        &state,
+        &query.realm_id,
+        &binding_id,
+        query.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let key = TokenKey::from_connection_ref(&connection_ref);
     match state.token_store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
@@ -359,7 +441,7 @@ pub async fn delete_auth_profile(
                 StatusCode::NO_CONTENT,
                 Json(WireAuthProfileCleared {
                     identity: WireBindingIdentity::from(&connection_ref),
-                    profile_id: binding.auth_profile.clone(),
+                    profile_id: auth_profile.id.clone(),
                     cleared: true,
                 }),
             )
@@ -376,36 +458,44 @@ pub async fn delete_auth_profile(
 #[derive(serde::Deserialize)]
 pub struct TestBindingBody {
     pub realm_id: RealmId,
-    pub binding_id: BindingId,
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
-pub async fn test_auth_profile(
+pub async fn test_auth_binding(
     State(state): State<AppState>,
-    Path(_profile_id): Path<String>,
+    Path(binding_id): Path<BindingId>,
     Json(body): Json<TestBindingBody>,
 ) -> impl IntoResponse {
     match resolve_realm(&state, &body.realm_id).await {
         Ok(realm) => {
-            let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store));
             let connection_ref = ConnectionRef {
                 realm: body.realm_id.clone(),
-                binding: body.binding_id.clone(),
-                profile: None,
+                binding: binding_id.clone(),
+                profile: body.profile_id.clone(),
             };
-            match registry.resolve(&realm, &connection_ref, &env).await {
+            match state
+                .provider_registry
+                .resolve(&realm, &connection_ref, &env)
+                .await
+            {
                 Ok(conn) => {
-                    let (connection_ref, binding, auth_profile) =
-                        match resolve_binding_identity(&state, &body.realm_id, &body.binding_id)
-                            .await
-                        {
-                            Ok(v) => v,
-                            Err((status, msg)) => {
-                                return (status, Json(serde_json::json!({ "error": msg })))
-                                    .into_response();
-                            }
-                        };
+                    let (connection_ref, binding, auth_profile) = match resolve_binding_identity(
+                        &state,
+                        &body.realm_id,
+                        &binding_id,
+                        body.profile_id.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err((status, msg)) => {
+                            return (status, Json(serde_json::json!({ "error": msg })))
+                                .into_response();
+                        }
+                    };
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -443,19 +533,22 @@ pub async fn test_auth_profile(
 fn provider_endpoints(
     provider: &str,
     redirect_uri: &str,
-) -> Result<(OAuthEndpoints, PersistedAuthMode, Option<&'static str>), (StatusCode, String)> {
+) -> Result<ProviderEndpointResolution, (StatusCode, String)> {
     match provider {
         "anthropic" | "claude" | "claude.ai" => Ok((
+            Provider::Anthropic,
             a_oauth::claude_ai_endpoints(redirect_uri),
             PersistedAuthMode::ClaudeAiOauth,
             None,
         )),
         "openai" | "chatgpt" => Ok((
+            Provider::OpenAI,
             o_oauth::chatgpt_endpoints(redirect_uri),
             PersistedAuthMode::ChatgptOauth,
             None,
         )),
         "google" | "gemini" | "code_assist" => Ok((
+            Provider::Gemini,
             g_oauth::code_assist_endpoints(redirect_uri),
             PersistedAuthMode::GoogleOauth,
             Some(g_oauth::CODE_ASSIST_CLIENT_SECRET),
@@ -476,12 +569,13 @@ pub struct LoginStartBody {
 }
 
 pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse {
-    let (endpoints, _mode, _secret) = match provider_endpoints(&body.provider, &body.redirect_uri) {
-        Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-        }
-    };
+    let (_provider, endpoints, _mode, _secret) =
+        match provider_endpoints(&body.provider, &body.redirect_uri) {
+            Ok(v) => v,
+            Err((status, msg)) => {
+                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+            }
+        };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().to_string();
     let state_token = match global_oauth_flow_registry().start(
@@ -524,37 +618,50 @@ pub struct LoginCompleteBody {
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
-    #[serde(default = "default_realm")]
-    pub realm_id: RealmId,
+    #[serde(default)]
+    pub realm_id: Option<RealmId>,
+    #[serde(default)]
     pub binding_id: Option<BindingId>,
-}
-
-fn default_realm() -> RealmId {
-    RealmId::parse("dev").expect("'dev' is a valid realm slug")
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
 pub async fn complete_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCompleteBody>,
 ) -> impl IntoResponse {
-    let (endpoints, mode, client_secret) =
+    let (provider, endpoints, mode, client_secret) =
         match provider_endpoints(&body.provider, &body.redirect_uri) {
             Ok(v) => v,
             Err((status, msg)) => {
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    let binding_id = body
-        .binding_id
-        .unwrap_or_else(|| default_oauth_binding_id(mode));
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(&state, &body.realm_id, &binding_id).await {
+    let (realm_id, binding_id) =
+        match require_explicit_oauth_identity(body.realm_id.as_ref(), body.binding_id.as_ref()) {
             Ok(v) => v,
             Err((status, msg)) => {
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    if body.provider != auth_profile.provider.as_str() {
+    let target = match resolve_oauth_target(
+        &state,
+        provider,
+        Some(realm_id),
+        Some(binding_id),
+        body.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let connection_ref = target.connection_ref;
+    let binding = target.binding;
+    let auth_profile = target.auth_profile;
+    if provider != auth_profile.provider {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -641,7 +748,7 @@ pub async fn complete_login(
         metadata: serde_json::Value::Null,
     };
 
-    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+    let key = TokenKey::from_connection_ref(&connection_ref);
     if let Err(e) = state.token_store.save(&key, &tokens).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -664,7 +771,7 @@ pub async fn complete_login(
         Json(WireLoginReady {
             state: None,
             identity: WireBindingIdentity::from(&connection_ref),
-            profile_id: binding.auth_profile.clone(),
+            profile_id: auth_profile.id.clone(),
             provider: body.provider,
             expires_at: expires_at.map(|e| e.to_rfc3339()),
             has_refresh_token: tokens.refresh_token.is_some(),
@@ -680,7 +787,7 @@ pub struct DeviceStartBody {
 }
 
 pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoResponse {
-    let (endpoints, _mode, _secret) = match provider_endpoints(&body.provider, "") {
+    let (_provider, endpoints, _mode, _secret) = match provider_endpoints(&body.provider, "") {
         Ok(v) => v,
         Err((status, msg)) => {
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
@@ -727,14 +834,12 @@ pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoR
 pub struct DeviceCompleteBody {
     pub provider: String,
     pub device_code: String,
-    #[serde(default = "default_dev_realm_rest")]
-    pub realm_id: RealmId,
+    #[serde(default)]
+    pub realm_id: Option<RealmId>,
     #[serde(default)]
     pub binding_id: Option<BindingId>,
-}
-
-fn default_dev_realm_rest() -> RealmId {
-    RealmId::parse("dev").expect("'dev' is a valid realm slug")
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
 /// Device-code flow completion leg. Single-poll semantics — the caller
@@ -744,12 +849,12 @@ fn default_dev_realm_rest() -> RealmId {
 ///   * `{ "state": "slow_down" }`   (429)
 ///   * `{ "state": "access_denied" }` / `{ "state": "expired" }` (400)
 ///   * `{ "state": "ready", realm_id, binding_id, ... }` (200, tokens
-///     persisted to TokenStore under `<realm_id>:<binding_id>`).
+///     persisted to TokenStore under the resolved `ConnectionRef`).
 pub async fn complete_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceCompleteBody>,
 ) -> impl IntoResponse {
-    let (endpoints, mode, client_secret) = match provider_endpoints(&body.provider, "") {
+    let (provider, endpoints, mode, client_secret) = match provider_endpoints(&body.provider, "") {
         Ok(v) => v,
         Err((status, msg)) => {
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
@@ -767,17 +872,31 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
-    let binding_id = body
-        .binding_id
-        .unwrap_or_else(|| default_oauth_binding_id(mode));
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(&state, &body.realm_id, &binding_id).await {
+    let (realm_id, binding_id) =
+        match require_explicit_oauth_identity(body.realm_id.as_ref(), body.binding_id.as_ref()) {
             Ok(v) => v,
             Err((status, msg)) => {
                 return (status, Json(serde_json::json!({ "error": msg }))).into_response();
             }
         };
-    if body.provider != auth_profile.provider.as_str() {
+    let target = match resolve_oauth_target(
+        &state,
+        provider,
+        Some(realm_id),
+        Some(binding_id),
+        body.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let connection_ref = target.connection_ref;
+    let binding = target.binding;
+    let auth_profile = target.auth_profile;
+    if provider != auth_profile.provider {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -845,7 +964,7 @@ pub async fn complete_device_login(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+            let key = TokenKey::from_connection_ref(&connection_ref);
             if let Err(e) = state.token_store.save(&key, &tokens).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -868,7 +987,7 @@ pub async fn complete_device_login(
                 Json(WireLoginReady {
                     state: Some("ready".to_string()),
                     identity: WireBindingIdentity::from(&connection_ref),
-                    profile_id: binding.auth_profile.clone(),
+                    profile_id: auth_profile.id.clone(),
                     provider: body.provider,
                     expires_at: expires_at.map(|e| e.to_rfc3339()),
                     has_refresh_token: tokens.refresh_token.is_some(),
@@ -885,14 +1004,20 @@ pub async fn get_auth_status(
     Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
-    let (connection_ref, binding, auth_profile) =
-        match resolve_binding_identity(&state, &query.realm_id, &binding_id).await {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
-    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        &state,
+        &query.realm_id,
+        &binding_id,
+        query.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let key = TokenKey::from_connection_ref(&connection_ref);
     let stored = match state.token_store.load(&key).await {
         Ok(v) => v,
         Err(e) => {
@@ -923,7 +1048,7 @@ pub async fn get_auth_status(
         StatusCode::OK,
         Json(WireAuthStatusDetail {
             identity: WireBindingIdentity::from(&connection_ref),
-            profile_id: binding.auth_profile.clone(),
+            profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method.clone(),
             state: state_label.to_string(),
@@ -948,14 +1073,20 @@ pub async fn logout(
     Path(binding_id): Path<BindingId>,
     Query(query): Query<RealmQuery>,
 ) -> impl IntoResponse {
-    let (connection_ref, binding, _) =
-        match resolve_binding_identity(&state, &query.realm_id, &binding_id).await {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
-    let key = TokenKey::new(connection_ref.realm.clone(), connection_ref.binding.clone());
+    let (connection_ref, _binding, auth_profile) = match resolve_binding_identity(
+        &state,
+        &query.realm_id,
+        &binding_id,
+        query.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let key = TokenKey::from_connection_ref(&connection_ref);
     match state.token_store.clear(&key).await {
         Ok(()) => {
             tracing::info!(
@@ -968,7 +1099,7 @@ pub async fn logout(
                 StatusCode::OK,
                 Json(WireAuthProfileCleared {
                     identity: WireBindingIdentity::from(&connection_ref),
-                    profile_id: binding.auth_profile.clone(),
+                    profile_id: auth_profile.id.clone(),
                     cleared: true,
                 }),
             )
@@ -979,5 +1110,37 @@ pub async fn logout(
             Json(serde_json::json!({ "error": format!("TokenStore clear failed: {e}") })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_complete_body_does_not_invent_default_identity() {
+        let body: LoginCompleteBody = serde_json::from_value(serde_json::json!({
+            "provider": "anthropic",
+            "code": "code",
+            "state": "state",
+            "redirect_uri": "http://127.0.0.1:0/callback"
+        }))
+        .unwrap();
+
+        assert!(body.realm_id.is_none());
+        assert!(body.binding_id.is_none());
+    }
+
+    #[test]
+    fn device_complete_body_does_not_invent_default_identity() {
+        let body: DeviceCompleteBody = serde_json::from_value(serde_json::json!({
+            "provider": "anthropic",
+            "device_code": "device-code"
+        }))
+        .unwrap();
+
+        assert!(body.realm_id.is_none());
+        assert!(body.binding_id.is_none());
     }
 }

@@ -83,18 +83,6 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
     rkat skill inspect task-workflow --source company --json
     ```
   </Tab>
-  <Tab title="JSON-RPC">
-    ```json
-    {
-      "jsonrpc": "2.0", "id": 1,
-      "method": "skills/inspect",
-      "params": {
-        "id": "task-workflow",
-        "source": "company"
-      }
-    }
-    ```
-  </Tab>
   <Tab title="REST">
     ```bash
     # Active version
@@ -114,20 +102,6 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
         "source": "company"
       }
     }
-    ```
-  </Tab>
-  <Tab title="Python">
-    ```python
-    skill = await client.inspect_skill("task-workflow", source="company")
-    print(skill.body)
-    ```
-  </Tab>
-  <Tab title="TypeScript">
-    ```typescript
-    const skill = await client.inspectSkill("task-workflow", {
-      source: "company",
-    });
-    console.log(skill.body);
     ```
   </Tab>
   <Tab title="Rust">

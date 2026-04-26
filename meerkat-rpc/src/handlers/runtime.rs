@@ -1,12 +1,15 @@
-//! v9 runtime RPC handlers — session/status, session/submit, and
+//! v9 runtime RPC handlers — runtime/session_status, runtime/session_submit, and
 //! session/realtime_attachment_status.
 
 use serde_json::value::RawValue;
 
 use meerkat_contracts::{
-    RuntimeAcceptOutcomeType, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, wire::runtime::WireInputPolicy,
+    InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
+    RuntimeRealtimeAttachmentStatusResult, RuntimeResetParams, RuntimeResetResult,
+    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry,
+    WireRealtimeAttachmentStatus, wire::runtime::WireInputPolicy,
 };
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
@@ -188,7 +191,7 @@ pub async fn handle_runtime_status(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeRealtimeAttachmentStatusParams = match parse_params(params) {
+    let params: RuntimeStateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -202,16 +205,12 @@ pub async fn handle_runtime_status(
     match adapter.runtime_state(&session_id).await {
         Ok(state) => RpcResponse::success(
             id,
-            serde_json::json!({ "state": to_wire_runtime_state(state) }),
+            RuntimeStateResult {
+                state: to_wire_runtime_state(state),
+            },
         ),
         Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct RuntimeSubmitParams {
-    session_id: String,
-    input: meerkat_runtime::Input,
 }
 
 pub async fn handle_runtime_submit(
@@ -219,9 +218,19 @@ pub async fn handle_runtime_submit(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeSubmitParams = match parse_params(params) {
+    let params: RuntimeAcceptParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
+    };
+    let input = match serde_json::from_value::<meerkat_runtime::Input>(params.input) {
+        Ok(input) => input,
+        Err(err) => {
+            return RpcResponse::error(
+                id,
+                crate::error::INVALID_PARAMS,
+                format!("invalid runtime input: {err}"),
+            );
+        }
     };
     let session_id = match SessionId::parse(&params.session_id) {
         Ok(id) => id,
@@ -230,7 +239,7 @@ pub async fn handle_runtime_submit(
         }
     };
 
-    match adapter.accept_input(&session_id, params.input).await {
+    match adapter.accept_input(&session_id, input).await {
         Ok(outcome) => match to_wire_accept_result(outcome) {
             Ok(result) => RpcResponse::success(id, result),
             Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
@@ -239,18 +248,12 @@ pub async fn handle_runtime_submit(
     }
 }
 
-#[derive(serde::Deserialize)]
-struct RuntimeSubmissionParams {
-    session_id: String,
-    input_id: String,
-}
-
 pub async fn handle_runtime_submission(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeSubmissionParams = match parse_params(params) {
+    let params: InputStateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -286,7 +289,7 @@ pub async fn handle_runtime_submissions(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeRealtimeAttachmentStatusParams = match parse_params(params) {
+    let params: InputListParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -314,7 +317,7 @@ pub async fn handle_runtime_submissions(
             }
         }
     }
-    RpcResponse::success(id, serde_json::json!({ "inputs": inputs }))
+    RpcResponse::success(id, InputListResult { inputs })
 }
 
 pub async fn handle_runtime_retire(
@@ -322,7 +325,7 @@ pub async fn handle_runtime_retire(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeRealtimeAttachmentStatusParams = match parse_params(params) {
+    let params: RuntimeRetireParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -333,7 +336,13 @@ pub async fn handle_runtime_retire(
         }
     };
     match adapter.retire_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(id, report),
+        Ok(report) => RpcResponse::success(
+            id,
+            RuntimeRetireResult {
+                inputs_abandoned: report.inputs_abandoned,
+                inputs_pending_drain: report.inputs_pending_drain,
+            },
+        ),
         Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
     }
 }
@@ -343,7 +352,7 @@ pub async fn handle_runtime_reset(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    let params: RuntimeRealtimeAttachmentStatusParams = match parse_params(params) {
+    let params: RuntimeResetParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -354,7 +363,12 @@ pub async fn handle_runtime_reset(
         }
     };
     match adapter.reset_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(id, report),
+        Ok(report) => RpcResponse::success(
+            id,
+            RuntimeResetResult {
+                inputs_abandoned: report.inputs_abandoned,
+            },
+        ),
         Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
     }
 }

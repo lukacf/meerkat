@@ -2,8 +2,9 @@
 //!
 //! Feature-gated behind `native-keyring`. Uses the `keyring` crate (v3).
 //! Service name is user-configurable (default `"meerkat-auth"`); account
-//! format is `<realm>:<binding>` per Codex
-//! `codex-rs/login/src/auth/storage.rs:149-220`.
+//! default account format is `<realm>:<binding>` per Codex
+//! `codex-rs/login/src/auth/storage.rs:149-220`; profile overrides use
+//! `<realm>:<binding>:<profile>`.
 //!
 //! The keyring crate has no enumeration API; `list()` returns
 //! `TokenStoreError::Unavailable` so callers can fall back to a file-store

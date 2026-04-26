@@ -13,8 +13,54 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
 }
 
 pub use crate::ids::{AgentRuntimeId, SessionId, ToolFilter, ToolVisibilityWitness};
-pub type FenceToken = u64;
-pub type Generation = u64;
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct FenceToken(pub u64);
+impl From<u64> for FenceToken {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+impl std::fmt::Display for FenceToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct Generation(pub u64);
+impl From<u64> for Generation {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+impl std::fmt::Display for Generation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;

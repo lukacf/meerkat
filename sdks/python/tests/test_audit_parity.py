@@ -32,7 +32,6 @@ CANONICAL_APP_RPC_METHODS = {
     "turn/interrupt",
     "blob/get",
     "skills/list",
-    "skills/inspect",
     "mcp/add",
     "mcp/remove",
     "mcp/reload",
@@ -41,13 +40,13 @@ CANONICAL_APP_RPC_METHODS = {
     "realtime/open_info",
     "realtime/status",
     "realtime/capabilities",
-    "session/status",
+    "runtime/session_status",
     "session/realtime_attachment_status",
-    "session/submission",
-    "session/submissions",
-    "session/submit",
-    "session/retire",
-    "session/reset",
+    "runtime/session_submission",
+    "runtime/session_submissions",
+    "runtime/session_submit",
+    "runtime/session_retire",
+    "runtime/session_reset",
     "mob/create",
     "mob/list",
     "mob/status",
@@ -103,7 +102,6 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "turn/interrupt": (Session, "interrupt"),
     "blob/get": (MeerkatClient, "get_blob"),
     "skills/list": (MeerkatClient, "list_skills"),
-    "skills/inspect": (MeerkatClient, "inspect_skill"),
     "mcp/add": (MeerkatClient, "mcp_add"),
     "mcp/remove": (MeerkatClient, "mcp_remove"),
     "mcp/reload": (MeerkatClient, "mcp_reload"),
@@ -112,13 +110,13 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "realtime/open_info": (MeerkatClient, "realtime_open_info"),
     "realtime/status": (MeerkatClient, "realtime_status"),
     "realtime/capabilities": (MeerkatClient, "realtime_capabilities"),
-    "session/status": (MeerkatClient, "status"),
+    "runtime/session_status": (MeerkatClient, "runtime_status"),
     "session/realtime_attachment_status": (MeerkatClient, "runtime_realtime_attachment_status"),
-    "session/submission": (MeerkatClient, "submission"),
-    "session/submissions": (MeerkatClient, "submissions"),
-    "session/submit": (MeerkatClient, "submit"),
-    "session/retire": (MeerkatClient, "retire"),
-    "session/reset": (MeerkatClient, "reset"),
+    "runtime/session_submission": (MeerkatClient, "runtime_submission"),
+    "runtime/session_submissions": (MeerkatClient, "runtime_submissions"),
+    "runtime/session_submit": (MeerkatClient, "runtime_submit"),
+    "runtime/session_retire": (MeerkatClient, "runtime_retire"),
+    "runtime/session_reset": (MeerkatClient, "runtime_reset"),
     "mob/create": (MeerkatClient, "create_mob"),
     "mob/list": (MeerkatClient, "list_mobs"),
     "mob/status": (Mob, "status"),
@@ -228,6 +226,89 @@ async def test_create_session_with_extended_create_fields():
     assert args[1]["app_context"] == {"app": "sdk"}
     assert args[1]["shell_env"] == {"FOO": "BAR"}
     assert args[1]["external_tools"][0]["name"] == "tool_a"
+
+
+@pytest.mark.asyncio
+async def test_python_auth_helpers_send_binding_scoped_params():
+    client = MeerkatClient()
+    client._process = MagicMock()
+    client._dispatcher = MagicMock()
+    client._request = AsyncMock(return_value={})
+
+    await client.auth_login_complete(
+        "anthropic",
+        "code",
+        "state",
+        realm_id="prod",
+        binding_id="claude-console",
+    )
+    client._request.assert_called_with(
+        "auth/login/complete",
+        {
+            "provider": "anthropic",
+            "code": "code",
+            "state": "state",
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+            "redirect_uri": "http://127.0.0.1:0/callback",
+        },
+    )
+
+    await client.auth_login_device_complete(
+        "anthropic",
+        "device-code",
+        realm_id="prod",
+        binding_id="claude-console",
+    )
+    client._request.assert_called_with(
+        "auth/login/device_complete",
+        {
+            "provider": "anthropic",
+            "device_code": "device-code",
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+        },
+    )
+
+    await client.auth_provision_api_key(
+        "access-token",
+        realm_id="prod",
+        binding_id="claude-console",
+    )
+    client._request.assert_called_with(
+        "auth/login/provision_api_key",
+        {
+            "access_token": "access-token",
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+        },
+    )
+
+    await client.auth_status("prod", "claude-console")
+    client._request.assert_called_with(
+        "auth/status/get",
+        {"realm_id": "prod", "binding_id": "claude-console"},
+    )
+
+    await client.auth_logout("prod", "claude-console")
+    client._request.assert_called_with(
+        "auth/logout",
+        {"realm_id": "prod", "binding_id": "claude-console"},
+    )
+
+
+def test_typescript_auth_status_logout_helpers_send_binding_scoped_params():
+    import pathlib
+
+    client_ts = pathlib.Path(__file__).parents[2] / "typescript" / "src" / "client.ts"
+    source = client_ts.read_text()
+    for method_name in ["authStatusGet", "authLogout"]:
+        start = source.index(f"async {method_name}")
+        end = source.index("\n  }\n", start)
+        body = source[start:end]
+        assert "bindingId" in body
+        assert "binding_id" in body
+        assert "profile_id" not in body
 
 
 @pytest.mark.asyncio
@@ -374,6 +455,7 @@ def test_sdk_never_uses_retired_public_method_strings():
     retired_methods = [
         '"auth/profile/test"',
         '"session/realtime_attachment_statuses"',
+        '"skills/inspect"',
     ]
     sdk_roots = [
         pathlib.Path(__file__).parent.parent / "meerkat",
@@ -390,38 +472,14 @@ def test_sdk_never_uses_retired_public_method_strings():
                 )
 
 
-def test_encode_agent_runtime_ref_is_opaque_and_strict():
-    """Row 31 regression gate: the SDK must emit an opaque
-    ``AgentRuntimeRef`` handle, not a parseable ``"identity:generation"``
-    string. The canonical wire shape is ``{"identity": "...", "generation": N}``;
-    anything else is a protocol error that must surface as a typed
-    ``MeerkatError``.
+def test_mob_public_types_do_not_expose_incarnation_atoms():
+    """Public mob SDK types use ``member_ref`` or ``current_session_id``;
+    binding-era incarnation atoms stay out of the Python surface.
     """
-    import base64
-    import json as _json
 
-    from meerkat.client import MeerkatError, _encode_agent_runtime_ref
+    from meerkat.mob import MobMemberSnapshot, MobSpawnResult
 
-    # Non-canonical shapes are typed errors.
-    with pytest.raises(MeerkatError):
-        _encode_agent_runtime_ref("worker:1")
-    with pytest.raises(MeerkatError):
-        _encode_agent_runtime_ref({"agent_identity": "worker", "generation": 1})
-    with pytest.raises(MeerkatError):
-        _encode_agent_runtime_ref({"identity": "worker"})
-
-    # Canonical form yields a deterministic opaque token whose internals
-    # decode to the short ``{i, g}`` key schema — so equality comparison
-    # works across SDKs and callers cannot sniff the display string.
-    token = _encode_agent_runtime_ref({"identity": "worker", "generation": 2})
-    assert isinstance(token, str) and token
-    # Token must NOT carry the parseable display form.
-    assert ":" not in token
-    # Decoding is an SDK-internal detail for testing; callers must not
-    # reach for it.
-    padded = token + "=" * (-len(token) % 4)
-    decoded = _json.loads(base64.urlsafe_b64decode(padded))
-    assert decoded == {"i": "worker", "g": 2}
-
-    # Absence threads through as None.
-    assert _encode_agent_runtime_ref(None) is None
+    for typed_dict in (MobMemberSnapshot, MobSpawnResult):
+        fields = set(typed_dict.__annotations__)
+        assert "agent_runtime_id" not in fields
+        assert "fence_token" not in fields

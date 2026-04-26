@@ -207,7 +207,15 @@ impl RealtimeConnection {
     }
 
     pub async fn close(&mut self) -> Result<(), RealtimeConnectionError> {
-        self.send_frame(RealtimeClientFrame::ChannelClose).await
+        self.send_frame(RealtimeClientFrame::ChannelClose).await?;
+        loop {
+            match self.next_frame().await? {
+                Some(RealtimeServerFrame::ChannelClosed(_)) | None => break,
+                Some(_) => {}
+            }
+        }
+        self.sink.close().await?;
+        Ok(())
     }
 
     pub async fn next_frame(
@@ -293,7 +301,9 @@ impl RealtimeConnectionSender {
     }
 
     pub async fn close(&mut self) -> Result<(), RealtimeConnectionError> {
-        self.send_frame(RealtimeClientFrame::ChannelClose).await
+        self.send_frame(RealtimeClientFrame::ChannelClose).await?;
+        self.sink.close().await?;
+        Ok(())
     }
 }
 

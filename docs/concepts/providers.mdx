@@ -179,7 +179,7 @@ For Gemma 4 specifically, prefer `chat_completions` as the default OpenAI-compat
 
 ## Auto-detection
 
-The provider is automatically inferred from the model name:
+The provider is resolved from the built-in model catalog and any configured self-hosted aliases:
 
 - `claude-*` models use Anthropic
 - `gpt-*`, `chatgpt-*` models use OpenAI

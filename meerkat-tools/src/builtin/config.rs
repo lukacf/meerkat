@@ -4,7 +4,9 @@
 //! and [`EnforcedToolPolicy`] for hard constraints that cannot be overridden.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+use meerkat_core::{ToolName, ToolNameSet};
 
 /// Tool enable/disable mode
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,11 +31,11 @@ pub struct ToolPolicyLayer {
 
     /// Tools to enable (soft - can be overridden by later layers)
     #[serde(default)]
-    pub enable: HashSet<String>,
+    pub enable: ToolNameSet,
 
     /// Tools to disable (soft - can be overridden by later layers)
     #[serde(default)]
-    pub disable: HashSet<String>,
+    pub disable: ToolNameSet,
 }
 
 /// Enforced policy that cannot be overridden by later layers.
@@ -42,11 +44,11 @@ pub struct ToolPolicyLayer {
 pub struct EnforcedToolPolicy {
     /// Hard allowlist - if non-empty, only these tools can be enabled
     #[serde(default)]
-    pub allow: HashSet<String>,
+    pub allow: ToolNameSet,
 
     /// Hard denylist - these tools are always disabled
     #[serde(default)]
-    pub deny: HashSet<String>,
+    pub deny: ToolNameSet,
 }
 
 /// Complete builtin tools configuration
@@ -74,14 +76,14 @@ impl ToolPolicyLayer {
     }
 
     /// Add a tool to the enable set
-    pub fn enable_tool(mut self, name: impl Into<String>) -> Self {
-        self.enable.insert(name.into());
+    pub fn enable_tool(mut self, name: impl Into<ToolName>) -> Self {
+        self.enable.insert(name);
         self
     }
 
     /// Add a tool to the disable set
-    pub fn disable_tool(mut self, name: impl Into<String>) -> Self {
-        self.disable.insert(name.into());
+    pub fn disable_tool(mut self, name: impl Into<ToolName>) -> Self {
+        self.disable.insert(name);
         self
     }
 }
@@ -90,8 +92,8 @@ impl ToolPolicyLayer {
 #[derive(Clone, Debug)]
 pub struct ResolvedToolPolicy {
     mode: ToolMode,
-    enabled: HashSet<String>,
-    disabled: HashSet<String>,
+    enabled: ToolNameSet,
+    disabled: ToolNameSet,
 }
 
 impl ResolvedToolPolicy {
@@ -118,12 +120,12 @@ impl ResolvedToolPolicy {
     }
 
     /// Get the set of explicitly enabled tools
-    pub fn enabled(&self) -> &HashSet<String> {
+    pub fn enabled(&self) -> &ToolNameSet {
         &self.enabled
     }
 
     /// Get the set of explicitly disabled tools
-    pub fn disabled(&self) -> &HashSet<String> {
+    pub fn disabled(&self) -> &ToolNameSet {
         &self.disabled
     }
 }
@@ -131,7 +133,7 @@ impl ResolvedToolPolicy {
 /// Merge multiple policy layers, later layers take precedence
 pub fn merge_policy_layers(layers: &[ToolPolicyLayer]) -> ResolvedToolPolicy {
     let mut mode = ToolMode::AllowAll;
-    let mut tool_states: HashMap<String, bool> = HashMap::new();
+    let mut tool_states: HashMap<ToolName, bool> = HashMap::new();
 
     for layer in layers {
         if let Some(m) = &layer.mode {
@@ -145,12 +147,12 @@ pub fn merge_policy_layers(layers: &[ToolPolicyLayer]) -> ResolvedToolPolicy {
         }
     }
 
-    let enabled: HashSet<String> = tool_states
+    let enabled: ToolNameSet = tool_states
         .iter()
         .filter(|(_, v)| **v)
         .map(|(k, _)| k.clone())
         .collect();
-    let disabled: HashSet<String> = tool_states
+    let disabled: ToolNameSet = tool_states
         .iter()
         .filter(|(_, v)| !**v)
         .map(|(k, _)| k.clone())
@@ -171,12 +173,14 @@ pub fn apply_enforced_policy(
     // Hard denylist always wins
     for tool in &enforced.deny {
         resolved.disabled.insert(tool.clone());
-        resolved.enabled.remove(tool);
+        resolved.enabled.remove(tool.as_str());
     }
 
     // If allowlist is non-empty, only those tools can be enabled
     if !enforced.allow.is_empty() {
-        resolved.enabled.retain(|t| enforced.allow.contains(t));
+        resolved
+            .enabled
+            .retain(|tool| enforced.allow.contains(tool.as_str()));
         // Any tool not in allow list is implicitly disabled
         // (handled by is_enabled returning false for non-enabled tools in AllowList mode)
         resolved.mode = ToolMode::AllowList;
@@ -284,10 +288,10 @@ mod tests {
             policy: ToolPolicyLayer {
                 mode: Some(ToolMode::AllowList),
                 enable: ["read_file"].into_iter().map(String::from).collect(),
-                disable: HashSet::new(),
+                disable: ToolNameSet::new(),
             },
             enforced: EnforcedToolPolicy {
-                allow: HashSet::new(),
+                allow: ToolNameSet::new(),
                 deny: ["bash"].into_iter().map(String::from).collect(),
             },
         };
@@ -437,7 +441,7 @@ mod tests {
 
         // Apply enforced policy that denies bash
         let enforced = EnforcedToolPolicy {
-            allow: HashSet::new(),
+            allow: ToolNameSet::new(),
             deny: ["bash"].into_iter().map(String::from).collect(),
         };
         let resolved = apply_enforced_policy(resolved, &enforced);
@@ -462,7 +466,7 @@ mod tests {
         // Apply enforced allowlist that only permits read_file
         let enforced = EnforcedToolPolicy {
             allow: ["read_file"].into_iter().map(String::from).collect(),
-            deny: HashSet::new(),
+            deny: ToolNameSet::new(),
         };
         let resolved = apply_enforced_policy(resolved, &enforced);
 
@@ -518,7 +522,7 @@ mod tests {
                 .enable_tool("read_file")
                 .enable_tool("bash"),
             enforced: EnforcedToolPolicy {
-                allow: HashSet::new(),
+                allow: ToolNameSet::new(),
                 deny: ["bash"].into_iter().map(String::from).collect(),
             },
         };

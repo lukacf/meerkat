@@ -3,7 +3,7 @@ use crate::error::MobError;
 use crate::ids::MeerkatId;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::task::JoinHandle;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -22,7 +22,9 @@ pub(super) struct PendingSpawnSlot {
 
 pub(super) enum PendingSpawnInsertImpact {
     Added,
-    Collided,
+    Collided {
+        replaced_identity: Option<MeerkatId>,
+    },
 }
 
 impl PendingSpawnLineage {
@@ -43,6 +45,25 @@ impl PendingSpawnLineage {
             .any(|pending| &pending.agent_identity == agent_identity)
     }
 
+    pub(super) fn member_identities(&self) -> BTreeSet<MeerkatId> {
+        self.metadata
+            .values()
+            .map(|pending| pending.agent_identity.clone())
+            .collect()
+    }
+
+    pub(super) fn member_session_pairs(&self) -> BTreeMap<String, String> {
+        self.metadata
+            .values()
+            .map(|pending| {
+                (
+                    pending.agent_identity.to_string(),
+                    pending.admitted_bridge_session_id.to_string(),
+                )
+            })
+            .collect()
+    }
+
     pub(super) fn insert(
         &mut self,
         spawn_ticket: u64,
@@ -51,6 +72,9 @@ impl PendingSpawnLineage {
     ) -> PendingSpawnInsertImpact {
         let replaced_pending = self.metadata.insert(spawn_ticket, pending);
         let replaced_task = self.tasks.insert(spawn_ticket, task);
+        let replaced_identity = replaced_pending
+            .as_ref()
+            .map(|pending| pending.agent_identity.clone());
         let replaced = replaced_pending.is_some() || replaced_task.is_some();
 
         if let Some(prev) = replaced_pending {
@@ -71,7 +95,7 @@ impl PendingSpawnLineage {
 
         self.debug_assert_alignment();
         if replaced {
-            PendingSpawnInsertImpact::Collided
+            PendingSpawnInsertImpact::Collided { replaced_identity }
         } else {
             PendingSpawnInsertImpact::Added
         }

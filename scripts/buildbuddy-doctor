@@ -185,6 +185,14 @@ else
   bad "BuildBuddy launcher does not refresh stale local path dependency locks"
 fi
 
+if grep -Fq -- '--macos_sdk_version=' scripts/buildbuddy-bazel-poc &&
+  grep -Fq -- '--macos_minimum_os=' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'BUILDBUDDY_MACOS_SDK_VERSION' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy macOS lanes pin executor SDK selection with overrides"
+else
+  bad "BuildBuddy macOS lanes do not pin executor SDK selection"
+fi
+
 dispatch_log_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-buildbuddy-dispatch-doctor.XXXXXX")"
 dispatch_dry_run="$(
   MEERKAT_BUILDBUDDY_LOG_ROOT="${dispatch_log_root}" \

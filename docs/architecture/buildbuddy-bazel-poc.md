@@ -196,6 +196,12 @@ different worktree or CI checkout, rewrites just that vendored path to the
 current checkout, and passes `--lockfile_mode=refresh` so Bazel re-resolves the
 local crate before analysis.
 
+The macOS RBE lanes also pin the Apple SDK selection to the current enterprise
+executor pool default (`BUILDBUDDY_MACOS_SDK_VERSION`, default `26.2`) and a
+modern deployment target (`BUILDBUDDY_MACOS_MINIMUM_OS`, default `13.0`). This
+avoids apple_support falling back to `MacOSX10.11`, which is not installed on
+the current arm64 macOS executors.
+
 Generated `rust_test` targets only carry `:package_runfiles` when their source
 appears to read package/workspace files at runtime. This keeps ordinary tests
 from being invalidated by unrelated non-source package files while preserving

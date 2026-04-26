@@ -398,10 +398,22 @@ if (next !== original) fs.writeFileSync(lockfile, next);
   module_lock_args+=(--lockfile_mode=refresh)
 fi
 
+apple_platform_args=()
+if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
+  macos_sdk_version="${BUILDBUDDY_MACOS_SDK_VERSION:-26.2}"
+  macos_minimum_os="${BUILDBUDDY_MACOS_MINIMUM_OS:-13.0}"
+  apple_platform_args+=(
+    --macos_sdk_version="${macos_sdk_version}"
+    --macos_minimum_os="${macos_minimum_os}"
+    --host_macos_minimum_os="${macos_minimum_os}"
+  )
+fi
+
 exec "${bb_bin}" "${startup_args[@]}" "${command}" \
   "${module_lock_args[@]}" \
   --config="${config}" \
   --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}" \
+  "${apple_platform_args[@]}" \
   "${extra_args[@]}" \
   ${target} \
   "$@"

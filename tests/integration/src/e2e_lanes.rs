@@ -549,6 +549,9 @@ fn clean_scenario_target_dir_if_requested(spec: &Spec, cargo_target_dir: &Path) 
     if !clean_e2e_scenario_targets_enabled() || !cargo_target_dir.exists() {
         return;
     }
+    if matches!(spec.lane, Lane::System) {
+        return;
+    }
     if let Err(error) = std::fs::remove_dir_all(cargo_target_dir) {
         eprintln!(
             "failed to clean e2e scenario target for {} at {}: {error}",
@@ -559,29 +562,17 @@ fn clean_scenario_target_dir_if_requested(spec: &Spec, cargo_target_dir: &Path) 
 }
 
 fn scenario_cargo_target_dir(spec: &Spec) -> Result<PathBuf, String> {
-    let artifact_key = if matches!(spec.lane, Lane::System) {
-        // The system-lane wrapper binary serializes scenarios with a lock.
-        // Reusing one nested Cargo target dir lets those sequential wrapper
-        // tests share build artifacts instead of rebuilding the same workspace
-        // once per scenario.
-        format!("lane-{}", lane_artifact_key(spec.lane))
-    } else {
-        scenario_artifact_key(spec)
-    };
+    if matches!(spec.lane, Lane::System) {
+        // System-lane wrappers are serialized in-process, so their nested cargo
+        // invocations can safely reuse the lane's normal target dir. That lets
+        // CI prebuild/clippy steps feed the e2e-system lane instead of forcing
+        // a second copy of the same artifacts under e2e-lanes/.
+        return cargo_target_dir();
+    }
     Ok(cargo_target_dir()?
         .join("e2e-lanes")
         .join(source_revision_key())
-        .join(artifact_key))
-}
-
-fn lane_artifact_key(lane: Lane) -> &'static str {
-    match lane {
-        Lane::Build => "build",
-        Lane::System => "system",
-        Lane::Live => "live",
-        Lane::Smoke => "smoke",
-        Lane::Auth => "auth",
-    }
+        .join(scenario_artifact_key(spec)))
 }
 
 fn source_revision_key() -> String {

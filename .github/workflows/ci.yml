@@ -465,6 +465,9 @@ jobs:
           ./scripts/repo-cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
           ./scripts/repo-cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
+      - name: Surface binary smoke
+        run: make test-surface-modularity
+
   wasm-check:
     name: WASM compilation check
     runs-on: ubuntu-latest

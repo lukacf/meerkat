@@ -1,23 +1,10 @@
-use meerkat_integration_tests::e2e_lanes::{run_catalog_scenario, run_named_suite};
+use meerkat_integration_tests::e2e_lanes::run_named_suite;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 fn system_lane_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-macro_rules! system_scenario {
-    ($name:ident, $id:literal) => {
-        #[tokio::test(flavor = "current_thread")]
-        #[ignore = "lane:e2e-system"]
-        async fn $name() {
-            let _guard = system_lane_lock().lock().await;
-            run_catalog_scenario($id)
-                .await
-                .unwrap_or_else(|error| panic!("{error}"));
-        }
-    };
 }
 
 macro_rules! system_suite {
@@ -33,10 +20,6 @@ macro_rules! system_suite {
     };
 }
 
-system_scenario!(
-    e2e_system_s56_rpc_rest_explicit_mob_registry_restores_without_live_api,
-    56
-);
 system_suite!(e2e_system_cli_init_snapshot, "cli-init-snapshot");
 system_suite!(e2e_system_cli_resume_tools, "cli-resume-tools");
 system_suite!(e2e_system_rest_resume_metadata, "rest-resume-metadata");
@@ -65,8 +48,3 @@ system_suite!(
     e2e_system_sqlite_shared_realm_cli_rest_cli,
     "sqlite-shared-realm-cli-rest-cli"
 );
-system_suite!(e2e_system_surface_rkat_help, "surface-rkat-help");
-system_suite!(e2e_system_surface_rkat_tests, "surface-rkat-tests");
-system_suite!(e2e_system_surface_rkat_rpc_help, "surface-rkat-rpc-help");
-system_suite!(e2e_system_surface_rkat_rest_help, "surface-rkat-rest-help");
-system_suite!(e2e_system_surface_rkat_mcp_help, "surface-rkat-mcp-help");

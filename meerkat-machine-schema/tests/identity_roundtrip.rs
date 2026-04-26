@@ -9,9 +9,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use meerkat_machine_schema::identity::{
-    ActorId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId, FieldId, IdentityError,
-    IdentityErrorKind, InputVariantId, MachineId, MachineInstanceId, NamedTypeBinding, NamedTypeId,
-    PhaseId, ProtocolId, RouteId, RustTypeAtom, SignalVariantId, TransitionId,
+    ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
+    EntryInputId, EnumTypeId, EnumVariantId, FieldId, IdentityError, IdentityErrorKind,
+    InputVariantId, MachineId, MachineInstanceId, NamedTypeBinding, NamedTypeId, PhaseId,
+    ProtocolId, RouteId, RustTypeAtom, SignalVariantId, StorePrimitiveId, TransactionPlanId,
+    TransactionTriggerId, TransitionId,
 };
 
 macro_rules! for_each_identity {
@@ -31,6 +33,11 @@ macro_rules! for_each_identity {
         $body!(EnumTypeId);
         $body!(EnumVariantId);
         $body!(CompositionId);
+        $body!(CompositionDriverId);
+        $body!(TransactionPlanId);
+        $body!(TransactionTriggerId);
+        $body!(CompositionWitnessId);
+        $body!(EntryInputId);
     };
 }
 
@@ -168,6 +175,20 @@ fn serde_rejects_invalid_slug_on_deserialize() {
         err.to_string().contains("1bad"),
         "deserialize error should surface the offending input: {err}"
     );
+}
+
+#[test]
+fn store_primitive_identity_accepts_qualified_rust_operation_paths() {
+    let primitive = StorePrimitiveId::parse("ScheduleStore::claim_due_occurrences").unwrap();
+    assert_eq!(primitive.as_str(), "ScheduleStore::claim_due_occurrences");
+    assert!(matches!(
+        StorePrimitiveId::parse("").map_err(|err| err.kind),
+        Err(IdentityErrorKind::Empty)
+    ));
+    assert!(matches!(
+        StorePrimitiveId::parse("ScheduleStore::claim due").map_err(|err| err.kind),
+        Err(IdentityErrorKind::InvalidChar { ch: ' ', .. })
+    ));
 }
 
 #[test]

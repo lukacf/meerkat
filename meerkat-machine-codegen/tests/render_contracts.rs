@@ -250,12 +250,12 @@ fn generated_kernel_inventory_contract_lists_all_typed_machine_modules() {
 
 use meerkat_machine_schema::RouteVariantId;
 use meerkat_machine_schema::identity::{
-    CompositionId, EffectVariantId, InputVariantId, MachineInstanceId, RouteId,
+    CompositionDriverId, CompositionId, EffectVariantId, InputVariantId, MachineInstanceId, RouteId,
 };
 
 fn sample_driver() -> CompositionDriver {
     CompositionDriver {
-        name: "noop_driver".into(),
+        name: CompositionDriverId::parse("noop_driver").expect("driver slug"),
         rust: CompositionDriverRustBinding {
             module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
             driver_type: "NoopDriver".into(),

@@ -185,6 +185,85 @@ define_identity!(
     /// Composition name.
     CompositionId
 );
+define_identity!(
+    /// Driver name within a composition.
+    CompositionDriverId
+);
+define_identity!(
+    /// Transaction plan name within a composition.
+    TransactionPlanId
+);
+define_identity!(
+    /// Transaction trigger name within a composition.
+    TransactionTriggerId
+);
+define_identity!(
+    /// Witness name within a composition.
+    CompositionWitnessId
+);
+define_identity!(
+    /// Entry input name within a composition.
+    EntryInputId
+);
+
+/// Store primitive referenced by a composition transaction plan.
+///
+/// Unlike kernel slugs, store primitives name existing Rust-side atomic
+/// operations and may use qualified path syntax such as
+/// `ScheduleStore::claim_due_occurrences`. The type still owns validation at
+/// the schema boundary instead of letting transaction plans carry raw strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StorePrimitiveId(String);
+
+impl StorePrimitiveId {
+    pub fn parse(value: impl Into<String>) -> Result<Self, IdentityError> {
+        let raw = value.into();
+        if raw.is_empty() {
+            return Err(IdentityError {
+                kind: IdentityErrorKind::Empty,
+                raw,
+            });
+        }
+        for (position, ch) in raw.chars().enumerate() {
+            if ch.is_control() || ch.is_whitespace() {
+                return Err(IdentityError {
+                    kind: IdentityErrorKind::InvalidChar { ch, position },
+                    raw,
+                });
+            }
+        }
+        Ok(Self(raw))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for StorePrimitiveId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for StorePrimitiveId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for StorePrimitiveId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for StorePrimitiveId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Atomic Rust-level representation used by [`NamedTypeBinding`] to anchor a
 /// DSL-declared named type to the concrete Rust type codegen must emit.

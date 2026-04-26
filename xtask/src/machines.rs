@@ -337,7 +337,7 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         )?;
         for witness in &composition.schema.witnesses {
             write_generated(
-                &composition_witness_path(root, &composition.slug, &witness.name),
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
                 &render_composition_witness_cfg(&composition.schema, witness),
             )?;
         }
@@ -553,7 +553,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         )?;
         for witness in &composition.schema.witnesses {
             compare_generated(
-                &composition_witness_path(root, &composition.slug, &witness.name),
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
                 &render_composition_witness_cfg(&composition.schema, witness),
                 &mut mismatches,
             )?;

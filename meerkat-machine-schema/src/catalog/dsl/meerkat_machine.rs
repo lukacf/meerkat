@@ -1303,6 +1303,31 @@ machine! {
         // Absorbed transitions
         // =====================================================================
 
+        // 17b. RecoverInputLifecycle: recovery feeds persisted lifecycle facts
+        // through the typed machine input. The runtime implementation carries
+        // the rich input-lifecycle maps; this catalog arm keeps the canonical
+        // input alphabet covered and emits the typed lifecycle notice rather
+        // than treating recovery as a shell-local projection write.
+        transition RecoverInputLifecycle {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverInputLifecycle {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                lane
+            }
+            update {}
+            to Idle
+            emit InputLifecycleNotice
+        }
+
         // 18. EnsureSessionWithExecutor
         // Idle → Attached (phase change)
         transition EnsureSessionWithExecutorIdle {

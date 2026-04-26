@@ -23,7 +23,7 @@
 use meerkat_machine_codegen::render_composition_driver;
 use meerkat_machine_schema::catalog::meerkat_mob_seam_composition;
 use meerkat_machine_schema::identity::{
-    EffectVariantId, InputVariantId, MachineInstanceId, RouteId,
+    CompositionDriverId, EffectVariantId, InputVariantId, MachineInstanceId, RouteId,
 };
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, RouteTargetKind,
@@ -38,7 +38,7 @@ fn attach_stub_driver(
     mut schema: meerkat_machine_schema::CompositionSchema,
 ) -> meerkat_machine_schema::CompositionSchema {
     schema.driver = Some(CompositionDriver {
-        name: "meerkat_mob_seam_driver".into(),
+        name: CompositionDriverId::parse("meerkat_mob_seam_driver").expect("driver slug"),
         rust: CompositionDriverRustBinding {
             module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
             driver_type: "MeerkatMobSeamDriver".into(),

@@ -140,7 +140,7 @@ where
 }
 
 use super::config::{ShellConfig, ShellError};
-use super::types::{BackgroundJob, JobId, JobStatus, JobSummary};
+use super::types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
 
 #[derive(Clone, Debug)]
 struct BackgroundJobRecord {
@@ -272,32 +272,28 @@ impl JobManager {
         self.ops_registry.snapshot(&job.operation_id)
     }
 
-    fn lifecycle_status_string(
+    fn lifecycle_summary_status(
         &self,
         job: &BackgroundJobRecord,
         snapshot: Option<&OperationLifecycleSnapshot>,
-    ) -> &'static str {
+    ) -> JobSummaryStatus {
         if matches!(job.view.status, JobStatus::TimedOut { .. }) {
-            return "timed_out";
+            return JobSummaryStatus::TimedOut;
         }
 
         match snapshot.map(|value| value.status) {
-            Some(OperationStatus::Provisioning | OperationStatus::Running) => "running",
-            Some(OperationStatus::Completed) => "completed",
-            Some(OperationStatus::Failed | OperationStatus::Terminated) => "failed",
+            Some(OperationStatus::Provisioning | OperationStatus::Running) => {
+                JobSummaryStatus::Running
+            }
+            Some(OperationStatus::Completed) => JobSummaryStatus::Completed,
+            Some(OperationStatus::Failed | OperationStatus::Terminated) => JobSummaryStatus::Failed,
             Some(
                 OperationStatus::Aborted
                 | OperationStatus::Cancelled
                 | OperationStatus::Retiring
                 | OperationStatus::Retired,
-            ) => "cancelled",
-            Some(OperationStatus::Absent) | None => match job.view.status {
-                JobStatus::Running { .. } => "running",
-                JobStatus::Completed { .. } => "completed",
-                JobStatus::Failed { .. } => "failed",
-                JobStatus::TimedOut { .. } => "timed_out",
-                JobStatus::Cancelled { .. } => "cancelled",
-            },
+            ) => JobSummaryStatus::Cancelled,
+            Some(OperationStatus::Absent) | None => JobSummaryStatus::from(&job.view.status),
         }
     }
 
@@ -794,12 +790,12 @@ impl JobManager {
             .values()
             .map(|job| {
                 let snapshot = self.snapshot_for_job(job);
-                let status_str = self.lifecycle_status_string(job, snapshot.as_ref());
+                let status = self.lifecycle_summary_status(job, snapshot.as_ref());
 
                 JobSummary {
                     id: job.view.id.clone(),
                     command: job.view.command.clone(),
-                    status: status_str.to_string(),
+                    status,
                     started_at_unix: job.view.started_at_unix,
                 }
             })
@@ -1299,8 +1295,8 @@ mod tests {
 
         let snapshot = manager.snapshot_for_job(&job);
         assert_eq!(
-            manager.lifecycle_status_string(&job, snapshot.as_ref()),
-            "timed_out"
+            manager.lifecycle_summary_status(&job, snapshot.as_ref()),
+            JobSummaryStatus::TimedOut
         );
     }
 

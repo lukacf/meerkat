@@ -1,0 +1,512 @@
+name: Cargo CI
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /tmp/meerkat-cargo-home
+
+jobs:
+  fmt-lint:
+    name: Format, lint, and static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Legacy surface gate
+        run: make legacy-surface-gate
+
+      - name: Bridge-classifier gate (W2-F)
+        run: make bridge-no-responsestatus-gate
+
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      - name: Verify RPC surface alignment
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify SDK wrapper freshness
+        run: make verify-sdk-wrapper-freshness
+
+      - name: Clippy (all features)
+        run: make lint
+
+      - name: Clippy feature matrix
+        run: make lint-feature-matrix
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@cargo-machete
+
+      - name: Check for unused dependencies
+        run: ./scripts/repo-cargo machete --with-metadata
+
+  sdk-suites:
+    name: SDK suites + parity gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: sdk-suites
+
+      - name: Build rkat-rpc for SDK smoke tests
+        run: ./scripts/repo-cargo build -p meerkat-rpc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Python SDK suite
+        run: make test-sdk-python
+
+      - name: Run TypeScript SDK suite
+        run: make test-sdk-typescript
+
+      - name: Verify SDK wrapper freshness
+        run: make verify-sdk-wrapper-freshness
+
+  machine-authority:
+    name: Machine authority workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: machine-authority
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install TLC
+        run: |
+          mkdir -p $HOME/.local/lib $HOME/.local/bin
+          curl -sL -o $HOME/.local/lib/tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          printf '#!/bin/sh\njava -jar %s/tla2tools.jar "$@"\n' "$HOME/.local/lib" > $HOME/.local/bin/tlc
+          chmod +x $HOME/.local/bin/tlc
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Machine code generation
+        run: ./scripts/repo-cargo xtask machine-codegen --all
+
+      - name: Generated artifacts stay clean
+        run: git diff --exit-code
+
+      - name: Machine drift check
+        run: ./scripts/repo-cargo xtask machine-check-drift --all
+
+      - name: Machine verification
+        run: ./scripts/repo-cargo xtask machine-verify --all
+
+      - name: Protocol codegen
+        run: ./scripts/repo-cargo xtask protocol-codegen
+
+      - name: Protocol codegen stays clean
+        run: git diff --exit-code
+
+      - name: Audit @generated header truthfulness
+        run: ./scripts/repo-cargo xtask audit-generated-headers
+
+  rmat-audit:
+    name: RMAT audit + ownership ledger
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rmat-audit
+
+      - name: Ownership ledger drift
+        run: ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift
+
+      - name: RMAT audit (strict)
+        run: ./scripts/repo-cargo run -p xtask -- rmat-audit --strict
+
+  seam-inventory:
+    name: Seam inventory (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: seam-inventory
+
+      - name: Seam inventory (strict)
+        run: ./scripts/repo-cargo run -p xtask -- seam-inventory --strict
+
+  wasm-contract-tests:
+    name: WASM contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm-contract-tests
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Build browser-contract tests
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
+
+      - name: Build release-targets tests
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run
+
+      - name: Build external-auth resolver tests
+        if: >-
+          ${{
+            github.event_name != 'pull_request' ||
+            !contains(github.event.pull_request.labels.*.name, 'workflow/catalog-only')
+          }}
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test wasm_external_resolver --no-run
+
+      - name: Run browser-contract tests under headless chrome
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract
+
+      - name: Run release-targets tests under headless chrome
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets
+
+      - name: Run external-auth resolver tests under node
+        if: >-
+          ${{
+            github.event_name != 'pull_request' ||
+            !contains(github.event.pull_request.labels.*.name, 'workflow/catalog-only')
+          }}
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: wasm-pack test --node meerkat-web-runtime --test wasm_external_resolver
+
+  test-unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Unit test lane
+        run: ./scripts/repo-cargo unit
+
+  integration-fast:
+    name: Integration-fast lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: integration-fast
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Integration-fast lane
+        run: ./scripts/repo-cargo int
+
+  e2e-fast:
+    name: E2E fast lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-fast
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-fast lane
+        run: ./scripts/repo-cargo e2e-fast
+
+  e2e-system:
+    name: E2E system lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-system
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-system lane
+        run: ./scripts/repo-cargo e2e-system
+
+  test-minimal:
+    name: Minimal feature builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: minimal
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Minimal build checks
+        run: |
+          ./scripts/repo-cargo check -p meerkat-core
+          ./scripts/repo-cargo check -p meerkat-client --no-default-features
+          ./scripts/repo-cargo check -p meerkat-store --no-default-features
+          ./scripts/repo-cargo check -p meerkat-tools --no-default-features
+          ./scripts/repo-cargo check -p meerkat --no-default-features
+          ./scripts/repo-cargo nextest run -p meerkat-core
+
+  test-feature-matrix-lib:
+    name: Feature matrix (library)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-lib
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Library crate feature combinations
+        run: |
+          ./scripts/repo-cargo check -p meerkat-tools --no-default-features --features comms
+          ./scripts/repo-cargo check -p meerkat-tools --no-default-features --features mcp
+          ./scripts/repo-cargo check -p meerkat-tools --no-default-features --features comms,mcp
+          ./scripts/repo-cargo check -p meerkat --no-default-features --features openai,memory-store
+          ./scripts/repo-cargo check -p meerkat --no-default-features --features gemini,jsonl-store
+          ./scripts/repo-cargo check -p meerkat --features all-providers,comms,mcp
+          ./scripts/repo-cargo check -p meerkat-mob --no-default-features
+          ./scripts/repo-cargo check -p meerkat-mob --no-default-features --features runtime-adapter
+          ./scripts/repo-cargo nextest run -p meerkat --features all-providers,comms,mcp
+
+  test-feature-matrix-surface-checks:
+    name: Feature matrix (surface checks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-surface-checks
+
+      - name: Surface crate feature combinations
+        run: ./scripts/run-surface-feature-matrix
+
+      - name: Surface binary smoke
+        run: make test-surface-modularity
+
+  wasm-check:
+    name: WASM compilation check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm32
+
+      - name: Check meerkat-web-runtime for wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: ./scripts/repo-cargo check -p meerkat-web-runtime --target wasm32-unknown-unknown
+
+      - name: Clippy meerkat-web-runtime for wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: ./scripts/repo-cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  gate:
+    name: Cargo CI gate
+    if: always()
+    needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          failed=""
+          for job in \
+            fmt-lint \
+            sdk-suites \
+            machine-authority \
+            test-unit \
+            integration-fast \
+            e2e-fast \
+            e2e-system \
+            test-minimal \
+            test-feature-matrix-lib \
+            test-feature-matrix-surface-checks \
+            wasm-check \
+            wasm-contract-tests \
+            rmat-audit \
+            seam-inventory \
+            audit
+          do
+            case "$job" in
+              fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
+              sdk-suites) result="${{ needs.sdk-suites.result }}" ;;
+              machine-authority) result="${{ needs.machine-authority.result }}" ;;
+              test-unit) result="${{ needs.test-unit.result }}" ;;
+              integration-fast) result="${{ needs.integration-fast.result }}" ;;
+              e2e-fast) result="${{ needs.e2e-fast.result }}" ;;
+              e2e-system) result="${{ needs.e2e-system.result }}" ;;
+              test-minimal) result="${{ needs.test-minimal.result }}" ;;
+              test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
+              test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
+              wasm-check) result="${{ needs.wasm-check.result }}" ;;
+              wasm-contract-tests) result="${{ needs.wasm-contract-tests.result }}" ;;
+              rmat-audit) result="${{ needs.rmat-audit.result }}" ;;
+              seam-inventory) result="${{ needs.seam-inventory.result }}" ;;
+              audit) result="${{ needs.audit.result }}" ;;
+            esac
+            if [[ "$result" != "success" ]]; then
+              echo "$job: $result"
+              failed="true"
+            fi
+          done
+          if [[ -n "$failed" ]]; then
+            exit 1
+          fi
+          echo "All checks passed"

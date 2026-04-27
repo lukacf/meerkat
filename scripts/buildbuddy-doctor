@@ -205,7 +205,7 @@ else
 fi
 
 if [[ -x scripts/run-surface-feature-matrix ]] &&
-  grep -Fq './scripts/run-surface-feature-matrix' .github/workflows/ci.yml &&
+  grep -Fq './scripts/run-surface-feature-matrix' .github/workflows/cargo.yml &&
   grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-rest \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-mcp-server' scripts/run-surface-feature-matrix &&
@@ -254,11 +254,16 @@ fi
 rm -rf "${dispatch_log_root}"
 
 if grep -Fq 'name: CI' .github/workflows/ci.yml &&
+  grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
   grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
   grep -Fq 'name: CI gate' .github/workflows/ci.yml &&
-  grep -Fq 'Selected CI backend passed' .github/workflows/ci.yml &&
+  grep -Fq 'name: Cargo CI' .github/workflows/cargo.yml &&
+  grep -Fq 'workflow_call:' .github/workflows/cargo.yml &&
+  grep -Fq 'name: Cargo CI gate' .github/workflows/cargo.yml &&
   grep -Fq 'name: BuildBuddy CI' .github/workflows/buildbuddy.yml &&
   grep -Fq 'workflow_call:' .github/workflows/buildbuddy.yml &&
+  ! grep -Fq 'pull_request:' .github/workflows/cargo.yml &&
+  ! grep -Fq 'push:' .github/workflows/cargo.yml &&
   ! grep -Fq 'pull_request:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'push:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY' .github/workflows/buildbuddy.yml &&
@@ -364,16 +369,17 @@ else
   bad "BuildBuddy full lanes still contain placeholder test routing"
 fi
 
-if ! grep -Fq 'rust-release-packaging:' .github/workflows/ci.yml &&
+if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   grep -Fq 'Verify Rust release packaging' .github/workflows/release.yml &&
-  grep -Fq 'e2e-system' .github/workflows/ci.yml &&
-  ! grep -Fq 'e2e-live:' .github/workflows/ci.yml &&
-  ! grep -Fq 'e2e-smoke:' .github/workflows/ci.yml &&
+  grep -Fq 'e2e-system' .github/workflows/cargo.yml &&
+  ! grep -Fq 'e2e-live:' .github/workflows/cargo.yml &&
+  ! grep -Fq 'e2e-smoke:' .github/workflows/cargo.yml &&
   grep -Fq 'Cargo E2E live lane' .github/workflows/live-e2e.yml &&
   grep -Fq 'Cargo E2E smoke lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'needs: [buildbuddy, fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/ci.yml &&
-  ! grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging' .github/workflows/ci.yml; then
-  pass "CI gate depends on BuildBuddy selector and every standard Cargo CI lane"
+  grep -Fq 'needs: [cargo, buildbuddy]' .github/workflows/ci.yml &&
+  grep -Fq 'needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/cargo.yml &&
+  ! grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging' .github/workflows/cargo.yml; then
+  pass "CI gate selects one backend and Cargo gate depends on every standard Cargo CI lane"
 else
   bad "CI gate does not match the backend selector and standard/nightly lane split"
 fi

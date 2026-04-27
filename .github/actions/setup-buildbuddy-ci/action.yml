@@ -94,7 +94,7 @@ runs:
         echo "$(dirname "${bb_bin}")" >> "${GITHUB_PATH}"
 
     - name: Cache Bazel external repositories
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/meerkat-bazel-repository-cache
         key: buildbuddy-bazel-repository-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}

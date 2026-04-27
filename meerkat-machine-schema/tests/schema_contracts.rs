@@ -480,7 +480,6 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
         "ObserveRuntimeRetired",
         "DestroyMob",
         "ObserveRuntimeDestroyed",
-        "SubscribeMobEventsRunning",
     ] {
         assert!(
             transition_names.iter().any(|name| name == &required),
@@ -685,11 +684,6 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
         "Destroy",
         "TaskCreate",
         "TaskUpdate",
-        "SubscribeAgentEvents",
-        "SubscribeAllAgentEvents",
-        "SubscribeMobEvents",
-        "RecordOperatorActionProvenance",
-        "SetSpawnPolicy",
         "Shutdown",
         "ForceCancel",
     ] {
@@ -701,7 +695,7 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
 }
 
 #[test]
-fn every_query_runtime_command_has_expected_surface_coverage() {
+fn every_non_transition_runtime_command_has_expected_surface_coverage() {
     let meerkat = meerkat_machine();
     let meerkat_surface_only_inputs = meerkat
         .surface_only_inputs
@@ -764,6 +758,13 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
         "PollEvents",
         "ReplayAllEvents",
         "GetMember",
+        // These commands are handled directly by the Mob runtime and do not
+        // mutate machine-owned state or emit machine-owned effects.
+        "SubscribeAgentEvents",
+        "SubscribeAllAgentEvents",
+        "SubscribeMobEvents",
+        "RecordOperatorActionProvenance",
+        "SetSpawnPolicy",
     ] {
         assert!(
             mob_surface_only_inputs.contains(required),

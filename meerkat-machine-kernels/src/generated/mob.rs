@@ -1149,10 +1149,15 @@ mod source {
                 ListMembersIncludingRetiring,
                 ListAllMembers,
                 MemberStatus,
+                SubscribeAgentEvents,
+                SubscribeAllAgentEvents,
+                SubscribeMobEvents,
                 CancelWork,
                 PollEvents,
                 ReplayAllEvents,
-                GetMember
+                GetMember,
+                RecordOperatorActionProvenance,
+                SetSpawnPolicy
             ]
 
             signal MobMachineSignal {
@@ -1696,60 +1701,6 @@ mod source {
             }
 
             // =====================================================================
-            // Absorbed transitions: per-phase self-loops
-            // =====================================================================
-
-            transition RecordOperatorActionProvenanceRunning {
-                on input RecordOperatorActionProvenance
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-            }
-            transition RecordOperatorActionProvenanceStopped {
-                on input RecordOperatorActionProvenance
-                guard { self.lifecycle_phase == Phase::Stopped }
-                update {}
-                to Stopped
-            }
-            transition RecordOperatorActionProvenanceCompleted {
-                on input RecordOperatorActionProvenance
-                guard { self.lifecycle_phase == Phase::Completed }
-                update {}
-                to Completed
-            }
-            transition RecordOperatorActionProvenanceDestroyed {
-                on input RecordOperatorActionProvenance
-                guard { self.lifecycle_phase == Phase::Destroyed }
-                update {}
-                to Destroyed
-            }
-
-            transition SetSpawnPolicyRunning {
-                on input SetSpawnPolicy
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-            }
-            transition SetSpawnPolicyStopped {
-                on input SetSpawnPolicy
-                guard { self.lifecycle_phase == Phase::Stopped }
-                update {}
-                to Stopped
-            }
-            transition SetSpawnPolicyCompleted {
-                on input SetSpawnPolicy
-                guard { self.lifecycle_phase == Phase::Completed }
-                update {}
-                to Completed
-            }
-            transition SetSpawnPolicyDestroyed {
-                on input SetSpawnPolicy
-                guard { self.lifecycle_phase == Phase::Destroyed }
-                update {}
-                to Destroyed
-            }
-
-            // =====================================================================
             // Phase-changing transitions
             // =====================================================================
 
@@ -2008,89 +1959,6 @@ mod source {
                 }
                 to Running
                 emit FlowTerminalized
-            }
-
-            // =====================================================================
-            // Subscribe commands
-            // =====================================================================
-
-            transition SubscribeAgentEventsRunning {
-                on input SubscribeAgentEvents
-                guard { self.lifecycle_phase == Phase::Running }
-                guard "active_members_present" { self.live_runtime_ids != EmptySet }
-                update {}
-                to Running
-            }
-            transition SubscribeAgentEventsStopped {
-                on input SubscribeAgentEvents
-                guard { self.lifecycle_phase == Phase::Stopped }
-                guard "active_members_present" { self.live_runtime_ids != EmptySet }
-                update {}
-                to Stopped
-            }
-            transition SubscribeAgentEventsCompleted {
-                on input SubscribeAgentEvents
-                guard { self.lifecycle_phase == Phase::Completed }
-                guard "active_members_present" { self.live_runtime_ids != EmptySet }
-                update {}
-                to Completed
-            }
-            transition SubscribeAgentEventsDestroyed {
-                on input SubscribeAgentEvents
-                guard { self.lifecycle_phase == Phase::Destroyed }
-                guard "active_members_present" { self.live_runtime_ids != EmptySet }
-                update {}
-                to Destroyed
-            }
-
-            transition SubscribeAllAgentEventsRunning {
-                on input SubscribeAllAgentEvents
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-            }
-            transition SubscribeAllAgentEventsStopped {
-                on input SubscribeAllAgentEvents
-                guard { self.lifecycle_phase == Phase::Stopped }
-                update {}
-                to Stopped
-            }
-            transition SubscribeAllAgentEventsCompleted {
-                on input SubscribeAllAgentEvents
-                guard { self.lifecycle_phase == Phase::Completed }
-                update {}
-                to Completed
-            }
-            transition SubscribeAllAgentEventsDestroyed {
-                on input SubscribeAllAgentEvents
-                guard { self.lifecycle_phase == Phase::Destroyed }
-                update {}
-                to Destroyed
-            }
-
-            transition SubscribeMobEventsRunning {
-                on input SubscribeMobEvents
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-            }
-            transition SubscribeMobEventsStopped {
-                on input SubscribeMobEvents
-                guard { self.lifecycle_phase == Phase::Stopped }
-                update {}
-                to Stopped
-            }
-            transition SubscribeMobEventsCompleted {
-                on input SubscribeMobEvents
-                guard { self.lifecycle_phase == Phase::Completed }
-                update {}
-                to Completed
-            }
-            transition SubscribeMobEventsDestroyed {
-                on input SubscribeMobEvents
-                guard { self.lifecycle_phase == Phase::Destroyed }
-                update {}
-                to Destroyed
             }
 
             // =====================================================================

@@ -81,10 +81,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListMembersIncludingRetiring`
 - `ListAllMembers`
 - `MemberStatus`
+- `SubscribeAgentEvents`
+- `SubscribeAllAgentEvents`
+- `SubscribeMobEvents`
 - `CancelWork`
 - `PollEvents`
 - `ReplayAllEvents`
 - `GetMember`
+- `RecordOperatorActionProvenance`
+- `SetSpawnPolicy`
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -301,46 +306,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
 
-### `RecordOperatorActionProvenanceRunning`
-- From: `Running`
-- On: `RecordOperatorActionProvenance`()
-- To: `Running`
-
-### `RecordOperatorActionProvenanceStopped`
-- From: `Stopped`
-- On: `RecordOperatorActionProvenance`()
-- To: `Stopped`
-
-### `RecordOperatorActionProvenanceCompleted`
-- From: `Completed`
-- On: `RecordOperatorActionProvenance`()
-- To: `Completed`
-
-### `RecordOperatorActionProvenanceDestroyed`
-- From: `Destroyed`
-- On: `RecordOperatorActionProvenance`()
-- To: `Destroyed`
-
-### `SetSpawnPolicyRunning`
-- From: `Running`
-- On: `SetSpawnPolicy`()
-- To: `Running`
-
-### `SetSpawnPolicyStopped`
-- From: `Stopped`
-- On: `SetSpawnPolicy`()
-- To: `Stopped`
-
-### `SetSpawnPolicyCompleted`
-- From: `Completed`
-- On: `SetSpawnPolicy`()
-- To: `Completed`
-
-### `SetSpawnPolicyDestroyed`
-- From: `Destroyed`
-- On: `SetSpawnPolicy`()
-- To: `Destroyed`
-
 ### `StopRunning`
 - From: `Running`
 - On: `Stop`()
@@ -419,74 +384,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ForceCancel`()
 - Emits: `FlowTerminalized`
 - To: `Running`
-
-### `SubscribeAgentEventsRunning`
-- From: `Running`
-- On: `SubscribeAgentEvents`()
-- Guards:
-  - `active_members_present`
-- To: `Running`
-
-### `SubscribeAgentEventsStopped`
-- From: `Stopped`
-- On: `SubscribeAgentEvents`()
-- Guards:
-  - `active_members_present`
-- To: `Stopped`
-
-### `SubscribeAgentEventsCompleted`
-- From: `Completed`
-- On: `SubscribeAgentEvents`()
-- Guards:
-  - `active_members_present`
-- To: `Completed`
-
-### `SubscribeAgentEventsDestroyed`
-- From: `Destroyed`
-- On: `SubscribeAgentEvents`()
-- Guards:
-  - `active_members_present`
-- To: `Destroyed`
-
-### `SubscribeAllAgentEventsRunning`
-- From: `Running`
-- On: `SubscribeAllAgentEvents`()
-- To: `Running`
-
-### `SubscribeAllAgentEventsStopped`
-- From: `Stopped`
-- On: `SubscribeAllAgentEvents`()
-- To: `Stopped`
-
-### `SubscribeAllAgentEventsCompleted`
-- From: `Completed`
-- On: `SubscribeAllAgentEvents`()
-- To: `Completed`
-
-### `SubscribeAllAgentEventsDestroyed`
-- From: `Destroyed`
-- On: `SubscribeAllAgentEvents`()
-- To: `Destroyed`
-
-### `SubscribeMobEventsRunning`
-- From: `Running`
-- On: `SubscribeMobEvents`()
-- To: `Running`
-
-### `SubscribeMobEventsStopped`
-- From: `Stopped`
-- On: `SubscribeMobEvents`()
-- To: `Stopped`
-
-### `SubscribeMobEventsCompleted`
-- From: `Completed`
-- On: `SubscribeMobEvents`()
-- To: `Completed`
-
-### `SubscribeMobEventsDestroyed`
-- From: `Destroyed`
-- On: `SubscribeMobEvents`()
-- To: `Destroyed`
 
 ### `ShutdownRunning`
 - From: `Running`

@@ -277,62 +277,6 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ UNCHANGED << externally_addressable_runtime_ids, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
-RecordOperatorActionProvenanceRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-RecordOperatorActionProvenanceStopped ==
-    /\ phase = "Stopped"
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-RecordOperatorActionProvenanceCompleted ==
-    /\ phase = "Completed"
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-RecordOperatorActionProvenanceDestroyed ==
-    /\ phase = "Destroyed"
-    /\ phase' = "Destroyed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SetSpawnPolicyRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SetSpawnPolicyStopped ==
-    /\ phase = "Stopped"
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SetSpawnPolicyCompleted ==
-    /\ phase = "Completed"
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SetSpawnPolicyDestroyed ==
-    /\ phase = "Destroyed"
-    /\ phase' = "Destroyed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
 StopRunning ==
     /\ phase = "Running"
     /\ (active_run_count = 0)
@@ -429,94 +373,6 @@ ForceCancelRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAgentEventsRunning ==
-    /\ phase = "Running"
-    /\ (live_runtime_ids # {})
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAgentEventsStopped ==
-    /\ phase = "Stopped"
-    /\ (live_runtime_ids # {})
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAgentEventsCompleted ==
-    /\ phase = "Completed"
-    /\ (live_runtime_ids # {})
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAgentEventsDestroyed ==
-    /\ phase = "Destroyed"
-    /\ (live_runtime_ids # {})
-    /\ phase' = "Destroyed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAllAgentEventsRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAllAgentEventsStopped ==
-    /\ phase = "Stopped"
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAllAgentEventsCompleted ==
-    /\ phase = "Completed"
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeAllAgentEventsDestroyed ==
-    /\ phase = "Destroyed"
-    /\ phase' = "Destroyed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeMobEventsRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeMobEventsStopped ==
-    /\ phase = "Stopped"
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeMobEventsCompleted ==
-    /\ phase = "Completed"
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
-
-
-SubscribeMobEventsDestroyed ==
-    /\ phase = "Destroyed"
-    /\ phase' = "Destroyed"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_state_markers, wiring_edges, external_peer_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
 
 ShutdownRunning ==
@@ -992,14 +848,6 @@ Next ==
     \/ MarkCompleted
     \/ \E session_id \in SessionIdValues : DestroyMob(session_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeDestroyed(agent_runtime_id, fence_token)
-    \/ RecordOperatorActionProvenanceRunning
-    \/ RecordOperatorActionProvenanceStopped
-    \/ RecordOperatorActionProvenanceCompleted
-    \/ RecordOperatorActionProvenanceDestroyed
-    \/ SetSpawnPolicyRunning
-    \/ SetSpawnPolicyStopped
-    \/ SetSpawnPolicyCompleted
-    \/ SetSpawnPolicyDestroyed
     \/ StopRunning
     \/ ResumeStopped
     \/ CompleteRunning
@@ -1010,18 +858,6 @@ Next ==
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningCompleted(task_id, new_status)
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningCancelled(task_id, new_status)
     \/ ForceCancelRunning
-    \/ SubscribeAgentEventsRunning
-    \/ SubscribeAgentEventsStopped
-    \/ SubscribeAgentEventsCompleted
-    \/ SubscribeAgentEventsDestroyed
-    \/ SubscribeAllAgentEventsRunning
-    \/ SubscribeAllAgentEventsStopped
-    \/ SubscribeAllAgentEventsCompleted
-    \/ SubscribeAllAgentEventsDestroyed
-    \/ SubscribeMobEventsRunning
-    \/ SubscribeMobEventsStopped
-    \/ SubscribeMobEventsCompleted
-    \/ SubscribeMobEventsDestroyed
     \/ ShutdownRunning
     \/ ShutdownStopped
     \/ ShutdownCompleted

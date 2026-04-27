@@ -114,6 +114,11 @@ make docker-tmux
 # target-a, target-b, peer comms, and scheduler wakeups.
 make docker-live-suite
 
+# Run the longer architecture stress suite. This adds peer relay, target
+# restart/churn, scheduler cascade, claim/release pressure, and multi-provider
+# arbitration checks.
+make docker-architecture-suite
+
 # Logs and cleanup.
 make docker-logs
 make docker-down
@@ -158,6 +163,12 @@ target-a, direct target-b shell control, target-b to target-a peer delivery, and
 a scheduled target-a wakeup. Unless overridden, the suite exercises all three
 providers: Hive on `gemini-3.1-pro-preview`, target-a on `gpt-5.5`, and
 target-b on `claude-opus-4-7`.
+
+`docker-architecture-suite` uses the same provider defaults and credentials but
+runs a longer stress pass through TUX. It verifies target-to-target delegation,
+target restart and peer rewiring, scheduled background wakeups that send comms,
+claim/release pressure while Hive comms stays live, and a multi-provider
+arbitration loop with transcript artifacts.
 
 For direct-mode host testing, the targets' RPC ports are also published as
 `localhost:54801` and `localhost:54802`.

@@ -2029,6 +2029,22 @@ fn process_event(
                     },
                     |_| (),
                 );
+                for entry in &targets {
+                    if let Some(rpc_addr) = &entry.rpc_addr {
+                        if let Some(idx) = app.find_target_by_id(&entry.target_id) {
+                            let addr_changed = app.targets[idx].rpc_addr != *rpc_addr;
+                            app.targets[idx].rpc_addr = rpc_addr.clone();
+                            if addr_changed
+                                || app.targets[idx].phase == TargetPhase::Disconnected
+                            {
+                                let _ = rpc_tx.send(RpcCommand::Connect {
+                                    target_id: entry.target_id.clone(),
+                                    rpc_addr: rpc_addr.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
         TuiEvent::KennelClaimGranted(grants) => {
@@ -2088,6 +2104,16 @@ fn process_event(
         } => {
             if app.find_target_by_id(&target_id).is_none() {
                 app.targets.push(TargetView::new(name, target_id, rpc_addr));
+            } else if let Some(idx) = app.find_target_by_id(&target_id) {
+                let addr_changed = app.targets[idx].rpc_addr != rpc_addr;
+                app.targets[idx].name = name;
+                app.targets[idx].rpc_addr = rpc_addr.clone();
+                if addr_changed || app.targets[idx].phase == TargetPhase::Disconnected {
+                    let _ = rpc_tx.send(RpcCommand::Connect {
+                        target_id,
+                        rpc_addr,
+                    });
+                }
             }
         }
         TuiEvent::KennelError(msg) => {

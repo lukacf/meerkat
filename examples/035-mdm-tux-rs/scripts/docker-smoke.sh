@@ -52,16 +52,18 @@ wait_for_log() {
   local pattern="$2"
   local timeout_sec="${3:-90}"
   local start
+  local logs
   start="$(date +%s)"
 
   while true; do
-    if "${compose[@]}" logs --no-color "${service}" 2>&1 | grep -Eq "${pattern}"; then
+    logs="$("${compose[@]}" logs --no-color "${service}" 2>&1 || true)"
+    if [[ "${logs}" =~ ${pattern} ]]; then
       return 0
     fi
     if (( "$(date +%s)" - start >= timeout_sec )); then
       echo "timed out waiting for ${service} log pattern: ${pattern}" >&2
       echo "--- ${service} logs ---" >&2
-      "${compose[@]}" logs --no-color "${service}" >&2 || true
+      printf '%s\n' "${logs}" >&2
       return 1
     fi
     sleep 2
@@ -113,7 +115,7 @@ smoke() {
   else
     "${compose[@]}" build kennel
   fi
-  "${compose[@]}" up -d kennel target-a target-b
+  "${compose[@]}" up -d --force-recreate kennel target-a target-b
   wait_for_log kennel 'listen[[:space:]]*:'
   wait_for_log target-a 'added hive as trusted peer'
   wait_for_log target-b 'added hive as trusted peer'

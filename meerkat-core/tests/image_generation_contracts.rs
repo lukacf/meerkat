@@ -27,7 +27,7 @@ fn public_image_generation_request_contract_roundtrips() {
         },
         ImageGenerationTargetPreference::Model {
             provider: ProviderId::new("openai"),
-            model: ModelId::new("gpt-image-1"),
+            model: ModelId::new("provider-api-image-model"),
         },
         ImageSizePreference::Square1024,
         ImageQualityPreference::Medium,

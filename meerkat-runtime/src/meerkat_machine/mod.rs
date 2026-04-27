@@ -796,7 +796,6 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
                 | MeerkatMachineCommand::ConfigureModelRoutingBaseline { .. }
                 | MeerkatMachineCommand::SessionModelRoutingStatus { .. }
-                | MeerkatMachineCommand::ResolveImageGenerationPlan { .. }
                 | MeerkatMachineCommand::RequestSwitchTurn { .. }
                 | MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { .. }
                 | MeerkatMachineCommand::BeginImageOperation { .. }

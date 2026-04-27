@@ -252,37 +252,6 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: meerkat_core::image_generation::ImageOperationId,
-        request: &meerkat_core::image_generation::GenerateImageRequest,
-    ) -> Result<
-        Result<
-            meerkat_core::image_generation::ImageGenerationResolvedPlan,
-            meerkat_core::image_generation::ImageOperationDenialReason,
-        >,
-        RuntimeDriverError,
-    > {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::ResolveImageGenerationPlan {
-                    session_id: session_id.clone(),
-                    operation_id,
-                    request: Box::new(request.clone()),
-                },
-            )
-            .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::ImageGenerationResolvedPlan(plan) => Ok(plan),
-            other => Err(RuntimeDriverError::Internal(format!(
-                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::resolve_image_generation_plan: {other:?}"
-            ))),
-        }
-    }
-
     async fn request_switch_turn(
         &self,
         session_id: &SessionId,

@@ -78,6 +78,10 @@ pub enum BlobStoreError {
 pub trait BlobStore: Send + Sync {
     async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError>;
 
+    async fn put_artifact(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+        self.put_image(media_type, data).await
+    }
+
     async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError>;
 
     async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError>;

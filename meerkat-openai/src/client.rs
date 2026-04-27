@@ -11,8 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, ContentBlock, ImageData, ImageGenerationIntent, ImageGenerationWarning,
-    ImageOperationTerminalClass, Message, OpenAiImageMetadata, OpenAiImageOutputOptions,
-    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OutputSchema, ProviderImageMetadata,
+    ImageOperationTerminalClass, Message, OpenAiImageMetadata, OutputSchema, ProviderImageMetadata,
     ProviderMeta, RevisedPromptDisposition, RevisedPromptSource, StopReason, Usage,
 };
 use meerkat_llm_core::BlockAssembler;
@@ -28,6 +27,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
+
+use crate::image_generation::{
+    OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
+    OpenAiImagesApiPlan, OpenAiResponsesImagePlan,
+};
 
 /// Extract the typed OpenAI provider tag from a request.
 pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
@@ -480,7 +484,7 @@ impl OpenAiClient {
     async fn execute_hosted_responses_image(
         &self,
         request: ProviderImageGenerationRequest,
-        plan: meerkat_core::OpenAiResponsesImagePlan,
+        plan: OpenAiResponsesImagePlan,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         let input = if request.projected_messages.is_empty() {
             vec![serde_json::json!({
@@ -501,6 +505,7 @@ impl OpenAiClient {
             serde_json::Value::String(plan.model.to_string()),
         );
         Self::apply_image_output_options(&mut tool, &plan.output);
+        Self::apply_openai_image_provider_params(&mut tool, &plan.provider_params, true);
         let body = serde_json::json!({
             "model": request.model,
             "input": input,
@@ -531,8 +536,9 @@ impl OpenAiClient {
             "n": request.generate_request.count.get(),
         });
         if let Some(obj) = body.as_object_mut() {
-            if request.model.starts_with("gpt-image") {
+            if model.starts_with("gpt-image") {
                 Self::apply_image_output_options(obj, &plan.output);
+                Self::apply_openai_image_provider_params(obj, &plan.provider_params, false);
             } else {
                 obj.insert(
                     "response_format".to_string(),
@@ -562,6 +568,37 @@ impl OpenAiClient {
             "output_format".to_string(),
             serde_json::Value::String(output.output_format.as_wire_value().to_string()),
         );
+    }
+
+    fn apply_openai_image_provider_params(
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        params: &OpenAiImageProviderParams,
+        allow_action: bool,
+    ) {
+        if let Some(background) = params.background {
+            obj.insert(
+                "background".to_string(),
+                serde_json::Value::String(background.as_wire_value().to_string()),
+            );
+        }
+        if let Some(output_compression) = params.output_compression {
+            obj.insert(
+                "output_compression".to_string(),
+                serde_json::Value::Number(output_compression.into()),
+            );
+        }
+        if let Some(moderation) = params.moderation {
+            obj.insert(
+                "moderation".to_string(),
+                serde_json::Value::String(moderation.as_wire_value().to_string()),
+            );
+        }
+        if allow_action && let Some(action) = params.action {
+            obj.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.as_wire_value().to_string()),
+            );
+        }
     }
 
     async fn normalize_openai_image_response(
@@ -703,14 +740,31 @@ impl ImageGenerationExecutor for OpenAiClient {
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
-            meerkat_core::GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool {
-                plan,
-                ..
-            } => self.execute_hosted_responses_image(request, plan).await,
-            meerkat_core::GenerateImageExecutionPlan::OpenAiImagesApi { model, plan, .. } => {
-                self.execute_images_api(request, model.to_string(), plan)
-                    .await
-            }
+            plan if plan.provider.0 == "openai" => match plan.backend {
+                meerkat_core::ImageGenerationBackendKind::HostedTool => {
+                    let provider_plan: OpenAiResponsesImagePlan =
+                        serde_json::from_value(plan.provider_plan).map_err(|err| {
+                            LlmError::InvalidRequest {
+                                message: format!("invalid OpenAI hosted image plan: {err}"),
+                            }
+                        })?;
+                    self.execute_hosted_responses_image(request, provider_plan)
+                        .await
+                }
+                meerkat_core::ImageGenerationBackendKind::ProviderApi => {
+                    let provider_plan: OpenAiImagesApiPlan =
+                        serde_json::from_value(plan.provider_plan).map_err(|err| {
+                            LlmError::InvalidRequest {
+                                message: format!("invalid OpenAI Images API plan: {err}"),
+                            }
+                        })?;
+                    let model = request.model.clone();
+                    self.execute_images_api(request, model, provider_plan).await
+                }
+                other => Err(LlmError::InvalidRequest {
+                    message: format!("OpenAI image executor cannot run backend {other:?}"),
+                }),
+            },
             other => Err(LlmError::InvalidRequest {
                 message: format!("OpenAI image executor cannot run plan {other:?}"),
             }),
@@ -1329,7 +1383,8 @@ mod tests {
 
     fn hosted_openai_plan_json() -> Value {
         serde_json::json!({
-            "plan_type": "open_ai_hosted_responses_image_tool",
+            "provider": "openai",
+            "backend": "hosted_tool",
             "max_count": 4,
             "capabilities": {
                 "hosted_image_generation_tool": true,
@@ -1338,7 +1393,8 @@ mod tests {
                 "image_search_grounding": false,
                 "image_continuity_tokens": "unsupported"
             },
-            "plan": {
+            "requires_scoped_override": false,
+            "provider_plan": {
                 "tool_name": "image_generation",
                 "model": "gpt-image-2",
                 "output": {
@@ -1352,8 +1408,8 @@ mod tests {
 
     fn images_api_openai_plan_json() -> Value {
         serde_json::json!({
-            "plan_type": "open_ai_images_api",
-            "model": "gpt-image-1",
+            "provider": "openai",
+            "backend": "provider_api",
             "max_count": 4,
             "capabilities": {
                 "hosted_image_generation_tool": false,
@@ -1362,7 +1418,8 @@ mod tests {
                 "image_search_grounding": false,
                 "image_continuity_tokens": "unsupported"
             },
-            "plan": {
+            "requires_scoped_override": false,
+            "provider_plan": {
                 "endpoint": "generations",
                 "output": {
                     "size": "landscape1536x1024",
@@ -1481,6 +1538,39 @@ mod tests {
         assert_eq!(body["size"], "1536x1024");
         assert_eq!(body["quality"], "low");
         assert_eq!(body["output_format"], "png");
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_image_executor_sends_provider_params() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "id": "resp_img_1",
+            "output": [{"type": "image_generation_call", "id": "ig_1", "result": "aGVsbG8="}]
+        });
+        let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let mut plan = hosted_openai_plan_json();
+        plan["provider_plan"]["provider_params"] = serde_json::json!({
+            "background": "opaque",
+            "output_compression": 72,
+            "moderation": "low",
+            "action": "generate"
+        });
+
+        client
+            .execute_image_generation(image_executor_request_json(plan))
+            .await?;
+
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured OpenAI image request");
+        assert_eq!(body["tools"][0]["background"], "opaque");
+        assert_eq!(body["tools"][0]["output_compression"], 72);
+        assert_eq!(body["tools"][0]["moderation"], "low");
+        assert_eq!(body["tools"][0]["action"], "generate");
 
         handle.abort();
         Ok(())

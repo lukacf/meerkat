@@ -4,11 +4,11 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use base64::Engine;
 use meerkat_core::image_generation::{
-    AssistantImageId, AssistantImageRef, GenerateImageExecutionPlan, GenerateImageRequest,
-    ImageFormatPreference, ImageGenerationIntent, ImageGenerationResolvedPlan,
-    ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationApprovalReason,
-    ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
-    ImageQualityPreference, ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
+    AssistantImageId, AssistantImageRef, GenerateImageRequest, ImageFormatPreference,
+    ImageGenerationIntent, ImageGenerationPlanner, ImageGenerationResolvedPlan,
+    ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationDenialReason,
+    ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference,
+    ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
     PostActivationImageTerminal, PromptSource, PromptText, ProviderId, ProviderTextDisposition,
     TextArtifactRef, ToolCallId,
 };
@@ -38,13 +38,6 @@ pub trait ImageGenerationMachine: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::image_generation::SessionModelRoutingStatus, RuntimeDriverError>;
-
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: ImageOperationId,
-        request: &GenerateImageRequest,
-    ) -> Result<Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>, RuntimeDriverError>;
 
     async fn begin_image_operation(
         &self,
@@ -83,22 +76,6 @@ where
         session_id: &SessionId,
     ) -> Result<meerkat_core::image_generation::SessionModelRoutingStatus, RuntimeDriverError> {
         SessionServiceRuntimeExt::session_model_routing_status(self, session_id).await
-    }
-
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: ImageOperationId,
-        request: &GenerateImageRequest,
-    ) -> Result<Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>, RuntimeDriverError>
-    {
-        SessionServiceRuntimeExt::resolve_image_generation_plan(
-            self,
-            session_id,
-            operation_id,
-            request,
-        )
-        .await
     }
 
     async fn begin_image_operation(
@@ -142,6 +119,7 @@ where
 pub struct ImageGenerationToolRuntime {
     pub session_id: SessionId,
     pub machine: Arc<dyn ImageGenerationMachine>,
+    pub planner: Arc<dyn ImageGenerationPlanner>,
     pub blob_store: Arc<dyn BlobStore>,
     pub executor: Arc<dyn ImageGenerationExecutor>,
 }
@@ -158,21 +136,19 @@ Use a simple request shape unless you explicitly need the canonical internal sha
 
 Routing and defaults:
 - target defaults to "auto".
-- On OpenAI sessions such as gpt-5.5, auto uses the OpenAI image default: gpt-image-2 through the Responses image_generation tool. The tool model is pinned to gpt-image-2; the provider call uses the supported Responses host model.
-- On Gemini sessions, auto uses the Gemini image default: gemini-3.1-flash-image-preview.
+- On image-capable sessions, auto uses the current provider's registered image default.
 - On non-image-capable session providers, auto is unsupported; set provider:"openai" or provider:"gemini".
-- provider:"openai" defaults to gpt-image-2 through the Responses image_generation tool.
-- provider:"gemini" defaults to gemini-3.1-flash-image-preview.
-- Available image model targets today are OpenAI gpt-image-2 (default, Responses image_generation tool), older OpenAI gpt-image-* and dall-e-* Images API models when explicitly requested, OpenAI text/Responses host models with the hosted image_generation tool when explicitly requested (for example model:"gpt-5.5"), and Gemini gemini-3.1-flash-image-preview (default).
-- To force a model, pass provider plus model, for example provider:"openai", model:"gpt-image-2" or provider:"gemini", model:"gemini-3.1-flash-image-preview". Passing only model is accepted for known/provider-shaped OpenAI and Gemini image models.
+- provider:"openai" or provider:"gemini" uses that provider's registered image default.
+- To force a model, pass provider plus model. Passing only model is accepted when a configured provider profile owns that model.
 
 Supported request fields:
 - intent: "generate" for a new image, "edit" only with source_images. If omitted and prompt is present, intent defaults to "generate".
 - prompt: text prompt for generation.
 - instruction: edit instruction for edit requests.
-- size: "auto", "1024x1024", "1024x1536", "1536x1024", or "WIDTHxHEIGHT". Size support is model/provider dependent. gpt-image-2 supports auto plus the named 1024/1536 sizes; custom sizes are passed through and may be rejected by the provider. Gemini currently treats size as a Meerkat preference/metadata and may choose its own exact output dimensions.
-- quality: "auto", "low", "medium", or "high". Quality support is model/provider dependent. gpt-image-2 receives quality directly; Gemini may ignore it.
-- format: "auto", "png", "jpeg", "jpg", or "webp". Format support is model/provider dependent. gpt-image-2 receives output_format directly; Gemini returns its native image media type.
+- size: "auto", "1024x1024", "1024x1536", "1536x1024", or "WIDTHxHEIGHT". Size support is model/provider dependent; unsupported values may be rejected by the provider.
+- quality: "auto", "low", "medium", or "high". Quality support is model/provider dependent.
+- format: "auto", "png", "jpeg", "jpg", or "webp". Format support is model/provider dependent.
+- provider_params: optional provider-specific JSON parameters documented by the selected provider profile.
 - count/n: currently only 1 is supported.
 
 Do not pass size as a bare top-level string outside request. Do not use intent:{type:"create"} unless you mean the compatibility alias for generate; prefer intent:"generate"."#;
@@ -180,6 +156,18 @@ Do not pass size as a bare top-level string outside request. Do not use intent:{
 impl GenerateImageTool {
     pub fn new(runtime: ImageGenerationToolRuntime) -> Self {
         Self { runtime }
+    }
+
+    fn description(&self) -> String {
+        let provider_docs = self.runtime.planner.provider_documentation();
+        if provider_docs.is_empty() {
+            return GENERATE_IMAGE_TOOL_DOCUMENTATION.to_string();
+        }
+
+        format!(
+            "{GENERATE_IMAGE_TOOL_DOCUMENTATION}\n\nConfigured provider image parameters:\n{}",
+            provider_docs.join("\n\n")
+        )
     }
 }
 
@@ -227,6 +215,10 @@ struct GenerateImageToolRequestSchema {
     provider: Option<String>,
     #[schemars(description = "Optional model override for the selected provider.")]
     model: Option<String>,
+    #[schemars(
+        description = "Provider-specific image model parameters validated by the selected provider."
+    )]
+    provider_params: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +249,8 @@ struct SimpleGenerateImageToolRequest {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    provider_params: Option<Value>,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -269,7 +263,7 @@ impl BuiltinTool for GenerateImageTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: self.name().into(),
-            description: GENERATE_IMAGE_TOOL_DOCUMENTATION.into(),
+            description: self.description(),
             input_schema: crate::schema::schema_for::<GenerateImageToolArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -286,15 +280,20 @@ impl BuiltinTool for GenerateImageTool {
         let args: GenerateImageToolArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let operation_id = ImageOperationId::new(uuid::Uuid::new_v4());
-        let request = parse_generate_image_request(args.request, operation_id)?;
+        let request =
+            parse_generate_image_request(args.request, operation_id, &*self.runtime.planner)?;
 
-        let resolved_plan = match self
+        let status = self
             .runtime
             .machine
-            .resolve_image_generation_plan(&self.runtime.session_id, operation_id, &request)
+            .session_model_routing_status(&self.runtime.session_id)
             .await
-            .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))?
-        {
+            .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))?;
+        let resolved_plan = match self.runtime.planner.resolve_image_generation_plan(
+            &status,
+            operation_id,
+            &request,
+        ) {
             Ok(plan) => plan,
             Err(reason) => {
                 return json_result(ImageGenerationToolResult {
@@ -498,6 +497,7 @@ impl BuiltinTool for GenerateImageTool {
 fn parse_generate_image_request(
     request: Value,
     operation_id: ImageOperationId,
+    planner: &dyn ImageGenerationPlanner,
 ) -> Result<GenerateImageRequest, BuiltinToolError> {
     if let Ok(canonical) = serde_json::from_value::<GenerateImageRequest>(request.clone()) {
         return Ok(canonical);
@@ -547,17 +547,19 @@ fn parse_generate_image_request(
         }
     };
 
-    GenerateImageRequest::new(
+    GenerateImageRequest::with_provider_params(
         intent,
         parse_simple_target(
             simple.target.as_ref(),
             simple.provider.as_deref(),
             simple.model.as_deref(),
+            planner,
         )?,
         parse_simple_size(simple.size.as_ref())?,
         parse_simple_quality(simple.quality.as_deref())?,
         parse_simple_format(simple.format.as_deref())?,
         simple.count.or(simple.n).unwrap_or(NonZeroU32::MIN),
+        simple.provider_params,
     )
     .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))
 }
@@ -635,6 +637,7 @@ fn parse_simple_target(
     target: Option<&Value>,
     provider: Option<&str>,
     model: Option<&str>,
+    planner: &dyn ImageGenerationPlanner,
 ) -> Result<ImageGenerationTargetPreference, BuiltinToolError> {
     if let Some(target) = target {
         if let Ok(canonical) =
@@ -661,27 +664,17 @@ fn parse_simple_target(
             provider: ProviderId::new(provider),
         }),
         (None, Some(model)) => {
-            let provider = infer_image_model_provider(model).ok_or_else(|| {
+            let provider = planner.infer_provider_for_model(model).ok_or_else(|| {
                 BuiltinToolError::invalid_args(
-                    "request.model requires request.provider unless the model is a known OpenAI or Gemini image model",
+                    "request.model requires request.provider unless the configured image providers own that model",
                 )
             })?;
             Ok(ImageGenerationTargetPreference::Model {
-                provider: ProviderId::new(provider),
+                provider,
                 model: ModelId::new(model),
             })
         }
         (None, None) => Ok(ImageGenerationTargetPreference::Auto),
-    }
-}
-
-fn infer_image_model_provider(model: &str) -> Option<&'static str> {
-    match meerkat_core::Provider::infer_from_model(model) {
-        Some(meerkat_core::Provider::OpenAI) => Some("openai"),
-        Some(meerkat_core::Provider::Gemini) => Some("gemini"),
-        _ if model.starts_with("gpt-image") || model.starts_with("dall-e") => Some("openai"),
-        _ if model.starts_with("gemini-") => Some("gemini"),
-        _ => None,
     }
 }
 
@@ -784,33 +777,16 @@ async fn commit_images(
 }
 
 fn execution_plan_requires_scoped_override(plan: &ImageGenerationResolvedPlan) -> bool {
-    matches!(
-        plan.execution_plan,
-        GenerateImageExecutionPlan::GeminiNativeImageModel { .. }
-    )
+    plan.execution_plan.requires_scoped_override()
 }
 
 fn approval_for_resolved_plan(
-    plan: &ImageGenerationResolvedPlan,
+    _plan: &ImageGenerationResolvedPlan,
 ) -> (
     ModelRoutingApprovalDisposition,
-    Option<ImageOperationApprovalReason>,
+    Option<meerkat_core::image_generation::ImageOperationApprovalReason>,
 ) {
-    let session_provider =
-        meerkat_core::Provider::infer_from_model(plan.machine_routing_model.as_str());
-    let target_provider = meerkat_core::Provider::infer_from_model(plan.provider_model.as_str());
-
-    if session_provider.is_some()
-        && target_provider.is_some()
-        && session_provider != target_provider
-    {
-        (
-            ModelRoutingApprovalDisposition::RequiredButUnavailable,
-            Some(ImageOperationApprovalReason::CrossProvider),
-        )
-    } else {
-        (ModelRoutingApprovalDisposition::NotRequired, None)
-    }
+    (ModelRoutingApprovalDisposition::NotRequired, None)
 }
 
 async fn capture_provider_text(
@@ -928,8 +904,9 @@ fn json_result(result: ImageGenerationToolResult) -> Result<ToolOutput, BuiltinT
 mod tests {
     use super::*;
     use meerkat_core::image_generation::{
-        ImageFormatPreference, ImageGenerationIntent, ImageGenerationTargetPreference,
-        ImageQualityPreference, ImageSizePreference, PromptSource, PromptText,
+        ImageContinuityTokenSupport, ImageFormatPreference, ImageGenerationBackendKind,
+        ImageGenerationIntent, ImageGenerationTargetCapabilities, ImageGenerationTargetPreference,
+        ImageQualityPreference, ImageSizePreference, PromptSource, PromptText, ProviderId,
         RevisedPromptDisposition, ToolCallId,
     };
     use meerkat_core::lifecycle::run_primitive::ModelId;
@@ -948,6 +925,75 @@ mod tests {
         requires_scoped_override: Mutex<bool>,
     }
 
+    struct FakePlanner;
+
+    impl ImageGenerationPlanner for FakePlanner {
+        fn resolve_image_generation_plan(
+            &self,
+            status: &meerkat_core::image_generation::SessionModelRoutingStatus,
+            _operation_id: ImageOperationId,
+            request: &GenerateImageRequest,
+        ) -> Result<ImageGenerationResolvedPlan, ImageOperationDenialReason> {
+            if request.count > NonZeroU32::MIN {
+                return Err(ImageOperationDenialReason::UnsupportedCount);
+            }
+            let provider = match &request.target {
+                ImageGenerationTargetPreference::Model { provider, .. }
+                | ImageGenerationTargetPreference::ProviderDefault { provider } => {
+                    provider.0.clone()
+                }
+                ImageGenerationTargetPreference::Auto => "openai".to_string(),
+            };
+            let requires_scoped_override = provider == "gemini" || provider == "google";
+            Ok(ImageGenerationResolvedPlan {
+                provider_model: if requires_scoped_override {
+                    ModelId::new("native-image-model")
+                } else {
+                    ModelId::new("hosted-image-model")
+                },
+                machine_routing_model: status.effective_model.clone(),
+                machine_routing_realtime_capable: true,
+                execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                    provider: ProviderId::new(provider),
+                    backend: if requires_scoped_override {
+                        ImageGenerationBackendKind::NativeModel
+                    } else {
+                        ImageGenerationBackendKind::HostedTool
+                    },
+                    max_count: NonZeroU32::MIN,
+                    capabilities: ImageGenerationTargetCapabilities {
+                        hosted_image_generation_tool: true,
+                        native_image_output: true,
+                        custom_tools: false,
+                        image_search_grounding: false,
+                        image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+                    },
+                    requires_scoped_override,
+                    provider_plan: serde_json::Value::Null,
+                },
+                projected_messages: Vec::new(),
+            })
+        }
+
+        fn infer_provider_for_model(&self, model: &str) -> Option<ProviderId> {
+            if model.starts_with("owned-openai") {
+                Some(ProviderId::new("openai"))
+            } else if model.starts_with("owned-gemini") {
+                Some(ProviderId::new("gemini"))
+            } else {
+                None
+            }
+        }
+
+        fn provider_documentation(&self) -> Vec<String> {
+            vec!["FakeProvider:\n- provider_params: {\"fake\":true}.".to_string()]
+        }
+    }
+
+    fn fake_planner() -> Arc<dyn ImageGenerationPlanner> {
+        Arc::new(FakePlanner)
+    }
+
     #[async_trait]
     impl ImageGenerationMachine for FakeMachine {
         async fn session_model_routing_status(
@@ -957,30 +1003,12 @@ mod tests {
         {
             Ok(
                 meerkat_core::image_generation::SessionModelRoutingStatus::new(
-                    ModelId::new("gpt-5.4"),
+                    ModelId::new("hosted-session-model"),
                     None,
                     None,
                     None,
                 ),
             )
-        }
-
-        async fn resolve_image_generation_plan(
-            &self,
-            session_id: &SessionId,
-            operation_id: ImageOperationId,
-            request: &GenerateImageRequest,
-        ) -> Result<
-            Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>,
-            RuntimeDriverError,
-        > {
-            self.calls.lock().unwrap().push("resolve_plan");
-            let status = self.session_model_routing_status(session_id).await?;
-            Ok(meerkat_runtime::resolve_image_generation_plan_from_status(
-                &status,
-                operation_id,
-                request,
-            ))
         }
 
         async fn begin_image_operation(
@@ -1082,7 +1110,10 @@ mod tests {
             &self,
             request: ProviderImageGenerationRequest,
         ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
-            assert_eq!(request.model, "gpt-5.4");
+            assert!(matches!(
+                request.model.as_str(),
+                "hosted-image-model" | "native-image-model"
+            ));
             Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
                 terminal: ImageOperationTerminalClass::Generated,
@@ -1152,6 +1183,7 @@ mod tests {
         let runtime = ImageGenerationToolRuntime {
             session_id: SessionId::new(),
             machine: Arc::new(FakeMachine::default()),
+            planner: fake_planner(),
             blob_store: Arc::new(FakeBlobStore {
                 writes: Mutex::new(Vec::new()),
             }),
@@ -1160,19 +1192,46 @@ mod tests {
         let description = GenerateImageTool::new(runtime).def().description;
 
         for expected in [
-            "gpt-image-2",
-            "gemini-3.1-flash-image-preview",
-            "OpenAI image default: gpt-image-2",
-            "Available image model targets today",
+            "registered image default",
+            "configured provider profile owns that model",
             "count/n: currently only 1 is supported",
+            "provider_params",
             "Size support is model/provider dependent",
-            "gpt-image-2 supports auto plus the named 1024/1536 sizes",
         ] {
             assert!(
                 description.contains(expected),
                 "tool description should document {expected:?}: {description}"
             );
         }
+    }
+
+    #[test]
+    fn cross_provider_image_plan_does_not_require_unavailable_approval() {
+        let plan = ImageGenerationResolvedPlan {
+            provider_model: ModelId::new("gemini-3.1-flash-image-preview"),
+            machine_routing_model: ModelId::new("gpt-5.5"),
+            machine_routing_realtime_capable: true,
+            execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                provider: ProviderId::new("gemini"),
+                backend: ImageGenerationBackendKind::NativeModel,
+                max_count: NonZeroU32::MIN,
+                capabilities: ImageGenerationTargetCapabilities {
+                    hosted_image_generation_tool: true,
+                    native_image_output: true,
+                    custom_tools: false,
+                    image_search_grounding: false,
+                    image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+                },
+                requires_scoped_override: true,
+                provider_plan: serde_json::Value::Null,
+            },
+            projected_messages: Vec::new(),
+        };
+
+        let (approval, approval_reason) = approval_for_resolved_plan(&plan);
+
+        assert_eq!(approval, ModelRoutingApprovalDisposition::NotRequired);
+        assert!(approval_reason.is_none());
     }
 
     #[test]
@@ -1187,6 +1246,7 @@ mod tests {
                 "n": 1
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
         )
         .unwrap();
 
@@ -1208,32 +1268,34 @@ mod tests {
             json!({
                 "intent": "generate",
                 "prompt": "draw a cozy tabby cat",
-                "model": "gpt-image-2"
+                "model": "owned-openai-image-model"
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
         )
         .unwrap();
 
         assert!(matches!(
             parsed.target,
             ImageGenerationTargetPreference::Model { ref provider, ref model }
-                if provider.0 == "openai" && model.as_str() == "gpt-image-2"
+                if provider.0 == "openai" && model.as_str() == "owned-openai-image-model"
         ));
 
         let parsed = parse_generate_image_request(
             json!({
                 "intent": "generate",
                 "prompt": "draw a cozy tabby cat",
-                "model": "gemini-3.1-flash-image-preview"
+                "model": "owned-gemini-image-model"
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
         )
         .unwrap();
 
         assert!(matches!(
             parsed.target,
             ImageGenerationTargetPreference::Model { ref provider, ref model }
-                if provider.0 == "gemini" && model.as_str() == "gemini-3.1-flash-image-preview"
+                if provider.0 == "gemini" && model.as_str() == "owned-gemini-image-model"
         ));
     }
 
@@ -1244,6 +1306,7 @@ mod tests {
                 "prompt": "draw a cozy tabby cat"
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
         )
         .unwrap();
 
@@ -1267,6 +1330,7 @@ mod tests {
                 "prompt": "draw a cozy tabby cat"
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
         )
         .unwrap();
 
@@ -1285,6 +1349,7 @@ mod tests {
         let runtime = ImageGenerationToolRuntime {
             session_id: SessionId::new(),
             machine: machine.clone(),
+            planner: fake_planner(),
             blob_store: blob_store.clone(),
             executor: Arc::new(FakeExecutor),
         };
@@ -1318,7 +1383,7 @@ mod tests {
 
         assert_eq!(
             machine.calls.lock().unwrap().as_slice(),
-            ["resolve_plan", "begin", "complete"]
+            ["begin", "complete"]
         );
         assert_eq!(
             blob_store.writes.lock().unwrap().as_slice(),
@@ -1351,11 +1416,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_image_gemini_plan_uses_scoped_override_call_sequence() {
+        let machine = Arc::new(FakeMachine::default());
+        let tool = GenerateImageTool::new(ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: machine.clone(),
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: Arc::new(FakeExecutor),
+        });
+        let mut image_request = request();
+        image_request.target = ImageGenerationTargetPreference::ProviderDefault {
+            provider: ProviderId::new("gemini"),
+        };
+
+        let output = tool
+            .call(json!({
+                "request": image_request
+            }))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let result: ImageGenerationToolResult = serde_json::from_value(output).unwrap();
+
+        assert!(matches!(
+            result.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        assert_eq!(
+            machine.calls.lock().unwrap().as_slice(),
+            ["begin", "activate", "complete", "restore"]
+        );
+    }
+
+    #[tokio::test]
     async fn generate_image_rejects_unsupported_count_during_machine_planning() {
         let machine = Arc::new(FakeMachine::default());
         let tool = GenerateImageTool::new(ImageGenerationToolRuntime {
             session_id: SessionId::new(),
             machine: machine.clone(),
+            planner: fake_planner(),
             blob_store: Arc::new(FakeBlobStore {
                 writes: Mutex::new(Vec::new()),
             }),
@@ -1378,6 +1481,6 @@ mod tests {
                 reason: ImageOperationDenialReason::UnsupportedCount
             }
         ));
-        assert_eq!(machine.calls.lock().unwrap().as_slice(), ["resolve_plan"]);
+        assert!(machine.calls.lock().unwrap().is_empty());
     }
 }

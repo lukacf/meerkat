@@ -815,43 +815,11 @@ mod tests {
         let runtime_adapter = MeerkatMachine::ephemeral();
         let session = Session::new();
         let session_id = session.id().clone();
-        runtime_adapter.register_session(session_id.clone()).await;
-        let expected_registry = runtime_adapter
-            .ops_lifecycle_registry(&session_id)
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
             .await
-            .ok_or_else(|| "missing runtime registry".to_string())?
-            as Arc<dyn OpsLifecycleRegistry>;
-
-        let bindings = meerkat_core::SessionRuntimeBindings {
-            session_id: session_id.clone(),
-            epoch_id: meerkat_core::runtime_epoch::RuntimeEpochId::new(),
-            ops_lifecycle: expected_registry.clone(),
-            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
-            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
-            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
-            external_tool_surface: Arc::new(
-                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-            ),
-            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
-            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
-            model_routing: Arc::new(meerkat_runtime::RuntimeModelRoutingHandle::ephemeral()),
-            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
-            mcp_server_lifecycle: Arc::new(
-                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
-            ),
-            peer_interaction: Some(Arc::new(
-                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
-            )),
-            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
-            session_claim_handle: runtime_adapter.session_claim_handle(),
-            interaction_stream: Some(Arc::new(
-                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
-            )),
-            realtime_product_turn: Arc::new(
-                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
-            ),
-        };
+            .map_err(|err| format!("prepare bindings: {err}"))?;
+        let expected_registry = Arc::clone(&bindings.ops_lifecycle);
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -1017,40 +985,10 @@ mod tests {
         let runtime_adapter = MeerkatMachine::ephemeral();
         let session = Session::new();
         let session_id = session.id().clone();
-        runtime_adapter.register_session(session_id.clone()).await;
-        let bindings = meerkat_core::SessionRuntimeBindings {
-            session_id,
-            epoch_id: meerkat_core::runtime_epoch::RuntimeEpochId::new(),
-            ops_lifecycle: runtime_adapter
-                .ops_lifecycle_registry(session.id())
-                .await
-                .ok_or_else(|| "missing runtime registry".to_string())?,
-            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
-            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
-            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
-            external_tool_surface: Arc::new(
-                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-            ),
-            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
-            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
-            model_routing: Arc::new(meerkat_runtime::RuntimeModelRoutingHandle::ephemeral()),
-            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
-            mcp_server_lifecycle: Arc::new(
-                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
-            ),
-            peer_interaction: Some(Arc::new(
-                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
-            )),
-            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
-            session_claim_handle: runtime_adapter.session_claim_handle(),
-            interaction_stream: Some(Arc::new(
-                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
-            )),
-            realtime_product_turn: Arc::new(
-                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
-            ),
-        };
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id)
+            .await
+            .map_err(|err| format!("prepare bindings: {err}"))?;
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),

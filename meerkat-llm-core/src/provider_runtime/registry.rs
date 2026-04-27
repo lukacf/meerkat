@@ -216,6 +216,15 @@ impl ProviderRuntimeRegistry {
                 ))?;
         runtime.build_image_generation_executor(connection)
     }
+
+    pub fn image_generation_profiles(
+        &self,
+    ) -> Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>> {
+        self.runtimes
+            .values()
+            .filter_map(|runtime| runtime.image_generation_profile())
+            .collect()
+    }
 }
 
 /// Also expose `ProviderBindingError` so callers can map validate failures

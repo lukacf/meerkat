@@ -10,16 +10,15 @@ use meerkat_contracts::wire::{
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::{
-    ApprovalId, AssistantImageId, AssistantImageRef, BlobId, BlobRef, GeminiImageTurnPlan,
-    GenerateImageExecutionPlan, GenerateImageRequest, ImageContinuityTokenSupport,
-    ImageFormatPreference, ImageGenerationIntent, ImageGenerationTargetCapabilities,
+    ApprovalId, AssistantImageId, AssistantImageRef, BlobId, BlobRef, GenerateImageExecutionPlan,
+    GenerateImageRequest, ImageContinuityTokenSupport, ImageFormatPreference,
+    ImageGenerationBackendKind, ImageGenerationIntent, ImageGenerationTargetCapabilities,
     ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationApprovalReason,
     ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
     ImageQualityPreference, ImageSizePreference, MediaType, ModelRoutingApprovalPhase,
-    ModelRoutingApprovalRequest, ModelRoutingApprovalTerminalClass, OpenAiImageOutputOptions,
-    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiResponsesImagePlan, PromptSource,
-    PromptText, ProviderId, ProviderImageMetadata, ProviderTextDisposition,
-    RevisedPromptDisposition, ScopedModelOverride, ScopedModelOverrideId, ScopedModelOverrideKind,
+    ModelRoutingApprovalRequest, ModelRoutingApprovalTerminalClass, PromptSource, PromptText,
+    ProviderId, ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
+    ScopedModelOverride, ScopedModelOverrideId, ScopedModelOverrideKind,
     ScopedModelOverrideSummary, SwitchTurnApprovalReason, SwitchTurnControlResult,
     SwitchTurnDenialReason, SwitchTurnDuration, SwitchTurnIntent, SwitchTurnOrigin,
     SwitchTurnPhase, SwitchTurnPolicyReason, SwitchTurnReasonText, SwitchTurnReasonTextDisposition,
@@ -89,28 +88,27 @@ fn image_generation_wire_aliases_roundtrip() {
     let decoded: WireGenerateImageRequest = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, request);
 
-    let plan: WireGenerateImageExecutionPlan =
-        GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool {
-            max_count: NonZeroU32::new(4).unwrap(),
-            capabilities: ImageGenerationTargetCapabilities {
-                hosted_image_generation_tool: true,
-                native_image_output: false,
-                custom_tools: true,
-                image_search_grounding: false,
-                image_continuity_tokens: ImageContinuityTokenSupport::SameProviderOnly,
-            },
-            plan: OpenAiResponsesImagePlan {
-                tool_name: "image_generation".into(),
-                model: ModelId::new("gpt-image-2"),
-                output: OpenAiImageOutputOptions::default(),
-            },
-        };
+    let plan: WireGenerateImageExecutionPlan = GenerateImageExecutionPlan {
+        provider: ProviderId::new("provider-a"),
+        backend: ImageGenerationBackendKind::HostedTool,
+        max_count: NonZeroU32::new(4).unwrap(),
+        capabilities: ImageGenerationTargetCapabilities {
+            hosted_image_generation_tool: true,
+            native_image_output: false,
+            custom_tools: true,
+            image_search_grounding: false,
+            image_continuity_tokens: ImageContinuityTokenSupport::SameProviderOnly,
+        },
+        requires_scoped_override: false,
+        provider_plan: serde_json::json!({"tool_name": "image_generation"}),
+    };
     let encoded = serde_json::to_string(&plan).unwrap();
     let decoded: WireGenerateImageExecutionPlan = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, plan);
 
-    let edits_plan: WireGenerateImageExecutionPlan = GenerateImageExecutionPlan::OpenAiImagesApi {
-        model: ModelId::new("gpt-image-1"),
+    let edits_plan: WireGenerateImageExecutionPlan = GenerateImageExecutionPlan {
+        provider: ProviderId::new("provider-a"),
+        backend: ImageGenerationBackendKind::ProviderApi,
         max_count: NonZeroU32::new(1).unwrap(),
         capabilities: ImageGenerationTargetCapabilities {
             hosted_image_generation_tool: false,
@@ -119,29 +117,27 @@ fn image_generation_wire_aliases_roundtrip() {
             image_search_grounding: false,
             image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
         },
-        plan: OpenAiImagesApiPlan {
-            endpoint: OpenAiImagesApiEndpoint::Edits,
-            output: OpenAiImageOutputOptions::default(),
-        },
+        requires_scoped_override: false,
+        provider_plan: serde_json::json!({"endpoint": "edits"}),
     };
     roundtrip(edits_plan);
 
-    let gemini_plan: WireGenerateImageExecutionPlan =
-        GenerateImageExecutionPlan::GeminiNativeImageModel {
-            model: ModelId::new("gemini-2.5-flash-image"),
-            max_count: NonZeroU32::new(1).unwrap(),
-            capabilities: ImageGenerationTargetCapabilities {
-                hosted_image_generation_tool: false,
-                native_image_output: true,
-                custom_tools: false,
-                image_search_grounding: false,
-                image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
-            },
-            plan: GeminiImageTurnPlan {
-                projection_snapshot_id: meerkat_core::ProjectionSnapshotId::new(uuid(2)),
-                output: meerkat_core::GeminiImageOutputOptions::default(),
-            },
-        };
+    let gemini_plan: WireGenerateImageExecutionPlan = GenerateImageExecutionPlan {
+        provider: ProviderId::new("provider-b"),
+        backend: ImageGenerationBackendKind::NativeModel,
+        max_count: NonZeroU32::new(1).unwrap(),
+        capabilities: ImageGenerationTargetCapabilities {
+            hosted_image_generation_tool: false,
+            native_image_output: true,
+            custom_tools: false,
+            image_search_grounding: false,
+            image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+        },
+        requires_scoped_override: true,
+        provider_plan: serde_json::json!({
+            "projection_snapshot_id": meerkat_core::ProjectionSnapshotId::new(uuid(2))
+        }),
+    };
     let encoded = serde_json::to_string(&gemini_plan).unwrap();
     let decoded: WireGenerateImageExecutionPlan = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, gemini_plan);

@@ -7,6 +7,7 @@ use crate::approval::ApprovalId;
 use crate::blob::BlobRef;
 use crate::lifecycle::run_primitive::ModelId;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use std::num::NonZeroU32;
 use uuid::Uuid;
 
@@ -322,6 +323,8 @@ pub struct GenerateImageRequest {
     pub quality: ImageQualityPreference,
     pub format: ImageFormatPreference,
     pub count: NonZeroU32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<Value>,
 }
 
 impl GenerateImageRequest {
@@ -333,6 +336,18 @@ impl GenerateImageRequest {
         format: ImageFormatPreference,
         count: NonZeroU32,
     ) -> Result<Self, ImageGenerationValidationError> {
+        Self::with_provider_params(intent, target, size, quality, format, count, None)
+    }
+
+    pub fn with_provider_params(
+        intent: ImageGenerationIntent,
+        target: ImageGenerationTargetPreference,
+        size: ImageSizePreference,
+        quality: ImageQualityPreference,
+        format: ImageFormatPreference,
+        count: NonZeroU32,
+        provider_params: Option<Value>,
+    ) -> Result<Self, ImageGenerationValidationError> {
         intent.validate()?;
         Ok(Self {
             intent,
@@ -341,6 +356,7 @@ impl GenerateImageRequest {
             quality,
             format,
             count,
+            provider_params,
         })
     }
 }
@@ -368,16 +384,19 @@ impl<'de> Deserialize<'de> for GenerateImageRequest {
             quality: ImageQualityPreference,
             format: ImageFormatPreference,
             count: NonZeroU32,
+            #[serde(default)]
+            provider_params: Option<Value>,
         }
 
         let raw = RawGenerateImageRequest::deserialize(deserializer)?;
-        GenerateImageRequest::new(
+        GenerateImageRequest::with_provider_params(
             raw.intent,
             raw.target,
             raw.size,
             raw.quality,
             raw.format,
             raw.count,
+            raw.provider_params,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -404,204 +423,86 @@ pub struct ImageGenerationTargetCapabilities {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "plan_type", rename_all = "snake_case")]
-pub enum GenerateImageExecutionPlan {
-    OpenAiHostedResponsesImageTool {
-        max_count: NonZeroU32,
-        capabilities: ImageGenerationTargetCapabilities,
-        plan: OpenAiResponsesImagePlan,
-    },
-    OpenAiImagesApi {
-        #[cfg_attr(feature = "schema", schemars(with = "String"))]
-        model: ModelId,
-        max_count: NonZeroU32,
-        capabilities: ImageGenerationTargetCapabilities,
-        plan: OpenAiImagesApiPlan,
-    },
-    GeminiNativeImageModel {
-        #[cfg_attr(feature = "schema", schemars(with = "String"))]
-        model: ModelId,
-        max_count: NonZeroU32,
-        capabilities: ImageGenerationTargetCapabilities,
-        plan: GeminiImageTurnPlan,
-    },
+pub struct GenerateImageExecutionPlan {
+    pub provider: ProviderId,
+    pub backend: ImageGenerationBackendKind,
+    pub max_count: NonZeroU32,
+    pub capabilities: ImageGenerationTargetCapabilities,
+    pub requires_scoped_override: bool,
+    #[serde(default)]
+    pub provider_plan: Value,
+}
+
+impl GenerateImageExecutionPlan {
+    pub fn requires_scoped_override(&self) -> bool {
+        self.requires_scoped_override
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenAiResponsesImagePlan {
-    pub tool_name: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationBackendKind {
+    HostedTool,
+    ProviderApi,
+    NativeModel,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageGenerationProviderResolution {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    #[serde(default = "default_openai_responses_image_model")]
-    pub model: ModelId,
-    #[serde(default)]
-    pub output: OpenAiImageOutputOptions,
+    pub provider_call_model: ModelId,
+    pub execution_plan: GenerateImageExecutionPlan,
 }
 
-fn default_openai_responses_image_model() -> ModelId {
-    ModelId::new("gpt-image-2")
-}
+pub trait ImageGenerationProviderProfile: Send + Sync {
+    fn canonical_provider(&self) -> &'static str;
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenAiImagesApiPlan {
-    pub endpoint: OpenAiImagesApiEndpoint,
-    #[serde(default)]
-    pub output: OpenAiImageOutputOptions,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenAiImageOutputOptions {
-    pub size: OpenAiImageSize,
-    pub quality: OpenAiImageQuality,
-    pub output_format: OpenAiImageOutputFormat,
-}
-
-impl Default for OpenAiImageOutputOptions {
-    fn default() -> Self {
-        Self {
-            size: OpenAiImageSize::Square1024,
-            quality: OpenAiImageQuality::Auto,
-            output_format: OpenAiImageOutputFormat::Png,
-        }
+    fn provider_aliases(&self) -> &'static [&'static str] {
+        &[]
     }
-}
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiImageSize {
-    Auto,
-    Square1024,
-    Portrait1024x1536,
-    Landscape1536x1024,
-    Custom {
-        width: NonZeroU32,
-        height: NonZeroU32,
-    },
-}
-
-impl OpenAiImageSize {
-    pub fn as_wire_value(&self) -> String {
-        match self {
-            Self::Auto => "auto".to_string(),
-            Self::Square1024 => "1024x1024".to_string(),
-            Self::Portrait1024x1536 => "1024x1536".to_string(),
-            Self::Landscape1536x1024 => "1536x1024".to_string(),
-            Self::Custom { width, height } => format!("{width}x{height}"),
-        }
+    fn matches_provider_id(&self, provider: &str) -> bool {
+        let provider = provider.to_ascii_lowercase();
+        provider == self.canonical_provider()
+            || self.provider_aliases().contains(&provider.as_str())
     }
-}
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiImageQuality {
-    Auto,
-    Low,
-    Medium,
-    High,
-}
+    fn default_model_for_session(
+        &self,
+        effective_provider: Option<crate::Provider>,
+        effective_model: &ModelId,
+    ) -> ModelId;
 
-impl OpenAiImageQuality {
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
+    fn owns_model(&self, model: &str) -> bool;
+
+    fn image_generation_documentation(&self) -> Option<&'static str> {
+        None
     }
+
+    fn resolve_execution_plan(
+        &self,
+        operation_id: ImageOperationId,
+        requested_model: &ModelId,
+        request: &GenerateImageRequest,
+        capabilities: ImageGenerationTargetCapabilities,
+        max_count: NonZeroU32,
+    ) -> Result<ImageGenerationProviderResolution, ImageOperationDenialReason>;
 }
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiImageOutputFormat {
-    Png,
-    Jpeg,
-    Webp,
-}
+pub trait ImageGenerationPlanner: Send + Sync {
+    fn resolve_image_generation_plan(
+        &self,
+        status: &SessionModelRoutingStatus,
+        operation_id: ImageOperationId,
+        request: &GenerateImageRequest,
+    ) -> Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>;
 
-impl OpenAiImageOutputFormat {
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpeg",
-            Self::Webp => "webp",
-        }
-    }
-}
+    fn infer_provider_for_model(&self, model: &str) -> Option<ProviderId>;
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiImagesApiEndpoint {
-    Generations,
-    Edits,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GeminiImageTurnPlan {
-    pub projection_snapshot_id: ProjectionSnapshotId,
-    #[serde(default)]
-    pub output: GeminiImageOutputOptions,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GeminiImageOutputOptions {
-    pub aspect_ratio: GeminiImageAspectRatio,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_size: Option<GeminiImageSize>,
-}
-
-impl Default for GeminiImageOutputOptions {
-    fn default() -> Self {
-        Self {
-            aspect_ratio: GeminiImageAspectRatio::Square1x1,
-            image_size: Some(GeminiImageSize::OneK),
-        }
-    }
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GeminiImageAspectRatio {
-    Square1x1,
-    Landscape16x9,
-    Portrait9x16,
-}
-
-impl GeminiImageAspectRatio {
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::Square1x1 => "1:1",
-            Self::Landscape16x9 => "16:9",
-            Self::Portrait9x16 => "9:16",
-        }
-    }
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GeminiImageSize {
-    OneK,
-    TwoK,
-    FourK,
-}
-
-impl GeminiImageSize {
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::OneK => "1K",
-            Self::TwoK => "2K",
-            Self::FourK => "4K",
-        }
+    fn provider_documentation(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -1228,35 +1129,33 @@ mod tests {
             image_continuity_tokens: ImageContinuityTokenSupport::SameProviderOnly,
         };
         let plans = vec![
-            GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool {
+            GenerateImageExecutionPlan {
+                provider: ProviderId::new("openai"),
+                backend: ImageGenerationBackendKind::HostedTool,
                 max_count: NonZeroU32::new(4).unwrap(),
                 capabilities: caps.clone(),
-                plan: OpenAiResponsesImagePlan {
-                    tool_name: "image_generation".into(),
-                    model: ModelId::new("gpt-image-2"),
-                    output: OpenAiImageOutputOptions::default(),
-                },
+                requires_scoped_override: false,
+                provider_plan: serde_json::json!({"tool_name": "image_generation"}),
             },
-            GenerateImageExecutionPlan::OpenAiImagesApi {
-                model: ModelId::new("gpt-image-1"),
+            GenerateImageExecutionPlan {
+                provider: ProviderId::new("openai"),
+                backend: ImageGenerationBackendKind::ProviderApi,
                 max_count: NonZeroU32::new(1).unwrap(),
                 capabilities: caps.clone(),
-                plan: OpenAiImagesApiPlan {
-                    endpoint: OpenAiImagesApiEndpoint::Generations,
-                    output: OpenAiImageOutputOptions::default(),
-                },
+                requires_scoped_override: false,
+                provider_plan: serde_json::json!({"endpoint": "generations"}),
             },
-            GenerateImageExecutionPlan::OpenAiImagesApi {
-                model: ModelId::new("gpt-image-1"),
+            GenerateImageExecutionPlan {
+                provider: ProviderId::new("openai"),
+                backend: ImageGenerationBackendKind::ProviderApi,
                 max_count: NonZeroU32::new(1).unwrap(),
                 capabilities: caps.clone(),
-                plan: OpenAiImagesApiPlan {
-                    endpoint: OpenAiImagesApiEndpoint::Edits,
-                    output: OpenAiImageOutputOptions::default(),
-                },
+                requires_scoped_override: false,
+                provider_plan: serde_json::json!({"endpoint": "edits"}),
             },
-            GenerateImageExecutionPlan::GeminiNativeImageModel {
-                model: ModelId::new("gemini-2.5-flash-image"),
+            GenerateImageExecutionPlan {
+                provider: ProviderId::new("gemini"),
+                backend: ImageGenerationBackendKind::NativeModel,
                 max_count: NonZeroU32::new(1).unwrap(),
                 capabilities: ImageGenerationTargetCapabilities {
                     hosted_image_generation_tool: false,
@@ -1265,10 +1164,10 @@ mod tests {
                     image_search_grounding: false,
                     image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
                 },
-                plan: GeminiImageTurnPlan {
-                    projection_snapshot_id: ProjectionSnapshotId::new(uuid(50)),
-                    output: GeminiImageOutputOptions::default(),
-                },
+                requires_scoped_override: true,
+                provider_plan: serde_json::json!({
+                    "projection_snapshot_id": ProjectionSnapshotId::new(uuid(50))
+                }),
             },
         ];
 
@@ -1296,7 +1195,7 @@ mod tests {
             },
             revised_prompt: RevisedPromptDisposition::Unchanged,
             native_metadata: ProviderImageMetadata::Gemini(GeminiImageMetadata {
-                target_model: "gemini-2.5-flash-image".into(),
+                target_model: "provider-native-image-model".into(),
                 response_id: Some("gemini-response".into()),
                 continuity_ref: Some(ImageContinuityRef::new("continuity-1")),
             }),
@@ -1503,7 +1402,7 @@ mod tests {
         });
         roundtrip(ImageGenerationTargetPreference::Model {
             provider: ProviderId::new("gemini"),
-            model: ModelId::new("gemini-2.5-flash-image"),
+            model: ModelId::new("provider-native-image-model"),
         });
 
         roundtrip(ImageSizePreference::Auto);
@@ -1574,12 +1473,12 @@ mod tests {
 
         roundtrip(ProviderImageMetadata::NotEmitted);
         roundtrip(ProviderImageMetadata::OpenAi(OpenAiImageMetadata {
-            target_model: "gpt-image-1".into(),
+            target_model: "provider-api-image-model".into(),
             response_id: Some("resp-70".into()),
             image_generation_call_id: Some("ig-70".into()),
         }));
         roundtrip(ProviderImageMetadata::Gemini(GeminiImageMetadata {
-            target_model: "gemini-2.5-flash-image".into(),
+            target_model: "provider-native-image-model".into(),
             response_id: Some("gemini-70".into()),
             continuity_ref: Some(ImageContinuityRef::new("continuity-71")),
         }));
@@ -1830,7 +1729,7 @@ mod tests {
                 source: RevisedPromptSource::Provider,
             },
             meta: ProviderImageMetadata::OpenAi(OpenAiImageMetadata {
-                target_model: "gpt-image-1".to_string(),
+                target_model: "provider-api-image-model".to_string(),
                 response_id: Some("resp_123".to_string()),
                 image_generation_call_id: Some("ig_123".to_string()),
             }),

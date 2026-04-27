@@ -741,12 +741,8 @@ impl RoutingImageGenerationExecutor {
         Self { executors }
     }
 
-    fn provider_key(plan: &meerkat_core::GenerateImageExecutionPlan) -> &'static str {
-        match plan {
-            meerkat_core::GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool { .. }
-            | meerkat_core::GenerateImageExecutionPlan::OpenAiImagesApi { .. } => "openai",
-            meerkat_core::GenerateImageExecutionPlan::GeminiNativeImageModel { .. } => "gemini",
-        }
+    fn provider_key(plan: &meerkat_core::GenerateImageExecutionPlan) -> &str {
+        plan.provider.0.as_str()
     }
 }
 
@@ -771,6 +767,148 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
             })?;
         executor.execute_image_generation(request).await
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct CompositeImageGenerationPlanner {
+    profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CompositeImageGenerationPlanner {
+    fn new(profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>) -> Self {
+        Self { profiles }
+    }
+
+    fn profile_for_provider(
+        &self,
+        provider: &str,
+    ) -> Option<&Arc<dyn meerkat_core::ImageGenerationProviderProfile>> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.matches_provider_id(provider))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
+    fn resolve_image_generation_plan(
+        &self,
+        status: &meerkat_core::SessionModelRoutingStatus,
+        operation_id: meerkat_core::ImageOperationId,
+        request: &meerkat_core::GenerateImageRequest,
+    ) -> Result<meerkat_core::ImageGenerationResolvedPlan, meerkat_core::ImageOperationDenialReason>
+    {
+        use meerkat_core::{
+            ImageContinuityTokenSupport, ImageGenerationTargetCapabilities,
+            ImageGenerationTargetPreference, ImageOperationDenialReason,
+        };
+
+        let capabilities = ImageGenerationTargetCapabilities {
+            hosted_image_generation_tool: true,
+            native_image_output: true,
+            custom_tools: false,
+            image_search_grounding: false,
+            image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+        };
+        let one = std::num::NonZeroU32::MIN;
+        if request.count > one {
+            return Err(ImageOperationDenialReason::UnsupportedCount);
+        }
+
+        let effective_provider =
+            meerkat_core::Provider::infer_from_model(status.effective_model.as_str());
+        let profile = match &request.target {
+            ImageGenerationTargetPreference::Auto => effective_provider
+                .and_then(|provider| self.profile_for_provider(provider.as_str()))
+                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
+            ImageGenerationTargetPreference::ProviderDefault { provider }
+            | ImageGenerationTargetPreference::Model { provider, .. } => self
+                .profile_for_provider(provider.0.as_str())
+                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
+        };
+        let requested_model = match &request.target {
+            ImageGenerationTargetPreference::Model { model, .. } => model.clone(),
+            _ => profile.default_model_for_session(effective_provider, &status.effective_model),
+        };
+        if matches!(
+            request.target,
+            ImageGenerationTargetPreference::Model { .. }
+        ) && !profile.owns_model(requested_model.as_str())
+        {
+            return Err(ImageOperationDenialReason::UnsupportedTarget);
+        }
+
+        let resolution = profile.resolve_execution_plan(
+            operation_id,
+            &requested_model,
+            request,
+            capabilities,
+            one,
+        )?;
+        let requires_scoped_override = resolution.execution_plan.requires_scoped_override();
+        let machine_routing_realtime_capable = if requires_scoped_override {
+            model_realtime_capable(
+                resolution.execution_plan.provider.0.as_str(),
+                resolution.provider_call_model.as_str(),
+            )
+        } else {
+            effective_provider
+                .map(|provider| {
+                    model_realtime_capable(provider.as_str(), status.effective_model.as_str())
+                })
+                .unwrap_or(false)
+        };
+        let machine_routing_model = if resolution.execution_plan.requires_scoped_override() {
+            resolution.provider_call_model.clone()
+        } else {
+            status.effective_model.clone()
+        };
+        Ok(meerkat_core::ImageGenerationResolvedPlan {
+            provider_model: resolution.provider_call_model,
+            machine_routing_model,
+            machine_routing_realtime_capable,
+            execution_plan: resolution.execution_plan,
+            projected_messages: image_projection_messages(request),
+        })
+    }
+
+    fn infer_provider_for_model(&self, model: &str) -> Option<meerkat_core::ProviderId> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.owns_model(model))
+            .map(|profile| meerkat_core::ProviderId::new(profile.canonical_provider()))
+    }
+
+    fn provider_documentation(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter_map(|profile| profile.image_generation_documentation())
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn image_projection_messages(
+    request: &meerkat_core::GenerateImageRequest,
+) -> Vec<meerkat_core::Message> {
+    let text = match &request.intent {
+        meerkat_core::ImageGenerationIntent::Generate { prompt, .. } => prompt.content.clone(),
+        meerkat_core::ImageGenerationIntent::Edit { instruction, .. } => {
+            instruction.content.clone()
+        }
+    };
+    vec![meerkat_core::Message::User(
+        meerkat_core::UserMessage::text(text),
+    )]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn model_realtime_capable(provider: &str, model: &str) -> bool {
+    meerkat_core::model_profile::capabilities::capabilities_for(provider, model)
+        .map(|caps| caps.realtime)
+        .unwrap_or(false)
 }
 
 /// Return `true` when the OpenAI model ID advertises
@@ -1767,6 +1905,7 @@ impl AgentFactory {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1791,6 +1930,7 @@ impl AgentFactory {
             Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
         >,
         image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+        image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
@@ -1833,18 +1973,20 @@ impl AgentFactory {
                 .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
         }
 
-        if let (Some(session_id), Some(machine), Some(executor), Some(blob_store)) = (
+        if let (Some(session_id), Some(machine), Some(executor), Some(planner), Some(blob_store)) = (
             session_id
                 .as_deref()
                 .and_then(|id| SessionId::parse(id).ok()),
             image_generation_machine,
             image_generation_executor,
+            image_generation_planner,
             image_generation_blob_store,
         ) {
             composite.register_image_generation_tool(
                 meerkat_tools::builtin::image_generation::ImageGenerationToolRuntime {
                     session_id,
                     machine,
+                    planner,
                     blob_store,
                     executor,
                 },
@@ -1909,6 +2051,16 @@ impl AgentFactory {
         }
 
         let registry = self.model_registry(config)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let image_generation_planner: Option<
+            Arc<dyn meerkat_core::ImageGenerationPlanner>,
+        > = {
+            let profiles = self.provider_registry.image_generation_profiles();
+            (!profiles.is_empty()).then(|| {
+                Arc::new(CompositeImageGenerationPlanner::new(profiles))
+                    as Arc<dyn meerkat_core::ImageGenerationPlanner>
+            })
+        };
 
         let explicit_meerkat_tool_policy =
             !matches!(
@@ -2457,6 +2609,7 @@ impl AgentFactory {
                             .image_generation_executor_override
                             .clone()
                             .or_else(|| auto_image_generation_executor.clone()),
+                        image_generation_planner.clone(),
                         build_config.blob_store_override.clone(),
                     )
                     .await?
@@ -3326,6 +3479,100 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_derives_scoped_target_realtime_capability() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        struct NativeImageProfile;
+
+        impl meerkat_core::ImageGenerationProviderProfile for NativeImageProfile {
+            fn canonical_provider(&self) -> &'static str {
+                "gemini"
+            }
+
+            fn default_model_for_session(
+                &self,
+                _effective_provider: Option<Provider>,
+                _effective_model: &meerkat_core::lifecycle::run_primitive::ModelId,
+            ) -> meerkat_core::lifecycle::run_primitive::ModelId {
+                meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "gemini-3.1-flash-image-preview",
+                )
+            }
+
+            fn owns_model(&self, model: &str) -> bool {
+                model == "gemini-3.1-flash-image-preview"
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _operation_id: meerkat_core::ImageOperationId,
+                requested_model: &meerkat_core::lifecycle::run_primitive::ModelId,
+                _request: &meerkat_core::GenerateImageRequest,
+                capabilities: meerkat_core::ImageGenerationTargetCapabilities,
+                max_count: std::num::NonZeroU32,
+            ) -> Result<
+                meerkat_core::ImageGenerationProviderResolution,
+                meerkat_core::ImageOperationDenialReason,
+            > {
+                Ok(meerkat_core::ImageGenerationProviderResolution {
+                    provider_call_model: requested_model.clone(),
+                    execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                        provider: meerkat_core::ProviderId::new("gemini"),
+                        backend: meerkat_core::ImageGenerationBackendKind::NativeModel,
+                        max_count,
+                        capabilities,
+                        requires_scoped_override: true,
+                        provider_plan: serde_json::Value::Null,
+                    },
+                })
+            }
+        }
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(NativeImageProfile)]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-realtime"),
+            None,
+            None,
+            None,
+        );
+        let request = meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::ProviderDefault {
+                provider: meerkat_core::ProviderId::new("gemini"),
+            },
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+
+        let plan = planner
+            .resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &request,
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.machine_routing_model.as_str(),
+            "gemini-3.1-flash-image-preview"
+        );
+        assert!(
+            !plan.machine_routing_realtime_capable,
+            "uncatalogued Gemini image models must not be treated as realtime-capable"
+        );
+    }
+
     #[test]
     fn resumed_self_hosted_binding_overrides_current_registry_server() {
         let temp = tempfile::tempdir().unwrap();
@@ -3438,6 +3685,7 @@ impl AgentFactory {
             Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
         >,
         image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+        image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
@@ -3505,6 +3753,7 @@ impl AgentFactory {
                 image_tool_results,
                 image_generation_machine,
                 image_generation_executor,
+                image_generation_planner,
                 image_generation_blob_store,
             )
             .await?;

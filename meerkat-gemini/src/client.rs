@@ -22,6 +22,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
+use crate::image_generation::{GeminiImageOutputOptions, GeminiImageTurnPlan};
+
 /// Extract the typed Gemini provider tag from a request.
 fn gemini_tag(request: &LlmRequest) -> Option<&GeminiProviderTag> {
     match request.provider_params.as_ref()? {
@@ -434,7 +436,7 @@ impl GeminiClient {
     fn build_image_request_body(
         &self,
         request: &ProviderImageGenerationRequest,
-        output: &meerkat_core::GeminiImageOutputOptions,
+        output: &GeminiImageOutputOptions,
     ) -> Result<Value, LlmError> {
         let messages = if request.projected_messages.is_empty() {
             vec![Message::User(meerkat_core::UserMessage::text(
@@ -467,7 +469,7 @@ impl GeminiClient {
     async fn execute_native_image(
         &self,
         request: ProviderImageGenerationRequest,
-        plan: meerkat_core::GeminiImageTurnPlan,
+        plan: GeminiImageTurnPlan,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         let body = self.build_image_request_body(&request, &plan.output)?;
         let url = format!(
@@ -594,7 +596,7 @@ impl GeminiClient {
     }
 }
 
-fn gemini_image_config(output: &meerkat_core::GeminiImageOutputOptions) -> serde_json::Value {
+fn gemini_image_config(output: &GeminiImageOutputOptions) -> serde_json::Value {
     let mut config = serde_json::Map::new();
     config.insert(
         "aspectRatio".to_string(),
@@ -617,8 +619,20 @@ impl ImageGenerationExecutor for GeminiClient {
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
-            meerkat_core::GenerateImageExecutionPlan::GeminiNativeImageModel { plan, .. } => {
-                self.execute_native_image(request, plan).await
+            plan if plan.provider.0 == "gemini" || plan.provider.0 == "google" => {
+                if plan.backend != meerkat_core::ImageGenerationBackendKind::NativeModel {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "Gemini image executor cannot run backend {:?}",
+                            plan.backend
+                        ),
+                    });
+                }
+                let provider_plan: GeminiImageTurnPlan = serde_json::from_value(plan.provider_plan)
+                    .map_err(|err| LlmError::InvalidRequest {
+                        message: format!("invalid Gemini image plan: {err}"),
+                    })?;
+                self.execute_native_image(request, provider_plan).await
             }
             other => Err(LlmError::InvalidRequest {
                 message: format!("Gemini image executor cannot run plan {other:?}"),
@@ -1386,8 +1400,8 @@ mod tests {
                 "count": 1
             },
             "execution_plan": {
-                "plan_type": "gemini_native_image_model",
-                "model": "gemini-2.5-flash-image",
+                "provider": "gemini",
+                "backend": "native_model",
                 "max_count": 1,
                 "capabilities": {
                     "hosted_image_generation_tool": false,
@@ -1396,7 +1410,8 @@ mod tests {
                     "image_search_grounding": false,
                     "image_continuity_tokens": "same_provider_only"
                 },
-                "plan": {
+                "requires_scoped_override": true,
+                "provider_plan": {
                     "projection_snapshot_id": "00000000-0000-0000-0000-000000000203",
                     "output": {
                         "aspect_ratio": "landscape16x9",
@@ -1530,14 +1545,13 @@ mod tests {
         let mut request = gemini_image_executor_request_json();
         request.model = "gemini-3.1-flash-image-preview".to_string();
         request.generate_request.size = meerkat_core::ImageSizePreference::Portrait1024x1536;
-        if let meerkat_core::GenerateImageExecutionPlan::GeminiNativeImageModel { plan, .. } =
-            &mut request.execution_plan
-        {
-            plan.output = meerkat_core::GeminiImageOutputOptions {
-                aspect_ratio: meerkat_core::GeminiImageAspectRatio::Portrait9x16,
-                image_size: Some(meerkat_core::GeminiImageSize::OneK),
-            };
-        }
+        let mut plan: crate::image_generation::GeminiImageTurnPlan =
+            serde_json::from_value(request.execution_plan.provider_plan.clone())?;
+        plan.output = crate::image_generation::GeminiImageOutputOptions {
+            aspect_ratio: crate::image_generation::GeminiImageAspectRatio::Portrait9x16,
+            image_size: Some(crate::image_generation::GeminiImageSize::OneK),
+        };
+        request.execution_plan.provider_plan = serde_json::to_value(plan)?;
 
         let output = client.execute_image_generation(request).await?;
         assert!(matches!(

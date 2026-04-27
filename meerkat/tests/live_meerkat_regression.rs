@@ -16,9 +16,12 @@ use async_trait::async_trait;
 use meerkat::*;
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::image_generation::{
-    GenerateImageRequest, ImageFormatPreference, ImageGenerationIntent,
-    ImageGenerationTargetPreference, ImageOperationTerminalClass, ImageQualityPreference,
-    ImageSizePreference, PromptSource, PromptText, ToolCallId,
+    GenerateImageExecutionPlan, GenerateImageRequest, ImageContinuityTokenSupport,
+    ImageFormatPreference, ImageGenerationBackendKind, ImageGenerationIntent,
+    ImageGenerationPlanner, ImageGenerationResolvedPlan, ImageGenerationTargetCapabilities,
+    ImageGenerationTargetPreference, ImageOperationDenialReason, ImageOperationId,
+    ImageOperationTerminalClass, ImageQualityPreference, ImageSizePreference, PromptSource,
+    PromptText, SessionModelRoutingStatus, ToolCallId,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions};
@@ -100,6 +103,113 @@ fn live_image_request(provider: &str, model: &str) -> GenerateImageRequest {
 
 mod image_generation_substrate {
     use super::*;
+
+    struct LiveImagePlanner;
+
+    impl ImageGenerationPlanner for LiveImagePlanner {
+        fn resolve_image_generation_plan(
+            &self,
+            status: &SessionModelRoutingStatus,
+            _operation_id: ImageOperationId,
+            request: &GenerateImageRequest,
+        ) -> Result<ImageGenerationResolvedPlan, ImageOperationDenialReason> {
+            let ImageGenerationTargetPreference::Model { provider, model } = &request.target else {
+                return Err(ImageOperationDenialReason::UnsupportedTarget);
+            };
+            let capabilities = ImageGenerationTargetCapabilities {
+                hosted_image_generation_tool: true,
+                native_image_output: true,
+                custom_tools: true,
+                image_search_grounding: false,
+                image_continuity_tokens: ImageContinuityTokenSupport::SameProviderOnly,
+            };
+            let (provider_model, execution_plan) = match provider.0.as_str() {
+                "openai" => {
+                    let images_api =
+                        model.as_str().starts_with("gpt-image") && model.as_str() != "gpt-image-2";
+                    let (provider_model, backend, provider_plan) = if images_api {
+                        (
+                            model.clone(),
+                            ImageGenerationBackendKind::ProviderApi,
+                            json!({
+                                "endpoint": "generations",
+                                "output": {
+                                    "size": "square1024",
+                                    "quality": "low",
+                                    "output_format": "png"
+                                }
+                            }),
+                        )
+                    } else {
+                        (
+                            ModelId::new("gpt-5.4"),
+                            ImageGenerationBackendKind::HostedTool,
+                            json!({
+                                "tool_name": "image_generation",
+                                "model": "gpt-image-2",
+                                "output": {
+                                    "size": "square1024",
+                                    "quality": "low",
+                                    "output_format": "png"
+                                }
+                            }),
+                        )
+                    };
+                    (
+                        provider_model,
+                        GenerateImageExecutionPlan {
+                            provider: provider.clone(),
+                            backend,
+                            max_count: request.count,
+                            capabilities,
+                            requires_scoped_override: false,
+                            provider_plan,
+                        },
+                    )
+                }
+                "gemini" | "google" => (
+                    model.clone(),
+                    GenerateImageExecutionPlan {
+                        provider: provider.clone(),
+                        backend: ImageGenerationBackendKind::NativeModel,
+                        max_count: request.count,
+                        capabilities,
+                        requires_scoped_override: true,
+                        provider_plan: json!({
+                            "projection_snapshot_id": "00000000-0000-0000-0000-000000000001",
+                            "output": {
+                                "aspect_ratio": "square1x1",
+                                "image_size": "one_k"
+                            }
+                        }),
+                    },
+                ),
+                _ => return Err(ImageOperationDenialReason::UnsupportedTarget),
+            };
+            let machine_routing_model = if execution_plan.requires_scoped_override() {
+                provider_model.clone()
+            } else {
+                status.effective_model.clone()
+            };
+            Ok(ImageGenerationResolvedPlan {
+                provider_model,
+                machine_routing_model,
+                machine_routing_realtime_capable: false,
+                execution_plan,
+                projected_messages: Vec::new(),
+            })
+        }
+
+        fn infer_provider_for_model(&self, model: &str) -> Option<ProviderId> {
+            if model.starts_with("gpt-image") || model.starts_with("dall-e") {
+                Some(ProviderId::new("openai"))
+            } else if model.starts_with("gemini-") {
+                Some(ProviderId::new("gemini"))
+            } else {
+                None
+            }
+        }
+    }
 
     struct ScriptedImageToolCallClient {
         provider: &'static str,
@@ -191,6 +301,7 @@ mod image_generation_substrate {
             meerkat_tools::builtin::image_generation::ImageGenerationToolRuntime {
                 session_id,
                 machine: runtime,
+                planner: Arc::new(LiveImagePlanner),
                 blob_store: blob_store.clone(),
                 executor,
             },

@@ -10,7 +10,12 @@ pub mod tokio {
 }
 
 pub mod client;
+pub mod image_generation;
 pub mod runtime;
 
 pub use client::GeminiClient;
+pub use image_generation::{
+    GeminiImageGenerationProfile, GeminiImageOutputOptions, GeminiImageProviderParams,
+    GeminiImageTurnPlan,
+};
 pub use runtime::{GoogleAuthMethod, GoogleBackendKind, GoogleProviderRuntime};

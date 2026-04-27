@@ -14,10 +14,9 @@ use meerkat_contracts::{RealtimeChannelState, RealtimeChannelStatus};
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::image_generation::{
-    GenerateImageRequest, ImageGenerationResolvedPlan, ImageOperationApprovalReason,
-    ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
-    SessionModelRoutingStatus, SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnIntent,
-    SwitchTurnRequestId,
+    ImageOperationApprovalReason, ImageOperationDenialReason, ImageOperationId,
+    ImageOperationPhase, ImageOperationTerminalClass, SessionModelRoutingStatus,
+    SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
 };
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
@@ -480,11 +479,6 @@ pub(crate) enum MeerkatMachineCommand {
     SessionModelRoutingStatus {
         session_id: SessionId,
     },
-    ResolveImageGenerationPlan {
-        session_id: SessionId,
-        operation_id: ImageOperationId,
-        request: Box<GenerateImageRequest>,
-    },
     RequestSwitchTurn {
         session_id: SessionId,
         request: Box<SwitchTurnRequest>,
@@ -575,7 +569,6 @@ pub(crate) enum MeerkatMachineCommandResult {
     RealtimeAttachmentStatus(RealtimeAttachmentStatus),
     RealtimeChannelStatus(RealtimeChannelStatus),
     SessionModelRoutingStatus(SessionModelRoutingStatus),
-    ImageGenerationResolvedPlan(Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>),
     SwitchTurnControlResult(SwitchTurnControlResult),
     ImageOperationRoutingResult(ImageOperationRoutingResult),
     ImageOperationPhase(ImageOperationPhase),
@@ -600,7 +593,6 @@ pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
 enum MeerkatMachineCommandManifestExemption {
     ConfigureModelRoutingBaseline,
     RequestSwitchTurn,
-    ResolveImageGenerationPlan,
     RuntimeRealtimeChannelStatus,
     SessionModelRoutingStatus,
     PrepareLocalSessionBindings,
@@ -609,7 +601,6 @@ enum MeerkatMachineCommandManifestExemption {
 const MEERKAT_MACHINE_COMMAND_MANIFEST_EXEMPTIONS: &[MeerkatMachineCommandManifestExemption] = &[
     MeerkatMachineCommandManifestExemption::ConfigureModelRoutingBaseline,
     MeerkatMachineCommandManifestExemption::RequestSwitchTurn,
-    MeerkatMachineCommandManifestExemption::ResolveImageGenerationPlan,
     MeerkatMachineCommandManifestExemption::RuntimeRealtimeChannelStatus,
     MeerkatMachineCommandManifestExemption::SessionModelRoutingStatus,
     MeerkatMachineCommandManifestExemption::PrepareLocalSessionBindings,
@@ -620,7 +611,6 @@ impl MeerkatMachineCommandManifestExemption {
         match self {
             Self::ConfigureModelRoutingBaseline => "ConfigureModelRoutingBaseline",
             Self::RequestSwitchTurn => "RequestSwitchTurn",
-            Self::ResolveImageGenerationPlan => "ResolveImageGenerationPlan",
             Self::RuntimeRealtimeChannelStatus => "RuntimeRealtimeChannelStatus",
             Self::SessionModelRoutingStatus => "SessionModelRoutingStatus",
             Self::PrepareLocalSessionBindings => "PrepareLocalSessionBindings",

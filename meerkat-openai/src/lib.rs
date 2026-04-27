@@ -12,6 +12,7 @@ pub mod tokio {
 
 pub mod client;
 pub mod client_compatible;
+pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
@@ -22,6 +23,10 @@ pub mod text_adapter;
 
 pub use client::OpenAiClient;
 pub use client_compatible::OpenAiCompatibleClient;
+pub use image_generation::{
+    OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
+    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiResponsesImagePlan,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use live::OpenAiLiveClient;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]

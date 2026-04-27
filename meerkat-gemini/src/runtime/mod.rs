@@ -497,6 +497,12 @@ impl ProviderRuntime for GoogleProviderRuntime {
         };
         Ok(Some(Arc::new(client)))
     }
+
+    fn image_generation_profile(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::ImageGenerationProviderProfile>> {
+        Some(Arc::new(crate::GeminiImageGenerationProfile))
+    }
 }
 
 #[cfg(any(

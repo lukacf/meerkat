@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider};
+use meerkat_core::{
+    AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, ImageGenerationProviderProfile,
+    Provider,
+};
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
 use crate::provider_runtime::errors::{
@@ -65,6 +68,12 @@ pub trait ProviderRuntime: Send + Sync {
         _connection: ResolvedConnection,
     ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
         Ok(None)
+    }
+
+    /// Return provider-owned image model planning rules, if this runtime
+    /// supports the `generate_image` substrate.
+    fn image_generation_profile(&self) -> Option<Arc<dyn ImageGenerationProviderProfile>> {
+        None
     }
 }
 

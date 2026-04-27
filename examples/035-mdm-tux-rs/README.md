@@ -155,7 +155,9 @@ not recreate already-running targets with different Compose interpolation.
 requires real provider credentials, starts the Docker topology, opens TUX in a
 tmux session, and verifies four end-to-end effects: Hive `send_request` to
 target-a, direct target-b shell control, target-b to target-a peer delivery, and
-a scheduled target-a wakeup.
+a scheduled target-a wakeup. Unless overridden, the suite exercises all three
+providers: Hive on `gemini-3.1-pro-preview`, target-a on `gpt-5.5`, and
+target-b on `claude-opus-4-7`.
 
 For direct-mode host testing, the targets' RPC ports are also published as
 `localhost:54801` and `localhost:54802`.

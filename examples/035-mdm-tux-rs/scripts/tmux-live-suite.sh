@@ -23,6 +23,47 @@ require() {
   fi
 }
 
+api_key_var_for_provider() {
+  case "$1" in
+    openai) echo "OPENAI_API_KEY" ;;
+    anthropic) echo "ANTHROPIC_API_KEY" ;;
+    gemini) echo "GEMINI_API_KEY" ;;
+    *)
+      echo "unsupported provider for live suite: $1" >&2
+      exit 2
+      ;;
+  esac
+}
+
+default_live_provider_matrix() {
+  export MDM_HIVE_MODEL="${MDM_HIVE_MODEL:-gemini-3.1-pro-preview}"
+  export MDM_HIVE_PROVIDER="${MDM_HIVE_PROVIDER:-gemini}"
+  export MDM_TARGET_A_MODEL="${MDM_TARGET_A_MODEL:-gpt-5.5}"
+  export MDM_TARGET_A_PROVIDER="${MDM_TARGET_A_PROVIDER:-openai}"
+  export MDM_TARGET_B_MODEL="${MDM_TARGET_B_MODEL:-claude-opus-4-7}"
+  export MDM_TARGET_B_PROVIDER="${MDM_TARGET_B_PROVIDER:-anthropic}"
+}
+
+require_provider_key() {
+  local label="$1"
+  local provider="$2"
+  local key_var
+  local key_value
+
+  key_var="$(api_key_var_for_provider "$provider")"
+  key_value="${!key_var:-}"
+  if [[ -z "$key_value" || "$key_value" == "dummy-mdm-tux-smoke-key" ]]; then
+    echo "docker-live-suite needs a real ${key_var} for ${label} (${provider})" >&2
+    exit 2
+  fi
+}
+
+require_live_provider_keys() {
+  require_provider_key "hive" "$MDM_HIVE_PROVIDER"
+  require_provider_key "target-a" "$MDM_TARGET_A_PROVIDER"
+  require_provider_key "target-b" "$MDM_TARGET_B_PROVIDER"
+}
+
 wait_for_tux() {
   local deadline=$((SECONDS + 60))
   while (( SECONDS < deadline )); do
@@ -72,8 +113,14 @@ verify_file_contains() {
 
 require docker
 require tmux
+default_live_provider_matrix
+require_live_provider_keys
 
 echo "Starting Docker TUX topology for live suite run $run_id"
+echo "Provider matrix:"
+echo "  hive=${MDM_HIVE_PROVIDER}/${MDM_HIVE_MODEL}"
+echo "  target-a=${MDM_TARGET_A_PROVIDER}/${MDM_TARGET_A_MODEL}"
+echo "  target-b=${MDM_TARGET_B_PROVIDER}/${MDM_TARGET_B_MODEL}"
 TUX_TMUX_SESSION="$session_name" ./scripts/docker-smoke.sh smoke
 
 tmux kill-session -t "$session_name" 2>/dev/null || true

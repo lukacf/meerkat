@@ -37,6 +37,7 @@ Environment:
   MDM_TARGET_A_MODEL / MDM_TARGET_A_PROVIDER         target-a override.
   MDM_TARGET_B_MODEL / MDM_TARGET_B_PROVIDER         target-b override.
   DOCKER_CARGO_PROFILE=debug                         Build profile.
+  DOCKER_SKIP_BUILD=1                                Reuse existing local image.
   RUST_MIN_STACK=16777216                            Runtime worker stack.
   COMPOSE_FILE=docker-compose.tux.yml                Compose file.
   TUX_TMUX_SESSION=mdm-tux-smoke                     tmux session name.
@@ -71,7 +72,7 @@ check_hive_rpc_session() {
   local host="${HIVE_RPC_HOST:-127.0.0.1}"
   local port="${HIVE_RPC_PORT:-55010}"
 
-  python3 - "${host}" "${port}" <<'PY'
+  python3 -c '
 import json
 import socket
 import sys
@@ -100,14 +101,18 @@ with socket.create_connection((host, port), timeout=5) as sock:
         sessions = message.get("result", {}).get("sessions", [])
         if not sessions:
             raise SystemExit("hive RPC returned no sessions")
-        print(f"Hive RPC session: {sessions[0]['session_id']}")
+        print("Hive RPC session: {}".format(sessions[0]["session_id"]))
         break
-PY
+' "${host}" "${port}"
 }
 
 smoke() {
   remove_stale_tux_runs
-  "${compose[@]}" build kennel
+  if [[ "${DOCKER_SKIP_BUILD:-0}" == "1" ]]; then
+    echo "Skipping Docker image build because DOCKER_SKIP_BUILD=1"
+  else
+    "${compose[@]}" build kennel
+  fi
   "${compose[@]}" up -d kennel target-a target-b
   wait_for_log kennel 'listen[[:space:]]*:'
   wait_for_log target-a 'added hive as trusted peer'

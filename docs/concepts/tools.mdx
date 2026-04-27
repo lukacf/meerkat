@@ -62,7 +62,7 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 
 | Category | Tools | Enable with |
 |----------|-------|-------------|
-| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image` | `enable_builtins` |
+| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `generate_image` | `enable_builtins` |
 | Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
 | Memory | `memory_search` | `enable_memory` |
 | Scheduler | `meerkat_schedule_*` | `enable_schedule` |
@@ -130,6 +130,14 @@ Tools can return rich content beyond plain text. The injected runtime shape is `
 The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 
 Custom tools can return multimodal content by returning `ToolResult::with_blocks(...)` with the appropriate content blocks.
+
+## Image generation
+
+`generate_image` is a session-owned builtin for creating or editing assistant images. It is registered when builtins are enabled and the runtime-backed surface supplies the image-generation machine, provider executor, planner, and blob store. CLI sessions wire this automatically; the default `--tools safe` preset includes builtins.
+
+The tool accepts a typed request under `request`, routes it to OpenAI or Gemini image backends, stores generated image bytes in the realm blob store, and returns structured `ImageGenerationToolResult` JSON with durable `images[].blob_ref` values.
+
+For setup, provider parameters, result fields, and troubleshooting, see [Image generation](/guides/image-generation).
 
 ## Composition
 

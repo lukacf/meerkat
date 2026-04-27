@@ -102,6 +102,17 @@ The `RKAT_*` variants take precedence over provider-native names, so you can run
 
 Self-hosted servers use the configured `bearer_token_env` or `bearer_token` on each server definition instead of the shared provider env vars above.
 
+## Image generation providers
+
+The `generate_image` builtin uses provider-specific image profiles behind a single Meerkat request shape. The active session model does not have to be an image model; image operations can route to a provider default or a forced image target while preserving the original session identity.
+
+| Provider | Default image target | Notes |
+|----------|----------------------|-------|
+| OpenAI | `gpt-image-2` | Uses the hosted Responses image tool by default. Other OpenAI-owned `gpt-image*` or `dall-e*` targets use the Images API path. |
+| Gemini | `gemini-3.1-flash-image-preview` | Also accepts provider alias `google`. Gemini image targets run through an internal scoped image-model turn. |
+
+Request `provider_params` are provider-specific. OpenAI accepts `background`, `output_compression`, `moderation`, and hosted-tool-only `action`. Gemini accepts `aspect_ratio` and `image_size`. See [Image generation](/guides/image-generation) for the exact request shape and troubleshooting.
+
 ## SDK feature flags
 
 When using Meerkat as a Rust library, enable only the providers you need:

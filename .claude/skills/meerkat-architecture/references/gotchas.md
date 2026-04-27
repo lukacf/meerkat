@@ -36,9 +36,9 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - **Mob persistence is SQLite/WAL-backed.** Avoid lock-holding backends or split store state.
 - **Agent mob tools and archive cleanup must share the same hydrated `MobMcpState`**; parallel shadow states are architectural bugs.
 - **`input_terminal_outcomes` / `input_attempt_counts`**: future DSL structural upgrades pending; until then, shell owns these two InputState fields explicitly (annotated with doc comments).
-- **Generated protocol files in `src/generated/`**: never hand-edit. Regenerate via `xtask machine-codegen --all` after any DSL change.
-- **Drift check before commit**: `xtask machine-check-drift --all` must be clean; if it reports stale artifacts, `machine-codegen --all` was forgotten.
-- **TLC at CI bounds**: `machine-verify --all` passing at small bounds does not prove the runtime is bug-free at production scale; treat it as strong evidence, not a certificate.
+- **Generated protocol files in `src/generated/`**: never hand-edit. Regenerate via `make machine-codegen` after any DSL change.
+- **Drift check before commit**: `make machine-check-drift` must be clean; if it reports stale artifacts, `make machine-codegen` was forgotten.
+- **TLC at CI bounds**: `make machine-verify` passing at small bounds does not prove the runtime is bug-free at production scale; treat it as strong evidence, not a certificate.
 
 ## Review lens — ask these before accepting a change
 

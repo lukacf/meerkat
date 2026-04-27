@@ -711,10 +711,12 @@ BuildBuddy/Bazel backend:
 - `make e2e-live`
 - `make e2e-smoke`
 
-Use explicit `make buildbuddy-build`, `make buildbuddy-clippy`,
-`make buildbuddy-test`, and the matching `make buildbuddy-e2e-*` targets only
-when you want BuildBuddy without exporting the env var. For narrow Cargo-only
-package checks, use `./scripts/repo-cargo`:
+Use explicit `make buildbuddy-build`, `make buildbuddy-check`,
+`make buildbuddy-clippy`, `make buildbuddy-test`, and the matching
+`make buildbuddy-e2e-*` targets only when you want BuildBuddy without exporting
+the env var. Set `BUILDBUDDY_DRY_RUN=1` to inspect the selected BuildBuddy
+commands through Make. For narrow Cargo-only package checks, use
+`./scripts/repo-cargo`:
 
 - `./scripts/repo-cargo unit`
 - `./scripts/repo-cargo int`

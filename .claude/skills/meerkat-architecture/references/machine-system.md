@@ -55,11 +55,11 @@ The DSL is a single source that produces two artifacts:
 │   each catalog file)         │  │  via canonical_machine_schemas() │
 │                              │  │  in catalog/mod.rs               │
 │  mm_dsl::MeerkatMachineState │  │                                  │
-│  mm_dsl::MeerkatMachineInput │  │  xtask machine-codegen --all     │
+│  mm_dsl::MeerkatMachineInput │  │  make machine-codegen            │
 │  mm_dsl::MeerkatMachine      │  │    → .tla spec files             │
-│    Authority                 │  │  xtask machine-check-drift --all │
+│    Authority                 │  │  make machine-check-drift        │
 │  mm_dsl::MeerkatMachine      │  │    → compare on-disk vs current  │
-│    Mutator                   │  │  xtask machine-verify --all      │
+│    Mutator                   │  │  make machine-verify             │
 │    .apply(input)             │  │    → run TLC on the specs        │
 │                              │  │                                  │
 │  Enforces guards/updates     │  │  Also emits generated protocol   │
@@ -87,9 +87,9 @@ Trust axiom: the codegen (macro expansion + schema extraction) is correct. The d
 
 Run these in order after any DSL edit:
 
-1. `cargo xtask machine-codegen --all` — re-emit TLA+ specs + generated protocol adapters from the current DSL. Must run after any DSL change.
-2. `cargo xtask machine-check-drift --all` — compare freshly generated artifacts against committed on-disk versions. Fails if DSL was edited without re-running codegen.
-3. `cargo xtask machine-verify --all` — run TLC model-checker on the TLA+ specs. Proves invariants across the bounded state space (CI uses 2-3 concurrent entities per domain; can be expanded).
+1. `make machine-codegen` — re-emit TLA+ specs + generated protocol adapters from the current DSL. Must run after any DSL change.
+2. `make machine-check-drift` — compare freshly generated artifacts against committed on-disk versions. Fails if DSL was edited without re-running codegen.
+3. `make machine-verify` — run TLC model-checker on the TLA+ specs. Proves invariants across the bounded state space (CI uses 2-3 concurrent entities per domain; can be expanded).
 
 All three pass = DSL + runtime are provably in sync, and the machine cannot enter an invalid state given typed inputs.
 
@@ -174,7 +174,7 @@ Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`. Four 
 
 Compositions express effect-disposition rules: which effects emitted by one machine are consumed as inputs by another, which obligations must be realized before a terminal, and which protocol helpers get codegen'd.
 
-Generated protocol adapters land in each crate's `src/generated/` (e.g., `meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs`). These are not hand-edited; regenerate via `xtask machine-codegen --all` when the catalog changes.
+Generated protocol adapters land in each crate's `src/generated/` (e.g., `meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs`). These are not hand-edited; regenerate via `make machine-codegen` when the catalog changes.
 
 ## Dogma for machine work
 

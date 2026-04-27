@@ -141,6 +141,18 @@ Repository-wide test lanes are part of the architecture:
 
 The authoritative end-to-end lane catalog lives in `tests/integration/src/e2e_lanes.rs`. If a change affects how a scenario is classified, filtered, or bootstrapped, update the lane harness first rather than reintroducing script-owned truth.
 
+Make is the stable command surface for those lanes. Cargo remains the default
+backend; `MEERKAT_BUILDBUDDY=1` switches the same broad local verbs to the
+optional BuildBuddy/Bazel backend through `scripts/run-build-backend-lane` and
+`scripts/buildbuddy-dev`. Keep lane semantics identical across backends: if a
+Cargo lane gains or loses coverage, the matching BuildBuddy lane should be
+updated rather than replaced by a static or host-only placeholder.
+
+For multi-agent work, same-checkout agents should use distinct `RUST_LANE_ID`
+values when they need stable warm output roots. Separate worktrees are isolated
+by path hash; do not reintroduce shared in-repo target directories or raw Cargo
+entrypoints that bypass `scripts/repo-cargo`.
+
 ## Key files
 
 - `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine implementation

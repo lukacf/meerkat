@@ -20,6 +20,38 @@ This file is a lean navigator. Load the specific reference under `references/` w
 7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
 8. **Seams are formal** — async owner handoffs, wait barriers, and surfaced terminal classes are modeled in the DSL or composition protocols, not left to shell convention.
 
+## Build And Test Architecture
+
+Make is the developer-facing command surface. Cargo is still the default
+backend; BuildBuddy/Bazel is an optional acceleration backend selected with the
+single opt-in switch `MEERKAT_BUILDBUDDY=1`.
+
+Architectural split:
+
+- `Makefile` owns the stable local verbs: `make build`, `make check`,
+  `make lint`, `make test`, `make test-unit`, `make test-int`, `make e2e-fast`,
+  `make e2e-system`, `make e2e-live`, and `make e2e-smoke`.
+- `scripts/run-build-backend-lane` is the backend switch. It runs
+  `scripts/repo-cargo` by default and delegates to `scripts/buildbuddy-dev`
+  only when BuildBuddy is explicitly enabled.
+- `scripts/buildbuddy-dev` is the local BuildBuddy facade. Use it or the
+  explicit `make buildbuddy-*` targets for local RBE lanes; avoid raw `bb`
+  except when debugging the wrapper.
+- `scripts/buildbuddy-bazel-poc` is the lower-level Bazel launcher and
+  compatibility layer. It may temporarily refresh Bazel lock metadata for local
+  absolute path dependencies, then restores checked-in generated files unless
+  `BUILDBUDDY_KEEP_LOCK_REFRESH=1` is set.
+- `.github/workflows/ci.yml` selects exactly one backend. Cargo and BuildBuddy
+  reusable workflows remain separate so CI lanes stay visible and comparable.
+
+Test lane authority belongs in Rust, not shell glue. The canonical e2e lane
+catalog is `tests/integration/src/e2e_lanes.rs`; scripts and Bazel targets
+should route to that taxonomy rather than inventing parallel classifications.
+
+For same-checkout multi-agent work, set distinct `RUST_LANE_ID` values when you
+want stable warm local output roots. Separate Git worktrees are isolated by path
+hash for both Cargo and BuildBuddy output roots.
+
 ## Runtime Dogma (first review lens)
 
 Full doctrine: `docs/architecture/meerkat-runtime-dogma.md`.
@@ -160,6 +192,8 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
 - `docs/architecture/meerkat-runtime-dogma.md` — full dogma
+- `docs/architecture/buildbuddy-bazel-poc.md` — BuildBuddy/Bazel developer and CI backend guide
 - `docs/architecture/identity-first-live-voice-proposal.md` — realtime + identity-first design notes
 - `docs/guides/realtime.mdx` — user-facing realtime voice guide (public vocabulary, state enum, reconfigure flow)
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog
+- `scripts/build-backend-env`, `scripts/run-build-backend-lane`, `scripts/buildbuddy-dev` — local build backend switch and BuildBuddy facade

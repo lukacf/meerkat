@@ -93,8 +93,11 @@ const runtime = await MeerkatRuntime.init(wasm, {
 
 For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane
 harness in `tests/integration/src/e2e_lanes.rs`. Prefer
-`./scripts/repo-cargo e2e-live` or `./scripts/repo-cargo e2e-smoke` over manual
-`npm run smoke` unless you are debugging the browser surface directly.
+`make e2e-live` or `make e2e-smoke` over manual `npm run smoke` unless you are
+debugging the browser surface directly. Cargo is the default backend; with
+BuildBuddy access, `MEERKAT_BUILDBUDDY=1 make e2e-live` and
+`MEERKAT_BUILDBUDDY=1 make e2e-smoke` route through the matching Bazel/RBE
+lanes.
 
 **Version validation:** `runtime_version()` export returns `CARGO_PKG_VERSION`. `MeerkatRuntime.init()` checks it against the expected version to catch stale cached WASM.
 
@@ -109,8 +112,12 @@ RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
 
 **CRITICAL: wasm-pack creates a `.gitignore` with `*` inside the output directory.** Delete it before `npm publish` or add an `.npmignore` to the package — otherwise npm excludes the WASM binary.
 
-Verify: `cargo check -p <crate> --target wasm32-unknown-unknown`
-Clippy: `cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings` (enforced in CI)
+Verify targeted wasm32 work with `./scripts/repo-cargo check -p <crate>
+--target wasm32-unknown-unknown`. Clippy for the runtime remains
+`./scripts/repo-cargo clippy -p meerkat-web-runtime --target
+wasm32-unknown-unknown -- -D warnings` when debugging locally. The optional
+BuildBuddy path exposes `scripts/buildbuddy-dev wasm-check` and
+`scripts/buildbuddy-dev wasm-contract` for the CI-equivalent WASM lanes.
 
 ## Common Gotchas
 

@@ -517,30 +517,6 @@ impl MeerkatMachine {
                     project_model_routing_status(&authority.state),
                 ))
             }
-            MeerkatMachineCommand::ResolveImageGenerationPlan {
-                session_id,
-                operation_id,
-                request,
-            } => {
-                let sessions = self.sessions.read().await;
-                let entry = sessions.get(&session_id).ok_or_else(|| {
-                    RuntimeControlPlaneError::NotFound(LogicalRuntimeId::new(
-                        session_id.to_string(),
-                    ))
-                })?;
-                let authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let status = project_model_routing_status(&authority.state);
-                Ok(MeerkatMachineCommandResult::ImageGenerationResolvedPlan(
-                    crate::service_ext::resolve_image_generation_plan_from_status(
-                        &status,
-                        operation_id,
-                        &request,
-                    ),
-                ))
-            }
             MeerkatMachineCommand::RequestSwitchTurn {
                 session_id,
                 request,

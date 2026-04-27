@@ -6,9 +6,9 @@ use base64::Engine;
 use meerkat_core::image_generation::{
     AssistantImageId, AssistantImageRef, GenerateImageRequest, ImageFormatPreference,
     ImageGenerationIntent, ImageGenerationPlanner, ImageGenerationResolvedPlan,
-    ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationApprovalReason,
-    ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
-    ImageQualityPreference, ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
+    ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationDenialReason,
+    ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference,
+    ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
     PostActivationImageTerminal, PromptSource, PromptText, ProviderId, ProviderTextDisposition,
     TextArtifactRef, ToolCallId,
 };
@@ -38,13 +38,6 @@ pub trait ImageGenerationMachine: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::image_generation::SessionModelRoutingStatus, RuntimeDriverError>;
-
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: ImageOperationId,
-        request: &GenerateImageRequest,
-    ) -> Result<Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>, RuntimeDriverError>;
 
     async fn begin_image_operation(
         &self,
@@ -83,22 +76,6 @@ where
         session_id: &SessionId,
     ) -> Result<meerkat_core::image_generation::SessionModelRoutingStatus, RuntimeDriverError> {
         SessionServiceRuntimeExt::session_model_routing_status(self, session_id).await
-    }
-
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: ImageOperationId,
-        request: &GenerateImageRequest,
-    ) -> Result<Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>, RuntimeDriverError>
-    {
-        SessionServiceRuntimeExt::resolve_image_generation_plan(
-            self,
-            session_id,
-            operation_id,
-            request,
-        )
-        .await
     }
 
     async fn begin_image_operation(
@@ -804,26 +781,12 @@ fn execution_plan_requires_scoped_override(plan: &ImageGenerationResolvedPlan) -
 }
 
 fn approval_for_resolved_plan(
-    plan: &ImageGenerationResolvedPlan,
+    _plan: &ImageGenerationResolvedPlan,
 ) -> (
     ModelRoutingApprovalDisposition,
-    Option<ImageOperationApprovalReason>,
+    Option<meerkat_core::image_generation::ImageOperationApprovalReason>,
 ) {
-    let session_provider =
-        meerkat_core::Provider::infer_from_model(plan.machine_routing_model.as_str());
-    let target_provider = meerkat_core::Provider::infer_from_model(plan.provider_model.as_str());
-
-    if session_provider.is_some()
-        && target_provider.is_some()
-        && session_provider != target_provider
-    {
-        (
-            ModelRoutingApprovalDisposition::RequiredButUnavailable,
-            Some(ImageOperationApprovalReason::CrossProvider),
-        )
-    } else {
-        (ModelRoutingApprovalDisposition::NotRequired, None)
-    }
+    (ModelRoutingApprovalDisposition::NotRequired, None)
 }
 
 async fn capture_provider_text(
@@ -1048,24 +1011,6 @@ mod tests {
             )
         }
 
-        async fn resolve_image_generation_plan(
-            &self,
-            session_id: &SessionId,
-            operation_id: ImageOperationId,
-            request: &GenerateImageRequest,
-        ) -> Result<
-            Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>,
-            RuntimeDriverError,
-        > {
-            self.calls.lock().unwrap().push("resolve_plan");
-            let status = self.session_model_routing_status(session_id).await?;
-            Ok(meerkat_runtime::resolve_image_generation_plan_from_status(
-                &status,
-                operation_id,
-                request,
-            ))
-        }
-
         async fn begin_image_operation(
             &self,
             _session_id: &SessionId,
@@ -1165,7 +1110,10 @@ mod tests {
             &self,
             request: ProviderImageGenerationRequest,
         ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
-            assert_eq!(request.model, "hosted-image-model");
+            assert!(matches!(
+                request.model.as_str(),
+                "hosted-image-model" | "native-image-model"
+            ));
             Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
                 terminal: ImageOperationTerminalClass::Generated,
@@ -1255,6 +1203,35 @@ mod tests {
                 "tool description should document {expected:?}: {description}"
             );
         }
+    }
+
+    #[test]
+    fn cross_provider_image_plan_does_not_require_unavailable_approval() {
+        let plan = ImageGenerationResolvedPlan {
+            provider_model: ModelId::new("gemini-3.1-flash-image-preview"),
+            machine_routing_model: ModelId::new("gpt-5.5"),
+            machine_routing_realtime_capable: true,
+            execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                provider: ProviderId::new("gemini"),
+                backend: ImageGenerationBackendKind::NativeModel,
+                max_count: NonZeroU32::MIN,
+                capabilities: ImageGenerationTargetCapabilities {
+                    hosted_image_generation_tool: true,
+                    native_image_output: true,
+                    custom_tools: false,
+                    image_search_grounding: false,
+                    image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+                },
+                requires_scoped_override: true,
+                provider_plan: serde_json::Value::Null,
+            },
+            projected_messages: Vec::new(),
+        };
+
+        let (approval, approval_reason) = approval_for_resolved_plan(&plan);
+
+        assert_eq!(approval, ModelRoutingApprovalDisposition::NotRequired);
+        assert!(approval_reason.is_none());
     }
 
     #[test]
@@ -1436,6 +1413,43 @@ mod tests {
             result.provider_text,
             ProviderTextDisposition::Captured { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn generate_image_gemini_plan_uses_scoped_override_call_sequence() {
+        let machine = Arc::new(FakeMachine::default());
+        let tool = GenerateImageTool::new(ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: machine.clone(),
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: Arc::new(FakeExecutor),
+        });
+        let mut image_request = request();
+        image_request.target = ImageGenerationTargetPreference::ProviderDefault {
+            provider: ProviderId::new("gemini"),
+        };
+
+        let output = tool
+            .call(json!({
+                "request": image_request
+            }))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let result: ImageGenerationToolResult = serde_json::from_value(output).unwrap();
+
+        assert!(matches!(
+            result.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        assert_eq!(
+            machine.calls.lock().unwrap().as_slice(),
+            ["begin", "activate", "complete", "restore"]
+        );
     }
 
     #[tokio::test]

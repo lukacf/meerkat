@@ -769,10 +769,12 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct CompositeImageGenerationPlanner {
     profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CompositeImageGenerationPlanner {
     fn new(profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>) -> Self {
         Self { profiles }
@@ -788,6 +790,7 @@ impl CompositeImageGenerationPlanner {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
     fn resolve_image_generation_plan(
         &self,
@@ -843,9 +846,14 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
             capabilities,
             one,
         )?;
+        let machine_routing_model = if resolution.execution_plan.requires_scoped_override() {
+            resolution.provider_call_model.clone()
+        } else {
+            status.effective_model.clone()
+        };
         Ok(meerkat_core::ImageGenerationResolvedPlan {
             provider_model: resolution.provider_call_model,
-            machine_routing_model: status.effective_model.clone(),
+            machine_routing_model,
             machine_routing_realtime_capable: true,
             execution_plan: resolution.execution_plan,
             projected_messages: image_projection_messages(request),
@@ -868,6 +876,7 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn image_projection_messages(
     request: &meerkat_core::GenerateImageRequest,
 ) -> Vec<meerkat_core::Message> {
@@ -2022,7 +2031,10 @@ impl AgentFactory {
         }
 
         let registry = self.model_registry(config)?;
-        let image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        let image_generation_planner: Option<
+            Arc<dyn meerkat_core::ImageGenerationPlanner>,
+        > = {
             let profiles = self.provider_registry.image_generation_profiles();
             (!profiles.is_empty()).then(|| {
                 Arc::new(CompositeImageGenerationPlanner::new(profiles))

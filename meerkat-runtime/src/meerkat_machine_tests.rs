@@ -15081,9 +15081,6 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         MeerkatMachineCommandResult::ImageOperationPhase(phase) => {
             format!("image_operation_phase:{phase:?}")
         }
-        MeerkatMachineCommandResult::ImageGenerationResolvedPlan(result) => {
-            format!("image_generation_resolved_plan:{result:?}")
-        }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }
 }

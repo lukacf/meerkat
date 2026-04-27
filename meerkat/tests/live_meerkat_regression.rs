@@ -186,9 +186,14 @@ mod image_generation_substrate {
                 ),
                 _ => return Err(ImageOperationDenialReason::UnsupportedTarget),
             };
+            let machine_routing_model = if execution_plan.requires_scoped_override() {
+                provider_model.clone()
+            } else {
+                status.effective_model.clone()
+            };
             Ok(ImageGenerationResolvedPlan {
                 provider_model,
-                machine_routing_model: status.effective_model.clone(),
+                machine_routing_model,
                 machine_routing_realtime_capable: false,
                 execution_plan,
                 projected_messages: Vec::new(),

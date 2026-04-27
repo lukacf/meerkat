@@ -127,26 +127,6 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
-    async fn resolve_image_generation_plan(
-        &self,
-        session_id: &SessionId,
-        operation_id: meerkat_core::image_generation::ImageOperationId,
-        request: &meerkat_core::image_generation::GenerateImageRequest,
-    ) -> Result<
-        Result<
-            meerkat_core::image_generation::ImageGenerationResolvedPlan,
-            meerkat_core::image_generation::ImageOperationDenialReason,
-        >,
-        RuntimeDriverError,
-    > {
-        let status = self.session_model_routing_status(session_id).await?;
-        Ok(resolve_image_generation_plan_from_status(
-            &status,
-            operation_id,
-            request,
-        ))
-    }
-
     async fn request_switch_turn(
         &self,
         _session_id: &SessionId,
@@ -206,17 +186,6 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
             "image operation restore is not supported by this runtime adapter".into(),
         ))
     }
-}
-
-pub fn resolve_image_generation_plan_from_status(
-    _status: &meerkat_core::image_generation::SessionModelRoutingStatus,
-    _operation_id: meerkat_core::image_generation::ImageOperationId,
-    _request: &meerkat_core::image_generation::GenerateImageRequest,
-) -> Result<
-    meerkat_core::image_generation::ImageGenerationResolvedPlan,
-    meerkat_core::image_generation::ImageOperationDenialReason,
-> {
-    Err(meerkat_core::image_generation::ImageOperationDenialReason::UnsupportedTarget)
 }
 
 #[cfg(test)]

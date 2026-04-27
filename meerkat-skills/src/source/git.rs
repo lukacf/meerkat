@@ -410,12 +410,78 @@ fn redact_secrets(value: &str) -> String {
 }
 
 fn redact_url(url: &str) -> String {
-    match url.split_once('@') {
-        Some((scheme_and_user, rest)) if scheme_and_user.contains("://") => {
-            let scheme = scheme_and_user.split("://").next().unwrap_or("https");
-            format!("{scheme}://<redacted>@{rest}")
-        }
-        _ => url.to_string(),
+    let redacted = redact_userinfo(url);
+    redact_sensitive_query(&redacted)
+}
+
+fn redact_userinfo(url: &str) -> String {
+    let Some(scheme_pos) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_pos + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+    let Some(userinfo_end) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    format!(
+        "{}<redacted>@{}{}",
+        &url[..authority_start],
+        &authority[userinfo_end + 1..],
+        &url[authority_end..]
+    )
+}
+
+fn redact_sensitive_query(url: &str) -> String {
+    let Some((base, query_and_fragment)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let (query, fragment) = match query_and_fragment.split_once('#') {
+        Some((query, fragment)) => (query, Some(fragment)),
+        None => (query_and_fragment, None),
+    };
+    let query = query
+        .split('&')
+        .map(|part| {
+            let key = part.split_once('=').map(|(key, _)| key).unwrap_or(part);
+            if is_sensitive_query_key(key) {
+                format!("{key}=<redacted>")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    match fragment {
+        Some(fragment) => format!("{base}?{query}#{fragment}"),
+        None => format!("{base}?{query}"),
+    }
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "access_token" | "api_key" | "auth" | "authorization" | "key" | "token"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_hides_userinfo_and_sensitive_query_values() {
+        assert_eq!(
+            redact_url("https://x-access-token:secret@example.com/repo.git?token=secret&ref=main"),
+            "https://<redacted>@example.com/repo.git?token=<redacted>&ref=main"
+        );
+        assert_eq!(
+            redact_url("https://example.com/repo.git?email=user@example.com&access_token=secret"),
+            "https://example.com/repo.git?email=user@example.com&access_token=<redacted>"
+        );
     }
 }
 

@@ -414,6 +414,11 @@ pub struct FactoryAgentBuilder {
     /// keeping runtime/service ownership in the surface.
     pub default_schedule_tools:
         Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
+    /// Default blob store injected into all builds.
+    pub default_blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
+    /// Default image-generation executor injected into all builds.
+    pub default_image_generation_executor:
+        Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
 }
 
 impl FactoryAgentBuilder {
@@ -429,6 +434,8 @@ impl FactoryAgentBuilder {
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
+            default_blob_store: None,
+            default_image_generation_executor: None,
         }
     }
 
@@ -450,7 +457,17 @@ impl FactoryAgentBuilder {
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
+            default_blob_store: None,
+            default_image_generation_executor: None,
         }
+    }
+
+    pub fn with_image_generation_machine(
+        mut self,
+        machine: Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
+    ) -> Self {
+        self.factory = self.factory.with_image_generation_machine(machine);
+        self
     }
 
     async fn resolve_config(&self) -> Config {
@@ -532,6 +549,17 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.schedule_tools = Some(schedule_dispatcher);
         }
 
+        if build_config.blob_store_override.is_none()
+            && let Some(blob_store) = self.default_blob_store.clone()
+        {
+            build_config.blob_store_override = Some(blob_store);
+        }
+        if build_config.image_generation_executor_override.is_none()
+            && let Some(executor) = self.default_image_generation_executor.clone()
+        {
+            build_config.image_generation_executor_override = Some(executor);
+        }
+
         let config = self.resolve_config().await;
 
         // Capture the session_context handle before build_agent consumes the
@@ -609,9 +637,13 @@ mod tests {
     use meerkat_core::{
         Provider, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult,
     };
+    use meerkat_llm_core::{
+        ImageGenerationExecutor, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
+    };
     use meerkat_runtime::MeerkatMachine;
     use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
     use meerkat_session::ephemeral::SessionAgent;
+    use meerkat_store::MemoryBlobStore;
     use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -662,6 +694,26 @@ mod tests {
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
             self.inner.health_check().await
+        }
+    }
+
+    struct FakeImageGenerationExecutor;
+
+    #[async_trait]
+    impl ImageGenerationExecutor for FakeImageGenerationExecutor {
+        async fn execute_image_generation(
+            &self,
+            request: ProviderImageGenerationRequest,
+        ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
+            Ok(ProviderImageGenerationOutput {
+                operation_id: request.operation_id,
+                terminal: meerkat_core::ImageOperationTerminalClass::Failed,
+                images: Vec::new(),
+                provider_text: None,
+                revised_prompt: meerkat_core::RevisedPromptDisposition::NotRequested,
+                native_metadata: meerkat_core::ProviderImageMetadata::NotEmitted,
+                warnings: Vec::new(),
+            })
         }
     }
 
@@ -1037,6 +1089,58 @@ mod tests {
                 .iter()
                 .any(|name| name == "meerkat_schedule_list")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_builder_wires_generate_image_on_runtime_backed_path() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let runtime_adapter = Arc::new(MeerkatMachine::ephemeral());
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .with_image_generation_machine(runtime_adapter.clone());
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        let capture: Arc<CaptureToolClient> = Arc::new(CaptureToolClient::default());
+        builder.default_llm_client = Some(capture.clone());
+        builder.default_blob_store = Some(Arc::new(MemoryBlobStore::default()));
+        builder.default_image_generation_executor = Some(Arc::new(FakeImageGenerationExecutor));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id)
+            .await
+            .map_err(|err| format!("prepare bindings: {err}"))?;
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "hello".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&req, event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+        let (run_tx, _run_rx) = mpsc::channel(8);
+        SessionAgent::run_with_events(&mut agent, "inspect".to_string().into(), run_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+
+        let tool_names = capture.tool_names();
+        assert!(tool_names.iter().any(|name| name == "generate_image"));
         Ok(())
     }
 

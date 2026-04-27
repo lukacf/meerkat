@@ -258,6 +258,24 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local surface-connection close inside the external-tool surface region",
         ),
+        (
+            "MeerkatMachine",
+            "SwitchTurnPersistentReconfigureRequested",
+            SeamClassification::NoOwnerRealization,
+            "Local persistent model-routing reconfiguration request consumed by the runtime kernel",
+        ),
+        (
+            "MeerkatMachine",
+            "SwitchTurnFiniteOverrideActivated",
+            SeamClassification::NoOwnerRealization,
+            "Local finite model-routing override activation consumed by the runtime kernel",
+        ),
+        (
+            "MeerkatMachine",
+            "SwitchTurnFiniteOverrideRestored",
+            SeamClassification::NoOwnerRealization,
+            "Local finite model-routing override restoration consumed by the runtime kernel",
+        ),
         //
         // External effects that carry surface truth back to callers must align
         // the surface representation with the kernel state they were derived
@@ -285,6 +303,36 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "InputLifecycleNotice",
             SeamClassification::SurfaceResultAlignment,
             "External input-lifecycle notices must reflect canonical input-lifecycle transitions",
+        ),
+        (
+            "MeerkatMachine",
+            "ModelRoutingStatusChanged",
+            SeamClassification::SurfaceResultAlignment,
+            "External model-routing status deltas must align with canonical routing topology truth",
+        ),
+        (
+            "MeerkatMachine",
+            "SwitchTurnDenied",
+            SeamClassification::SurfaceResultAlignment,
+            "External switch-turn denials must reflect the exact canonical routing denial reason",
+        ),
+        (
+            "MeerkatMachine",
+            "ImageOperationPhaseChanged",
+            SeamClassification::SurfaceResultAlignment,
+            "External image-operation phase deltas must align with canonical image routing state",
+        ),
+        (
+            "MeerkatMachine",
+            "ImageOperationDenied",
+            SeamClassification::SurfaceResultAlignment,
+            "External image-operation denials must reflect the exact canonical denial reason",
+        ),
+        (
+            "MeerkatMachine",
+            "ModelRoutingApprovalTerminalized",
+            SeamClassification::SurfaceResultAlignment,
+            "External routing approval terminal notices must align with canonical approval state",
         ),
         (
             "MeerkatMachine",

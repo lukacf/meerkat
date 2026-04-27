@@ -10442,6 +10442,195 @@
   },
   "WireAssistantBlock": {
     "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -10660,6 +10849,58 @@
       {
         "properties": {
           "block_type": {
+            "const": "image",
+            "type": "string"
+          },
+          "data": {
+            "properties": {
+              "blob_ref": {
+                "$ref": "#/$defs/BlobRef"
+              },
+              "height": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "image_id": {
+                "$ref": "#/$defs/AssistantImageId"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "meta": {
+                "$ref": "#/$defs/ProviderImageMetadata"
+              },
+              "revised_prompt": {
+                "$ref": "#/$defs/RevisedPromptDisposition"
+              },
+              "width": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "image_id",
+              "blob_ref",
+              "media_type",
+              "width",
+              "height",
+              "revised_prompt",
+              "meta"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_type",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "block_type": {
             "const": "unknown",
             "type": "string"
           }
@@ -10671,6 +10912,64 @@
       }
     ],
     "title": "WireAssistantBlock"
+  },
+  "WireAssistantImageRef": {
+    "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "blob_ref": {
+        "$ref": "#/$defs/BlobRef"
+      },
+      "height": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "image_id": {
+        "$ref": "#/$defs/AssistantImageId"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "width": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "image_id",
+      "blob_ref",
+      "media_type",
+      "width",
+      "height"
+    ],
+    "title": "AssistantImageRef",
+    "type": "object"
   },
   "WireAuthError": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11397,6 +11696,645 @@
     "description": "Wire-safe content input (mirrors `ContentInput`).",
     "title": "WireContentInput"
   },
+  "WireGenerateImageExecutionPlan": {
+    "$defs": {
+      "GeminiImageTurnPlan": {
+        "properties": {
+          "projection_snapshot_id": {
+            "$ref": "#/$defs/ProjectionSnapshotId"
+          }
+        },
+        "required": [
+          "projection_snapshot_id"
+        ],
+        "type": "object"
+      },
+      "ImageContinuityTokenSupport": {
+        "enum": [
+          "unsupported",
+          "same_provider_only",
+          "cross_provider"
+        ],
+        "type": "string"
+      },
+      "ImageGenerationTargetCapabilities": {
+        "properties": {
+          "custom_tools": {
+            "type": "boolean"
+          },
+          "hosted_image_generation_tool": {
+            "type": "boolean"
+          },
+          "image_continuity_tokens": {
+            "$ref": "#/$defs/ImageContinuityTokenSupport"
+          },
+          "image_search_grounding": {
+            "type": "boolean"
+          },
+          "native_image_output": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hosted_image_generation_tool",
+          "native_image_output",
+          "custom_tools",
+          "image_search_grounding",
+          "image_continuity_tokens"
+        ],
+        "type": "object"
+      },
+      "OpenAiImagesApiEndpoint": {
+        "enum": [
+          "generations",
+          "edits"
+        ],
+        "type": "string"
+      },
+      "OpenAiImagesApiPlan": {
+        "properties": {
+          "endpoint": {
+            "$ref": "#/$defs/OpenAiImagesApiEndpoint"
+          }
+        },
+        "required": [
+          "endpoint"
+        ],
+        "type": "object"
+      },
+      "OpenAiResponsesImagePlan": {
+        "properties": {
+          "tool_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name"
+        ],
+        "type": "object"
+      },
+      "ProjectionSnapshotId": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
+          },
+          "max_count": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "plan": {
+            "$ref": "#/$defs/OpenAiResponsesImagePlan"
+          },
+          "plan_type": {
+            "const": "open_ai_hosted_responses_image_tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_type",
+          "max_count",
+          "capabilities",
+          "plan"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
+          },
+          "max_count": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/$defs/OpenAiImagesApiPlan"
+          },
+          "plan_type": {
+            "const": "open_ai_images_api",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_type",
+          "model",
+          "max_count",
+          "capabilities",
+          "plan"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
+          },
+          "max_count": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/$defs/GeminiImageTurnPlan"
+          },
+          "plan_type": {
+            "const": "gemini_native_image_model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_type",
+          "model",
+          "max_count",
+          "capabilities",
+          "plan"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "GenerateImageExecutionPlan"
+  },
+  "WireGenerateImageRequest": {
+    "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "BlockId": {
+        "type": "string"
+      },
+      "ImageContinuityDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_provided",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_source_provider",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "continuity_ref": {
+                "type": "string"
+              },
+              "disposition": {
+                "const": "available",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition",
+              "continuity_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageFormatPreference": {
+        "enum": [
+          "auto",
+          "png",
+          "jpeg",
+          "webp"
+        ],
+        "type": "string"
+      },
+      "ImageGenerationIntent": {
+        "oneOf": [
+          {
+            "properties": {
+              "intent": {
+                "const": "generate",
+                "type": "string"
+              },
+              "prompt": {
+                "$ref": "#/$defs/PromptText"
+              },
+              "prompt_source": {
+                "$ref": "#/$defs/PromptSource"
+              },
+              "reference_images": {
+                "items": {
+                  "$ref": "#/$defs/ImageSourceRef"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "intent",
+              "prompt",
+              "prompt_source"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "instruction": {
+                "$ref": "#/$defs/PromptText"
+              },
+              "instruction_source": {
+                "$ref": "#/$defs/PromptSource"
+              },
+              "intent": {
+                "const": "edit",
+                "type": "string"
+              },
+              "source_images": {
+                "items": {
+                  "$ref": "#/$defs/ImageSourceRef"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "intent",
+              "instruction",
+              "instruction_source",
+              "source_images"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageGenerationTargetPreference": {
+        "oneOf": [
+          {
+            "properties": {
+              "target": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "target": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "target": {
+                "const": "model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "provider",
+              "model"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageQualityPreference": {
+        "enum": [
+          "auto",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "ImageSizePreference": {
+        "oneOf": [
+          {
+            "properties": {
+              "size": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "size": {
+                "const": "square1024",
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "size": {
+                "const": "portrait1024x1536",
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "size": {
+                "const": "landscape1536x1024",
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "height": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "size": {
+                "const": "custom",
+                "type": "string"
+              },
+              "width": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "size",
+              "width",
+              "height"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageSourceRef": {
+        "oneOf": [
+          {
+            "properties": {
+              "blob_ref": {
+                "$ref": "#/$defs/BlobRef"
+              },
+              "kind": {
+                "const": "blob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "blob_ref"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_id": {
+                "$ref": "#/$defs/BlockId"
+              },
+              "kind": {
+                "const": "transcript_block",
+                "type": "string"
+              },
+              "message_id": {
+                "$ref": "#/$defs/MessageId"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id",
+              "block_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "image_id": {
+                "$ref": "#/$defs/AssistantImageId"
+              },
+              "kind": {
+                "const": "assistant_image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "image_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "continuity": {
+                "$ref": "#/$defs/ImageContinuityDisposition"
+              },
+              "fallback_blob_ref": {
+                "$ref": "#/$defs/BlobRef"
+              },
+              "handle": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider",
+              "handle",
+              "continuity",
+              "fallback_blob_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MessageId": {
+        "type": "string"
+      },
+      "PromptSource": {
+        "oneOf": [
+          {
+            "properties": {
+              "message_id": {
+                "$ref": "#/$defs/MessageId"
+              },
+              "source": {
+                "const": "user_provided",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "message_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "source": {
+                "const": "model_distilled",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "tool_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "source": {
+                "const": "hybrid",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              },
+              "user_message_ids": {
+                "items": {
+                  "$ref": "#/$defs/MessageId"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "source",
+              "user_message_ids",
+              "tool_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "count": {
+        "format": "uint32",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "format": {
+        "$ref": "#/$defs/ImageFormatPreference"
+      },
+      "intent": {
+        "$ref": "#/$defs/ImageGenerationIntent"
+      },
+      "quality": {
+        "$ref": "#/$defs/ImageQualityPreference"
+      },
+      "size": {
+        "$ref": "#/$defs/ImageSizePreference"
+      },
+      "target": {
+        "$ref": "#/$defs/ImageGenerationTargetPreference"
+      }
+    },
+    "required": [
+      "intent",
+      "target",
+      "size",
+      "quality",
+      "format",
+      "count"
+    ],
+    "title": "GenerateImageRequest",
+    "type": "object"
+  },
   "WireHandlingMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Public handling mode for mob member delivery.",
@@ -11406,6 +12344,1538 @@
     ],
     "title": "WireHandlingMode",
     "type": "string"
+  },
+  "WireImageGenerationToolResult": {
+    "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantImageRef": {
+        "properties": {
+          "blob_ref": {
+            "$ref": "#/$defs/BlobRef"
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "image_id": {
+            "$ref": "#/$defs/AssistantImageId"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "width": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_id",
+          "blob_ref",
+          "media_type",
+          "width",
+          "height"
+        ],
+        "type": "object"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "ImageGenerationWarning": {
+        "oneOf": [
+          {
+            "properties": {
+              "warning": {
+                "const": "continuity_degraded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "warning": {
+                "const": "unsupported_artifact_dropped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "requested": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "returned": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "warning": {
+                "const": "provider_returned_fewer_images",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning",
+              "requested",
+              "returned"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "warning": {
+                "const": "provider_execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "warning": {
+                "const": "blob_commit_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "warning": {
+                "const": "provider_text_capture_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "warning",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageOperationApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "ImageOperationDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_count",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "approval_required_but_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/ImageOperationApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageOperationId": {
+        "type": "string"
+      },
+      "ImageOperationTerminalClass": {
+        "oneOf": [
+          {
+            "properties": {
+              "terminal": {
+                "const": "generated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider_text": {
+                "$ref": "#/$defs/ProviderTextDisposition"
+              },
+              "terminal": {
+                "const": "empty_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "provider_text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/ImageOperationDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "refused_by_provider",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "safety_filtered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "scoped_restore_failed",
+                "type": "string"
+              },
+              "trigger": {
+                "$ref": "#/$defs/PostActivationImageTerminal"
+              }
+            },
+            "required": [
+              "terminal",
+              "trigger"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PostActivationImageDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/ImageOperationApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PostActivationImageTerminal": {
+        "oneOf": [
+          {
+            "properties": {
+              "terminal": {
+                "const": "generated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "empty_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/PostActivationImageDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "refused_by_provider",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "safety_filtered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ProviderTextDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "emitted_but_not_stored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "captured",
+                "type": "string"
+              },
+              "text_artifact_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition",
+              "text_artifact_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "images": {
+        "items": {
+          "$ref": "#/$defs/AssistantImageRef"
+        },
+        "type": "array"
+      },
+      "native_metadata": {
+        "$ref": "#/$defs/ProviderImageMetadata"
+      },
+      "operation_id": {
+        "$ref": "#/$defs/ImageOperationId"
+      },
+      "provider_text": {
+        "$ref": "#/$defs/ProviderTextDisposition"
+      },
+      "revised_prompt": {
+        "$ref": "#/$defs/RevisedPromptDisposition"
+      },
+      "terminal": {
+        "$ref": "#/$defs/ImageOperationTerminalClass"
+      },
+      "warnings": {
+        "items": {
+          "$ref": "#/$defs/ImageGenerationWarning"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "operation_id",
+      "terminal",
+      "provider_text",
+      "revised_prompt",
+      "native_metadata"
+    ],
+    "title": "ImageGenerationToolResult",
+    "type": "object"
+  },
+  "WireImageOperationPhase": {
+    "$defs": {
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "ImageOperationApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "ImageOperationDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_count",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "approval_required_but_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/ImageOperationApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageOperationTerminalClass": {
+        "oneOf": [
+          {
+            "properties": {
+              "terminal": {
+                "const": "generated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider_text": {
+                "$ref": "#/$defs/ProviderTextDisposition"
+              },
+              "terminal": {
+                "const": "empty_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "provider_text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/ImageOperationDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "refused_by_provider",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "safety_filtered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "scoped_restore_failed",
+                "type": "string"
+              },
+              "trigger": {
+                "$ref": "#/$defs/PostActivationImageTerminal"
+              }
+            },
+            "required": [
+              "terminal",
+              "trigger"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PostActivationImageDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/ImageOperationApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PostActivationImageTerminal": {
+        "oneOf": [
+          {
+            "properties": {
+              "terminal": {
+                "const": "generated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "empty_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/PostActivationImageDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "refused_by_provider",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "safety_filtered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ProviderTextDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "emitted_but_not_stored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "captured",
+                "type": "string"
+              },
+              "text_artifact_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition",
+              "text_artifact_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "phase": {
+            "const": "requested",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "validating",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "approval_id": {
+            "$ref": "#/$defs/ApprovalId"
+          },
+          "phase": {
+            "const": "awaiting_approval",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase",
+          "approval_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "plan_resolved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "projection_snapshotted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "scoped_override_active",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "provider_call_in_flight",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "provider_result_captured",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "blob_commit_pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "result_committed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "restoring_scoped_override",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "terminal",
+            "type": "string"
+          },
+          "terminal": {
+            "$ref": "#/$defs/ImageOperationTerminalClass"
+          }
+        },
+        "required": [
+          "phase",
+          "terminal"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ImageOperationPhase"
   },
   "WireInputLifecycleState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11751,6 +14221,138 @@
     ],
     "title": "WireInputStateHistoryEntry",
     "type": "object"
+  },
+  "WireModelRoutingApprovalPhase": {
+    "$defs": {
+      "ModelRoutingApprovalTerminalClass": {
+        "enum": [
+          "approved",
+          "denied_by_user",
+          "expired",
+          "interrupted",
+          "session_archived",
+          "surface_detached"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "phase": {
+            "const": "pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "presented_to_user",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "terminal",
+            "type": "string"
+          },
+          "terminal": {
+            "$ref": "#/$defs/ModelRoutingApprovalTerminalClass"
+          }
+        },
+        "required": [
+          "phase",
+          "terminal"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ModelRoutingApprovalPhase"
+  },
+  "WireModelRoutingApprovalRequest": {
+    "$defs": {
+      "ImageOperationApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "ImageOperationId": {
+        "type": "string"
+      },
+      "SwitchTurnApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "until_changed_from_model_origin",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnRequestId": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "parent": {
+            "const": "switch_turn",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/SwitchTurnApprovalReason"
+          },
+          "request_id": {
+            "$ref": "#/$defs/SwitchTurnRequestId"
+          }
+        },
+        "required": [
+          "parent",
+          "request_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/ImageOperationId"
+          },
+          "parent": {
+            "const": "image_operation",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/ImageOperationApprovalReason"
+          }
+        },
+        "required": [
+          "parent",
+          "operation_id",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ModelRoutingApprovalRequest"
   },
   "WireProviderBinding": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12142,8 +14744,317 @@
     "title": "WireRuntimeState",
     "type": "string"
   },
+  "WireScopedModelOverride": {
+    "$defs": {
+      "FiniteScopedTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "const": "one_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "const": "turns",
+                "type": "string"
+              },
+              "turns": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "duration",
+              "turns"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageOperationId": {
+        "type": "string"
+      },
+      "ScopedModelOverrideId": {
+        "type": "string"
+      },
+      "ScopedModelOverrideKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "image_operation",
+                "type": "string"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/ImageOperationId"
+              }
+            },
+            "required": [
+              "kind",
+              "operation_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "$ref": "#/$defs/FiniteScopedTurnDuration"
+              },
+              "kind": {
+                "const": "finite_switch_turn",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/SwitchTurnRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id",
+              "duration"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnRequestId": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "baseline_model_snapshot": {
+        "type": "string"
+      },
+      "id": {
+        "$ref": "#/$defs/ScopedModelOverrideId"
+      },
+      "kind": {
+        "$ref": "#/$defs/ScopedModelOverrideKind"
+      },
+      "previous_effective_model": {
+        "type": "string"
+      },
+      "target_model": {
+        "type": "string"
+      },
+      "topology_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "id",
+      "kind",
+      "previous_effective_model",
+      "baseline_model_snapshot",
+      "target_model",
+      "topology_epoch"
+    ],
+    "title": "ScopedModelOverride",
+    "type": "object"
+  },
   "WireSessionHistory": {
     "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      },
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
         "oneOf": [
@@ -12265,6 +15176,58 @@
                   "id",
                   "name",
                   "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "image",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "blob_ref": {
+                    "$ref": "#/$defs/BlobRef"
+                  },
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_id": {
+                    "$ref": "#/$defs/AssistantImageId"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "$ref": "#/$defs/ProviderImageMetadata"
+                  },
+                  "revised_prompt": {
+                    "$ref": "#/$defs/RevisedPromptDisposition"
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_id",
+                  "blob_ref",
+                  "media_type",
+                  "width",
+                  "height",
+                  "revised_prompt",
+                  "meta"
                 ],
                 "type": "object"
               }
@@ -12834,6 +15797,195 @@
   },
   "WireSessionMessage": {
     "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      },
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
         "oneOf": [
@@ -12955,6 +16107,58 @@
                   "id",
                   "name",
                   "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "image",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "blob_ref": {
+                    "$ref": "#/$defs/BlobRef"
+                  },
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_id": {
+                    "$ref": "#/$defs/AssistantImageId"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "$ref": "#/$defs/ProviderImageMetadata"
+                  },
+                  "revised_prompt": {
+                    "$ref": "#/$defs/RevisedPromptDisposition"
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_id",
+                  "blob_ref",
+                  "media_type",
+                  "width",
+                  "height",
+                  "revised_prompt",
+                  "meta"
                 ],
                 "type": "object"
               }
@@ -13411,6 +16615,559 @@
     ],
     "title": "WireSessionMessage"
   },
+  "WireSessionModelRoutingStatus": {
+    "$defs": {
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "FiniteScopedTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "const": "one_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "const": "turns",
+                "type": "string"
+              },
+              "turns": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "duration",
+              "turns"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ImageOperationId": {
+        "type": "string"
+      },
+      "ScopedModelOverrideId": {
+        "type": "string"
+      },
+      "ScopedModelOverrideKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "image_operation",
+                "type": "string"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/ImageOperationId"
+              }
+            },
+            "required": [
+              "kind",
+              "operation_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "$ref": "#/$defs/FiniteScopedTurnDuration"
+              },
+              "kind": {
+                "const": "finite_switch_turn",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/SwitchTurnRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id",
+              "duration"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScopedModelOverrideSummary": {
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/ScopedModelOverrideId"
+          },
+          "kind": {
+            "$ref": "#/$defs/ScopedModelOverrideKind"
+          },
+          "target_model": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "target_model",
+          "topology_epoch"
+        ],
+        "type": "object"
+      },
+      "SwitchTurnApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "until_changed_from_model_origin",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "approval_required_but_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/SwitchTurnApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "$ref": "#/$defs/FiniteScopedTurnDuration"
+              },
+              "duration_type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type",
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_type": {
+                "const": "until_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnPhase": {
+        "oneOf": [
+          {
+            "properties": {
+              "phase": {
+                "const": "requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "validating",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "pending_for_boundary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_id": {
+                "$ref": "#/$defs/ApprovalId"
+              },
+              "phase": {
+                "const": "awaiting_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "applying_finite_override",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "applying_persistent_reconfigure",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "active_finite_override",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "restoring_finite_override",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "phase": {
+                "const": "terminal",
+                "type": "string"
+              },
+              "terminal": {
+                "$ref": "#/$defs/SwitchTurnTerminalClass"
+              }
+            },
+            "required": [
+              "phase",
+              "terminal"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnRequestId": {
+        "type": "string"
+      },
+      "SwitchTurnRequestSummary": {
+        "properties": {
+          "duration": {
+            "$ref": "#/$defs/SwitchTurnDuration"
+          },
+          "phase": {
+            "$ref": "#/$defs/SwitchTurnPhase"
+          },
+          "request_id": {
+            "$ref": "#/$defs/SwitchTurnRequestId"
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "target_model",
+          "duration",
+          "phase"
+        ],
+        "type": "object"
+      },
+      "SwitchTurnRestoreTrigger": {
+        "enum": [
+          "consumed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnTerminalClass": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "consumed_and_restored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "interrupted_and_restored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "persistent_reconfigure_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "persistent_reconfigure_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "restore_failed",
+                "type": "string"
+              },
+              "trigger": {
+                "$ref": "#/$defs/SwitchTurnRestoreTrigger"
+              }
+            },
+            "required": [
+              "terminal",
+              "trigger"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "active_operation_override": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ScopedModelOverrideSummary"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "active_turn_override": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ScopedModelOverrideSummary"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "baseline_model": {
+        "type": "string"
+      },
+      "effective_model": {
+        "type": "string"
+      },
+      "pending_switch_turn": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SwitchTurnRequestSummary"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "baseline_model",
+      "effective_model"
+    ],
+    "title": "SessionModelRoutingStatus",
+    "type": "object"
+  },
   "WireSessionSummary": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical session summary for wire protocol.",
@@ -13478,6 +17235,822 @@
     ],
     "title": "WireStopReason",
     "type": "string"
+  },
+  "WireSwitchTurnControlResult": {
+    "$defs": {
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "FiniteScopedTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "const": "one_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "const": "turns",
+                "type": "string"
+              },
+              "turns": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "duration",
+              "turns"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "until_changed_from_model_origin",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "approval_required_but_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/SwitchTurnApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "$ref": "#/$defs/FiniteScopedTurnDuration"
+              },
+              "duration_type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type",
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_type": {
+                "const": "until_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnRequestId": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "duration": {
+            "$ref": "#/$defs/SwitchTurnDuration"
+          },
+          "request_id": {
+            "$ref": "#/$defs/SwitchTurnRequestId"
+          },
+          "result": {
+            "const": "applied",
+            "type": "string"
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "request_id",
+          "target_model",
+          "duration"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "approval_id": {
+            "$ref": "#/$defs/ApprovalId"
+          },
+          "duration": {
+            "$ref": "#/$defs/SwitchTurnDuration"
+          },
+          "reason": {
+            "$ref": "#/$defs/SwitchTurnApprovalReason"
+          },
+          "result": {
+            "const": "awaiting_approval",
+            "type": "string"
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "approval_id",
+          "target_model",
+          "duration",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/SwitchTurnDenialReason"
+          },
+          "request_id": {
+            "$ref": "#/$defs/SwitchTurnRequestId"
+          },
+          "result": {
+            "const": "denied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "request_id",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SwitchTurnControlResult"
+  },
+  "WireSwitchTurnIntent": {
+    "$defs": {
+      "FiniteScopedTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "const": "one_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration": {
+                "const": "turns",
+                "type": "string"
+              },
+              "turns": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "duration",
+              "turns"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnDuration": {
+        "oneOf": [
+          {
+            "properties": {
+              "duration": {
+                "$ref": "#/$defs/FiniteScopedTurnDuration"
+              },
+              "duration_type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type",
+              "duration"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_type": {
+                "const": "until_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "duration_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnOrigin": {
+        "oneOf": [
+          {
+            "properties": {
+              "origin": {
+                "const": "user",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnReasonTextDisposition"
+              }
+            },
+            "required": [
+              "origin",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "origin": {
+                "const": "model",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnReasonTextDisposition"
+              }
+            },
+            "required": [
+              "origin",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "origin": {
+                "const": "system_policy",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnPolicyReason"
+              }
+            },
+            "required": [
+              "origin",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnPolicyReason": {
+        "enum": [
+          "budget_downgrade",
+          "safety_handoff",
+          "release_temporary_hold"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnReasonText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "SwitchTurnReasonTextDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_provided",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "provided",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnReasonText"
+              }
+            },
+            "required": [
+              "disposition",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "duration": {
+        "$ref": "#/$defs/SwitchTurnDuration"
+      },
+      "origin": {
+        "$ref": "#/$defs/SwitchTurnOrigin"
+      },
+      "target_model": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "target_model",
+      "duration",
+      "origin"
+    ],
+    "title": "SwitchTurnIntent",
+    "type": "object"
+  },
+  "WireSwitchTurnPhase": {
+    "$defs": {
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "SwitchTurnApprovalReason": {
+        "enum": [
+          "cross_provider",
+          "cost_exceeds_threshold",
+          "safety_hold",
+          "until_changed_from_model_origin",
+          "realtime_detach_required"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnDenialReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "unsupported_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "cost_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "safety_policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "approval_required_but_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approvable": {
+                "$ref": "#/$defs/SwitchTurnApprovalReason"
+              },
+              "reason": {
+                "const": "denied_during_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "approvable"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "scoped_override_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "realtime_transport_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "projection_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SwitchTurnRestoreTrigger": {
+        "enum": [
+          "consumed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "SwitchTurnTerminalClass": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SwitchTurnDenialReason"
+              },
+              "terminal": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "consumed_and_restored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "interrupted_and_restored",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "persistent_reconfigure_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "persistent_reconfigure_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "terminal": {
+                "const": "restore_failed",
+                "type": "string"
+              },
+              "trigger": {
+                "$ref": "#/$defs/SwitchTurnRestoreTrigger"
+              }
+            },
+            "required": [
+              "terminal",
+              "trigger"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "phase": {
+            "const": "requested",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "validating",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "pending_for_boundary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "approval_id": {
+            "$ref": "#/$defs/ApprovalId"
+          },
+          "phase": {
+            "const": "awaiting_approval",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase",
+          "approval_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "applying_finite_override",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "applying_persistent_reconfigure",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "active_finite_override",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "restoring_finite_override",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "phase": {
+            "const": "terminal",
+            "type": "string"
+          },
+          "terminal": {
+            "$ref": "#/$defs/SwitchTurnTerminalClass"
+          }
+        },
+        "required": [
+          "phase",
+          "terminal"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SwitchTurnPhase"
   },
   "WireToolCall": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

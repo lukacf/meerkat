@@ -250,6 +250,19 @@ impl CompositeDispatcher {
         self.skill_tools = Some(tool_set);
     }
 
+    /// Register the session-owned assistant image generation builtin.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn register_image_generation_tool(
+        &mut self,
+        runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
+    ) {
+        let tool = Arc::new(crate::builtin::image_generation::GenerateImageTool::new(
+            runtime,
+        ));
+        self.allowed_tools.insert(tool.name().to_string());
+        self.builtin_tools.push(tool);
+    }
+
     /// Get usage instructions for all enabled tools.
     pub fn usage_instructions(&self) -> String {
         let mut out = String::from("# Available Tools\n\n");
@@ -429,6 +442,20 @@ impl AgentToolDispatcher for CompositeDispatcher {
                         };
                         ToolResult::new(call.id.to_string(), content, false)
                     }
+                    ToolOutput::JsonWithEffects {
+                        value,
+                        session_effects,
+                    } => {
+                        let content = match &value {
+                            Value::String(s) => s.clone(),
+                            _ => serde_json::to_string(&value).unwrap_or_default(),
+                        };
+                        return Ok(ToolDispatchOutcome {
+                            result: ToolResult::new(call.id.to_string(), content, false),
+                            async_ops,
+                            session_effects,
+                        });
+                    }
                     ToolOutput::Blocks(blocks) => {
                         ToolResult::with_blocks(call.id.to_string(), blocks, false)
                     }
@@ -471,6 +498,20 @@ impl AgentToolDispatcher for CompositeDispatcher {
                                 _ => serde_json::to_string(&value).unwrap_or_default(),
                             };
                             ToolResult::new(call.id.to_string(), content, false)
+                        }
+                        ToolOutput::JsonWithEffects {
+                            value,
+                            session_effects,
+                        } => {
+                            let content = match &value {
+                                Value::String(s) => s.clone(),
+                                _ => serde_json::to_string(&value).unwrap_or_default(),
+                            };
+                            return Ok(ToolDispatchOutcome {
+                                result: ToolResult::new(call.id.to_string(), content, false),
+                                async_ops,
+                                session_effects,
+                            });
                         }
                         ToolOutput::Blocks(blocks) => {
                             ToolResult::with_blocks(call.id.to_string(), blocks, false)

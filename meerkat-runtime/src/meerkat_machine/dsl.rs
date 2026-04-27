@@ -1777,6 +1777,77 @@ impl From<crate::HandlingMode> for InputLane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchTurnPhase {
+    #[default]
+    Requested,
+    PendingForBoundary,
+    ActiveFiniteOverride,
+    ApplyingPersistentReconfigure,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchTurnTerminal {
+    #[default]
+    Denied,
+    ConsumedAndRestored,
+    PersistentReconfigureApplied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingDenialReason {
+    #[default]
+    CapabilityPolicy,
+    ApprovalRequiredButUnavailable,
+    DeniedDuringApproval,
+    ScopedOverrideConflict,
+    RealtimeTransportConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingApprovalPhase {
+    #[default]
+    Pending,
+    PresentedToUser,
+    Approved,
+    Denied,
+    SurfaceDetached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingApprovalParentKind {
+    #[default]
+    SwitchTurn,
+    ImageOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageOperationPhase {
+    #[default]
+    Requested,
+    PlanResolved,
+    ScopedOverrideActive,
+    ProviderCallInFlight,
+    ResultCommitted,
+    RestoringScopedOverride,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageTerminal {
+    #[default]
+    Generated,
+    Denied,
+    EmptyResult,
+    RefusedByProvider,
+    SafetyFiltered,
+    Failed,
+    Cancelled,
+    Timeout,
+    ScopedRestoreFailed,
+}
+
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
 // DSL. Shape mirrors `meerkat_core::comms::TrustedPeerDescriptor`.
 // The catalog DSL holds an identical type; the two are structurally
@@ -1914,6 +1985,35 @@ machine! {
             llm_retry_selected_delay_ms: u64,
             llm_retry_last_failure_kind: Option<Enum<LlmRetryFailureKind>>,
             silent_intent_overrides: Set<String>,
+
+            // --- Model-routing / image-operation authority (Phase 1) ---
+            model_routing_baseline_model: Option<String>,
+            model_routing_baseline_realtime: Option<bool>,
+            model_routing_topology_epoch: u64,
+            model_routing_turn_override_id: Option<String>,
+            model_routing_turn_request_id: Option<String>,
+            model_routing_turn_target_model: Option<String>,
+            model_routing_turn_realtime: Option<bool>,
+            model_routing_turn_remaining_turns: Option<u64>,
+            model_routing_operation_override_id: Option<String>,
+            model_routing_operation_target_model: Option<String>,
+            model_routing_operation_realtime: Option<bool>,
+            model_routing_pending_switch_request_id: Option<String>,
+            model_routing_pending_switch_target_model: Option<String>,
+            model_routing_pending_switch_realtime: Option<bool>,
+            model_routing_pending_switch_turns: Option<u64>,
+            model_routing_pending_switch_phase: Option<Enum<RoutingSwitchTurnPhase>>,
+            model_routing_switch_terminal: Map<String, Enum<RoutingSwitchTurnTerminal>>,
+            model_routing_switch_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_image_operation_phases: Map<String, Enum<RoutingImageOperationPhase>>,
+            model_routing_image_operation_target_models: Map<String, String>,
+            model_routing_image_operation_realtime: Map<String, bool>,
+            model_routing_image_operation_requires_scoped_override: Map<String, bool>,
+            model_routing_image_terminals: Map<String, Enum<RoutingImageTerminal>>,
+            model_routing_image_terminal_payloads: Map<String, String>,
+            model_routing_image_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_approval_phases: Map<String, Enum<RoutingApprovalPhase>>,
+            model_routing_approval_parent_kind: Map<String, Enum<RoutingApprovalParentKind>>,
 
             // --- Registration substate ---
             registration_phase: RegistrationPhase,
@@ -2220,6 +2320,33 @@ machine! {
             llm_retry_selected_delay_ms = 0,
             llm_retry_last_failure_kind = None,
             silent_intent_overrides = EmptySet,
+            model_routing_baseline_model = None,
+            model_routing_baseline_realtime = None,
+            model_routing_topology_epoch = 0,
+            model_routing_turn_override_id = None,
+            model_routing_turn_request_id = None,
+            model_routing_turn_target_model = None,
+            model_routing_turn_realtime = None,
+            model_routing_turn_remaining_turns = None,
+            model_routing_operation_override_id = None,
+            model_routing_operation_target_model = None,
+            model_routing_operation_realtime = None,
+            model_routing_pending_switch_request_id = None,
+            model_routing_pending_switch_target_model = None,
+            model_routing_pending_switch_realtime = None,
+            model_routing_pending_switch_turns = None,
+            model_routing_pending_switch_phase = None,
+            model_routing_switch_terminal = EmptyMap,
+            model_routing_switch_denials = EmptyMap,
+            model_routing_image_operation_phases = EmptyMap,
+            model_routing_image_operation_target_models = EmptyMap,
+            model_routing_image_operation_realtime = EmptyMap,
+            model_routing_image_operation_requires_scoped_override = EmptyMap,
+            model_routing_image_terminals = EmptyMap,
+            model_routing_image_terminal_payloads = EmptyMap,
+            model_routing_image_denials = EmptyMap,
+            model_routing_approval_phases = EmptyMap,
+            model_routing_approval_parent_kind = EmptyMap,
             // Registration substate
             registration_phase = RegistrationPhase::Queuing,
             // Comms drain substate
@@ -2378,6 +2505,42 @@ machine! {
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
+            ModelRoutingStatus { session_id: SessionId },
+            SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
+            RequestFiniteSwitchTurn {
+                request_id: String,
+                target_model: String,
+                turns: u64,
+                target_realtime_capable: bool,
+                requires_approval: bool,
+                approval_available: bool,
+                approval_denied: bool,
+                realtime_detach_allowed: bool,
+            },
+            RequestUntilChangedSwitchTurn {
+                request_id: String,
+                target_model: String,
+                target_realtime_capable: bool,
+                requires_approval: bool,
+                approval_available: bool,
+                approval_denied: bool,
+                realtime_detach_allowed: bool,
+            },
+            CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
+            AdmitModelRoutingAssistantTurn,
+            BeginImageOperation {
+                operation_id: String,
+                target_model: String,
+                target_realtime_capable: bool,
+                requires_approval: bool,
+                approval_available: bool,
+                approval_denied: bool,
+                realtime_detach_allowed: bool,
+                requires_scoped_override: bool,
+            },
+            ActivateImageOperationOverride { operation_id: String, target_model: String, target_realtime_capable: bool },
+            CompleteImageOperation { operation_id: String, terminal: Enum<RoutingImageTerminal>, terminal_payload: String },
+            RestoreImageOperationOverride { operation_id: String },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
@@ -2716,6 +2879,7 @@ machine! {
             ListActiveInputs,
             RuntimeState,
             RuntimeRealtimeAttachmentStatus,
+            ModelRoutingStatus,
             LoadBoundaryReceipt,
             Recover
         ]
@@ -2753,6 +2917,14 @@ machine! {
             // consumers — they surface through structured logging / traces
             // as human-readable context.
             RuntimeNotice { kind: Enum<RuntimeNoticeKind>, detail: String },
+            ModelRoutingStatusChanged { topology_epoch: u64 },
+            SwitchTurnDenied { request_id: String, reason: Enum<RoutingDenialReason> },
+            SwitchTurnPersistentReconfigureRequested { request_id: String, target_model: String },
+            SwitchTurnFiniteOverrideActivated { request_id: String, target_model: String, turns_remaining: u64 },
+            SwitchTurnFiniteOverrideRestored { request_id: String },
+            ImageOperationPhaseChanged { operation_id: String, phase: Enum<RoutingImageOperationPhase> },
+            ImageOperationDenied { operation_id: String, reason: Enum<RoutingDenialReason> },
+            ModelRoutingApprovalTerminalized { approval_id: String, phase: Enum<RoutingApprovalPhase> },
             // Absorbed effects
             ResolveAdmission,
             SubmitAdmittedIngressEffect,
@@ -2882,6 +3054,14 @@ machine! {
         disposition WakeInterrupt => local,
         disposition CommittedVisibleSetPublished => external,
         disposition RuntimeNotice => external,
+        disposition ModelRoutingStatusChanged => external,
+        disposition SwitchTurnDenied => external,
+        disposition SwitchTurnPersistentReconfigureRequested => local,
+        disposition SwitchTurnFiniteOverrideActivated => local,
+        disposition SwitchTurnFiniteOverrideRestored => local,
+        disposition ImageOperationPhaseChanged => external,
+        disposition ImageOperationDenied => external,
+        disposition ModelRoutingApprovalTerminalized => external,
         // Absorbed effect dispositions
         disposition ResolveAdmission => local,
         disposition SubmitAdmittedIngressEffect => local,
@@ -3122,6 +3302,468 @@ machine! {
             guard "runtime_is_bound" { self.active_runtime_id != None }
             update {}
             to Running
+        }
+
+        // Phase 1 model-routing authority. These transitions own the scoped
+        // override stack and image-operation phase projection; the shell only
+        // realizes provider / persistence mechanics from the effects.
+        transition SetModelRoutingBaseline {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SetModelRoutingBaseline { baseline_model, realtime_capable }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.model_routing_baseline_model = Some(baseline_model);
+                self.model_routing_baseline_realtime = Some(realtime_capable);
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+            }
+            to Idle
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        transition RequestFiniteSwitchTurnApprovalUnavailable {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "baseline_known" { self.model_routing_baseline_model != None }
+            guard "approval_unavailable" { requires_approval && !approval_available }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ApprovalRequiredButUnavailable }
+        }
+
+        transition RequestFiniteSwitchTurnApprovalDenied {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            update {
+                self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
+                self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
+            emit ModelRoutingApprovalTerminalized { approval_id: request_id, phase: RoutingApprovalPhase::Denied }
+        }
+
+        transition RequestFiniteSwitchTurnRealtimeConflict {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "realtime_conflict" {
+                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::RealtimeTransportConflict);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::RealtimeTransportConflict }
+        }
+
+        transition RequestFiniteSwitchTurnScopedConflict {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "scoped_conflict" {
+                self.model_routing_turn_override_id != None
+                || self.model_routing_operation_override_id != None
+                || self.model_routing_pending_switch_request_id != None
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ScopedOverrideConflict);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ScopedOverrideConflict }
+        }
+
+        transition RequestFiniteSwitchTurnAccepted {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "baseline_known" { self.model_routing_baseline_model != None }
+            guard "positive_turns" { turns > 0 }
+            guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            guard "no_realtime_conflict" {
+                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
+            }
+            guard "no_scoped_conflict" {
+                self.model_routing_turn_override_id == None
+                && self.model_routing_operation_override_id == None
+                && self.model_routing_pending_switch_request_id == None
+            }
+            update {
+                if requires_approval {
+                    self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
+                    self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
+                }
+                self.model_routing_pending_switch_request_id = Some(request_id);
+                self.model_routing_pending_switch_target_model = Some(target_model);
+                self.model_routing_pending_switch_realtime = Some(target_realtime_capable);
+                self.model_routing_pending_switch_turns = Some(turns);
+                self.model_routing_pending_switch_phase = Some(RoutingSwitchTurnPhase::PendingForBoundary);
+            }
+            to Idle
+        }
+
+        transition RequestUntilChangedSwitchTurnAccepted {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "baseline_known" { self.model_routing_baseline_model != None }
+            guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            guard "no_realtime_conflict" {
+                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
+            }
+            update {
+                if requires_approval {
+                    self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
+                    self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
+                }
+                self.model_routing_pending_switch_request_id = Some(request_id);
+                self.model_routing_pending_switch_target_model = Some(target_model);
+                self.model_routing_pending_switch_realtime = Some(target_realtime_capable);
+                self.model_routing_pending_switch_turns = None;
+                self.model_routing_pending_switch_phase = Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure);
+            }
+            to Idle
+            emit SwitchTurnPersistentReconfigureRequested { request_id: request_id, target_model: target_model }
+        }
+
+        transition RequestUntilChangedSwitchTurnRealtimeConflict {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "realtime_conflict" {
+                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::RealtimeTransportConflict);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::RealtimeTransportConflict }
+        }
+
+        transition RequestUntilChangedSwitchTurnApprovalUnavailable {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "baseline_known" { self.model_routing_baseline_model != None }
+            guard "approval_unavailable" { requires_approval && !approval_available }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ApprovalRequiredButUnavailable }
+        }
+
+        transition RequestUntilChangedSwitchTurnApprovalDenied {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed
+            }
+            guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            update {
+                self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
+                self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
+            emit ModelRoutingApprovalTerminalized { approval_id: request_id, phase: RoutingApprovalPhase::Denied }
+        }
+
+        transition CompleteUntilChangedSwitchTurnReconfigure {
+            per_phase [Idle, Attached, Running]
+            on input CompleteUntilChangedSwitchTurnReconfigure { request_id }
+            guard "pending_until_changed_reconfigure" {
+                self.model_routing_pending_switch_request_id == Some(request_id)
+                && self.model_routing_pending_switch_turns == None
+                && self.model_routing_pending_switch_phase == Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::PersistentReconfigureApplied);
+                self.model_routing_pending_switch_request_id = None;
+                self.model_routing_pending_switch_target_model = None;
+                self.model_routing_pending_switch_realtime = None;
+                self.model_routing_pending_switch_phase = None;
+            }
+            to Idle
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        transition AdmitPendingFiniteSwitchTurn {
+            per_phase [Idle, Attached, Running]
+            on input AdmitModelRoutingAssistantTurn
+            guard "pending_finite" {
+                self.model_routing_pending_switch_request_id != None
+                && self.model_routing_pending_switch_turns != None
+            }
+            update {
+                self.model_routing_turn_override_id = Some(self.model_routing_pending_switch_request_id.get("value"));
+                self.model_routing_turn_request_id = Some(self.model_routing_pending_switch_request_id.get("value"));
+                self.model_routing_turn_target_model = Some(self.model_routing_pending_switch_target_model.get("value"));
+                self.model_routing_turn_realtime = Some(self.model_routing_pending_switch_realtime.get("value"));
+                self.model_routing_turn_remaining_turns = Some(self.model_routing_pending_switch_turns.get("value"));
+                self.model_routing_pending_switch_request_id = None;
+                self.model_routing_pending_switch_target_model = None;
+                self.model_routing_pending_switch_realtime = None;
+                self.model_routing_pending_switch_turns = None;
+                self.model_routing_pending_switch_phase = None;
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+            }
+            to Idle
+            emit SwitchTurnFiniteOverrideActivated {
+                request_id: self.model_routing_turn_request_id.get("value"),
+                target_model: self.model_routing_turn_target_model.get("value"),
+                turns_remaining: self.model_routing_turn_remaining_turns.get("value")
+            }
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        transition DecrementFiniteSwitchTurn {
+            per_phase [Idle, Attached, Running]
+            on input AdmitModelRoutingAssistantTurn
+            guard "active_multi_turn" {
+                self.model_routing_turn_override_id != None
+                && self.model_routing_turn_remaining_turns.get("value") > 1
+            }
+            update {
+                self.model_routing_turn_remaining_turns = Some(self.model_routing_turn_remaining_turns.get("value") - 1);
+            }
+            to Idle
+        }
+
+        transition RestoreConsumedFiniteSwitchTurn {
+            per_phase [Idle, Attached, Running]
+            on input AdmitModelRoutingAssistantTurn
+            guard "active_one_turn_remaining" {
+                self.model_routing_turn_override_id != None
+                && self.model_routing_turn_remaining_turns.get("value") == 1
+            }
+            update {
+                self.model_routing_switch_terminal.insert(self.model_routing_turn_request_id.get("value"), RoutingSwitchTurnTerminal::ConsumedAndRestored);
+                self.model_routing_turn_override_id = None;
+                self.model_routing_turn_request_id = None;
+                self.model_routing_turn_target_model = None;
+                self.model_routing_turn_realtime = None;
+                self.model_routing_turn_remaining_turns = None;
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+            }
+            to Idle
+            emit SwitchTurnFiniteOverrideRestored { request_id: self.model_routing_turn_request_id.get("value") }
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        transition BeginImageOperationScopedConflict {
+            per_phase [Idle, Attached, Running]
+            on input BeginImageOperation {
+                operation_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed, requires_scoped_override
+            }
+            guard "operation_in_operation_conflict" { self.model_routing_operation_override_id != None }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::ScopedOverrideConflict);
+            }
+            to Idle
+            emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::ScopedOverrideConflict }
+        }
+
+        transition BeginImageOperationRealtimeConflict {
+            per_phase [Idle, Attached, Running]
+            on input BeginImageOperation {
+                operation_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed, requires_scoped_override
+            }
+            guard "realtime_conflict" {
+                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
+            }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::RealtimeTransportConflict);
+            }
+            to Idle
+            emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::RealtimeTransportConflict }
+        }
+
+        transition BeginImageOperationApprovalUnavailable {
+            per_phase [Idle, Attached, Running]
+            on input BeginImageOperation {
+                operation_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed, requires_scoped_override
+            }
+            guard "approval_unavailable" { requires_approval && !approval_available }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
+            }
+            to Idle
+            emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::ApprovalRequiredButUnavailable }
+        }
+
+        transition BeginImageOperationApprovalDenied {
+            per_phase [Idle, Attached, Running]
+            on input BeginImageOperation {
+                operation_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed, requires_scoped_override
+            }
+            guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            update {
+                self.model_routing_approval_phases.insert(operation_id, RoutingApprovalPhase::Denied);
+                self.model_routing_approval_parent_kind.insert(operation_id, RoutingApprovalParentKind::ImageOperation);
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::DeniedDuringApproval);
+            }
+            to Idle
+            emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::DeniedDuringApproval }
+            emit ModelRoutingApprovalTerminalized { approval_id: operation_id, phase: RoutingApprovalPhase::Denied }
+        }
+
+        transition BeginImageOperationAccepted {
+            per_phase [Idle, Attached, Running]
+            on input BeginImageOperation {
+                operation_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                realtime_detach_allowed, requires_scoped_override
+            }
+            guard "baseline_known" { self.model_routing_baseline_model != None }
+            guard "no_operation_in_operation" { self.model_routing_operation_override_id == None }
+            guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            guard "no_realtime_conflict" {
+                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
+            }
+            update {
+                if requires_approval {
+                    self.model_routing_approval_phases.insert(operation_id, RoutingApprovalPhase::Approved);
+                    self.model_routing_approval_parent_kind.insert(operation_id, RoutingApprovalParentKind::ImageOperation);
+                }
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::PlanResolved);
+                self.model_routing_image_operation_target_models.insert(operation_id, target_model);
+                self.model_routing_image_operation_realtime.insert(operation_id, target_realtime_capable);
+                if requires_scoped_override {
+                    self.model_routing_image_operation_requires_scoped_override.insert(operation_id, true);
+                }
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::PlanResolved }
+        }
+
+        transition ActivateImageOperationOverride {
+            per_phase [Idle, Attached, Running]
+            on input ActivateImageOperationOverride { operation_id, target_model, target_realtime_capable }
+            guard "operation_plan_resolved" { self.model_routing_image_operation_target_models.contains_key(operation_id) }
+            guard "operation_requires_scoped_override" {
+                self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
+            }
+            guard "no_operation_override_active" { self.model_routing_operation_override_id == None }
+            update {
+                self.model_routing_operation_override_id = Some(operation_id);
+                self.model_routing_operation_target_model = Some(target_model);
+                self.model_routing_operation_realtime = Some(target_realtime_capable);
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::ScopedOverrideActive);
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::ScopedOverrideActive }
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        transition CompleteImageOperation {
+            per_phase [Idle, Attached, Running]
+            on input CompleteImageOperation { operation_id, terminal, terminal_payload }
+            guard "operation_active" { self.model_routing_operation_override_id == Some(operation_id) }
+            guard "operation_requires_scoped_override" {
+                self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
+            }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::RestoringScopedOverride);
+                self.model_routing_image_terminals.insert(operation_id, terminal);
+                self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::RestoringScopedOverride }
+        }
+
+        transition CompleteImageOperationWithoutScopedOverride {
+            per_phase [Idle, Attached, Running]
+            on input CompleteImageOperation { operation_id, terminal, terminal_payload }
+            guard "operation_plan_resolved" { self.model_routing_image_operation_target_models.contains_key(operation_id) }
+            guard "operation_does_not_require_scoped_override" {
+                !self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
+            }
+            guard "no_operation_override_active" { self.model_routing_operation_override_id == None }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, terminal);
+                self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+                self.model_routing_image_operation_target_models.remove(operation_id);
+                self.model_routing_image_operation_realtime.remove(operation_id);
+                self.model_routing_image_operation_requires_scoped_override.remove(operation_id);
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }
+        }
+
+        transition RestoreImageOperationOverride {
+            per_phase [Idle, Attached, Running]
+            on input RestoreImageOperationOverride { operation_id }
+            guard "operation_active" { self.model_routing_operation_override_id == Some(operation_id) }
+            update {
+                self.model_routing_operation_override_id = None;
+                self.model_routing_operation_target_model = None;
+                self.model_routing_operation_realtime = None;
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_operation_target_models.remove(operation_id);
+                self.model_routing_image_operation_realtime.remove(operation_id);
+                self.model_routing_image_operation_requires_scoped_override.remove(operation_id);
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }
+            emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
         // 5. StagePersistentFilter: per-phase self-loop, guard session_registered

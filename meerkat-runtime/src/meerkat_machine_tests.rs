@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -28,6 +29,59 @@ use tokio::sync::Notify;
 
 use crate::completion::CompletionOutcome;
 use crate::identifiers::IdempotencyKey;
+use crate::meerkat_machine_types::{
+    ImageOperationRoutingRequest, ImageOperationRoutingResult, ModelRoutingApprovalDisposition,
+    ModelRoutingRealtimePolicy, SwitchTurnRequest,
+};
+
+fn uuid(n: u128) -> uuid::Uuid {
+    uuid::Uuid::from_u128(n)
+}
+
+fn model(id: &str) -> meerkat_core::lifecycle::run_primitive::ModelId {
+    meerkat_core::lifecycle::run_primitive::ModelId::new(id)
+}
+
+fn realtime_policy(target_realtime_capable: bool) -> ModelRoutingRealtimePolicy {
+    ModelRoutingRealtimePolicy {
+        target_realtime_capable,
+        allow_realtime_detach: false,
+    }
+}
+
+fn finite_switch_request(
+    n: u128,
+    target_model: &str,
+    turns: meerkat_core::image_generation::FiniteScopedTurnDuration,
+) -> SwitchTurnRequest {
+    SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(n)),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model(target_model),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::Finite {
+                duration: turns,
+            },
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::User {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnReasonTextDisposition::NotProvided,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    }
+}
+
+fn image_request(n: u128, target_model: &str) -> ImageOperationRoutingRequest {
+    ImageOperationRoutingRequest {
+        operation_id: meerkat_core::image_generation::ImageOperationId::new(uuid(n)),
+        target_model: model(target_model),
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+        requires_scoped_override: true,
+    }
+}
 
 struct FakeDrainRuntime {
     notify: Arc<Notify>,
@@ -321,6 +375,484 @@ async fn session_service_runtime_ext_write_side_follows_machine_control_surface(
         reset_report.inputs_abandoned, 0,
         "reset after retire should not find residual queued work"
     );
+}
+
+#[tokio::test]
+async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("baseline should be projected through machine command surface");
+
+    let switch = finite_switch_request(
+        101,
+        "turn-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        switch,
+    )
+    .await
+    .expect("finite switch_turn should be admitted");
+
+    let before_boundary =
+        <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("status should project");
+    assert_eq!(before_boundary.effective_model.as_str(), "baseline");
+    assert!(
+        before_boundary.pending_switch_turn.is_some(),
+        "finite switch_turn waits for the next admitted assistant-turn boundary"
+    );
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("assistant-turn boundary should activate finite override");
+    let turn_active = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("status should project");
+    assert_eq!(turn_active.effective_model.as_str(), "turn-target");
+
+    let image = image_request(201, "operation-target");
+    let operation_id = image.operation_id;
+    let image_result = <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        image,
+    )
+    .await
+    .expect("image operation should be admitted under turn override");
+    assert!(matches!(
+        image_result,
+        ImageOperationRoutingResult::Accepted {
+            phase: meerkat_core::image_generation::ImageOperationPhase::PlanResolved,
+            ..
+        }
+    ));
+    <MeerkatMachine as SessionServiceRuntimeExt>::activate_image_operation_override(
+        &adapter,
+        &session_id,
+        operation_id,
+    )
+    .await
+    .expect("operation-scoped override should activate");
+    let operation_active =
+        <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("status should project");
+    assert_eq!(
+        operation_active.effective_model.as_str(),
+        "operation-target",
+        "operation override takes precedence over the active turn override"
+    );
+
+    let empty_terminal = meerkat_core::image_generation::ImageOperationTerminalClass::EmptyResult {
+        provider_text: meerkat_core::image_generation::ProviderTextDisposition::Captured {
+            text_artifact_ref: meerkat_core::image_generation::TextArtifactRef::new(
+                "provider-text-artifact",
+            ),
+        },
+    };
+    <MeerkatMachine as SessionServiceRuntimeExt>::complete_image_operation(
+        &adapter,
+        &session_id,
+        operation_id,
+        empty_terminal.clone(),
+    )
+    .await
+    .expect("image operation should enter restore phase");
+    let restored_phase =
+        <MeerkatMachine as SessionServiceRuntimeExt>::restore_image_operation_override(
+            &adapter,
+            &session_id,
+            operation_id,
+        )
+        .await
+        .expect("operation restore should clear child override");
+    assert_eq!(
+        restored_phase,
+        meerkat_core::image_generation::ImageOperationPhase::Terminal {
+            terminal: empty_terminal
+        },
+        "restore should preserve the exact payload-bearing terminal passed to complete"
+    );
+    let restored_to_turn =
+        <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("status should project");
+    assert_eq!(restored_to_turn.effective_model.as_str(), "turn-target");
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("next admitted assistant turn should consume one-turn override");
+    let consumed = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("status should project");
+    assert_eq!(consumed.effective_model.as_str(), "baseline");
+    assert!(consumed.active_turn_override.is_none());
+}
+
+#[tokio::test]
+async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let mut denied_switch = finite_switch_request(
+        301,
+        "expensive-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    denied_switch.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_switch.approval_reason =
+        Some(meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold);
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_switch,
+    )
+    .await
+    .expect("denial should terminalize through machine state");
+    assert!(matches!(
+        denied,
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            ..
+        }
+    ));
+
+    let mut denied_until_changed = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(304)),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-denied-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::RequiredButUnavailable,
+        approval_reason: Some(
+            meerkat_core::image_generation::SwitchTurnApprovalReason::UntilChangedFromModelOrigin,
+        ),
+    };
+    let denied_persistent = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_until_changed.clone(),
+    )
+    .await
+    .expect("UntilChanged approval-unavailable denial should terminalize");
+    assert!(matches!(
+        denied_persistent,
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason:
+                meerkat_core::image_generation::SwitchTurnDenialReason::ApprovalRequiredButUnavailable,
+            ..
+        }
+    ));
+    denied_until_changed.request_id =
+        meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(305));
+    denied_until_changed.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    let denied_by_user = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_until_changed,
+    )
+    .await
+    .expect("UntilChanged user denial should terminalize");
+    assert!(matches!(
+        denied_by_user,
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            ..
+        }
+    ));
+
+    let active_switch = finite_switch_request(
+        302,
+        "turn-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::Turns {
+            turns: NonZeroU32::new(2).unwrap(),
+        },
+    );
+    <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        active_switch,
+    )
+    .await
+    .unwrap();
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .unwrap();
+
+    let nested_switch = finite_switch_request(
+        303,
+        "nested-turn-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    let nested_switch_result = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        nested_switch,
+    )
+    .await
+    .expect("scoped conflict should return typed denial");
+    assert!(matches!(
+        nested_switch_result,
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+            ..
+        }
+    ));
+
+    let image = image_request(401, "operation-target");
+    let operation_id = image.operation_id;
+    <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        image,
+    )
+    .await
+    .unwrap();
+    <MeerkatMachine as SessionServiceRuntimeExt>::activate_image_operation_override(
+        &adapter,
+        &session_id,
+        operation_id,
+    )
+    .await
+    .unwrap();
+
+    let nested_image = image_request(402, "nested-operation-target");
+    let nested_image_result = <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        nested_image,
+    )
+    .await
+    .expect("operation-in-operation conflict should terminalize");
+    assert!(matches!(
+        nested_image_result,
+        ImageOperationRoutingResult::Denied {
+            reason:
+                meerkat_core::image_generation::ImageOperationDenialReason::ScopedOverrideConflict,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "baseline".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        connection_ref: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::clone(&current_identity),
+        current_visibility_state: Arc::clone(&current_visibility_state),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "persistent-target".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: false,
+    }));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(501)),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    };
+    <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        request,
+    )
+    .await
+    .expect("UntilChanged should route through persistent reconfigure family");
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status.baseline_model.as_str(), "persistent-target");
+    assert_eq!(status.effective_model.as_str(), "persistent-target");
+    assert!(status.active_turn_override.is_none());
+    assert_eq!(
+        current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model,
+        "persistent-target",
+        "UntilChanged switch_turn must pass through the live LLM reconfigure host"
+    );
+}
+
+#[tokio::test]
+async fn realtime_policy_rejects_non_realtime_effective_targets_without_detach_permission() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("realtime-baseline"),
+        true,
+    )
+    .await
+    .unwrap();
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("realtime intent projection should succeed");
+
+    let mut switch = finite_switch_request(
+        601,
+        "batch-only-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    switch.target_realtime = realtime_policy(false);
+    let switch_result = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        switch,
+    )
+    .await
+    .expect("realtime policy conflict should terminalize");
+    assert!(matches!(
+        switch_result,
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason:
+                meerkat_core::image_generation::SwitchTurnDenialReason::RealtimeTransportConflict,
+            ..
+        }
+    ));
+
+    let mut image = image_request(602, "batch-image-target");
+    image.target_realtime = realtime_policy(false);
+    let image_result = <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        image,
+    )
+    .await
+    .expect("realtime policy conflict should terminalize");
+    assert!(matches!(
+        image_result,
+        ImageOperationRoutingResult::Denied {
+            reason: meerkat_core::image_generation::ImageOperationDenialReason::RealtimeTransportConflict,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -14533,6 +15065,24 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         }
         MeerkatMachineCommandResult::RealtimeChannelStatus(status) => {
             format!("realtime_channel_status:{status:?}")
+        }
+        MeerkatMachineCommandResult::SessionModelRoutingStatus(status) => {
+            format!(
+                "session_model_routing_status:{}->{}",
+                status.baseline_model, status.effective_model
+            )
+        }
+        MeerkatMachineCommandResult::SwitchTurnControlResult(result) => {
+            format!("switch_turn_control_result:{result:?}")
+        }
+        MeerkatMachineCommandResult::ImageOperationRoutingResult(result) => {
+            format!("image_operation_routing_result:{result:?}")
+        }
+        MeerkatMachineCommandResult::ImageOperationPhase(phase) => {
+            format!("image_operation_phase:{phase:?}")
+        }
+        MeerkatMachineCommandResult::ImageGenerationResolvedPlan(result) => {
+            format!("image_generation_resolved_plan:{result:?}")
         }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }

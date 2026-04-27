@@ -504,7 +504,7 @@ impl BuiltinTool for ShellTool {
                 // and do not block the turn boundary.
                 .map(meerkat_core::ops::AsyncOpRef::detached)
                 .collect(),
-            ToolOutput::Blocks(_) => Vec::new(),
+            ToolOutput::Blocks(_) | ToolOutput::JsonWithEffects { .. } => Vec::new(),
         }
     }
 }

@@ -37,14 +37,16 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 # Output
 - When the task is complete, provide a clear summary of what was accomplished.
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
+#[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
+use meerkat_core::SessionId;
+#[cfg(not(feature = "memory-store"))]
+use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
     Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
     SessionTooling, ToolCategoryOverride,
 };
-#[cfg(not(feature = "memory-store"))]
-use meerkat_core::{SessionId, SessionMeta};
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
@@ -223,6 +225,12 @@ pub struct AgentBuildConfig {
     pub recoverable_tool_defs: Option<Vec<meerkat_core::ToolDef>>,
     /// Optional blob store override used for image externalization/hydration.
     pub blob_store_override: Option<Arc<dyn BlobStore>>,
+    /// Optional runtime machine handle for the generated-image builtin.
+    pub image_generation_machine_override:
+        Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
+    /// Optional provider executor for the generated-image builtin.
+    pub image_generation_executor_override:
+        Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
     /// Per-build override for factory-level `enable_builtins`.
     /// `Inherit` defers to the factory default.
     pub override_builtins: ToolCategoryOverride,
@@ -366,6 +374,14 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("external_tools", &self.external_tools.is_some())
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
+            .field(
+                "image_generation_machine_override",
+                &self.image_generation_machine_override.is_some(),
+            )
+            .field(
+                "image_generation_executor_override",
+                &self.image_generation_executor_override.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
@@ -429,6 +445,8 @@ impl AgentBuildConfig {
             external_tools: None,
             recoverable_tool_defs: None,
             blob_store_override: None,
+            image_generation_machine_override: None,
+            image_generation_executor_override: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
@@ -710,6 +728,51 @@ pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct RoutingImageGenerationExecutor {
+    executors: BTreeMap<String, Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RoutingImageGenerationExecutor {
+    fn new(
+        executors: BTreeMap<String, Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+    ) -> Self {
+        Self { executors }
+    }
+
+    fn provider_key(plan: &meerkat_core::GenerateImageExecutionPlan) -> &'static str {
+        match plan {
+            meerkat_core::GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool { .. }
+            | meerkat_core::GenerateImageExecutionPlan::OpenAiImagesApi { .. } => "openai",
+            meerkat_core::GenerateImageExecutionPlan::GeminiNativeImageModel { .. } => "gemini",
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecutor {
+    async fn execute_image_generation(
+        &self,
+        request: meerkat_llm_core::ProviderImageGenerationRequest,
+    ) -> Result<meerkat_llm_core::ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
+        let provider = Self::provider_key(&request.execution_plan);
+        let executor = self
+            .executors
+            .get(provider)
+            .or_else(|| {
+                (provider == "gemini")
+                    .then(|| self.executors.get("google"))
+                    .flatten()
+            })
+            .ok_or_else(|| meerkat_llm_core::LlmError::InvalidRequest {
+                message: format!("no image generation executor configured for provider {provider}"),
+            })?;
+        executor.execute_image_generation(request).await
+    }
+}
+
 /// Return `true` when the OpenAI model ID advertises
 /// `ModelCapabilities.realtime == true` in the curated catalog.
 ///
@@ -834,6 +897,9 @@ pub struct AgentFactory {
     /// deterministic and off the canonical-seam-bypass path
     /// (dogma §65).
     provider_registry: Arc<meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry>,
+    /// Default machine handle for generated-image planning/routing.
+    pub image_generation_machine:
+        Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -855,6 +921,10 @@ impl std::fmt::Debug for AgentFactory {
         d.field("skill_source", &self.skill_source.as_ref().map(|_| ".."));
         d.field("custom_store", &self.custom_store.as_ref().map(|_| ".."));
         d.field("mob_tools", &self.mob_tools.is_some());
+        d.field(
+            "image_generation_machine",
+            &self.image_generation_machine.is_some(),
+        );
         #[cfg(feature = "comms")]
         d.field("comms_runtime", &self.comms_runtime.is_some());
         d.finish()
@@ -958,6 +1028,7 @@ impl AgentFactory {
             #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
             external_auth_resolvers: BTreeMap::new(),
+            image_generation_machine: None,
         }
     }
 
@@ -999,6 +1070,7 @@ impl AgentFactory {
             refresh_coord: None,
             external_auth_resolvers: BTreeMap::new(),
             provider_registry: Arc::new(build_provider_registry()),
+            image_generation_machine: None,
         }
     }
 
@@ -1018,6 +1090,14 @@ impl AgentFactory {
         &self,
     ) -> Arc<meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry> {
         Arc::clone(&self.provider_registry)
+    }
+
+    pub fn with_image_generation_machine(
+        mut self,
+        machine: Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
+    ) -> Self {
+        self.image_generation_machine = Some(machine);
+        self
     }
 
     /// Register an external auth resolver that surfaces bindings whose
@@ -1684,6 +1764,9 @@ impl AgentFactory {
             skill_engine,
             // Public API defaults to true (all tools visible).
             true,
+            None,
+            None,
+            None,
         )
         .await
     }
@@ -1704,6 +1787,11 @@ impl AgentFactory {
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
         image_tool_results: bool,
+        image_generation_machine: Option<
+            Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
+        >,
+        image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+        image_generation_blob_store: Option<Arc<dyn BlobStore>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -1733,7 +1821,7 @@ impl AgentFactory {
                 project_root,
                 shell_config,
                 external,
-                session_id,
+                session_id.clone(),
                 ops_lifecycle,
                 image_tool_results,
             )
@@ -1743,6 +1831,24 @@ impl AgentFactory {
         if let Some(engine) = skill_engine {
             composite
                 .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
+        }
+
+        if let (Some(session_id), Some(machine), Some(executor), Some(blob_store)) = (
+            session_id
+                .as_deref()
+                .and_then(|id| SessionId::parse(id).ok()),
+            image_generation_machine,
+            image_generation_executor,
+            image_generation_blob_store,
+        ) {
+            composite.register_image_generation_tool(
+                meerkat_tools::builtin::image_generation::ImageGenerationToolRuntime {
+                    session_id,
+                    machine,
+                    blob_store,
+                    executor,
+                },
+            );
         }
 
         Ok(Arc::new(composite))
@@ -1833,6 +1939,10 @@ impl AgentFactory {
         };
 
         // 3. Create LLM client.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut auto_image_generation_executor: Option<
+            Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
+        > = None;
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
             Some(client) => Arc::clone(client),
             None if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") => {
@@ -1892,6 +2002,12 @@ impl AgentFactory {
                         .await
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
                     provider = connection.provider;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        auto_image_generation_executor = provider_registry
+                            .build_image_generation_executor(connection.clone())
+                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    }
 
                     // Phase 1.5-rev loop closure — refresh-loop middle:
                     // The DSL tracks per-binding auth lifecycle state.
@@ -1960,6 +2076,66 @@ impl AgentFactory {
                 }
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        if build_config.image_generation_executor_override.is_none() {
+            let mut executors: BTreeMap<
+                String,
+                Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
+            > = BTreeMap::new();
+            if let Some(executor) = auto_image_generation_executor.take() {
+                executors.insert(provider_key(provider).to_string(), executor);
+            }
+            for image_provider in [Provider::OpenAI, Provider::Gemini] {
+                let key = provider_key(image_provider).to_string();
+                if executors.contains_key(&key) {
+                    continue;
+                }
+                let Ok((realm, _binding_id, connection_ref)) =
+                    Self::resolve_realm_binding_for_provider(
+                        config,
+                        image_provider,
+                        None,
+                        build_config.realm_id.as_deref(),
+                    )
+                else {
+                    continue;
+                };
+                #[allow(unused_mut)]
+                let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(store) = self.token_store.clone() {
+                        env = env.with_token_store(store);
+                    }
+                    if let Some(coord) = self.refresh_coord.clone() {
+                        env = env.with_refresh_coordinator(coord);
+                    }
+                }
+                for (handle, resolver) in &self.external_auth_resolvers {
+                    env = env.with_external_resolver(handle.clone(), resolver.clone());
+                }
+                let Ok(connection) = self
+                    .provider_registry
+                    .resolve(&realm, &connection_ref, &env)
+                    .await
+                else {
+                    continue;
+                };
+                let Ok(Some(executor)) = self
+                    .provider_registry
+                    .build_image_generation_executor(connection)
+                else {
+                    continue;
+                };
+                executors.insert(key, executor);
+            }
+            auto_image_generation_executor = match executors.len() {
+                0 => None,
+                1 => executors.into_values().next(),
+                _ => Some(Arc::new(RoutingImageGenerationExecutor::new(executors))
+                    as Arc<dyn meerkat_llm_core::ImageGenerationExecutor>),
+            };
+        }
 
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
@@ -2260,6 +2436,15 @@ impl AgentFactory {
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
                         _image_tool_results,
+                        build_config
+                            .image_generation_machine_override
+                            .clone()
+                            .or_else(|| self.image_generation_machine.clone()),
+                        build_config
+                            .image_generation_executor_override
+                            .clone()
+                            .or_else(|| auto_image_generation_executor.clone()),
+                        build_config.blob_store_override.clone(),
                     )
                     .await?
                 }
@@ -3236,6 +3421,11 @@ impl AgentFactory {
         session_id: String,
         ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
         image_tool_results: bool,
+        image_generation_machine: Option<
+            Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>,
+        >,
+        image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+        image_generation_blob_store: Option<Arc<dyn BlobStore>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -3300,6 +3490,9 @@ impl AgentFactory {
                 Some(ops_lifecycle),
                 skill_engine,
                 image_tool_results,
+                image_generation_machine,
+                image_generation_executor,
+                image_generation_blob_store,
             )
             .await?;
 

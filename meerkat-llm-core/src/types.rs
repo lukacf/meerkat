@@ -5,9 +5,16 @@
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
+use meerkat_core::image_generation::{
+    GenerateImageExecutionPlan, GenerateImageRequest, ImageFormatPreference,
+    ImageGenerationToolResult, ImageOperationTerminalClass, ImageSizePreference,
+    ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
+};
 use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{Message, OutputSchema, StopReason, ToolDef, Usage};
+use meerkat_core::{
+    AssistantImageRef, MediaType, Message, OutputSchema, StopReason, ToolDef, Usage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
@@ -47,6 +54,101 @@ pub trait LlmClient: Send + Sync {
             schema: output_schema.schema.as_value().clone(),
             warnings: Vec::new(),
         })
+    }
+}
+
+/// Provider-neutral image execution seam.
+///
+/// The request is already a typed projection from machine/runtime state. Provider
+/// crates consume it as mechanics-only input and return normalized, pre-blob
+/// image bytes plus metadata for the runtime to commit durably.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait ImageGenerationExecutor: Send + Sync {
+    async fn execute_image_generation(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderImageGenerationRequest {
+    pub operation_id: meerkat_core::ImageOperationId,
+    pub model: String,
+    pub generate_request: GenerateImageRequest,
+    pub execution_plan: GenerateImageExecutionPlan,
+    /// Machine-owned provider projection. Provider adapters do not construct
+    /// replay policy from transcript history; they lower these messages to the
+    /// provider-native request.
+    #[serde(default)]
+    pub projected_messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderGeneratedImage {
+    pub media_type: MediaType,
+    /// Base64-encoded image bytes without a data URL prefix.
+    pub base64_data: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderImageGenerationOutput {
+    pub operation_id: meerkat_core::ImageOperationId,
+    pub terminal: ImageOperationTerminalClass,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ProviderGeneratedImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_text: Option<String>,
+    pub revised_prompt: RevisedPromptDisposition,
+    pub native_metadata: ProviderImageMetadata,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<meerkat_core::ImageGenerationWarning>,
+}
+
+impl ProviderImageGenerationOutput {
+    pub fn to_tool_result(
+        &self,
+        committed_images: Vec<AssistantImageRef>,
+        provider_text: ProviderTextDisposition,
+    ) -> ImageGenerationToolResult {
+        ImageGenerationToolResult {
+            operation_id: self.operation_id,
+            terminal: self.terminal.clone(),
+            images: committed_images,
+            provider_text,
+            revised_prompt: self.revised_prompt.clone(),
+            native_metadata: self.native_metadata.clone(),
+            warnings: self.warnings.clone(),
+        }
+    }
+}
+
+pub fn normalize_base64_image_data(data: &str) -> String {
+    data.split_once(";base64,")
+        .map(|(_, payload)| payload)
+        .unwrap_or(data)
+        .trim()
+        .to_string()
+}
+
+pub fn media_type_from_format_preference(format: ImageFormatPreference) -> MediaType {
+    let media_type = match format {
+        ImageFormatPreference::Jpeg => "image/jpeg",
+        ImageFormatPreference::Webp => "image/webp",
+        ImageFormatPreference::Auto | ImageFormatPreference::Png => "image/png",
+    };
+    MediaType::new(media_type)
+}
+
+pub fn dimensions_from_size_preference(size: &ImageSizePreference) -> (u32, u32) {
+    match size {
+        ImageSizePreference::Auto => (0, 0),
+        ImageSizePreference::Square1024 => (1024, 1024),
+        ImageSizePreference::Portrait1024x1536 => (1024, 1536),
+        ImageSizePreference::Landscape1536x1024 => (1536, 1024),
+        ImageSizePreference::Custom { width, height } => (width.get(), height.get()),
     }
 }
 

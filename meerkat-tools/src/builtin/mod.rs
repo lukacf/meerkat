@@ -21,6 +21,7 @@ pub mod composite;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_store;
+pub mod image_generation;
 pub mod memory_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
@@ -63,6 +64,11 @@ use std::sync::Arc;
 pub enum ToolOutput {
     /// JSON value (existing behavior). Serialized to text for ToolResult.
     Json(serde_json::Value),
+    /// JSON value plus session effects to apply at the canonical turn owner.
+    JsonWithEffects {
+        value: serde_json::Value,
+        session_effects: Vec<meerkat_core::ops::SessionEffect>,
+    },
     /// Multimodal content blocks (e.g., images from view_image).
     Blocks(Vec<ContentBlock>),
 }
@@ -73,7 +79,7 @@ impl ToolOutput {
     /// Returns `None` if this is a `Blocks` variant.
     pub fn into_json(self) -> Option<serde_json::Value> {
         match self {
-            Self::Json(v) => Some(v),
+            Self::Json(v) | Self::JsonWithEffects { value: v, .. } => Some(v),
             Self::Blocks(_) => None,
         }
     }

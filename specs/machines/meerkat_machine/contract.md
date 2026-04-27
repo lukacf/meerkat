@@ -13,6 +13,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
+- `model_routing_baseline_model`: `Option<String>`
+- `model_routing_baseline_realtime`: `Option<Bool>`
+- `model_routing_topology_epoch`: `u64`
+- `model_routing_turn_override_id`: `Option<String>`
+- `model_routing_turn_request_id`: `Option<String>`
+- `model_routing_turn_target_model`: `Option<String>`
+- `model_routing_turn_realtime`: `Option<Bool>`
+- `model_routing_turn_remaining_turns`: `Option<u64>`
+- `model_routing_operation_override_id`: `Option<String>`
+- `model_routing_operation_target_model`: `Option<String>`
+- `model_routing_operation_realtime`: `Option<Bool>`
+- `model_routing_pending_switch_request_id`: `Option<String>`
+- `model_routing_pending_switch_target_model`: `Option<String>`
+- `model_routing_pending_switch_realtime`: `Option<Bool>`
+- `model_routing_pending_switch_turns`: `Option<u64>`
+- `model_routing_pending_switch_phase`: `Option<RoutingSwitchTurnPhase>`
+- `model_routing_switch_terminal`: `Map<String, RoutingSwitchTurnTerminal>`
+- `model_routing_switch_denials`: `Map<String, RoutingDenialReason>`
+- `model_routing_image_operation_phases`: `Map<String, RoutingImageOperationPhase>`
+- `model_routing_image_operation_target_models`: `Map<String, String>`
+- `model_routing_image_operation_realtime`: `Map<String, Bool>`
+- `model_routing_image_operation_requires_scoped_override`: `Map<String, Bool>`
+- `model_routing_image_terminals`: `Map<String, RoutingImageTerminal>`
+- `model_routing_image_terminal_payloads`: `Map<String, String>`
+- `model_routing_image_denials`: `Map<String, RoutingDenialReason>`
+- `model_routing_approval_phases`: `Map<String, RoutingApprovalPhase>`
+- `model_routing_approval_parent_kind`: `Map<String, RoutingApprovalParentKind>`
 - `realtime_intent_present`: `Bool`
 - `realtime_binding_state`: `RealtimeBindingState`
 - `realtime_binding_authority_epoch`: `Option<u64>`
@@ -79,6 +106,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: AgentRuntimeId)
 - `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
+- `ModelRoutingStatus`(session_id: SessionId)
+- `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
+- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool)
+- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool)
+- `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
+- `AdmitModelRoutingAssistantTurn`
+- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
+- `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
+- `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
+- `RestoreImageOperationOverride`(operation_id: String)
 - `LoadBoundaryReceipt`(runtime_id: AgentRuntimeId, sequence: BoundarySequence)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
@@ -159,6 +196,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListActiveInputs`
 - `RuntimeState`
 - `RuntimeRealtimeAttachmentStatus`
+- `ModelRoutingStatus`
 - `LoadBoundaryReceipt`
 - `Recover`
 
@@ -190,6 +228,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
+- `ModelRoutingStatusChanged`(topology_epoch: u64)
+- `SwitchTurnDenied`(request_id: String, reason: RoutingDenialReason)
+- `SwitchTurnPersistentReconfigureRequested`(request_id: String, target_model: String)
+- `SwitchTurnFiniteOverrideActivated`(request_id: String, target_model: String, turns_remaining: u64)
+- `SwitchTurnFiniteOverrideRestored`(request_id: String)
+- `ImageOperationPhaseChanged`(operation_id: String, phase: RoutingImageOperationPhase)
+- `ImageOperationDenied`(operation_id: String, reason: RoutingDenialReason)
+- `ModelRoutingApprovalTerminalized`(approval_id: String, phase: RoutingApprovalPhase)
 - `ResolveAdmission`
 - `SubmitAdmittedIngressEffect`
 - `SubmitRunPrimitive`
@@ -331,6 +377,616 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `runtime_is_bound`
+- To: `Running`
+
+### `SetModelRoutingBaselineIdle`
+- From: `Idle`
+- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
+- Guards:
+  - `session_registered`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `SetModelRoutingBaselineAttached`
+- From: `Attached`
+- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
+- Guards:
+  - `session_registered`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `SetModelRoutingBaselineRunning`
+- From: `Running`
+- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
+- Guards:
+  - `session_registered`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Running`
+
+### `SetModelRoutingBaselineRetired`
+- From: `Retired`
+- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
+- Guards:
+  - `session_registered`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Retired`
+
+### `SetModelRoutingBaselineStopped`
+- From: `Stopped`
+- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
+- Guards:
+  - `session_registered`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Stopped`
+
+### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnApprovalUnavailableAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnApprovalUnavailableRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnApprovalDeniedIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnApprovalDeniedAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnApprovalDeniedRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnRealtimeConflictIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnRealtimeConflictAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnRealtimeConflictRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnScopedConflictIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `scoped_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnScopedConflictAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `scoped_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnScopedConflictRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `scoped_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnAcceptedIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `positive_turns`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+  - `no_scoped_conflict`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnAcceptedAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `positive_turns`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+  - `no_scoped_conflict`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnAcceptedRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `positive_turns`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+  - `no_scoped_conflict`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnAcceptedIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `SwitchTurnPersistentReconfigureRequested`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnAcceptedAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `SwitchTurnPersistentReconfigureRequested`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnAcceptedRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `SwitchTurnPersistentReconfigureRequested`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnRealtimeConflictIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnRealtimeConflictAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnRealtimeConflictRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `realtime_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `baseline_known`
+  - `approval_unavailable`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- Guards:
+  - `approval_denied`
+- Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Running`
+
+### `CompleteUntilChangedSwitchTurnReconfigureIdle`
+- From: `Idle`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `CompleteUntilChangedSwitchTurnReconfigureAttached`
+- From: `Attached`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `CompleteUntilChangedSwitchTurnReconfigureRunning`
+- From: `Running`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Running`
+
+### `AdmitPendingFiniteSwitchTurnIdle`
+- From: `Idle`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `pending_finite`
+- Emits: `SwitchTurnFiniteOverrideActivated`, `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `AdmitPendingFiniteSwitchTurnAttached`
+- From: `Attached`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `pending_finite`
+- Emits: `SwitchTurnFiniteOverrideActivated`, `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `AdmitPendingFiniteSwitchTurnRunning`
+- From: `Running`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `pending_finite`
+- Emits: `SwitchTurnFiniteOverrideActivated`, `ModelRoutingStatusChanged`
+- To: `Running`
+
+### `DecrementFiniteSwitchTurnIdle`
+- From: `Idle`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_multi_turn`
+- To: `Idle`
+
+### `DecrementFiniteSwitchTurnAttached`
+- From: `Attached`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_multi_turn`
+- To: `Attached`
+
+### `DecrementFiniteSwitchTurnRunning`
+- From: `Running`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_multi_turn`
+- To: `Running`
+
+### `RestoreConsumedFiniteSwitchTurnIdle`
+- From: `Idle`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_one_turn_remaining`
+- Emits: `SwitchTurnFiniteOverrideRestored`, `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `RestoreConsumedFiniteSwitchTurnAttached`
+- From: `Attached`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_one_turn_remaining`
+- Emits: `SwitchTurnFiniteOverrideRestored`, `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `RestoreConsumedFiniteSwitchTurnRunning`
+- From: `Running`
+- On: `AdmitModelRoutingAssistantTurn`()
+- Guards:
+  - `active_one_turn_remaining`
+- Emits: `SwitchTurnFiniteOverrideRestored`, `ModelRoutingStatusChanged`
+- To: `Running`
+
+### `BeginImageOperationScopedConflictIdle`
+- From: `Idle`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `operation_in_operation_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Idle`
+
+### `BeginImageOperationScopedConflictAttached`
+- From: `Attached`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `operation_in_operation_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Attached`
+
+### `BeginImageOperationScopedConflictRunning`
+- From: `Running`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `operation_in_operation_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Running`
+
+### `BeginImageOperationRealtimeConflictIdle`
+- From: `Idle`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `realtime_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Idle`
+
+### `BeginImageOperationRealtimeConflictAttached`
+- From: `Attached`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `realtime_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Attached`
+
+### `BeginImageOperationRealtimeConflictRunning`
+- From: `Running`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `realtime_conflict`
+- Emits: `ImageOperationDenied`
+- To: `Running`
+
+### `BeginImageOperationApprovalUnavailableIdle`
+- From: `Idle`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_unavailable`
+- Emits: `ImageOperationDenied`
+- To: `Idle`
+
+### `BeginImageOperationApprovalUnavailableAttached`
+- From: `Attached`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_unavailable`
+- Emits: `ImageOperationDenied`
+- To: `Attached`
+
+### `BeginImageOperationApprovalUnavailableRunning`
+- From: `Running`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_unavailable`
+- Emits: `ImageOperationDenied`
+- To: `Running`
+
+### `BeginImageOperationApprovalDeniedIdle`
+- From: `Idle`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_denied`
+- Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Idle`
+
+### `BeginImageOperationApprovalDeniedAttached`
+- From: `Attached`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_denied`
+- Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Attached`
+
+### `BeginImageOperationApprovalDeniedRunning`
+- From: `Running`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `approval_denied`
+- Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Running`
+
+### `BeginImageOperationAcceptedIdle`
+- From: `Idle`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `baseline_known`
+  - `no_operation_in_operation`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Idle`
+
+### `BeginImageOperationAcceptedAttached`
+- From: `Attached`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `baseline_known`
+  - `no_operation_in_operation`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Attached`
+
+### `BeginImageOperationAcceptedRunning`
+- From: `Running`
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- Guards:
+  - `baseline_known`
+  - `no_operation_in_operation`
+  - `approval_satisfied`
+  - `no_realtime_conflict`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Running`
+
+### `ActivateImageOperationOverrideIdle`
+- From: `Idle`
+- On: `ActivateImageOperationOverride`(operation_id, target_model, target_realtime_capable)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_requires_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `ActivateImageOperationOverrideAttached`
+- From: `Attached`
+- On: `ActivateImageOperationOverride`(operation_id, target_model, target_realtime_capable)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_requires_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `ActivateImageOperationOverrideRunning`
+- From: `Running`
+- On: `ActivateImageOperationOverride`(operation_id, target_model, target_realtime_capable)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_requires_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
+- To: `Running`
+
+### `CompleteImageOperationIdle`
+- From: `Idle`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_active`
+  - `operation_requires_scoped_override`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Idle`
+
+### `CompleteImageOperationAttached`
+- From: `Attached`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_active`
+  - `operation_requires_scoped_override`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Attached`
+
+### `CompleteImageOperationRunning`
+- From: `Running`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_active`
+  - `operation_requires_scoped_override`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Running`
+
+### `CompleteImageOperationWithoutScopedOverrideIdle`
+- From: `Idle`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_does_not_require_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Idle`
+
+### `CompleteImageOperationWithoutScopedOverrideAttached`
+- From: `Attached`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_does_not_require_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Attached`
+
+### `CompleteImageOperationWithoutScopedOverrideRunning`
+- From: `Running`
+- On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
+- Guards:
+  - `operation_plan_resolved`
+  - `operation_does_not_require_scoped_override`
+  - `no_operation_override_active`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Running`
+
+### `RestoreImageOperationOverrideIdle`
+- From: `Idle`
+- On: `RestoreImageOperationOverride`(operation_id)
+- Guards:
+  - `operation_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
+- To: `Idle`
+
+### `RestoreImageOperationOverrideAttached`
+- From: `Attached`
+- On: `RestoreImageOperationOverride`(operation_id)
+- Guards:
+  - `operation_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
+- To: `Attached`
+
+### `RestoreImageOperationOverrideRunning`
+- From: `Running`
+- On: `RestoreImageOperationOverride`(operation_id)
+- Guards:
+  - `operation_active`
+- Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
 - To: `Running`
 
 ### `StagePersistentFilterIdle`
@@ -4044,7 +4700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, classify envelope, append/context starts, run preparation, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, notify op watcher, collect/enqueue, and terminal records
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, classify envelope, append/context starts, run preparation, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, notify op watcher, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, and persistent reconfigure
 - `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -4060,4 +4716,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records
+- `model_routing_and_image_operation` — set model routing baseline, request finite switch turn, request until changed switch turn, admit model routing assistant turn, begin image operation, activate image operation override, complete image operation, restore image operation override, project model routing status changed, switch turn denied, switch turn persistent reconfigure requested, switch turn finite override activated/restored, image operation phase changed/denied, and model routing approval terminalized
 - `live_topology_and_supervision` — begin live topology reconfigure, mark detached, apply identity or visibility, complete/abort/fail topology, bind/authorize/revoke supervisor, publish/revoke trust edge, comms trust reconcile, and local endpoint publish or clear

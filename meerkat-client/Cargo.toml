@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
 schemars = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [features]
 default = ["anthropic", "openai", "gemini"]

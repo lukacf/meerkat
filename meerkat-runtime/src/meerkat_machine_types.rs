@@ -13,11 +13,17 @@ use indexmap::IndexSet;
 use meerkat_contracts::{RealtimeChannelState, RealtimeChannelStatus};
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
+use meerkat_core::image_generation::{
+    GenerateImageRequest, ImageGenerationResolvedPlan, ImageOperationApprovalReason,
+    ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
+    SessionModelRoutingStatus, SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnIntent,
+    SwitchTurnRequestId,
+};
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
@@ -236,6 +242,51 @@ pub struct ResolvedSessionLlmReconfigure {
     pub target_capability_surface: SessionLlmCapabilitySurface,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelRoutingApprovalDisposition {
+    NotRequired,
+    Approved,
+    DeniedByUser,
+    RequiredButUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelRoutingRealtimePolicy {
+    pub target_realtime_capable: bool,
+    pub allow_realtime_detach: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchTurnRequest {
+    pub request_id: SwitchTurnRequestId,
+    pub intent: SwitchTurnIntent,
+    pub target_realtime: ModelRoutingRealtimePolicy,
+    pub approval: ModelRoutingApprovalDisposition,
+    pub approval_reason: Option<SwitchTurnApprovalReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageOperationRoutingRequest {
+    pub operation_id: ImageOperationId,
+    pub target_model: ModelId,
+    pub target_realtime: ModelRoutingRealtimePolicy,
+    pub approval: ModelRoutingApprovalDisposition,
+    pub approval_reason: Option<ImageOperationApprovalReason>,
+    pub requires_scoped_override: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageOperationRoutingResult {
+    Accepted {
+        operation_id: ImageOperationId,
+        phase: ImageOperationPhase,
+    },
+    Denied {
+        operation_id: ImageOperationId,
+        reason: ImageOperationDenialReason,
+    },
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SessionLlmReconfigureHost: Send + Sync {
@@ -421,6 +472,43 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeRealtimeChannelStatus {
         session_id: SessionId,
     },
+    ConfigureModelRoutingBaseline {
+        session_id: SessionId,
+        baseline_model: ModelId,
+        realtime_capable: bool,
+    },
+    SessionModelRoutingStatus {
+        session_id: SessionId,
+    },
+    ResolveImageGenerationPlan {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        request: Box<GenerateImageRequest>,
+    },
+    RequestSwitchTurn {
+        session_id: SessionId,
+        request: Box<SwitchTurnRequest>,
+    },
+    AdmitModelRoutingAssistantTurn {
+        session_id: SessionId,
+    },
+    BeginImageOperation {
+        session_id: SessionId,
+        request: Box<ImageOperationRoutingRequest>,
+    },
+    ActivateImageOperationOverride {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+    },
+    CompleteImageOperation {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        terminal: ImageOperationTerminalClass,
+    },
+    RestoreImageOperationOverride {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+    },
     LoadBoundaryReceipt {
         runtime_id: LogicalRuntimeId,
         run_id: LifecycleRunId,
@@ -486,6 +574,11 @@ pub(crate) enum MeerkatMachineCommandResult {
     RuntimeState(RuntimeState),
     RealtimeAttachmentStatus(RealtimeAttachmentStatus),
     RealtimeChannelStatus(RealtimeChannelStatus),
+    SessionModelRoutingStatus(SessionModelRoutingStatus),
+    ImageGenerationResolvedPlan(Result<ImageGenerationResolvedPlan, ImageOperationDenialReason>),
+    SwitchTurnControlResult(SwitchTurnControlResult),
+    ImageOperationRoutingResult(ImageOperationRoutingResult),
+    ImageOperationPhase(ImageOperationPhase),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineRunPrepared),
 }
@@ -505,19 +598,31 @@ pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MeerkatMachineCommandManifestExemption {
+    ConfigureModelRoutingBaseline,
+    RequestSwitchTurn,
+    ResolveImageGenerationPlan,
     RuntimeRealtimeChannelStatus,
+    SessionModelRoutingStatus,
     PrepareLocalSessionBindings,
 }
 
 const MEERKAT_MACHINE_COMMAND_MANIFEST_EXEMPTIONS: &[MeerkatMachineCommandManifestExemption] = &[
+    MeerkatMachineCommandManifestExemption::ConfigureModelRoutingBaseline,
+    MeerkatMachineCommandManifestExemption::RequestSwitchTurn,
+    MeerkatMachineCommandManifestExemption::ResolveImageGenerationPlan,
     MeerkatMachineCommandManifestExemption::RuntimeRealtimeChannelStatus,
+    MeerkatMachineCommandManifestExemption::SessionModelRoutingStatus,
     MeerkatMachineCommandManifestExemption::PrepareLocalSessionBindings,
 ];
 
 impl MeerkatMachineCommandManifestExemption {
     const fn variant_name(self) -> &'static str {
         match self {
+            Self::ConfigureModelRoutingBaseline => "ConfigureModelRoutingBaseline",
+            Self::RequestSwitchTurn => "RequestSwitchTurn",
+            Self::ResolveImageGenerationPlan => "ResolveImageGenerationPlan",
             Self::RuntimeRealtimeChannelStatus => "RuntimeRealtimeChannelStatus",
+            Self::SessionModelRoutingStatus => "SessionModelRoutingStatus",
             Self::PrepareLocalSessionBindings => "PrepareLocalSessionBindings",
         }
     }

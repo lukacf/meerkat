@@ -1,37 +1,42 @@
-# Initial Traceability Matrix
+# Requirement Traceability Matrix
 
-This is the initial requirement traceability matrix for the `0.5` RCT package.
-
-This matrix tracks **implementation/cutover evidence**, not the already
-validated target-model baseline. The target machine/composition authority has
-already been validated at commit `4e350279`, but the requirements below remain
-`MISSING` until the cutover phases land real runtime-facing entrypoints and
-evidence on the implementation branch.
-
-| REQ-ID | Domain | Planned Phase | Runtime Caller / Entry Point | Primary Evidence Target | Initial Status |
+| REQ-ID | Phase | Implemented In | Runtime Caller | Test Name | Status |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-001` | in-repo source of truth | `2` | repo CI / `cargo xtask machine-check-drift --all` | machine bundle import + CI failure proof | `MISSING` |
-| `REQ-002` | machine-authority/codegen workflow | `2` | `cargo xtask machine-codegen --all` | drift and generation proof | `MISSING` |
-| `REQ-003` | machine final modes and owner map | `11` | full CI + release gate | final owner-map verification | `MISSING` |
-| `REQ-004` | closed runtime ingress taxonomy | `3` | runtime admission path | runtime ingress tests + no-Projected/no-SystemGenerated proof | `MISSING` |
-| `REQ-005` | contributor model and receipt semantics | `3` | persistent + ephemeral runtime recovery | replay/receipt tests | `MISSING` |
-| `REQ-006` | out-of-band control plane | `3` | runtime control channel | control-plane preemption tests | `MISSING` |
-| `REQ-007` | runtime policy algebra and queue discipline | `3` | runtime policy resolution | policy/queue behavioral tests | `MISSING` |
-| `REQ-008` | turn execution narrowing | `5` | runtime -> core run primitive path | host-mode cutover + turn kernel proof | `MISSING` |
-| `REQ-009` | peer comms normalization + reservations | `5` | `RuntimeCommsBridge` | peer/runtime bridge tests | `MISSING` |
-| `REQ-010` | completion-aware runtime comms bridge | `5` | `accept_input_with_completion(...)` | reservation/completion E2E | `MISSING` |
-| `REQ-011` | shared async-op lifecycle substrate | `4` | `OpsLifecycleRegistry` | registry-backed mob/background-op proof | `MISSING` |
-| `REQ-012` | mob-only child-agent path + no lifecycle leakage | `4` | mob control plane and parent wait path | no `SubagentResult` leakage proof | `MISSING` |
-| `REQ-013` | mob owner split | `7` | mob actor/orchestrator runtime path | decomposition and replay tests | `MISSING` |
-| `REQ-014` | flow/orchestrator durable truth | `7` | flow run + orchestration kernels | flow/mob replay tests | `MISSING` |
-| `REQ-015` | external tool lifecycle machine | `6` | MCP router/adapter/gateway path | add/remove/reload behavioral tests | `MISSING` |
-| `REQ-016` | typed notices primary, transcript notices derivative | `6` | runtime/tool-surface notice path | outward notice contract proof | `MISSING` |
-| `REQ-017` | CLI/REST/RPC external-event cutovers | `8` | CLI, REST, JSON-RPC | real surface ingress E2Es | `MISSING` |
-| `REQ-018` | MCP run/resume cutover | `9` | MCP server tools | runtime-backed MCP smoke | `MISSING` |
-| `REQ-019` | WASM/browser convergence | `9` | browser runtime exports | browser E2Es + wasm32 checks | `MISSING` |
-| `REQ-020` | Python/TypeScript wrapper parity | `10` | SDK client/wrapper APIs | regenerated bindings + wrapper smoke | `MISSING` |
-| `REQ-021` | Rust docs/examples/API posture | `10` | docs/examples compile path | runtime-backed docs/examples proof | `MISSING` |
-| `REQ-022` | final deletion ledger complete | `11` | release gate | bypass deletion proof | `MISSING` |
-| `REQ-023` | rich-machine authority harness and owner tests | `6` and `7` | `cargo xtask machine-verify --machine <name>` | advanced machine-authority harness + kernel tests | `MISSING` |
-| `REQ-024` | SchemaKernel by-construction workflow | `2` and `3` | generated owner crates | generated kernel no-drift proof | `MISSING` |
-| `REQ-025` | surface compatibility/versioning policy | `8` to `10` | public schemas + docs + bindings | change propagation proof | `MISSING` |
+| TYPE-001 | 0 | `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/image_generation.rs` | public `meerkat_core` + `meerkat_contracts::wire` API | `image_generation_request_serde_roundtrip`, `phase0_declared_enum_variants_roundtrip`, `public_image_generation_request_contract_roundtrips`, `image_generation_wire_aliases_roundtrip` | TYPED |
+| TYPE-002 | 0 | `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/image_generation.rs` | public `meerkat_contracts::wire` API | `execution_plan_and_result_variants_roundtrip`, `phase0_declared_enum_variants_roundtrip`, `image_generation_wire_aliases_roundtrip` | TYPED |
+| TYPE-003 | 0 | `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/image_generation.rs` | public `meerkat_contracts::wire` API | `until_changed_is_not_encoded_as_zero_turns`, `lifecycle_and_override_variants_roundtrip`, `phase0_declared_enum_variants_roundtrip`, `model_routing_wire_aliases_roundtrip` | TYPED |
+| TYPE-004 | 0 | `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/image_generation.rs` | public `meerkat_contracts::wire` API | `approval_parent_linkage_shapes_are_typed`, `phase0_declared_enum_variants_roundtrip`, `model_routing_wire_aliases_roundtrip` | TYPED |
+| TYPE-005 | 0 | `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/image_generation.rs` | public `meerkat_contracts::wire` API | `effective_model_precedence_is_operation_then_turn_then_baseline`, `lifecycle_and_override_variants_roundtrip`, `phase0_declared_enum_variants_roundtrip`, `model_routing_wire_aliases_roundtrip` | TYPED |
+| TYPE-006 | 0 | `meerkat-core/src/types.rs`, `meerkat-core/src/image_generation.rs`, `meerkat-contracts/src/wire/session.rs` | public `AssistantBlock` and `WireAssistantBlock` serde | `assistant_block_image_roundtrip`, `public_assistant_image_block_contract_roundtrips_without_inline_bytes`, `assistant_image_block_projects_to_wire_image_not_unknown` | TYPED |
+| CONTRACT-001 | 0/2 | `.rct/source-of-truth.md` | official OpenAI docs boundary | docs validation on 2026-04-26 | VALIDATED |
+| CONTRACT-002 | 0/2 | `.rct/source-of-truth.md` | official Gemini docs boundary | docs validation on 2026-04-26 | VALIDATED |
+| CONTRACT-003 | 0/2 | `meerkat-core/src/types.rs`, `meerkat-contracts/src/wire/session.rs`, `meerkat-tools/src/builtin/image_generation.rs` | `generate_image` blob commit -> `SessionEffect::AppendAssistantBlocks` -> public `AssistantBlock::Image` -> `WireAssistantBlock::Image` | `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `public_assistant_image_block_contract_roundtrips_without_inline_bytes`, `assistant_image_block_projects_to_wire_image_not_unknown`, `e2e_smoke_openai_generate_image_substrate`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+| CONTRACT-004 | 0/3 | `meerkat-contracts/src/wire/image_generation.rs`, `meerkat-contracts/src/emit.rs`, `artifacts/schemas/wire-types.json` | `emit-schemas` shipped schema entrypoint | `schema_entrypoint_contains_image_generation_contracts`, `cargo run -p meerkat-contracts --features schema --bin emit-schemas` | VALIDATED |
+| CONTRACT-005 | 0/3 | `.rct/source-of-truth.md`, `.rct/plan.yaml` | test lane policy | docs validation on 2026-04-26 | VALIDATED |
+| REQ-001 | 2 | `meerkat-tools/src/builtin/image_generation.rs`, `meerkat/src/factory.rs`, `meerkat/src/service_factory.rs`, `meerkat/src/surface/runtime_backed.rs` | `FactoryAgentBuilder` / `CompositeDispatcher` exposes `generate_image` with machine/blob/executor runtime | `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `factory_builder_wires_generate_image_on_runtime_backed_path`, `e2e_smoke_openai_generate_image_substrate`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+| REQ-002 | 2 | `meerkat-runtime/src/service_ext.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-openai/src/client.rs` | `MeerkatMachineCommand::ResolveImageGenerationPlan` keeps provider image target separate from machine routing model | `image_plan_keeps_provider_target_separate_from_machine_routing_model`, `e2e_smoke_openai_generate_image_substrate` | VALIDATED |
+| REQ-003 | 2 | `meerkat-runtime/src/meerkat_machine/dsl.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-tools/src/builtin/image_generation.rs` | `begin_image_operation` / `activate_image_operation_override` / `complete_image_operation` / `restore_image_operation_override` | `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `model_routing_status_proves_finite_turn_and_operation_precedence` | VALIDATED |
+| REQ-004 | 1 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine/dsl.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs` | `SessionServiceRuntimeExt::begin_image_operation`, `request_switch_turn`, `session_model_routing_status` | `model_routing_status_proves_finite_turn_and_operation_precedence`, `cargo xtask machine-verify --all` | VALIDATED |
+| REQ-005 | 2 | `meerkat-openai/src/client.rs`, `meerkat-openai/src/runtime/mod.rs`, `meerkat-llm-core/src/types.rs` | OpenAI image executor normalizes Responses hosted image tool and Images API output into typed provider image output | `openai_hosted_image_executor_normalizes_fake_response`, `e2e_smoke_openai_live_image_generation`, `e2e_smoke_openai_generate_image_substrate` | VALIDATED |
+| REQ-006 | 2 | `meerkat-gemini/src/client.rs`, `meerkat-gemini/src/runtime/mod.rs`, `meerkat-llm-core/src/types.rs` | Gemini image executor normalizes interleaved text/image parts into typed provider image output | `gemini_native_image_executor_requests_text_and_image_modalities`, `e2e_smoke_gemini_live_image_generation`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+| REQ-007 | 2 | `meerkat-runtime/src/service_ext.rs`, `meerkat-gemini/src/client.rs`, `meerkat-tools/src/builtin/image_generation.rs` | Machine plan projection -> Gemini executor -> provider text disposition -> blob commit -> restore | `image_plan_keeps_provider_target_separate_from_machine_routing_model`, `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+| REQ-008 | 1 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine_types.rs`, `meerkat-runtime/src/service_ext.rs` | `SessionServiceRuntimeExt::request_switch_turn` | `model_routing_denials_cover_approval_and_scoped_nesting_guards`, `until_changed_switch_turn_reconfigures_baseline_not_scoped_override` | VALIDATED |
+| REQ-009 | 1 | `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-runtime/src/meerkat_machine_tests.rs` | `SessionServiceRuntimeExt::admit_model_routing_assistant_turn` | `model_routing_status_proves_finite_turn_and_operation_precedence` | VALIDATED |
+| REQ-010 | 1 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine/dsl.rs` | `SessionServiceRuntimeExt::request_switch_turn` | `until_changed_switch_turn_reconfigures_baseline_not_scoped_override` | VALIDATED |
+| REQ-011 | 1 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine/dsl.rs` | `SessionServiceRuntimeExt::request_switch_turn`, `begin_image_operation` | `model_routing_denials_cover_approval_and_scoped_nesting_guards` | VALIDATED |
+| REQ-012 | 1 | `meerkat-runtime/src/meerkat_machine_types.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs` | `SessionServiceRuntimeExt::request_switch_turn`, `begin_image_operation` | `model_routing_denials_cover_approval_and_scoped_nesting_guards` | VALIDATED |
+| REQ-013 | 1 | `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-runtime/src/service_ext.rs` | `SessionServiceRuntimeExt::session_model_routing_status` | `model_routing_status_proves_finite_turn_and_operation_precedence`, `until_changed_switch_turn_reconfigures_baseline_not_scoped_override` | VALIDATED |
+| REQ-014 | 1 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine/dsl.rs` | `SessionServiceRuntimeExt::request_switch_turn`, `begin_image_operation` | `realtime_policy_rejects_non_realtime_effective_targets_without_detach_permission` | VALIDATED |
+| REQ-015 | 2 | `meerkat-runtime/src/service_ext.rs`, `meerkat-tools/src/builtin/image_generation.rs` | `resolve_image_generation_plan` denies unsupported count/projection through typed denial reasons before provider execution | `generate_image_rejects_unsupported_count_during_machine_planning`, `openai_images_api_rejects_unprojected_edit_and_reference_sources` | VALIDATED |
+| REQ-016 | 1 | `meerkat-core/src/image_generation.rs`, `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`, `meerkat-runtime/src/meerkat_machine/dsl.rs` | `SessionServiceRuntimeExt::complete_image_operation`, `restore_image_operation_override` | `model_routing_status_proves_finite_turn_and_operation_precedence`, `model_routing_denials_cover_approval_and_scoped_nesting_guards` | VALIDATED |
+| REQ-017 | 1 | `meerkat-core/src/model_profile/capabilities.rs`, `meerkat-runtime/src/meerkat_machine_types.rs` | `ModelRoutingRealtimePolicy`, model capability projection | `realtime_policy_rejects_non_realtime_effective_targets_without_detach_permission` | VALIDATED |
+| REQ-018 | 2 | `meerkat-tools/src/builtin/image_generation.rs`, `meerkat-core/src/agent/runner.rs`, `meerkat-core/src/agent/state.rs` | tool result session effects append canonical `AssistantBlock::Image` only after post-tool hook approval | `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `hook_denied_tool_result_suppresses_session_effects`, `e2e_smoke_openai_generate_image_substrate` | VALIDATED |
+| REQ-019 | 2 | `meerkat-tools/src/builtin/image_generation.rs`, `meerkat-openai/src/client.rs`, `meerkat-gemini/src/client.rs` | provider text is surfaced as `EmittedButNotStored`; generated bytes are externalized through `BlobStore` before transcript effect | `generate_image_dispatch_commits_blob_and_emits_assistant_image_effect`, `e2e_smoke_openai_generate_image_substrate`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+| REQ-020 | 3 | `meerkat-client/tests/live_client_provider_matrix.rs`, `meerkat/tests/live_meerkat_regression.rs` | ignored `e2e-smoke` live lanes with env-key gating | `e2e_smoke_openai_live_image_generation`, `e2e_smoke_gemini_live_image_generation`, `e2e_smoke_openai_generate_image_substrate`, `e2e_smoke_gemini_generate_image_substrate` | VALIDATED |
+
+Typed But Unwired:
+
+- None. Phase 2 consumes the image request/plan/result contracts through the
+  `generate_image` builtin, MeerkatMachine plan/lifecycle commands, provider
+  executors, blob store commit, assistant image block session effects, and live
+  substrate smoke tests.

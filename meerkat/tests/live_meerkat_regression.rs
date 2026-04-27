@@ -12,9 +12,29 @@
 //! Run with:
 //!   cargo test -p meerkat --test live_meerkat_regression -- --ignored --test-threads=1
 
+use async_trait::async_trait;
 use meerkat::*;
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+use meerkat_core::image_generation::{
+    GenerateImageRequest, ImageFormatPreference, ImageGenerationIntent,
+    ImageGenerationTargetPreference, ImageOperationTerminalClass, ImageQualityPreference,
+    ImageSizePreference, PromptSource, PromptText, ToolCallId,
+};
+use meerkat_core::lifecycle::run_primitive::ModelId;
+use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions};
+use meerkat_core::{
+    AgentToolDispatcher, AssistantBlock, BlobStore, ContentBlock, ProviderId, SessionEffect,
+    ToolCallView,
+};
+use meerkat_runtime::{MeerkatMachine, SessionServiceRuntimeExt};
+use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder};
+use meerkat_store::MemoryBlobStore;
+use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -48,6 +68,316 @@ fn gemini_api_key() -> Option<String> {
 /// Get the model to use for regression tests (cheaper model by default).
 fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+}
+
+fn live_image_request(provider: &str, model: &str) -> GenerateImageRequest {
+    GenerateImageRequest::new(
+        ImageGenerationIntent::Generate {
+            prompt: PromptText::new(
+                "Generate a simple original image: one teal square centered on a plain white background.",
+            )
+            .unwrap(),
+            prompt_source: PromptSource::ModelDistilled {
+                tool_call_id: ToolCallId::new("live-substrate-image-smoke"),
+            },
+            reference_images: Vec::new(),
+        },
+        ImageGenerationTargetPreference::Model {
+            provider: ProviderId::new(provider),
+            model: ModelId::new(model),
+        },
+        ImageSizePreference::Square1024,
+        ImageQualityPreference::Low,
+        ImageFormatPreference::Png,
+        std::num::NonZeroU32::new(1).unwrap(),
+    )
+    .unwrap()
+}
+
+// ============================================================================
+// IMAGE SUBSTRATE LIVE SMOKE
+// ============================================================================
+
+mod image_generation_substrate {
+    use super::*;
+
+    struct ScriptedImageToolCallClient {
+        provider: &'static str,
+        model: String,
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedImageToolCallClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let mut guard = self.calls.lock().expect("scripted client lock");
+            let call_index = *guard;
+            *guard += 1;
+            drop(guard);
+
+            let events = if call_index == 0 {
+                vec![
+                    LlmEvent::ToolCallComplete {
+                        id: "live-agent-image-call".to_string(),
+                        name: "generate_image".to_string(),
+                        args: json!({
+                            "request": live_image_request(self.provider, &self.model)
+                        }),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    },
+                ]
+            } else {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "image complete".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    },
+                ]
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> &'static str {
+            "scripted-image-tool-call"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    async fn run_live_generate_image_substrate(
+        provider: &str,
+        model: &str,
+        executor: Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
+    ) {
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let session = Session::new();
+        let session_id = session.id().clone();
+        runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should be prepared");
+        runtime
+            .configure_model_routing_baseline(&session_id, ModelId::new(model), false)
+            .await
+            .expect("baseline image model should be configured");
+
+        let blob_store = Arc::new(MemoryBlobStore::default());
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("builtin dispatcher should construct");
+        dispatcher.register_image_generation_tool(
+            meerkat_tools::builtin::image_generation::ImageGenerationToolRuntime {
+                session_id,
+                machine: runtime,
+                blob_store: blob_store.clone(),
+                executor,
+            },
+        );
+
+        let raw = RawValue::from_string(
+            serde_json::to_string(&json!({
+                "request": live_image_request(provider, model)
+            }))
+            .expect("request should serialize"),
+        )
+        .expect("request should become raw json");
+        let outcome = dispatcher
+            .dispatch(ToolCallView {
+                id: "live-image-call",
+                name: "generate_image",
+                args: &raw,
+            })
+            .await
+            .expect("generate_image dispatch should succeed");
+
+        assert_eq!(
+            outcome.session_effects.len(),
+            1,
+            "generated images should be appended to session truth"
+        );
+        let SessionEffect::AppendAssistantBlocks { blocks } = &outcome.session_effects[0] else {
+            panic!("expected assistant image block effect");
+        };
+        assert_eq!(blocks.len(), 1, "live smoke should commit one image block");
+
+        let ContentBlock::Text { text } = &outcome.result.content[0] else {
+            panic!("tool result should be JSON text");
+        };
+        let result: meerkat_core::image_generation::ImageGenerationToolResult =
+            serde_json::from_str(text).expect("tool result should decode");
+        assert!(
+            matches!(result.terminal, ImageOperationTerminalClass::Generated),
+            "image substrate terminal should be Generated, got {:?}",
+            result.terminal
+        );
+        assert_eq!(result.images.len(), 1);
+        let payload = blob_store
+            .get(&result.images[0].blob_ref.blob_id)
+            .await
+            .expect("committed image blob should be readable");
+        assert!(
+            payload.data.len() > 256,
+            "committed image payload should contain real image bytes"
+        );
+        eprintln!(
+            "[image-substrate] {provider} model={model} committed {} bytes as {}",
+            payload.data.len(),
+            result.images[0].media_type.as_str()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_openai_generate_image_substrate() {
+        let Some(api_key) = openai_api_key() else {
+            eprintln!("Skipping OpenAI substrate image smoke: missing OPENAI_API_KEY");
+            return;
+        };
+        let model =
+            std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-1".into());
+        run_live_generate_image_substrate(
+            "openai",
+            &model,
+            Arc::new(meerkat_client::OpenAiClient::new(api_key)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_gemini_generate_image_substrate() {
+        let Some(api_key) = gemini_api_key() else {
+            eprintln!(
+                "Skipping Gemini substrate image smoke: missing GEMINI_API_KEY/RKAT_GEMINI_API_KEY/GOOGLE_API_KEY"
+            );
+            return;
+        };
+        let model = std::env::var("RKAT_GEMINI_IMAGE_MODEL")
+            .unwrap_or_else(|_| "gemini-3.1-flash-image-preview".into());
+        run_live_generate_image_substrate(
+            "gemini",
+            &model,
+            Arc::new(meerkat_client::GeminiClient::new(api_key)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_openai_generate_image_factory_session_turn() {
+        let Some(api_key) = openai_api_key() else {
+            eprintln!("Skipping OpenAI factory/session image smoke: missing OPENAI_API_KEY");
+            return;
+        };
+        let model =
+            std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-1".into());
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let blob_store = Arc::new(MemoryBlobStore::default());
+        let factory = AgentFactory::new(temp_dir.path().join("sessions"))
+            .builtins(true)
+            .with_image_generation_machine(runtime.clone());
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(ScriptedImageToolCallClient {
+            provider: "openai",
+            model: model.clone(),
+            calls: Mutex::new(0),
+        }));
+        builder.default_blob_store = Some(blob_store.clone());
+        builder.default_image_generation_executor =
+            Some(Arc::new(meerkat_client::OpenAiClient::new(api_key)));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should be prepared");
+        runtime
+            .configure_model_routing_baseline(&session_id, ModelId::new("gpt-5.4"), false)
+            .await
+            .expect("baseline text model should be configured");
+
+        let req = CreateSessionRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: "make an image".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+        let (build_tx, _build_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&req, build_tx)
+            .await
+            .expect("factory should build runtime-backed image agent");
+        let (run_tx, _run_rx) = mpsc::channel(32);
+        let result =
+            SessionAgent::run_with_events(&mut agent, "make an image".to_string().into(), run_tx)
+                .await
+                .expect("agent turn should complete after generate_image");
+        assert_eq!(result.tool_calls, 1);
+
+        let image_ref = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::BlockAssistant(blocks) => blocks.blocks.iter().find_map(|block| {
+                    if let AssistantBlock::Image { blob_ref, .. } = block {
+                        Some(blob_ref.clone())
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .expect("factory/session path should append assistant image block");
+        let payload = blob_store
+            .get(&image_ref.blob_id)
+            .await
+            .expect("factory/session image blob should be readable");
+        assert!(
+            payload.data.len() > 256,
+            "factory/session path should commit real image bytes"
+        );
+        eprintln!(
+            "[image-substrate] factory/session OpenAI model={model} committed {} bytes as {}",
+            payload.data.len(),
+            image_ref.media_type
+        );
+    }
 }
 
 // ============================================================================

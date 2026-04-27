@@ -112,10 +112,11 @@ pub use meerkat_machine::{
     PeerIngressOwner, RuntimeBindingsError,
 };
 pub use meerkat_machine_types::{
-    HydratedSessionLlmState, RealtimeAttachmentSignalAuthority, RealtimeAttachmentStatus,
-    ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
-    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
-    SessionToolVisibilityDelta,
+    HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,
+    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, RealtimeAttachmentSignalAuthority,
+    RealtimeAttachmentStatus, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
+    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,
+    SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{
@@ -136,7 +137,9 @@ pub use runtime_event::{
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
-pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+pub use service_ext::{
+    RuntimeMode, SessionServiceRuntimeExt, resolve_image_generation_plan_from_status,
+};
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

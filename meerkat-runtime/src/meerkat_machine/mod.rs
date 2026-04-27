@@ -348,6 +348,20 @@ impl MeerkatMachine {
         Self::preview_dsl_input_on_state(&state, input, context)
     }
 
+    async fn session_dsl_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<dsl::MeerkatMachineState, RuntimeControlPlaneError> {
+        let authority = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(RuntimeControlPlaneError::Internal)?;
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(authority.state.clone())
+    }
+
     async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,
@@ -712,6 +726,7 @@ impl MeerkatMachine {
         }
     }
 
+    #[allow(clippy::large_futures)]
     fn execute_meerkat_machine_command(
         &self,
         self_handle: Option<Arc<Self>>,
@@ -779,6 +794,15 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::RuntimeState { .. }
                 | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
                 | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
+                | MeerkatMachineCommand::ConfigureModelRoutingBaseline { .. }
+                | MeerkatMachineCommand::SessionModelRoutingStatus { .. }
+                | MeerkatMachineCommand::ResolveImageGenerationPlan { .. }
+                | MeerkatMachineCommand::RequestSwitchTurn { .. }
+                | MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { .. }
+                | MeerkatMachineCommand::BeginImageOperation { .. }
+                | MeerkatMachineCommand::ActivateImageOperationOverride { .. }
+                | MeerkatMachineCommand::CompleteImageOperation { .. }
+                | MeerkatMachineCommand::RestoreImageOperationOverride { .. }
                 | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
                     .execute_meerkat_machine_control_command(command)
                     .await

@@ -13,12 +13,12 @@ use meerkat_core::{
     AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::ConnectionRef,
 };
 
-use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use crate::provider_runtime::runtime::ProviderRuntime;
+use crate::{ImageGenerationExecutor, LlmClient};
 
 // Provider runtimes live in per-provider crates. Callers (typically the
 // `meerkat` facade's `default_provider_registry()`) register them via
@@ -200,6 +200,21 @@ impl ProviderRuntimeRegistry {
                     "runtime-not-registered",
                 ))?;
         runtime.build_client(connection)
+    }
+
+    /// Build the optional image-generation executor owned by the same
+    /// provider runtime and resolved connection.
+    pub fn build_image_generation_executor(
+        &self,
+        connection: ResolvedConnection,
+    ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+        let runtime =
+            self.runtimes
+                .get(&connection.provider)
+                .ok_or(ProviderClientError::MissingFeature(
+                    "runtime-not-registered",
+                ))?;
+        runtime.build_image_generation_executor(connection)
     }
 }
 

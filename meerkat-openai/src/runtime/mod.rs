@@ -17,7 +17,6 @@ use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
-use meerkat_llm_core::LlmClient;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -26,6 +25,7 @@ use meerkat_llm_core::provider_runtime::errors::{
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 pub use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
 
@@ -333,6 +333,56 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 Ok(Arc::new(client))
             }
         }
+    }
+
+    fn build_image_generation_executor(
+        &self,
+        connection: ResolvedConnection,
+    ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+        let backend_kind = match connection.backend {
+            NormalizedBackendKind::OpenAi(k) => k,
+            other => unreachable!(
+                "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
+                 — registry dispatch invariant violated"
+            ),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(authorizer) = connection.resolved_authorizer() {
+            let base_url = connection
+                .backend_profile
+                .base_url
+                .clone()
+                .unwrap_or_else(|| backend_kind.default_base_url().into());
+            let client =
+                crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                    .with_authorizer(authorizer);
+            return Ok(Some(Arc::new(client)));
+        }
+        #[cfg(target_arch = "wasm32")]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::MissingFeature(
+                "openai-authorizer-backed auth not available on wasm32",
+            ))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::NoCredentialMaterial)?;
+        let client = match backend_kind {
+            OpenAiBackendKind::OpenAiApi => match &connection.backend_profile.base_url {
+                Some(url) => crate::OpenAiClient::new_with_base_url(secret, url.clone()),
+                None => crate::OpenAiClient::new(secret),
+            },
+            OpenAiBackendKind::ChatGptBackend => {
+                let base_url = connection
+                    .backend_profile
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| OpenAiBackendKind::ChatGptBackend.default_base_url().into());
+                crate::OpenAiClient::new_with_base_url(secret, base_url)
+            }
+        };
+        Ok(Some(Arc::new(client)))
     }
 }
 

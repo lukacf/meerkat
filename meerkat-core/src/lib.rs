@@ -39,6 +39,7 @@ pub mod generated;
 pub mod handles;
 pub mod hooks;
 pub mod image_content;
+pub mod image_generation;
 pub mod interaction;
 pub mod lifecycle;
 pub mod mcp_config;
@@ -176,6 +177,7 @@ pub use image_content::{
     externalize_content_blocks, externalize_content_input, externalize_messages_from,
     hydrate_content_blocks, hydrate_content_input, hydrate_messages_for_execution,
 };
+pub use image_generation::*;
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
     PeerIngressAuthorityPhase, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,

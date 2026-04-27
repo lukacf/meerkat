@@ -89,6 +89,11 @@ pub enum SessionEffect {
         names: BTreeSet<String>,
         witnesses: BTreeMap<String, ToolVisibilityWitness>,
     },
+    /// Append durable assistant blocks produced by a tool after the tool has
+    /// committed any external payloads (for example generated image blobs).
+    AppendAssistantBlocks {
+        blocks: Vec<crate::types::AssistantBlock>,
+    },
 }
 
 #[derive(Debug, Clone)]

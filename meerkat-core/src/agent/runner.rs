@@ -237,10 +237,10 @@ where
 
     /// Apply accumulated session effects from tool dispatch.
     ///
-    /// Called by the agent loop after each parallel tool batch completes,
-    /// BEFORE `Message::ToolResults` is appended to the session. This is
-    /// the canonical commit point for tool-produced session mutations
-    /// (e.g., mob authority grants).
+    /// Called by the agent loop after each parallel tool batch completes.
+    /// State-mutating effects are applied before `Message::ToolResults`; effects
+    /// that append assistant transcript blocks are applied after tool results so
+    /// provider tool-call adjacency remains intact.
     ///
     /// The session's `build_state` is the source of truth. The shared
     /// `mob_authority_handle` (if present) is updated as a derived projection
@@ -280,6 +280,14 @@ where
                             ))
                         })?;
                     visibility_changed = true;
+                }
+                crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
+                    self.session.push(crate::types::Message::BlockAssistant(
+                        crate::types::BlockAssistantMessage {
+                            blocks: blocks.clone(),
+                            stop_reason: crate::types::StopReason::EndTurn,
+                        },
+                    ));
                 }
             }
         }

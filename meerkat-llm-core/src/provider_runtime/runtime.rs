@@ -7,12 +7,12 @@ use async_trait::async_trait;
 
 use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider};
 
-use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use crate::provider_runtime::registry::ResolverEnvironment;
+use crate::{ImageGenerationExecutor, LlmClient};
 
 /// Per-provider runtime contract: validate a binding, resolve credentials,
 /// construct an LlmClient.
@@ -57,6 +57,15 @@ pub trait ProviderRuntime: Send + Sync {
         &self,
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError>;
+
+    /// Construct an optional image-generation executor from the same resolved
+    /// provider connection used for the text client.
+    fn build_image_generation_executor(
+        &self,
+        _connection: ResolvedConnection,
+    ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

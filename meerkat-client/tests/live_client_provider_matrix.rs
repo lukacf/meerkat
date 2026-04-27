@@ -1,5 +1,5 @@
 #![cfg(feature = "integration-real-tests")]
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 //! Live integration tests for LLM clients.
 //!
@@ -11,7 +11,16 @@ use meerkat_client::{
     AnthropicClient, GeminiClient, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest,
     OpenAiClient,
 };
+use meerkat_core::ProviderId;
+use meerkat_core::image_generation::{
+    GenerateImageExecutionPlan, GenerateImageRequest, ImageContinuityTokenSupport,
+    ImageFormatPreference, ImageGenerationIntent, ImageGenerationTargetCapabilities,
+    ImageGenerationTargetPreference, ImageOperationId, ImageQualityPreference, ImageSizePreference,
+    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, PromptSource, PromptText, ToolCallId,
+};
+use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::{Message, StopReason, UserMessage};
+use meerkat_llm_core::{ImageGenerationExecutor, ProviderImageGenerationRequest};
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
 use std::net::SocketAddr;
@@ -120,6 +129,40 @@ fn gemini_api_key() -> Option<String> {
     first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
+fn tiny_image_request(provider: &str, model: &str) -> GenerateImageRequest {
+    GenerateImageRequest::new(
+        ImageGenerationIntent::Generate {
+            prompt: PromptText::new(
+                "Generate a simple original image: one teal square centered on a plain white background.",
+            )
+            .unwrap(),
+            prompt_source: PromptSource::ModelDistilled {
+                tool_call_id: ToolCallId::new("live-image-smoke"),
+            },
+            reference_images: Vec::new(),
+        },
+        ImageGenerationTargetPreference::Model {
+            provider: ProviderId::new(provider),
+            model: ModelId::new(model),
+        },
+        ImageSizePreference::Square1024,
+        ImageQualityPreference::Low,
+        ImageFormatPreference::Png,
+        std::num::NonZeroU32::new(1).unwrap(),
+    )
+    .unwrap()
+}
+
+fn image_capabilities() -> ImageGenerationTargetCapabilities {
+    ImageGenerationTargetCapabilities {
+        hosted_image_generation_tool: false,
+        native_image_output: true,
+        custom_tools: false,
+        image_search_grounding: false,
+        image_continuity_tokens: ImageContinuityTokenSupport::Unsupported,
+    }
+}
+
 #[tokio::test]
 #[ignore = "lane:e2e-live"]
 async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
@@ -150,6 +193,93 @@ async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     assert!(got_text);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_openai_live_image_generation() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = openai_api_key() else {
+        eprintln!("Skipping OpenAI image smoke: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
+        return Ok(());
+    };
+    let model = std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-1".into());
+    let client = OpenAiClient::new(api_key);
+    let request = ProviderImageGenerationRequest {
+        operation_id: ImageOperationId::new(uuid::Uuid::new_v4()),
+        model: model.clone(),
+        generate_request: tiny_image_request("openai", &model),
+        execution_plan: GenerateImageExecutionPlan::OpenAiImagesApi {
+            model: ModelId::new(model),
+            max_count: std::num::NonZeroU32::new(1).unwrap(),
+            capabilities: image_capabilities(),
+            plan: OpenAiImagesApiPlan {
+                endpoint: OpenAiImagesApiEndpoint::Generations,
+            },
+        },
+        projected_messages: Vec::new(),
+    };
+    let output = client.execute_image_generation(request).await?;
+    eprintln!(
+        "OpenAI image smoke terminal={:?} images={} warnings={:?}",
+        output.terminal,
+        output.images.len(),
+        output.warnings
+    );
+    assert!(
+        !output.images.is_empty(),
+        "OpenAI image smoke should return at least one image"
+    );
+    assert!(
+        output.images[0].base64_data.len() > 256,
+        "image payload should contain base64 data"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_gemini_live_image_generation() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = gemini_api_key() else {
+        eprintln!(
+            "Skipping Gemini image smoke: missing GEMINI_API_KEY/RKAT_GEMINI_API_KEY/GOOGLE_API_KEY"
+        );
+        return Ok(());
+    };
+    let model = std::env::var("RKAT_GEMINI_IMAGE_MODEL")
+        .unwrap_or_else(|_| "gemini-3.1-flash-image-preview".into());
+    let client = GeminiClient::new(api_key);
+    let request = ProviderImageGenerationRequest {
+        operation_id: ImageOperationId::new(uuid::Uuid::new_v4()),
+        model: model.clone(),
+        generate_request: tiny_image_request("gemini", &model),
+        execution_plan: GenerateImageExecutionPlan::GeminiNativeImageModel {
+            model: ModelId::new(model),
+            max_count: std::num::NonZeroU32::new(1).unwrap(),
+            capabilities: image_capabilities(),
+            plan: meerkat_core::image_generation::GeminiImageTurnPlan {
+                projection_snapshot_id: meerkat_core::image_generation::ProjectionSnapshotId::new(
+                    uuid::Uuid::new_v4(),
+                ),
+            },
+        },
+        projected_messages: Vec::new(),
+    };
+    let output = client.execute_image_generation(request).await?;
+    eprintln!(
+        "Gemini image smoke terminal={:?} images={} warnings={:?}",
+        output.terminal,
+        output.images.len(),
+        output.warnings
+    );
+    assert!(
+        !output.images.is_empty(),
+        "Gemini image smoke should return at least one image"
+    );
+    assert!(
+        output.images[0].base64_data.len() > 256,
+        "image payload should contain base64 data"
+    );
     Ok(())
 }
 

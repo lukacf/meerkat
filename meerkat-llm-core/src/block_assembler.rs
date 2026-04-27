@@ -32,7 +32,7 @@ pub struct BlockKey(usize);
 
 /// Represents either a finalized block or a placeholder for one still streaming.
 enum BlockSlot {
-    Finalized(AssistantBlock),
+    Finalized(Box<AssistantBlock>),
     Pending,
 }
 
@@ -88,17 +88,18 @@ impl BlockAssembler {
     /// `meta` is used by Gemini for thoughtSignature on text parts.
     pub fn on_text_delta(&mut self, delta: &str, meta: Option<Box<ProviderMeta>>) {
         if meta.is_none()
-            && let Some(BlockSlot::Finalized(AssistantBlock::Text { text, meta: None })) =
-                self.slots.last_mut()
+            && let Some(BlockSlot::Finalized(block)) = self.slots.last_mut()
+            && let AssistantBlock::Text { text, meta: None } = block.as_mut()
         {
             text.push_str(delta);
             return;
         }
         // Insert new text block
-        self.slots.push(BlockSlot::Finalized(AssistantBlock::Text {
-            text: delta.into(),
-            meta,
-        }));
+        self.slots
+            .push(BlockSlot::Finalized(Box::new(AssistantBlock::Text {
+                text: delta.into(),
+                meta,
+            })));
     }
 
     /// Start a new reasoning block.
@@ -131,10 +132,10 @@ impl BlockAssembler {
         if let Some(buf) = self.reasoning_buffer.take()
             && let Some(slot) = self.slots.get_mut(buf.block_key.0)
         {
-            *slot = BlockSlot::Finalized(AssistantBlock::Reasoning {
+            *slot = BlockSlot::Finalized(Box::new(AssistantBlock::Reasoning {
                 text: buf.text,
                 meta,
-            });
+            }));
         }
         // Complete without prior start is silently ignored - provider protocol quirk
     }
@@ -230,12 +231,12 @@ impl BlockAssembler {
     ) -> Result<(), StreamAssemblyError> {
         if let Some((_, _, buf)) = self.tool_buffers.swap_remove_full(&id) {
             if let Some(slot) = self.slots.get_mut(buf.block_key.0) {
-                *slot = BlockSlot::Finalized(AssistantBlock::ToolUse {
+                *slot = BlockSlot::Finalized(Box::new(AssistantBlock::ToolUse {
                     id,
                     name,
                     args,
                     meta,
-                });
+                }));
                 return Ok(());
             }
             Ok(())
@@ -243,12 +244,12 @@ impl BlockAssembler {
             // No prior start - provider that doesn't emit start events
             // Insert at end; ordering may be off but we have the data
             self.slots
-                .push(BlockSlot::Finalized(AssistantBlock::ToolUse {
+                .push(BlockSlot::Finalized(Box::new(AssistantBlock::ToolUse {
                     id,
                     name,
                     args,
                     meta,
-                }));
+                })));
             Ok(())
         }
     }
@@ -261,7 +262,7 @@ impl BlockAssembler {
         self.slots
             .into_iter()
             .filter_map(|slot| match slot {
-                BlockSlot::Finalized(block) => Some(block),
+                BlockSlot::Finalized(block) => Some(*block),
                 BlockSlot::Pending => None,
             })
             .collect()

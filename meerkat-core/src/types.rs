@@ -9,7 +9,10 @@ use std::borrow::Cow;
 use std::fmt;
 use uuid::Uuid;
 
-use crate::blob::BlobId;
+use crate::blob::{BlobId, BlobRef};
+use crate::image_generation::{
+    AssistantImageId, MediaType, ProviderImageMetadata, RevisedPromptDisposition,
+};
 use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
 
 // ===========================================================================
@@ -488,6 +491,17 @@ pub enum AssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<Box<ProviderMeta>>,
     },
+
+    /// Canonical generated image output.
+    Image {
+        image_id: AssistantImageId,
+        blob_ref: BlobRef,
+        media_type: MediaType,
+        width: u32,
+        height: u32,
+        revised_prompt: RevisedPromptDisposition,
+        meta: ProviderImageMetadata,
+    },
 }
 
 impl PartialEq for AssistantBlock {
@@ -515,10 +529,34 @@ impl PartialEq for AssistantBlock {
                     meta: m2,
                 },
             ) => i1 == i2 && n1 == n2 && a1.get() == a2.get() && m1 == m2,
+            (
+                AssistantBlock::Image {
+                    image_id: i1,
+                    blob_ref: b1,
+                    media_type: mt1,
+                    width: w1,
+                    height: h1,
+                    revised_prompt: rp1,
+                    meta: m1,
+                },
+                AssistantBlock::Image {
+                    image_id: i2,
+                    blob_ref: b2,
+                    media_type: mt2,
+                    width: w2,
+                    height: h2,
+                    revised_prompt: rp2,
+                    meta: m2,
+                },
+            ) => {
+                i1 == i2 && b1 == b2 && mt1 == mt2 && w1 == w2 && h1 == h2 && rp1 == rp2 && m1 == m2
+            }
             _ => false,
         }
     }
 }
+
+impl Eq for AssistantBlock {}
 
 /// Borrowed view into a tool call block. Zero allocations.
 #[derive(Debug, Clone, Copy)]

@@ -10,11 +10,20 @@ use meerkat_core::lifecycle::run_primitive::{
 };
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason, Usage,
+    AssistantBlock, ContentBlock, ImageData, ImageFormatPreference, ImageGenerationIntent,
+    ImageGenerationWarning, ImageOperationTerminalClass, ImageQualityPreference,
+    ImageSizePreference, Message, OpenAiImageMetadata, OpenAiImagesApiEndpoint, OutputSchema,
+    ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition, RevisedPromptSource, StopReason,
+    Usage,
 };
 use meerkat_llm_core::BlockAssembler;
 use meerkat_llm_core::LlmError;
-use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
+use meerkat_llm_core::{
+    ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
+    ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
+    dimensions_from_size_preference, media_type_from_format_preference,
+    normalize_base64_image_data,
+};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
@@ -44,6 +53,25 @@ pub struct OpenAiClient {
     /// invocation. Used for ExternalAuthorizer flows that produce a
     /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+}
+
+fn openai_image_size(size: &ImageSizePreference) -> String {
+    match size {
+        ImageSizePreference::Auto => "auto".to_string(),
+        ImageSizePreference::Square1024 => "1024x1024".to_string(),
+        ImageSizePreference::Portrait1024x1536 => "1024x1536".to_string(),
+        ImageSizePreference::Landscape1536x1024 => "1536x1024".to_string(),
+        ImageSizePreference::Custom { width, height } => format!("{width}x{height}"),
+    }
+}
+
+fn openai_image_quality(quality: ImageQualityPreference) -> &'static str {
+    match quality {
+        ImageQualityPreference::Auto => "auto",
+        ImageQualityPreference::Low => "low",
+        ImageQualityPreference::Medium => "medium",
+        ImageQualityPreference::High => "high",
+    }
 }
 
 impl OpenAiClient {
@@ -381,6 +409,332 @@ impl OpenAiClient {
             serde_json::from_str(data).ok()
         } else {
             None
+        }
+    }
+
+    fn image_prompt(request: &ProviderImageGenerationRequest) -> String {
+        match &request.generate_request.intent {
+            ImageGenerationIntent::Generate { prompt, .. } => prompt.content.clone(),
+            ImageGenerationIntent::Edit { instruction, .. } => instruction.content.clone(),
+        }
+    }
+
+    fn image_count_warning(
+        request: &ProviderImageGenerationRequest,
+        returned: usize,
+    ) -> Vec<ImageGenerationWarning> {
+        let requested = request.generate_request.count;
+        let Some(returned_count) = std::num::NonZeroU32::new(returned as u32) else {
+            return Vec::new();
+        };
+        if returned_count < requested {
+            vec![ImageGenerationWarning::ProviderReturnedFewerImages {
+                requested,
+                returned: returned_count,
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn openai_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("safety") || lower.contains("content_filter") {
+            ImageOperationTerminalClass::SafetyFiltered
+        } else if lower.contains("refusal") || lower.contains("refused") {
+            ImageOperationTerminalClass::RefusedByProvider
+        } else if status_code == 408 || status_code == 504 {
+            ImageOperationTerminalClass::Timeout
+        } else if status_code == 499 {
+            ImageOperationTerminalClass::Cancelled
+        } else {
+            ImageOperationTerminalClass::Failed
+        }
+    }
+
+    async fn post_json_to_openai(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut request_builder = self
+            .http
+            .post(endpoint)
+            .header("Content-Type", "application/json");
+        if let Some(authorizer) = &self.authorizer {
+            let mut extra: Vec<(String, String)> = Vec::new();
+            let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: endpoint,
+                headers: &mut extra,
+            };
+            authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                LlmError::AuthenticationFailed {
+                    message: format!("openai authorizer failed: {e}"),
+                }
+            })?;
+            for (name, value) in extra {
+                request_builder = request_builder.header(name, value);
+            }
+        } else if let Some(api_key) = &self.api_key {
+            request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
+        }
+        for (name, value) in &self.extra_headers {
+            request_builder = request_builder.header(name, value);
+        }
+        request_builder.json(body).send().await.map_err(|e| {
+            if e.is_timeout() {
+                LlmError::NetworkTimeout { duration_ms: 30000 }
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                if e.is_connect() {
+                    return LlmError::ConnectionReset;
+                }
+                LlmError::Unknown {
+                    message: e.to_string(),
+                }
+            }
+        })
+    }
+
+    async fn execute_hosted_responses_image(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        let input = if request.projected_messages.is_empty() {
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": Self::image_prompt(&request)
+            })]
+        } else {
+            Self::convert_to_responses_input(&request.projected_messages)?
+        };
+        let mut tool = serde_json::Map::new();
+        tool.insert(
+            "type".to_string(),
+            serde_json::Value::String("image_generation".to_string()),
+        );
+        Self::apply_image_output_options(&mut tool, &request);
+        let body = serde_json::json!({
+            "model": request.model,
+            "input": input,
+            "tools": [serde_json::Value::Object(tool)],
+            "stream": false,
+        });
+        let endpoint = format!("{}/v1/responses", self.base_url);
+        let response = self.post_json_to_openai(&endpoint, &body).await?;
+        self.normalize_openai_image_response(request, response, true)
+            .await
+    }
+
+    async fn execute_images_api(
+        &self,
+        request: ProviderImageGenerationRequest,
+        model: String,
+        endpoint_kind: OpenAiImagesApiEndpoint,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        let endpoint_path = match endpoint_kind {
+            OpenAiImagesApiEndpoint::Generations => "/v1/images/generations",
+            OpenAiImagesApiEndpoint::Edits => "/v1/images/edits",
+        };
+        let mut body = serde_json::json!({
+            "model": model,
+            "prompt": Self::image_prompt(&request),
+            "n": request.generate_request.count.get(),
+        });
+        if let Some(obj) = body.as_object_mut() {
+            if request.model.starts_with("gpt-image") {
+                Self::apply_image_output_options(obj, &request);
+            } else {
+                obj.insert(
+                    "response_format".to_string(),
+                    serde_json::Value::String("b64_json".to_string()),
+                );
+            }
+        }
+        let endpoint = format!("{}{}", self.base_url, endpoint_path);
+        let response = self.post_json_to_openai(&endpoint, &body).await?;
+        self.normalize_openai_image_response(request, response, false)
+            .await
+    }
+
+    fn apply_image_output_options(
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        request: &ProviderImageGenerationRequest,
+    ) {
+        obj.insert(
+            "size".to_string(),
+            serde_json::Value::String(openai_image_size(&request.generate_request.size)),
+        );
+        obj.insert(
+            "quality".to_string(),
+            serde_json::Value::String(
+                openai_image_quality(request.generate_request.quality).to_string(),
+            ),
+        );
+        obj.insert(
+            "output_format".to_string(),
+            serde_json::Value::String(
+                match request.generate_request.format {
+                    ImageFormatPreference::Jpeg => "jpeg",
+                    ImageFormatPreference::Webp => "webp",
+                    ImageFormatPreference::Auto | ImageFormatPreference::Png => "png",
+                }
+                .to_string(),
+            ),
+        );
+    }
+
+    async fn normalize_openai_image_response(
+        &self,
+        request: ProviderImageGenerationRequest,
+        response: reqwest::Response,
+        hosted_responses: bool,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        let status_code = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        if !(200..=299).contains(&status_code) {
+            return Ok(ProviderImageGenerationOutput {
+                operation_id: request.operation_id,
+                terminal: Self::openai_error_terminal(status_code, &text),
+                images: Vec::new(),
+                provider_text: None,
+                revised_prompt: RevisedPromptDisposition::NotRequested,
+                native_metadata: ProviderImageMetadata::OpenAi(OpenAiImageMetadata {
+                    target_model: request.model,
+                    response_id: None,
+                    image_generation_call_id: None,
+                }),
+                warnings: Vec::new(),
+            });
+        }
+
+        let value: Value = serde_json::from_str(&text).map_err(|e| LlmError::StreamParseError {
+            message: format!("invalid OpenAI image response JSON: {e}"),
+        })?;
+        let (width, height) = dimensions_from_size_preference(&request.generate_request.size);
+        let media_type = media_type_from_format_preference(request.generate_request.format);
+        let mut images = Vec::new();
+        let mut revised_prompt = RevisedPromptDisposition::NotRequested;
+        let mut provider_text = Vec::new();
+        let mut image_generation_call_id = None;
+
+        if hosted_responses {
+            if let Some(output) = value.get("output").and_then(Value::as_array) {
+                for item in output {
+                    match item.get("type").and_then(|v| v.as_str()) {
+                        Some("image_generation_call") => {
+                            if image_generation_call_id.is_none() {
+                                image_generation_call_id =
+                                    item.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                            }
+                            if let Some(data) = item
+                                .get("result")
+                                .or_else(|| item.get("b64_json"))
+                                .or_else(|| item.get("image_data"))
+                                .and_then(|v| v.as_str())
+                            {
+                                images.push(ProviderGeneratedImage {
+                                    media_type: media_type.clone(),
+                                    base64_data: normalize_base64_image_data(data),
+                                    width,
+                                    height,
+                                });
+                            }
+                            if let Some(text) = item.get("revised_prompt").and_then(|v| v.as_str())
+                                && let Ok(prompt) = meerkat_core::PromptText::new(text.to_string())
+                            {
+                                revised_prompt = RevisedPromptDisposition::Revised {
+                                    text: prompt,
+                                    source: RevisedPromptSource::Provider,
+                                };
+                            }
+                        }
+                        Some("message") => {
+                            if let Some(parts) = item.get("content").and_then(|v| v.as_array()) {
+                                for part in parts {
+                                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                        provider_text.push(text.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        } else if let Some(data) = value.get("data").and_then(|v| v.as_array()) {
+            for item in data {
+                if let Some(data) = item.get("b64_json").and_then(|v| v.as_str()) {
+                    images.push(ProviderGeneratedImage {
+                        media_type: media_type.clone(),
+                        base64_data: normalize_base64_image_data(data),
+                        width,
+                        height,
+                    });
+                }
+                if let Some(text) = item.get("revised_prompt").and_then(|v| v.as_str())
+                    && let Ok(prompt) = meerkat_core::PromptText::new(text.to_string())
+                {
+                    revised_prompt = RevisedPromptDisposition::Revised {
+                        text: prompt,
+                        source: RevisedPromptSource::Provider,
+                    };
+                }
+            }
+        }
+
+        let terminal = if images.is_empty() {
+            ImageOperationTerminalClass::EmptyResult {
+                provider_text: if provider_text.is_empty() {
+                    meerkat_core::ProviderTextDisposition::NotEmitted
+                } else {
+                    meerkat_core::ProviderTextDisposition::EmittedButNotStored
+                },
+            }
+        } else {
+            ImageOperationTerminalClass::Generated
+        };
+        let warnings = Self::image_count_warning(&request, images.len());
+        Ok(ProviderImageGenerationOutput {
+            operation_id: request.operation_id,
+            terminal,
+            images,
+            provider_text: if provider_text.is_empty() {
+                None
+            } else {
+                Some(provider_text.join("\n"))
+            },
+            revised_prompt,
+            native_metadata: ProviderImageMetadata::OpenAi(OpenAiImageMetadata {
+                target_model: request.model,
+                response_id: value.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                image_generation_call_id,
+            }),
+            warnings,
+        })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl ImageGenerationExecutor for OpenAiClient {
+    async fn execute_image_generation(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        match request.execution_plan.clone() {
+            meerkat_core::GenerateImageExecutionPlan::OpenAiHostedResponsesImageTool { .. } => {
+                self.execute_hosted_responses_image(request).await
+            }
+            meerkat_core::GenerateImageExecutionPlan::OpenAiImagesApi { model, plan, .. } => {
+                self.execute_images_api(request, model.to_string(), plan.endpoint)
+                    .await
+            }
+            other => Err(LlmError::InvalidRequest {
+                message: format!("OpenAI image executor cannot run plan {other:?}"),
+            }),
         }
     }
 }
@@ -912,12 +1266,28 @@ fn fallback_raw_value() -> Box<RawValue> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use axum::{Router, extract::State, response::IntoResponse, routing::post};
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
     use meerkat_core::UserMessage;
+    use meerkat_llm_core::ImageGenerationExecutor;
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
     async fn responses_sse(State(payload): State<String>) -> impl IntoResponse {
         ([("content-type", "text/event-stream")], payload)
+    }
+
+    #[derive(Clone)]
+    struct ImageStubState {
+        response: Value,
+        seen: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn openai_image_stub(
+        State(state): State<ImageStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body);
+        Json(state.response)
     }
 
     async fn spawn_openai_stub_server(payload: String) -> (String, tokio::task::JoinHandle<()>) {
@@ -934,9 +1304,186 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn spawn_openai_image_stub(
+        response: Value,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/responses", post(openai_image_stub))
+            .route("/v1/images/generations", post(openai_image_stub))
+            .with_state(ImageStubState { response, seen });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn image_executor_request_json(plan: Value) -> ProviderImageGenerationRequest {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "00000000-0000-0000-0000-000000000101",
+            "model": "gpt-4.1-mini",
+            "generate_request": {
+                "intent": {
+                    "intent": "generate",
+                    "prompt": {"content": "draw a small red kite"},
+                    "prompt_source": {
+                        "source": "user_provided",
+                        "message_id": "00000000-0000-0000-0000-000000000102"
+                    },
+                    "reference_images": []
+                },
+                "target": {"target": "auto"},
+                "size": {"size": "landscape1536x1024"},
+                "quality": "low",
+                "format": "png",
+                "count": 2
+            },
+            "execution_plan": plan,
+            "projected_messages": []
+        }))
+        .expect("image executor request")
+    }
+
+    fn hosted_openai_plan_json() -> Value {
+        serde_json::json!({
+            "plan_type": "open_ai_hosted_responses_image_tool",
+            "max_count": 4,
+            "capabilities": {
+                "hosted_image_generation_tool": true,
+                "native_image_output": false,
+                "custom_tools": true,
+                "image_search_grounding": false,
+                "image_continuity_tokens": "unsupported"
+            },
+            "plan": {"tool_name": "image_generation"}
+        })
+    }
+
+    fn images_api_openai_plan_json() -> Value {
+        serde_json::json!({
+            "plan_type": "open_ai_images_api",
+            "model": "gpt-image-1",
+            "max_count": 4,
+            "capabilities": {
+                "hosted_image_generation_tool": false,
+                "native_image_output": true,
+                "custom_tools": false,
+                "image_search_grounding": false,
+                "image_continuity_tokens": "unsupported"
+            },
+            "plan": {"endpoint": "generations"}
+        })
+    }
+
     // =========================================================================
     // Responses API Request Format Tests
     // =========================================================================
+
+    #[tokio::test]
+    async fn openai_hosted_image_executor_normalizes_fake_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "id": "resp_img_1",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Provider caption"}]
+                },
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_1",
+                    "result": "data:image/png;base64,aGVsbG8=",
+                    "revised_prompt": "draw a small red kite in watercolor"
+                }
+            ]
+        });
+        let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+
+        let output = client
+            .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+            .await?;
+
+        assert!(matches!(
+            output.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].base64_data, "aGVsbG8=");
+        assert_eq!(output.images[0].media_type.as_str(), "image/png");
+        assert_eq!(
+            (output.images[0].width, output.images[0].height),
+            (1536, 1024)
+        );
+        assert_eq!(output.provider_text.as_deref(), Some("Provider caption"));
+        assert!(matches!(
+            output.revised_prompt,
+            RevisedPromptDisposition::Revised { .. }
+        ));
+        assert!(matches!(
+            output.native_metadata,
+            ProviderImageMetadata::OpenAi(OpenAiImageMetadata {
+                response_id: Some(_),
+                image_generation_call_id: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            output.warnings.as_slice(),
+            [ImageGenerationWarning::ProviderReturnedFewerImages { .. }]
+        ));
+
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured OpenAI image request");
+        assert_eq!(body["model"], "gpt-4.1-mini");
+        assert_eq!(body["tools"][0]["type"], "image_generation");
+        assert_eq!(body["tools"][0]["size"], "1536x1024");
+        assert_eq!(body["tools"][0]["quality"], "low");
+        assert_eq!(body["tools"][0]["output_format"], "png");
+        assert!(body.get("stream").and_then(Value::as_bool) == Some(false));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_images_api_executor_sends_output_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "created": 1713833628,
+            "data": [{"b64_json": "data:image/png;base64,aGVsbG8="}]
+        });
+        let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let mut request = image_executor_request_json(images_api_openai_plan_json());
+        request.model = "gpt-image-1".to_string();
+
+        let output = client.execute_image_generation(request).await?;
+
+        assert!(matches!(
+            output.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        assert_eq!(
+            (output.images[0].width, output.images[0].height),
+            (1536, 1024)
+        );
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured OpenAI image request");
+        assert_eq!(body["model"], "gpt-image-1");
+        assert_eq!(body["size"], "1536x1024");
+        assert_eq!(body["quality"], "low");
+        assert_eq!(body["output_format"], "png");
+
+        handle.abort();
+        Ok(())
+    }
 
     #[test]
     fn test_request_uses_responses_api_endpoint_format() {

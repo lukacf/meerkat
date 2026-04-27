@@ -7,6 +7,7 @@ mod comms;
 mod connection;
 mod event;
 mod host;
+mod image_generation;
 mod mcp_live;
 mod mob;
 mod models;
@@ -56,6 +57,12 @@ pub use host::{
     RuntimeHostCapabilities, RuntimeHostEndpointProjection, RuntimeHostFeatureFlags,
     RuntimeHostHealth, RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo,
     RuntimeHostRealmProjection,
+};
+pub use image_generation::{
+    WireAssistantImageRef, WireGenerateImageExecutionPlan, WireGenerateImageRequest,
+    WireImageGenerationToolResult, WireImageOperationPhase, WireModelRoutingApprovalPhase,
+    WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionModelRoutingStatus,
+    WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,

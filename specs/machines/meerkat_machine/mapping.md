@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MeerkatMachine`
 
 ### Code Anchors
-- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, classify envelope, append/context starts, run preparation, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, notify op watcher, collect/enqueue, and terminal records
+- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, classify envelope, append/context starts, run preparation, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, notify op watcher, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, and persistent reconfigure
 - `meerkat_public_surface`: `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -24,6 +24,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records
+- `model_routing_and_image_operation` — set model routing baseline, request finite switch turn, request until changed switch turn, admit model routing assistant turn, begin image operation, activate image operation override, complete image operation, restore image operation override, project model routing status changed, switch turn denied, switch turn persistent reconfigure requested, switch turn finite override activated/restored, image operation phase changed/denied, and model routing approval terminalized
 - `live_topology_and_supervision` — begin live topology reconfigure, mark detached, apply identity or visibility, complete/abort/fail topology, bind/authorize/revoke supervisor, publish/revoke trust edge, comms trust reconcile, and local endpoint publish or clear
 
 ### Transitions
@@ -66,36 +67,249 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReconfigureSessionLlmIdentityRunning`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `SetModelRoutingBaselineIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SetModelRoutingBaselineAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SetModelRoutingBaselineRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SetModelRoutingBaselineRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SetModelRoutingBaselineStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalUnavailableIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalUnavailableAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalUnavailableRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalDeniedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalDeniedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnApprovalDeniedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnRealtimeConflictIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnRealtimeConflictAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnRealtimeConflictRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnScopedConflictIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnScopedConflictAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnScopedConflictRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestFiniteSwitchTurnAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnRealtimeConflictIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnRealtimeConflictAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnRealtimeConflictRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteUntilChangedSwitchTurnReconfigureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteUntilChangedSwitchTurnReconfigureAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteUntilChangedSwitchTurnReconfigureRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `AdmitPendingFiniteSwitchTurnIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `AdmitPendingFiniteSwitchTurnAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `AdmitPendingFiniteSwitchTurnRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `DecrementFiniteSwitchTurnIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `DecrementFiniteSwitchTurnAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `DecrementFiniteSwitchTurnRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreConsumedFiniteSwitchTurnIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreConsumedFiniteSwitchTurnAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreConsumedFiniteSwitchTurnRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationScopedConflictIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationScopedConflictAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationScopedConflictRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationRealtimeConflictIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationRealtimeConflictAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `model_routing_and_image_operation`
+- `BeginImageOperationRealtimeConflictRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalUnavailableIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalUnavailableAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalUnavailableRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalDeniedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalDeniedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationApprovalDeniedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `BeginImageOperationAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ActivateImageOperationOverrideIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ActivateImageOperationOverrideAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ActivateImageOperationOverrideRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationWithoutScopedOverrideIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationWithoutScopedOverrideAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `CompleteImageOperationWithoutScopedOverrideRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreImageOperationOverrideIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreImageOperationOverrideAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `RestoreImageOperationOverrideRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
 - `StagePersistentFilterIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `recycle_and_compaction`
+  - scenarios: `staged_visibility_apply`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `StagePersistentFilterAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `realtime_connection_projection`
+  - scenarios: `staged_visibility_apply`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `StagePersistentFilterRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`
+  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `model_routing_and_image_operation`
 - `StagePersistentFilterRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `recycle_and_compaction`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `StagePersistentFilterStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - scenarios: `staged_visibility_apply`, `model_routing_and_image_operation`
 - `RequestDeferredToolsIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `RequestDeferredToolsAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `RequestDeferredToolsRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `RequestDeferredToolsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `RequestDeferredToolsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PrepareBindingsInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -116,19 +330,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `session_registration_and_binding`
 - `SetPeerIngressContextIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `SetPeerIngressContextAttached`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `SetPeerIngressContextRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `SetPeerIngressContextRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `NotifyDrainExitedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
@@ -224,19 +438,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `session_registration_and_binding`
 - `SetSilentIntentsIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `retire-reset-destroy`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `SetSilentIntentsAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `retire-reset-destroy`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `SetSilentIntentsRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `SetSilentIntentsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `SetSilentIntentsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `product_turn_streaming`
+  - scenarios: `retire-reset-destroy`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `AbortIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
@@ -683,19 +897,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `realtime_connection_projection`
 - `PeerRequestSentIdle`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestSentAttached`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `PeerRequestSentRunning`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PeerRequestSentRetired`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestSentStopped`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PeerResponseProgressArrivedIdle`
   - anchors: `peer_directory_reachability_authority`
   - scenarios: `peer_reachability_probe`, `realtime_connection_projection`, `recycle_and_compaction`
@@ -728,49 +942,49 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedFailedIdle`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerResponseTerminalArrivedFailedAttached`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `realtime_connection_projection`
 - `PeerResponseTerminalArrivedFailedRunning`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `bind-run-boundary-terminal`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `PeerResponseTerminalArrivedFailedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerResponseTerminalArrivedFailedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `PeerRequestTimedOutIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestTimedOutAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
 - `PeerRequestTimedOutRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `model_routing_and_image_operation`
 - `PeerRequestTimedOutRetired`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestTimedOutStopped`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
 - `PeerRequestReceivedIdle`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestReceivedAttached`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `PeerRequestReceivedRunning`
   - anchors: `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PeerRequestReceivedRetired`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PeerRequestReceivedStopped`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PeerResponseRepliedIdle`
   - anchors: `peer_directory_reachability_authority`
   - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
@@ -1475,6 +1689,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeNotice`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `ModelRoutingStatusChanged`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SwitchTurnDenied`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SwitchTurnPersistentReconfigureRequested`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SwitchTurnFiniteOverrideActivated`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `SwitchTurnFiniteOverrideRestored`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ImageOperationPhaseChanged`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ImageOperationDenied`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ModelRoutingApprovalTerminalized`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
 - `ResolveAdmission`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -1533,8 +1771,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `ExposeOperationPeer`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
 - `RetainTerminalRecord`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -1587,13 +1825,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `PeerInteractionStateChanged`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`
 - `PeerInteractionCleanup`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `peer_reachability_probe`, `realtime_connection_projection`
 - `InboundPeerInteractionStateChanged`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`
 - `SessionContextAdvanced`
   - anchors: `meerkat_machine`
@@ -1606,7 +1844,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `realtime_connection_projection`
 - `RealtimeProductTurnPhaseChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - scenarios: `product_turn_streaming`, `model_routing_and_image_operation`
 - `RealtimeProjectionFreshnessChanged`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
@@ -1615,13 +1853,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `realtime_connection_projection`
 - `LiveTopologyPhaseChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - scenarios: `model_routing_and_image_operation`, `live_topology_and_supervision`
 - `LocalEndpointChanged`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 - `PeerProjectionChanged`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `CommsTrustReconcileRequested`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`

@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 //! Meerkat contracts — canonical wire types, capability model, and error contracts.
 //!
@@ -209,6 +209,7 @@ pub use wire::{
     VisibilityClass,
     WireAgentRuntimeId,
     WireAssistantBlock,
+    WireAssistantImageRef,
     // Phase 4c — connection/auth wire types.
     WireAuthError,
     WireAuthProfile,
@@ -225,7 +226,11 @@ pub use wire::{
     WireContentInput,
     WireDeviceStart,
     WireEvent,
+    WireGenerateImageExecutionPlan,
+    WireGenerateImageRequest,
     WireHandlingMode,
+    WireImageGenerationToolResult,
+    WireImageOperationPhase,
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
@@ -240,6 +245,8 @@ pub use wire::{
     WireMobRuntimeMode,
     WireModelBetaHeader,
     WireModelProfile,
+    WireModelRoutingApprovalPhase,
+    WireModelRoutingApprovalRequest,
     WireModelTier,
     WireProviderBinding,
     WireProviderMeta,
@@ -253,11 +260,16 @@ pub use wire::{
     WireRunResult,
     WireRuntimeBinding,
     WireRuntimeState,
+    WireScopedModelOverride,
     WireSessionHistory,
     WireSessionInfo,
     WireSessionMessage,
+    WireSessionModelRoutingStatus,
     WireSessionSummary,
     WireStopReason,
+    WireSwitchTurnControlResult,
+    WireSwitchTurnIntent,
+    WireSwitchTurnPhase,
     WireToolCall,
     WireToolResult,
     WireToolResultContent,

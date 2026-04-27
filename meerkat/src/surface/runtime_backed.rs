@@ -30,9 +30,11 @@ pub fn build_runtime_backed_service(
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     let event_projection = persistence.event_projection();
     let (store, runtime_store, blob_store) = persistence.into_parts();
+    builder = builder.with_image_generation_machine(runtime_adapter.clone());
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
         &store,
     ))));
+    builder.default_blob_store = Some(blob_store.clone());
     let mut service =
         PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

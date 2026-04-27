@@ -373,6 +373,15 @@ pub enum WireAssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
+    Image {
+        image_id: meerkat_core::AssistantImageId,
+        blob_ref: meerkat_core::BlobRef,
+        media_type: meerkat_core::MediaType,
+        width: u32,
+        height: u32,
+        revised_prompt: meerkat_core::RevisedPromptDisposition,
+        meta: meerkat_core::ProviderImageMetadata,
+    },
     Unknown,
 }
 
@@ -401,6 +410,23 @@ impl From<AssistantBlock> for WireAssistantBlock {
                 // wire type preserves that invariant.
                 args,
                 meta: meta.map(|m| (*m).into()),
+            },
+            AssistantBlock::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
+            } => Self::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
             },
             _ => Self::Unknown,
         }

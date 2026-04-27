@@ -6,9 +6,17 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
-use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::{
+    ContentBlock, GeminiImageMetadata, ImageData, ImageGenerationIntent,
+    ImageOperationTerminalClass, Message, OutputSchema, Provider, ProviderImageMetadata,
+    ProviderTextDisposition, StopReason, Usage,
+};
 use meerkat_llm_core::LlmError;
-use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
+use meerkat_llm_core::{
+    ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
+    ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
+    dimensions_from_size_preference, normalize_base64_image_data,
+};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -383,6 +391,187 @@ impl GeminiClient {
         serde_json::from_str(line).ok()
     }
 
+    fn image_prompt(request: &ProviderImageGenerationRequest) -> String {
+        match &request.generate_request.intent {
+            ImageGenerationIntent::Generate { prompt, .. } => prompt.content.clone(),
+            ImageGenerationIntent::Edit { instruction, .. } => instruction.content.clone(),
+        }
+    }
+
+    async fn post_gemini_json(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut req = self
+            .http
+            .post(endpoint)
+            .header("Content-Type", "application/json");
+        if let Some(authorizer) = &self.authorizer {
+            let mut extra: Vec<(String, String)> = Vec::new();
+            let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: endpoint,
+                headers: &mut extra,
+            };
+            authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                LlmError::AuthenticationFailed {
+                    message: format!("gemini authorizer failed: {e}"),
+                }
+            })?;
+            for (name, value) in extra {
+                req = req.header(name, value);
+            }
+        } else {
+            req = req.header("x-goog-api-key", &self.api_key);
+        }
+        req.json(body)
+            .send()
+            .await
+            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
+    }
+
+    fn build_image_request_body(
+        &self,
+        request: &ProviderImageGenerationRequest,
+    ) -> Result<Value, LlmError> {
+        let messages = if request.projected_messages.is_empty() {
+            vec![Message::User(meerkat_core::UserMessage::text(
+                Self::image_prompt(request),
+            ))]
+        } else {
+            request.projected_messages.clone()
+        };
+        let llm_request = LlmRequest::new(&request.model, messages);
+        let mut body = self.build_request_body(&llm_request)?;
+        body["generationConfig"]["responseModalities"] = Value::Array(vec![
+            Value::String("TEXT".into()),
+            Value::String("IMAGE".into()),
+        ]);
+        Ok(body)
+    }
+
+    fn gemini_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("safety") || lower.contains("blocked") {
+            ImageOperationTerminalClass::SafetyFiltered
+        } else if lower.contains("refusal") || lower.contains("refused") {
+            ImageOperationTerminalClass::RefusedByProvider
+        } else if status_code == 408 || status_code == 504 {
+            ImageOperationTerminalClass::Timeout
+        } else {
+            ImageOperationTerminalClass::Failed
+        }
+    }
+
+    async fn execute_native_image(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        let body = self.build_image_request_body(&request)?;
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent",
+            self.base_url, request.model
+        );
+        let response = self.post_gemini_json(&url, &body).await?;
+        let status_code = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        if !(200..=299).contains(&status_code) {
+            return Ok(ProviderImageGenerationOutput {
+                operation_id: request.operation_id,
+                terminal: Self::gemini_error_terminal(status_code, &text),
+                images: Vec::new(),
+                provider_text: None,
+                revised_prompt: meerkat_core::RevisedPromptDisposition::UnsupportedByBackend,
+                native_metadata: ProviderImageMetadata::Gemini(GeminiImageMetadata {
+                    target_model: request.model,
+                    response_id: None,
+                    continuity_ref: None,
+                }),
+                warnings: Vec::new(),
+            });
+        }
+
+        let parsed: GenerateContentResponse =
+            serde_json::from_str(&text).map_err(|e| LlmError::StreamParseError {
+                message: format!("invalid Gemini image response JSON: {e}"),
+            })?;
+        let (width, height) = dimensions_from_size_preference(&request.generate_request.size);
+        let mut images = Vec::new();
+        let mut provider_text = Vec::new();
+        let mut finish_reason = None;
+        if let Some(candidates) = parsed.candidates {
+            for cand in candidates {
+                finish_reason = cand.finish_reason.clone().or(finish_reason);
+                if let Some(content) = cand.content
+                    && let Some(parts) = content.parts
+                {
+                    for part in parts {
+                        if let Some(text) = part.text
+                            && !text.is_empty()
+                            && !part.thought.unwrap_or(false)
+                        {
+                            provider_text.push(text);
+                        }
+                        if let Some(inline_data) = part.inline_data {
+                            images.push(ProviderGeneratedImage {
+                                media_type: meerkat_core::MediaType::new(inline_data.mime_type),
+                                base64_data: normalize_base64_image_data(&inline_data.data),
+                                width,
+                                height,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let terminal = if images.is_empty() {
+            match finish_reason.as_deref() {
+                Some("SAFETY" | "RECITATION") => ImageOperationTerminalClass::SafetyFiltered,
+                _ => ImageOperationTerminalClass::EmptyResult {
+                    provider_text: if provider_text.is_empty() {
+                        ProviderTextDisposition::NotEmitted
+                    } else {
+                        ProviderTextDisposition::EmittedButNotStored
+                    },
+                },
+            }
+        } else {
+            ImageOperationTerminalClass::Generated
+        };
+        let warnings = if let Some(returned) = std::num::NonZeroU32::new(images.len() as u32) {
+            if returned < request.generate_request.count {
+                vec![
+                    meerkat_core::ImageGenerationWarning::ProviderReturnedFewerImages {
+                        requested: request.generate_request.count,
+                        returned,
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(ProviderImageGenerationOutput {
+            operation_id: request.operation_id,
+            terminal,
+            images,
+            provider_text: if provider_text.is_empty() {
+                None
+            } else {
+                Some(provider_text.join("\n"))
+            },
+            revised_prompt: meerkat_core::RevisedPromptDisposition::UnsupportedByBackend,
+            native_metadata: ProviderImageMetadata::Gemini(GeminiImageMetadata {
+                target_model: request.model,
+                response_id: parsed.response_id,
+                continuity_ref: None,
+            }),
+            warnings,
+        })
+    }
+
     /// Compile an output schema for Gemini structured outputs.
     ///
     /// Uses `responseJsonSchema` without destructive lowering so schema
@@ -401,6 +590,24 @@ impl GeminiClient {
         }
 
         Ok(CompiledSchema { schema, warnings })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl ImageGenerationExecutor for GeminiClient {
+    async fn execute_image_generation(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        match request.execution_plan.clone() {
+            meerkat_core::GenerateImageExecutionPlan::GeminiNativeImageModel { .. } => {
+                self.execute_native_image(request).await
+            }
+            other => Err(LlmError::InvalidRequest {
+                message: format!("Gemini image executor cannot run plan {other:?}"),
+            }),
+        }
     }
 }
 
@@ -1041,6 +1248,7 @@ impl LlmClient for GeminiClient {
 struct GenerateContentResponse {
     candidates: Option<Vec<Candidate>>,
     usage_metadata: Option<GeminiUsage>,
+    response_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1060,8 +1268,16 @@ struct CandidateContent {
 struct Part {
     text: Option<String>,
     function_call: Option<FunctionCall>,
+    inline_data: Option<InlineData>,
     thought: Option<bool>,
     thought_signature: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineData {
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,10 +1302,88 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
     use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel;
     use meerkat_core::{
         AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
     };
+    use meerkat_llm_core::ImageGenerationExecutor;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone)]
+    struct GeminiImageStubState {
+        response: Value,
+        seen: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn gemini_image_stub(
+        State(state): State<GeminiImageStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body);
+        Json(state.response)
+    }
+
+    async fn spawn_gemini_image_stub(
+        response: Value,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/v1beta/models/gemini-2.5-flash-image:generateContent",
+                post(gemini_image_stub),
+            )
+            .with_state(GeminiImageStubState { response, seen });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn gemini_image_executor_request_json() -> ProviderImageGenerationRequest {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "00000000-0000-0000-0000-000000000201",
+            "model": "gemini-2.5-flash-image",
+            "generate_request": {
+                "intent": {
+                    "intent": "generate",
+                    "prompt": {"content": "draw a small blue boat"},
+                    "prompt_source": {
+                        "source": "user_provided",
+                        "message_id": "00000000-0000-0000-0000-000000000202"
+                    },
+                    "reference_images": []
+                },
+                "target": {"target": "auto"},
+                "size": {"size": "landscape1536x1024"},
+                "quality": "auto",
+                "format": "auto",
+                "count": 1
+            },
+            "execution_plan": {
+                "plan_type": "gemini_native_image_model",
+                "model": "gemini-2.5-flash-image",
+                "max_count": 1,
+                "capabilities": {
+                    "hosted_image_generation_tool": false,
+                    "native_image_output": true,
+                    "custom_tools": true,
+                    "image_search_grounding": false,
+                    "image_continuity_tokens": "same_provider_only"
+                },
+                "plan": {
+                    "projection_snapshot_id": "00000000-0000-0000-0000-000000000203"
+                }
+            },
+            "projected_messages": []
+        }))
+        .expect("gemini image executor request")
+    }
 
     fn assert_no_const_or_type_arrays(value: &Value) {
         match value {
@@ -1115,6 +1409,72 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[tokio::test]
+    async fn gemini_native_image_executor_requests_text_and_image_modalities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "responseId": "gem_resp_1",
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "Here is a blue boat."},
+                        {
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": "data:image/png;base64,aGVsbG8="
+                            }
+                        }
+                    ]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let (base_url, handle) = spawn_gemini_image_stub(response, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+
+        let output = client
+            .execute_image_generation(gemini_image_executor_request_json())
+            .await?;
+
+        assert!(matches!(
+            output.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].base64_data, "aGVsbG8=");
+        assert_eq!(output.images[0].media_type.as_str(), "image/png");
+        assert_eq!(
+            (output.images[0].width, output.images[0].height),
+            (1536, 1024)
+        );
+        assert_eq!(
+            output.provider_text.as_deref(),
+            Some("Here is a blue boat.")
+        );
+        assert!(matches!(
+            output.native_metadata,
+            ProviderImageMetadata::Gemini(GeminiImageMetadata {
+                response_id: Some(_),
+                ..
+            })
+        ));
+
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured Gemini image request");
+        assert_eq!(
+            body["generationConfig"]["responseModalities"],
+            serde_json::json!(["TEXT", "IMAGE"])
+        );
+        assert_eq!(
+            body["contents"][0]["parts"][0]["text"],
+            "draw a small blue boat"
+        );
+
+        handle.abort();
+        Ok(())
     }
 
     #[test]

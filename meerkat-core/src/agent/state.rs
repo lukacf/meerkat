@@ -1851,10 +1851,11 @@ where
                         let mut accumulated_session_effects =
                             Vec::<crate::ops::SessionEffect>::new();
                         for (tc, dispatch_result, duration_ms) in dispatch_results {
+                            let mut tool_session_effects = Vec::new();
                             let mut tool_result = match dispatch_result {
                                 Ok(outcome) => {
                                     all_async_ops.extend(outcome.async_ops);
-                                    accumulated_session_effects.extend(outcome.session_effects);
+                                    tool_session_effects = outcome.session_effects;
                                     outcome.result
                                 }
                                 Err(crate::error::ToolError::CallbackPending {
@@ -1914,7 +1915,7 @@ where
                                 )
                                 .await?;
 
-                            if let Some(HookDecision::Deny {
+                            let post_tool_denied = if let Some(HookDecision::Deny {
                                 reason_code,
                                 message,
                                 payload,
@@ -1934,7 +1935,10 @@ where
                                     }),
                                 );
                                 tool_result.is_error = true;
-                            }
+                                true
+                            } else {
+                                false
+                            };
 
                             for outcome in &post_tool_report.outcomes {
                                 for patch in &outcome.patches {
@@ -1982,6 +1986,9 @@ where
                             }
 
                             tool_results.push(tool_result);
+                            if !post_tool_denied {
+                                accumulated_session_effects.extend(tool_session_effects);
+                            }
 
                             // Track tool call in budget
                             self.budget.record_tool_call();
@@ -1998,19 +2005,29 @@ where
                             .iter()
                             .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
 
-                        // Apply session effects from tool dispatch before
-                        // appending ToolResults. This ensures the canonical
-                        // session state is updated before the next boundary,
-                        // so an invariant failure doesn't occur after
-                        // ToolResults is already in the transcript.
-                        if !accumulated_session_effects.is_empty() {
-                            self.apply_session_effects(&accumulated_session_effects)?;
+                        // Apply state-mutating effects before ToolResults, but
+                        // defer transcript-producing assistant blocks until
+                        // after ToolResults so provider tool-call adjacency is
+                        // preserved.
+                        let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
+                            accumulated_session_effects.into_iter().partition(|effect| {
+                                matches!(
+                                    effect,
+                                    crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+                                )
+                            });
+                        if !pre_tool_effects.is_empty() {
+                            self.apply_session_effects(&pre_tool_effects)?;
                         }
 
                         // Add tool results to session
                         self.session.push(Message::ToolResults {
                             results: tool_results,
                         });
+
+                        if !post_tool_effects.is_empty() {
+                            self.apply_session_effects(&post_tool_effects)?;
+                        }
 
                         self.observe_cancel_after_boundary_request(&run_id)?;
 
@@ -4393,6 +4410,217 @@ mod tests {
                 .staged_requested_deferred_names
                 .contains("deferred_tool"),
             "expected deferred_tool to be staged after tool session effects"
+        );
+    }
+
+    struct ImageEffectClient {
+        call_count: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ImageEffectClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut calls = self.call_count.lock().unwrap();
+            let response = if *calls == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "image-call".to_string(),
+                        name: "image_effect".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                )
+            } else {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                )
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct ImageEffectDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl ImageEffectDispatcher {
+        fn new() -> Self {
+            Self {
+                tools: vec![Arc::new(ToolDef {
+                    name: "image_effect".into(),
+                    description: "returns an assistant image session effect".into(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
+                })]
+                .into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ImageEffectDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            let mut outcome = crate::ops::ToolDispatchOutcome::sync_result(ToolResult::new(
+                call.id.to_string(),
+                "{\"ok\":true}".to_string(),
+                false,
+            ));
+            outcome
+                .session_effects
+                .push(crate::ops::SessionEffect::AppendAssistantBlocks {
+                    blocks: vec![AssistantBlock::Image {
+                        image_id: crate::AssistantImageId::new(uuid::Uuid::new_v4()),
+                        blob_ref: crate::BlobRef {
+                            blob_id: crate::BlobId::new("image-blob"),
+                            media_type: "image/png".to_string(),
+                        },
+                        media_type: crate::MediaType::new("image/png"),
+                        width: 1,
+                        height: 1,
+                        revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                        meta: crate::ProviderImageMetadata::NotEmitted,
+                    }],
+                });
+            Ok(outcome)
+        }
+    }
+
+    struct DenyPostToolHook;
+
+    #[async_trait]
+    impl crate::hooks::HookEngine for DenyPostToolHook {
+        async fn execute(
+            &self,
+            invocation: crate::hooks::HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<crate::hooks::HookExecutionReport, crate::hooks::HookEngineError> {
+            if invocation.point == crate::hooks::HookPoint::PostToolExecution {
+                return Ok(crate::hooks::HookExecutionReport {
+                    decision: Some(crate::hooks::HookDecision::deny(
+                        crate::hooks::HookId::new("deny-image-tool"),
+                        crate::hooks::HookReasonCode::PolicyViolation,
+                        "blocked".to_string(),
+                        None,
+                    )),
+                    ..Default::default()
+                });
+            }
+            Ok(Default::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_denied_tool_result_suppresses_session_effects() {
+        let client = Arc::new(ImageEffectClient {
+            call_count: Mutex::new(0),
+        });
+        let tools = Arc::new(ImageEffectDispatcher::new());
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new().with_hook_engine(Arc::new(DenyPostToolHook)),
+        )
+        .build(client, tools, Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert!(
+            !agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::BlockAssistant(blocks)
+                    if blocks
+                        .blocks
+                        .iter()
+                        .any(|block| matches!(block, AssistantBlock::Image { .. }))
+            )),
+            "hook-denied tool session effects must not append assistant image blocks"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_image_session_effects_preserve_tool_result_adjacency() {
+        let client = Arc::new(ImageEffectClient {
+            call_count: Mutex::new(0),
+        });
+        let tools = Arc::new(ImageEffectDispatcher::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build(client, tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+
+        let messages = agent.session().messages();
+        let tool_use_index = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    Message::BlockAssistant(blocks)
+                        if blocks
+                            .blocks
+                            .iter()
+                            .any(|block| matches!(block, AssistantBlock::ToolUse { .. }))
+                )
+            })
+            .expect("assistant tool use should be recorded");
+        let tool_results_index = messages
+            .iter()
+            .position(|message| matches!(message, Message::ToolResults { .. }))
+            .expect("tool results should be recorded");
+        let image_index = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    Message::BlockAssistant(blocks)
+                        if blocks
+                            .blocks
+                            .iter()
+                            .any(|block| matches!(block, AssistantBlock::Image { .. }))
+                )
+            })
+            .expect("assistant image block should be recorded");
+
+        assert_eq!(
+            tool_results_index,
+            tool_use_index + 1,
+            "tool results must remain adjacent to the tool-use assistant message"
+        );
+        assert!(
+            image_index > tool_results_index,
+            "assistant image blocks should be appended after tool results"
         );
     }
 

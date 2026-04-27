@@ -24,11 +24,11 @@ pub mod review;
 
 use std::collections::BTreeMap;
 
+use meerkat_core::types::ContentInput;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
-use meerkat_core::types::ContentInput;
 use serde_json::Value;
 
 // ── Pack trait ───────────────────────────────────────────────────────────────
@@ -145,7 +145,12 @@ pub fn turn_driven_profile(
 }
 
 /// Build a flow step with text output mode and common defaults.
-pub fn flow_step(role: &str, message: String, depends_on: &[&str], timeout_ms: u64) -> FlowStepSpec {
+pub fn flow_step(
+    role: &str,
+    message: String,
+    depends_on: &[&str],
+    timeout_ms: u64,
+) -> FlowStepSpec {
     FlowStepSpec {
         role: ProfileName::from(role),
         message: ContentInput::from(message),
@@ -180,8 +185,10 @@ pub fn mob_definition(
     flows: BTreeMap<FlowId, FlowSpec>,
     spawn_policy: Option<SpawnPolicyConfig>,
 ) -> MobDefinition {
-    let mut definition =
-        MobDefinition::explicit(MobId::from(format!("codemob-{id_prefix}-{}", uuid::Uuid::new_v4().as_simple())));
+    let mut definition = MobDefinition::explicit(MobId::from(format!(
+        "codemob-{id_prefix}-{}",
+        uuid::Uuid::new_v4().as_simple()
+    )));
     definition.profiles = profiles;
     definition.skills = skills;
     definition.flows = flows;

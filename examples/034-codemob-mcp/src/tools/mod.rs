@@ -8,7 +8,7 @@ use meerkat::surface::RequestContext;
 use meerkat::SessionService;
 use meerkat_core::service::{SessionQuery, SessionSummary};
 use meerkat_core::types::SessionId;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::state::ForceState;
 
@@ -323,7 +323,9 @@ pub async fn handle_tool_call(
                 .all()
                 .map(|p| json!({"name": p.name(), "description": p.description(), "agents": p.agent_count(), "flow_steps": p.flow_step_count()}))
                 .collect();
-            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}))
+            Ok(
+                json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}),
+            )
         }
         "consult" => consult::handle(state, arguments, request_context).await,
         "deliberate" => {
@@ -343,11 +345,16 @@ pub async fn handle_tool_call(
             labels.insert("source".into(), "consult".into());
             let sessions = state
                 .session_service
-                .list(SessionQuery { labels: Some(labels), ..SessionQuery::default() })
+                .list(SessionQuery {
+                    labels: Some(labels),
+                    ..SessionQuery::default()
+                })
                 .await
                 .map_err(|e| ToolCallError::internal(format!("List sessions failed: {e}")))?;
             let summaries: Vec<Value> = sessions.iter().map(format_session_summary).collect();
-            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&summaries).unwrap_or_default()}]}))
+            Ok(
+                json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&summaries).unwrap_or_default()}]}),
+            )
         }
         "destroy_session" => {
             let sid = arguments
@@ -361,7 +368,9 @@ pub async fn handle_tool_call(
                 .archive(&session_id)
                 .await
                 .map_err(|e| ToolCallError::internal(format!("Destroy failed: {e}")))?;
-            Ok(json!({"content": [{"type": "text", "text": format!("Session {session_id} destroyed.")}]}))
+            Ok(
+                json!({"content": [{"type": "text", "text": format!("Session {session_id} destroyed.")}]}),
+            )
         }
         "create_mob" => {
             let result = mobs::handle_create(arguments).await?;

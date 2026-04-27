@@ -1,20 +1,20 @@
+use meerkat::surface::{request_action, RequestContext};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::Duration;
-use meerkat::surface::{RequestContext, request_action};
 
 use meerkat_mob::definition::FlowSpec;
 use meerkat_mob::ids::{AgentIdentity, FlowId, MobId};
 use meerkat_mob::{MobDefinition, MobRun, MobRunStatus, SpawnMemberSpec, StepRunStatus};
 
-use crate::state::ForceState;
 use super::{ProgressNotifier, ToolCallError};
+use crate::state::ForceState;
 
 const DEFAULT_FLOW_STEP_TIMEOUT_MS: u64 = 300_000; // 5 min: matches Opus call timeout
 const FLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -57,8 +57,12 @@ pub async fn handle(
         })?;
         let total_steps = pack.flow_step_count();
         let has_flows = total_steps > 0;
-        let definition =
-            pack.definition(&input.task, context, &overrides, input.provider_params.as_ref());
+        let definition = pack.definition(
+            &input.task,
+            context,
+            &overrides,
+            input.provider_params.as_ref(),
+        );
         (total_steps, has_flows, definition)
     };
 
@@ -122,7 +126,10 @@ pub async fn handle(
         .map(|o| o.profile.to_string())
         .unwrap_or_else(|| "moderator".to_string());
     let flow_timeout = if has_flows {
-        Some(derive_flow_watchdog_timeout(&definition, &FlowId::from("main"))?)
+        Some(derive_flow_watchdog_timeout(
+            &definition,
+            &FlowId::from("main"),
+        )?)
     } else {
         None
     };
@@ -204,15 +211,21 @@ pub async fn handle(
         if let Some(token) = progress_token.as_ref() {
             send_progress(
                 progress_notifier.as_ref(),
-                token, 0, 1,
+                token,
+                0,
+                1,
                 &format!("waiting for {expected} agents to complete kickoff"),
             );
         }
-        if let Err(e) = state.mob_state.mob_wait_kickoff(
-            &mob_id,
-            None,
-            Some(120_000), // 2 min timeout — kickoff turns are simple LLM calls
-        ).await {
+        if let Err(e) = state
+            .mob_state
+            .mob_wait_kickoff(
+                &mob_id,
+                None,
+                Some(120_000), // 2 min timeout — kickoff turns are simple LLM calls
+            )
+            .await
+        {
             tracing::warn!(mob_id = %mob_id, error = %e, "kickoff barrier failed; proceeding anyway");
         }
     }
@@ -367,7 +380,10 @@ async fn run_flow(
     {
         Ok(run) => run,
         Err(error) => {
-            let _ = state.mob_state.mob_cancel_flow(mob_id, run_id.clone()).await;
+            let _ = state
+                .mob_state
+                .mob_cancel_flow(mob_id, run_id.clone())
+                .await;
             return Err(error);
         }
     };
@@ -397,12 +413,14 @@ async fn run_flow(
                 .collect();
             Err(ToolCallError::internal(format!(
                 "Flow failed: {}",
-                if errors.is_empty() { "unknown error".into() } else { errors.join("; ") }
+                if errors.is_empty() {
+                    "unknown error".into()
+                } else {
+                    errors.join("; ")
+                }
             )))
         }
-        MobRunStatus::Canceled => {
-            Err(ToolCallError::internal("Flow was canceled".to_string()))
-        }
+        MobRunStatus::Canceled => Err(ToolCallError::internal("Flow was canceled".to_string())),
         _ => Err(ToolCallError::internal(format!(
             "Flow reached non-terminal status '{}'",
             format_run_status(run.status())
@@ -419,7 +437,10 @@ fn derive_flow_watchdog_timeout(
     })?;
     Ok(derive_flow_watchdog_timeout_from_spec(
         flow,
-        definition.limits.as_ref().and_then(|limits| limits.max_flow_duration_ms),
+        definition
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.max_flow_duration_ms),
         definition
             .limits
             .as_ref()
@@ -442,8 +463,7 @@ fn derive_flow_watchdog_timeout_from_spec(
         let step_timeout_ms = step.timeout_ms.unwrap_or(DEFAULT_FLOW_STEP_TIMEOUT_MS);
         acc.saturating_add(step_timeout_ms.saturating_mul(attempts_per_step))
     });
-    let per_step_slack_ms =
-        FLOW_WATCHDOG_PER_STEP_SLACK_MS.saturating_mul(flow.steps.len() as u64);
+    let per_step_slack_ms = FLOW_WATCHDOG_PER_STEP_SLACK_MS.saturating_mul(flow.steps.len() as u64);
 
     Duration::from_millis(
         total_step_budget_ms
@@ -570,9 +590,7 @@ async fn run_comms(
             let remaining_grace = idle_since
                 .map(|t| IDLE_GRACE.saturating_sub(t.elapsed()))
                 .unwrap_or(IDLE_GRACE);
-            remaining_grace.min(
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-            )
+            remaining_grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
         } else {
             // Agents are working — just enforce the hard deadline
             deadline.saturating_duration_since(tokio::time::Instant::now())
@@ -628,11 +646,13 @@ async fn run_comms(
                     }
                 }
 
-                    if total_events % 20 == 0 {
+                if total_events % 20 == 0 {
                     if let Some(token) = progress_token {
                         send_progress(
                             progress_notifier,
-                            token, 0, 1,
+                            token,
+                            0,
+                            1,
                             &format!("{total_events} events, {active_turns} active"),
                         );
                     }

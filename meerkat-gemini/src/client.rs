@@ -955,12 +955,12 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, dept
             obj.remove("$anchor");
             obj.remove("const");
             obj.remove("title");
-            // Keep root-level additionalProperties to avoid dropping top-level
-            // caller intent. Nested additionalProperties remains unsupported on
-            // the function-declaration schema subset and is stripped.
-            if depth > 0 {
-                obj.remove("additionalProperties");
-            }
+            obj.remove("if");
+            obj.remove("then");
+            obj.remove("else");
+            obj.remove("dependentSchemas");
+            obj.remove("unevaluatedProperties");
+            obj.remove("additionalProperties");
 
             for (key, child) in obj.iter_mut() {
                 if key == "properties" {
@@ -2451,10 +2451,9 @@ mod tests {
             parameters.get("title").is_none(),
             "tool parameters should not include title"
         );
-        assert_eq!(
-            parameters.get("additionalProperties"),
-            Some(&serde_json::json!(false)),
-            "tool parameters should preserve top-level additionalProperties"
+        assert!(
+            parameters.get("additionalProperties").is_none(),
+            "tool parameters should strip root additionalProperties for Gemini"
         );
         assert!(
             parameters["properties"]["payload"].get("$ref").is_none(),
@@ -2478,6 +2477,55 @@ mod tests {
                 .is_none(),
             "nested title should be stripped"
         );
+        assert!(
+            parameters["properties"]["payload"]
+                .get("additionalProperties")
+                .is_none(),
+            "inlined payload should strip additionalProperties"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_strip_conditionals() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "payload": {"type": "object"}
+            },
+            "allOf": [
+                {
+                    "if": {"properties": {"mode": {"const": "shell"}}},
+                    "then": {"required": ["payload"]},
+                    "else": {"required": ["mode"]}
+                }
+            ],
+            "additionalProperties": false
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "conditional_tool".into(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let rendered = serde_json::to_string(parameters)?;
+
+        assert!(!rendered.contains("\"if\""));
+        assert!(!rendered.contains("\"then\""));
+        assert!(!rendered.contains("\"else\""));
+        assert!(!rendered.contains("additionalProperties"));
         Ok(())
     }
 

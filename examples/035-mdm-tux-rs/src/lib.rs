@@ -36,7 +36,11 @@ pub fn auto_detect() -> Option<(String, ProviderKind, String)> {
         return Some(("claude-sonnet-4-6".into(), ProviderKind::Anthropic, k));
     }
     if let Ok(k) = std::env::var("GEMINI_API_KEY") {
-        return Some(("gemini-3.1-flash-lite".into(), ProviderKind::Gemini, k));
+        return Some((
+            "gemini-3.1-flash-lite-preview".into(),
+            ProviderKind::Gemini,
+            k,
+        ));
     }
     None
 }

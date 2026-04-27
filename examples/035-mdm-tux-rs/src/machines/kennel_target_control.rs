@@ -178,16 +178,10 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             .map_err(|e| err("State", "ClaimRequested", &e.reason))?;
             Ok(lift(next, connected, effects))
         }
-        Event::ClaimAcked {
-            lease_id,
-            tux_id,
-        } => {
+        Event::ClaimAcked { lease_id, tux_id } => {
             let (next, effects) = kennel_lease::transition(
                 lease,
-                kennel_lease::Event::ClaimAcked {
-                    lease_id,
-                    tux_id,
-                },
+                kennel_lease::Event::ClaimAcked { lease_id, tux_id },
             )
             .map_err(|e| err("State", "ClaimAcked", &e.reason))?;
             Ok(lift(next, connected, effects))

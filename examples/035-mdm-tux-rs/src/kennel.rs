@@ -200,14 +200,14 @@ pub enum KennelPayload {
     PeerWire {
         /// Human-readable name for the peer (the other target's name).
         peer_name: String,
-        /// Comms public key of the peer (ed25519 peer ID).
+        /// Comms public key of the peer (`ed25519:<base64>`).
         peer_id: String,
         /// Comms transport address of the peer (tcp://host:port).
         peer_addr: String,
     },
     /// Kennel tells a target to remove another target from its trusted peers.
     PeerUnwire {
-        /// Comms public key of the peer to remove.
+        /// Comms public key of the peer to remove (`ed25519:<base64>`).
         peer_id: String,
     },
     Error {
@@ -265,18 +265,19 @@ fn signable_bytes(
 
 pub fn build_signed_envelope(
     keypair: &Keypair,
-    signer_id: &str,
+    _signer_id: &str,
     payload: KennelPayload,
 ) -> anyhow::Result<SignedKennelEnvelope> {
+    let signer_id = keypair.public_key().to_pubkey_string();
     let message_id = Uuid::new_v4().to_string();
     let issued_at_ms = chrono::Utc::now().timestamp_millis();
-    let signable = signable_bytes(1, &message_id, issued_at_ms, signer_id, &payload)?;
+    let signable = signable_bytes(1, &message_id, issued_at_ms, &signer_id, &payload)?;
     let signature = keypair.sign(&signable);
     Ok(SignedKennelEnvelope {
         version: 1,
         message_id,
         issued_at_ms,
-        signer_id: signer_id.to_string(),
+        signer_id,
         payload,
         signature: BASE64.encode(signature.as_bytes()),
     })
@@ -286,7 +287,7 @@ pub fn verify_envelope(envelope: &SignedKennelEnvelope) -> anyhow::Result<PubKey
     if envelope.version != 1 {
         bail!("unsupported kennel envelope version {}", envelope.version);
     }
-    let signer = PubKey::from_peer_id(&envelope.signer_id)
+    let signer = PubKey::from_pubkey_string(&envelope.signer_id)
         .with_context(|| format!("bad signer id {}", envelope.signer_id))?;
     let signable = signable_bytes(
         envelope.version,

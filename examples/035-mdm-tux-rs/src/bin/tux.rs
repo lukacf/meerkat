@@ -209,6 +209,7 @@ impl App {
             Mode::Direct if !self.targets.is_empty() => {
                 let t = &self.targets[self.selected];
                 if self.transport == TransportMode::Kennel
+                    && t.target_id != "hive"
                     && !matches!(
                         self.target_states.get(&t.target_id),
                         Some(KennelUiState::ClaimedByMe)
@@ -234,9 +235,13 @@ impl App {
 
 enum TuiEvent {
     /// A target's RPC client connected.
-    TargetConnected { target_id: String },
+    TargetConnected {
+        target_id: String,
+    },
     /// A target's RPC client disconnected.
-    TargetDisconnected { target_id: String },
+    TargetDisconnected {
+        target_id: String,
+    },
     /// RPC response to display.
     RpcResponse {
         target_id: String,
@@ -283,9 +288,15 @@ enum TuiEvent {
         sessions: Value,
     },
     /// Hive agent responses from the kennel.
-    HiveStreamEvent { event: Value },
-    HiveComplete { text: String },
-    HiveError { message: String },
+    HiveStreamEvent {
+        event: Value,
+    },
+    HiveComplete {
+        text: String,
+    },
+    HiveError {
+        message: String,
+    },
 }
 
 // ── Commands to background RPC tasks ─────────────────────────────────────────
@@ -328,17 +339,22 @@ enum RpcCommand {
         target_name: String,
     },
     /// Connect to a target's RPC address.
-    Connect {
-        target_id: String,
-        rpc_addr: String,
-    },
+    Connect { target_id: String, rpc_addr: String },
 }
 
 enum KennelClientCommand {
-    ClaimTarget { target_id: String },
-    ClaimAck { lease_id: String },
-    ReleaseTarget { lease_id: String },
-    Shutdown { reply: tokio::sync::oneshot::Sender<()> },
+    ClaimTarget {
+        target_id: String,
+    },
+    ClaimAck {
+        lease_id: String,
+    },
+    ReleaseTarget {
+        lease_id: String,
+    },
+    Shutdown {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 // ── RPC command processor ────────────────────────────────────────────────────
@@ -353,7 +369,10 @@ async fn rpc_command_loop(
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
-            RpcCommand::Connect { target_id, rpc_addr } => {
+            RpcCommand::Connect {
+                target_id,
+                rpc_addr,
+            } => {
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
                 let tid = target_id.clone();
@@ -364,9 +383,8 @@ async fn rpc_command_loop(
                             // Set a generous timeout for turns that involve
                             // multiple tool calls + LLM reasoning.
                             client.set_request_timeout(Duration::from_secs(300));
-                            if let Err(e) = client
-                                .request("initialize", serde_json::json!({}))
-                                .await
+                            if let Err(e) =
+                                client.request("initialize", serde_json::json!({})).await
                             {
                                 let _ = event_tx
                                     .send(TuiEvent::RpcError {
@@ -433,9 +451,7 @@ async fn rpc_command_loop(
                                 // overridden by a stale disconnect event.
                                 if was_current {
                                     let _ = event_tx2
-                                        .send(TuiEvent::TargetDisconnected {
-                                            target_id: tid2,
-                                        })
+                                        .send(TuiEvent::TargetDisconnected { target_id: tid2 })
                                         .await;
                                 }
                             });
@@ -487,7 +503,10 @@ async fn rpc_command_loop(
                         // Infer provider from model name prefix
                         let provider = if m.starts_with("claude-") {
                             "anthropic"
-                        } else if m.starts_with("gpt-") || m.starts_with("o1-") || m.starts_with("o3-") {
+                        } else if m.starts_with("gpt-")
+                            || m.starts_with("o1-")
+                            || m.starts_with("o3-")
+                        {
                             "openai"
                         } else if m.starts_with("gemini-") {
                             "gemini"
@@ -529,10 +548,7 @@ async fn rpc_command_loop(
                             .await;
                         return;
                     };
-                    match client
-                        .request("session/list", serde_json::json!({}))
-                        .await
-                    {
+                    match client.request("session/list", serde_json::json!({})).await {
                         Ok(result) => {
                             let _ = event_tx
                                 .send(TuiEvent::SessionList {
@@ -750,7 +766,8 @@ async fn rpc_command_loop(
                             .await;
                         match client
                             .request("session/create", serde_json::json!({
-                                "prompt": "You are the hive orchestrator. Use peers, send_request, send_message, mob_wire, mob_unwire, and mob_list_members to manage the fleet."
+                                "prompt": "You are the hive orchestrator. Use peers as the source of truth, then use send_request and send_message to manage the fleet.",
+                                "initial_turn": "deferred"
                             }))
                             .await
                         {
@@ -759,6 +776,14 @@ async fn rpc_command_loop(
                                     .get("session_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
+                                if sid != "unknown" {
+                                    let _ = event_tx
+                                        .send(TuiEvent::SessionBound {
+                                            target_id: target_name.clone(),
+                                            session_id: sid.to_string(),
+                                        })
+                                        .await;
+                                }
                                 let _ = event_tx
                                     .send(TuiEvent::RpcResponse {
                                         target_id: target_name,
@@ -836,13 +861,15 @@ async fn rpc_command_loop(
                     };
                     let Some(client) = client else { return };
                     // Try to find an existing session to resume.
-                    if let Ok(list_result) = client
-                        .request("session/list", serde_json::json!({}))
-                        .await
+                    if let Ok(list_result) =
+                        client.request("session/list", serde_json::json!({})).await
                     {
-                        if let Some(sessions) = list_result.get("sessions").and_then(|v| v.as_array()) {
+                        if let Some(sessions) =
+                            list_result.get("sessions").and_then(|v| v.as_array())
+                        {
                             if let Some(latest) = sessions.first() {
-                                if let Some(sid) = latest.get("session_id").and_then(|v| v.as_str()) {
+                                if let Some(sid) = latest.get("session_id").and_then(|v| v.as_str())
+                                {
                                     let _ = client
                                         .request(
                                             "session/stream_open",
@@ -914,10 +941,7 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
         }
         "tool_call_requested" | "ToolCallRequested" => {
             target.flush_streaming();
-            let name = event
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let args = event.get("args").cloned().unwrap_or(Value::Null);
             let display = if name == "shell" {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
@@ -947,14 +971,8 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
             ]);
         }
         "tool_execution_completed" | "ToolExecutionCompleted" => {
-            let name = event
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let result = event
-                .get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let result = event.get("result").and_then(|v| v.as_str()).unwrap_or("");
             let is_error = event
                 .get("is_error")
                 .and_then(|v| v.as_bool())
@@ -980,15 +998,24 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
             target.phase = TargetPhase::Idle;
         }
         // Silent events — no display needed
-        "turn_started" | "TurnStarted"
-        | "turn_completed" | "TurnCompleted"
-        | "tool_config_changed" | "ToolConfigChanged"
-        | "reasoning_started" | "ReasoningStarted"
-        | "reasoning_complete" | "ReasoningComplete"
-        | "mcp_pending_notice" | "McpPendingNotice"
-        | "system_context_appended" | "SystemContextAppended"
-        | "compaction_started" | "CompactionStarted"
-        | "compaction_completed" | "CompactionCompleted" => {}
+        "turn_started"
+        | "TurnStarted"
+        | "turn_completed"
+        | "TurnCompleted"
+        | "tool_config_changed"
+        | "ToolConfigChanged"
+        | "reasoning_started"
+        | "ReasoningStarted"
+        | "reasoning_complete"
+        | "ReasoningComplete"
+        | "mcp_pending_notice"
+        | "McpPendingNotice"
+        | "system_context_appended"
+        | "SystemContextAppended"
+        | "compaction_started"
+        | "CompactionStarted"
+        | "compaction_completed"
+        | "CompactionCompleted" => {}
         _ => {
             // Truly unknown event — show only if non-trivial
             if !kind.is_empty() {
@@ -1286,7 +1313,9 @@ async fn spawn_kennel_client(
                 Ok(Ok(stream)) => stream,
                 Ok(Err(e)) => {
                     let _ = event_tx
-                        .send(TuiEvent::KennelError(format!("[kennel] connect failed: {e}")))
+                        .send(TuiEvent::KennelError(format!(
+                            "[kennel] connect failed: {e}"
+                        )))
                         .await;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
@@ -1307,7 +1336,7 @@ async fn spawn_kennel_client(
             &tux_id,
             KennelPayload::TuxRegister {
                 tux_id: tux_id.clone(),
-                pubkey: tux_id.clone(),
+                pubkey: keypair.public_key().to_pubkey_string(),
                 attached_target_ids: current_attached_target_ids(&claims),
             },
         )
@@ -1330,9 +1359,10 @@ async fn spawn_kennel_client(
             continue;
         }
         let (hive_rpc_addr, hive_session_id) = match &env.payload {
-            KennelPayload::TuxRegistered { hive_rpc_addr, hive_session_id } => {
-                (hive_rpc_addr.clone(), hive_session_id.clone())
-            }
+            KennelPayload::TuxRegistered {
+                hive_rpc_addr,
+                hive_session_id,
+            } => (hive_rpc_addr.clone(), hive_session_id.clone()),
             _ => {
                 let _ = event_tx
                     .send(TuiEvent::KennelError(format!(
@@ -1601,11 +1631,7 @@ async fn main() -> anyhow::Result<()> {
     for (i, addr) in targets.iter().enumerate() {
         let name = format!("target-{}", i + 1);
         let target_id = format!("direct-{}", i + 1);
-        initial_targets.push(TargetView::new(
-            name,
-            target_id.clone(),
-            addr.clone(),
-        ));
+        initial_targets.push(TargetView::new(name, target_id.clone(), addr.clone()));
         let _ = rpc_tx.send(RpcCommand::Connect {
             target_id,
             rpc_addr: addr.clone(),
@@ -1659,7 +1685,7 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
 
     // Load or generate keypair (needed for kennel signed envelopes)
     let keypair = Arc::new(load_or_generate_keypair(&data_dir.join("identity")).await?);
-    let tux_id = keypair.public_key().to_peer_id();
+    let tux_id = keypair.public_key().to_peer_id().to_string();
     let direct_ip = match advertise {
         Some(ip) => ip,
         None => {
@@ -1737,9 +1763,11 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
 
     let claims_for_tui = Some(claims.clone());
     let kennel_tx_for_tui = Some(kennel_tx.clone());
-    tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, claims_for_tui, kennel_tx_for_tui))
-        .await?
-        .context("TUI loop")?;
+    tokio::task::spawn_blocking(move || {
+        tui_loop(app, rpc_tx, event_rx, claims_for_tui, kennel_tx_for_tui)
+    })
+    .await?
+    .context("TUI loop")?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let _ = kennel_tx.send(KennelClientCommand::Shutdown { reply: shutdown_tx });
@@ -1828,7 +1856,10 @@ fn process_event(
                 let was_disconnected = app.targets[idx].phase == TargetPhase::Disconnected;
                 app.targets[idx].phase = TargetPhase::Idle;
                 let name = app.targets[idx].name.clone();
-                app.targets[idx].push_notice("connected", &format!("RPC connection to {name} established"));
+                app.targets[idx].push_notice(
+                    "connected",
+                    &format!("RPC connection to {name} established"),
+                );
                 // Clear stale session on reconnect — the target may have
                 // restarted with a different session.
                 if was_disconnected {
@@ -1854,6 +1885,10 @@ fn process_event(
         }
         TuiEvent::RpcError { target_id, message } => {
             if let Some(idx) = app.find_target_by_id(&target_id) {
+                if app.targets[idx].phase == TargetPhase::Running {
+                    app.targets[idx].phase = TargetPhase::Idle;
+                    app.targets[idx].flush_streaming();
+                }
                 app.targets[idx].push_notice("error", &message);
             }
         }
@@ -1889,10 +1924,15 @@ fn process_event(
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         lines.push(format!("*{provider_name}* (default: {default_model})"));
-                        if let Some(models) = provider_entry.get("models").and_then(|v| v.as_array()) {
+                        if let Some(models) =
+                            provider_entry.get("models").and_then(|v| v.as_array())
+                        {
                             for model in models {
                                 let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                                let name = model.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
+                                let name = model
+                                    .get("display_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(id);
                                 lines.push(format!("  `{id}` -- {name}"));
                                 model_ids.insert(id.to_string());
                             }
@@ -1922,8 +1962,7 @@ fn process_event(
                         .collect::<Vec<_>>()
                         .join("\n")
                 } else {
-                    serde_json::to_string_pretty(&sessions)
-                        .unwrap_or_else(|_| sessions.to_string())
+                    serde_json::to_string_pretty(&sessions).unwrap_or_else(|_| sessions.to_string())
                 };
                 app.targets[idx].push_section([
                     "**Sessions**".to_string(),
@@ -2043,11 +2082,7 @@ fn process_event(
             rpc_addr,
         } => {
             if app.find_target_by_id(&target_id).is_none() {
-                app.targets.push(TargetView::new(
-                    name,
-                    target_id,
-                    rpc_addr,
-                ));
+                app.targets.push(TargetView::new(name, target_id, rpc_addr));
             }
         }
         TuiEvent::KennelError(msg) => {
@@ -2133,10 +2168,14 @@ fn handle_key(
                 Mode::Direct
             };
         }
-        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct => {
+        KeyCode::Char('p')
+            if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct =>
+        {
             app.selected = app.selected.saturating_sub(1);
         }
-        KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct => {
+        KeyCode::Char('n')
+            if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct =>
+        {
             app.selected = (app.selected + 1).min(app.targets.len().saturating_sub(1));
         }
         KeyCode::Up if app.mode == Mode::Direct && modifiers.is_empty() => {
@@ -2217,10 +2256,7 @@ fn handle_key(
                 // via RPC, not brokered through the kennel claim protocol).
                 if app.transport == TransportMode::Kennel && target.target_id != "hive" {
                     let tid = &target.target_id;
-                    if !matches!(
-                        app.target_states.get(tid),
-                        Some(KennelUiState::ClaimedByMe)
-                    ) {
+                    if !matches!(app.target_states.get(tid), Some(KennelUiState::ClaimedByMe)) {
                         app.targets[idx].push_notice("error", "use /claim first");
                         return;
                     }
@@ -2240,7 +2276,6 @@ fn handle_key(
                     model,
                 });
             }
-
             // Hive mode: dispatch to the "hive" target via RPC (same as Direct)
             else if app.mode == Mode::Hive {
                 if let Some(hive_idx) = app.find_target_by_id("hive") {
@@ -2250,7 +2285,8 @@ fn handle_key(
                         return;
                     }
                     if hive.session_id.is_none() {
-                        app.targets[hive_idx].push_notice("error", "hive has no session; waiting for connection");
+                        app.targets[hive_idx]
+                            .push_notice("error", "hive has no session; waiting for connection");
                         return;
                     }
                     let target_id = hive.target_id.clone();
@@ -2267,7 +2303,9 @@ fn handle_key(
                         model,
                     });
                 } else {
-                    app.targets.get_mut(0).map(|t| t.push_notice("error", "hive not available (kennel mode required)"));
+                    app.targets.get_mut(0).map(|t| {
+                        t.push_notice("error", "hive not available (kennel mode required)")
+                    });
                 }
             }
         }
@@ -2290,7 +2328,11 @@ fn handle_slash_command(
     let parts: Vec<&str> = body.splitn(2, ' ').collect();
     let slash = parts[0];
     let arg = parts.get(1).unwrap_or(&"").trim();
-    let idx = app.selected;
+    let idx = if app.mode == Mode::Hive {
+        app.find_target_by_id("hive").unwrap_or(app.selected)
+    } else {
+        app.selected
+    };
 
     match slash {
         "/new" => {
@@ -2299,7 +2341,11 @@ fn handle_slash_command(
             }
             let target_name = app.targets[idx].name.clone();
             app.targets[idx].push_user_turn("/new");
-            app.targets[idx].push_notice("mob", &format!("respawning {target_name}..."));
+            if target_name == "hive" {
+                app.targets[idx].push_notice("session", "creating fresh hive session...");
+            } else {
+                app.targets[idx].push_notice("mob", &format!("respawning {target_name}..."));
+            }
             let _ = rpc_tx.send(RpcCommand::MobRespawn { target_name });
         }
         "/resume" if arg.is_empty() => {
@@ -2329,7 +2375,9 @@ fn handle_slash_command(
                 t.push_section(["**Commands**".into()]);
                 if app.transport == TransportMode::Kennel {
                     t.push_line("  `/claim`        -- claim selected target from kennel".into());
-                    t.push_line("  `/release`      -- release selected target back to kennel".into());
+                    t.push_line(
+                        "  `/release`      -- release selected target back to kennel".into(),
+                    );
                 }
                 t.push_line("  `/new`          -- start a fresh session".into());
                 t.push_line("  `/resume`       -- list past sessions".into());
@@ -2348,9 +2396,7 @@ fn handle_slash_command(
                 if !t.known_models.is_empty() && !t.known_models.contains(arg) {
                     t.push_notice(
                         "error",
-                        &format!(
-                            "unknown model '{arg}'. Run /models to see available models."
-                        ),
+                        &format!("unknown model '{arg}'. Run /models to see available models."),
                     );
                     return;
                 }
@@ -2723,7 +2769,18 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
     }
 
     // Status hint line
-    let hint = if let Some(t) = app.selected_target() {
+    let hint = if app.mode == Mode::Hive {
+        if let Some(hive_idx) = app.find_target_by_id("hive") {
+            let hive = &app.targets[hive_idx];
+            match hive.phase {
+                TargetPhase::Disconnected => "Hive disconnected -- waiting for RPC connection".into(),
+                TargetPhase::Running => "Hive is working; new messages queue.".into(),
+                TargetPhase::Idle => "Ready to send to hive.".into(),
+            }
+        } else {
+            "Hive not available.".into()
+        }
+    } else if let Some(t) = app.selected_target() {
         match t.phase {
             TargetPhase::Disconnected => "Target disconnected -- waiting for RPC connection".into(),
             TargetPhase::Running => format!("{} is working; new messages queue.", t.name),
@@ -2756,9 +2813,7 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
                         Span::raw("COMMAND  "),
                         Span::styled(
                             status.0,
-                            Style::default()
-                                .fg(status.1)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(status.1).add_modifier(Modifier::BOLD),
                         ),
                     ])),
             )
@@ -2778,12 +2833,10 @@ fn render_footer(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App)
         "timeline paused"
     };
     let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{selected_hint}  |  {scroll_hint}"),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("{selected_hint}  |  {scroll_hint}"),
+            Style::default().fg(Color::DarkGray),
+        )]),
         Line::from(vec![Span::styled(
             "[Tab] mode  [Up/Down] select  [Enter] send  [Shift+Enter] newline  \
              [Ctrl+U] clear input  [Ctrl+L] clear timeline  [PgUp/PgDn] scroll  [Esc] quit",
@@ -2884,10 +2937,7 @@ mod tests {
     #[test]
     fn short_id_truncates_long_ids() {
         assert_eq!(short_id("short"), "short");
-        assert_eq!(
-            short_id("abcdefghijklmnopqrstuvwxyz"),
-            "abcdefgh...uvwxyz"
-        );
+        assert_eq!(short_id("abcdefghijklmnopqrstuvwxyz"), "abcdefgh...uvwxyz");
     }
 
     #[test]
@@ -2916,7 +2966,12 @@ mod tests {
     #[test]
     fn find_all_flags_collects_multiple_values() {
         let args: Vec<String> = vec![
-            "--target", "host1:8000", "--target", "host2:9000", "--other", "val",
+            "--target",
+            "host1:8000",
+            "--target",
+            "host2:9000",
+            "--other",
+            "val",
         ]
         .into_iter()
         .map(String::from)

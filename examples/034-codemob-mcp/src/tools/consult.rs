@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use meerkat::surface::{RequestContext, request_action};
+use meerkat::surface::{request_action, RequestContext};
 use meerkat::SessionService;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
@@ -11,8 +11,8 @@ use meerkat_core::service::{
 use meerkat_core::types::{HandlingMode, SessionId};
 use meerkat_core::Session;
 
-use crate::state::ForceState;
 use super::ToolCallError;
+use crate::state::ForceState;
 
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are a helpful technical advisor. Give clear, concise opinions. \
@@ -47,9 +47,7 @@ pub async fn handle(
         _ => input.question,
     };
 
-    let model = input
-        .model
-        .unwrap_or_else(|| "gpt-5.4".to_string());
+    let model = input.model.unwrap_or_else(|| "gpt-5.4".to_string());
 
     // If session_id is provided, continue the existing session with start_turn.
     // Model, system_prompt, and shell are inherited from the original session.
@@ -79,9 +77,7 @@ pub async fn handle(
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
-            additional_instructions: None,
             turn_metadata: None,
-
         };
 
         let result = state

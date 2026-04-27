@@ -5,64 +5,155 @@
 //! produces the final verdict. Reviewers have shell access to run tests
 //! independently (no status echoing).
 
-use std::collections::BTreeMap;
 use indexmap::IndexMap;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use super::*;
 
 pub struct RctPack;
 
 impl Pack for RctPack {
-    fn name(&self) -> &str { "rct" }
-    fn description(&self) -> &str { "Full RCT pipeline: plan, implement, 3 parallel gate reviewers, aggregate verdict" }
-    fn agent_count(&self) -> usize { 6 }
-    fn flow_step_count(&self) -> usize { 6 }
+    fn name(&self) -> &str {
+        "rct"
+    }
+    fn description(&self) -> &str {
+        "Full RCT pipeline: plan, implement, 3 parallel gate reviewers, aggregate verdict"
+    }
+    fn agent_count(&self) -> usize {
+        6
+    }
+    fn flow_step_count(&self) -> usize {
+        6
+    }
 
-    fn definition(&self, task: &str, context: &str, overrides: &BTreeMap<String, String>, pp: Option<&Value>) -> MobDefinition {
+    fn definition(
+        &self,
+        task: &str,
+        context: &str,
+        overrides: &BTreeMap<String, String>,
+        pp: Option<&Value>,
+    ) -> MobDefinition {
         let ctx = format_context(context);
 
-        let tools_with_shell = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
-        let tools_comms_only = ToolConfig { comms: true, ..ToolConfig::default() };
+        let tools_with_shell = ToolConfig {
+            builtins: true,
+            shell: true,
+            comms: true,
+            ..ToolConfig::default()
+        };
+        let tools_comms_only = ToolConfig {
+            comms: true,
+            ..ToolConfig::default()
+        };
 
         // (name, skill, description, default_model, tools, mode)
         let agents: Vec<(&str, &str, &str, &str, ToolConfig)> = vec![
             // 6 agents, 6 distinct models — every agent sees the code differently
-            ("orchestrator",       "rct-orchestrator-skill", "RCT pipeline orchestrator",      "claude-opus-4-6",        tools_with_shell.clone()),
-            ("implementer",        "rct-implementer-skill",  "Implementation agent",            "gpt-5.4",               tools_with_shell.clone()),
-            ("rct_guardian",       "rct-guardian-skill",     "RCT Guardian reviewer",           "gemini-3.1-pro-preview", tools_with_shell.clone()),
-            ("integration_sheriff","rct-sheriff-skill",      "Integration Sheriff reviewer",    "gpt-5.2",               tools_with_shell.clone()),
-            ("spec_auditor",       "rct-auditor-skill",      "Spec Auditor reviewer",           "gemini-3.1-flash-lite-preview",  tools_with_shell.clone()),
-            ("aggregator",         "rct-aggregator-skill",   "Gate verdict aggregator",         "claude-sonnet-4-6",      tools_comms_only),
+            (
+                "orchestrator",
+                "rct-orchestrator-skill",
+                "RCT pipeline orchestrator",
+                "claude-opus-4-6",
+                tools_with_shell.clone(),
+            ),
+            (
+                "implementer",
+                "rct-implementer-skill",
+                "Implementation agent",
+                "gpt-5.4",
+                tools_with_shell.clone(),
+            ),
+            (
+                "rct_guardian",
+                "rct-guardian-skill",
+                "RCT Guardian reviewer",
+                "gemini-3.1-pro-preview",
+                tools_with_shell.clone(),
+            ),
+            (
+                "integration_sheriff",
+                "rct-sheriff-skill",
+                "Integration Sheriff reviewer",
+                "gpt-5.2",
+                tools_with_shell.clone(),
+            ),
+            (
+                "spec_auditor",
+                "rct-auditor-skill",
+                "Spec Auditor reviewer",
+                "gemini-3.1-flash-lite-preview",
+                tools_with_shell.clone(),
+            ),
+            (
+                "aggregator",
+                "rct-aggregator-skill",
+                "Gate verdict aggregator",
+                "claude-sonnet-4-6",
+                tools_comms_only,
+            ),
         ];
 
         let mut profiles = BTreeMap::new();
         for (name, skill, desc, default, tools) in &agents {
-            profiles.insert(ProfileName::from(*name), ProfileBinding::Inline(Profile {
-                model: resolve_model(overrides, name, default),
-                skills: vec![skill.to_string()],
-                tools: tools.clone(),
-                peer_description: desc.to_string(),
-                external_addressable: true,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: pp.cloned(),
-            }));
+            profiles.insert(
+                ProfileName::from(*name),
+                ProfileBinding::Inline(Profile {
+                    model: resolve_model(overrides, name, default),
+                    skills: vec![skill.to_string()],
+                    tools: tools.clone(),
+                    peer_description: desc.to_string(),
+                    external_addressable: true,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: pp.cloned(),
+                }),
+            );
         }
 
         let mut skills = BTreeMap::new();
-        skills.insert("rct-orchestrator-skill".into(), SkillSource::Inline { content: include_str!("../../skills/rct_orchestrator.md").into() });
-        skills.insert("rct-implementer-skill".into(),  SkillSource::Inline { content: include_str!("../../skills/rct_implementer.md").into() });
-        skills.insert("rct-guardian-skill".into(),     SkillSource::Inline { content: include_str!("../../skills/rct_guardian.md").into() });
-        skills.insert("rct-sheriff-skill".into(),      SkillSource::Inline { content: include_str!("../../skills/rct_integration_sheriff.md").into() });
-        skills.insert("rct-auditor-skill".into(),      SkillSource::Inline { content: include_str!("../../skills/rct_spec_auditor.md").into() });
-        skills.insert("rct-aggregator-skill".into(),   SkillSource::Inline { content: include_str!("../../skills/rct_aggregator.md").into() });
+        skills.insert(
+            "rct-orchestrator-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_orchestrator.md").into(),
+            },
+        );
+        skills.insert(
+            "rct-implementer-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_implementer.md").into(),
+            },
+        );
+        skills.insert(
+            "rct-guardian-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_guardian.md").into(),
+            },
+        );
+        skills.insert(
+            "rct-sheriff-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_integration_sheriff.md").into(),
+            },
+        );
+        skills.insert(
+            "rct-auditor-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_spec_auditor.md").into(),
+            },
+        );
+        skills.insert(
+            "rct-aggregator-skill".into(),
+            SkillSource::Inline {
+                content: include_str!("../../skills/rct_aggregator.md").into(),
+            },
+        );
 
         let mut steps = IndexMap::new();
         steps.insert(StepId::from("plan"), flow_step("orchestrator",
@@ -81,10 +172,24 @@ impl Pack for RctPack {
             &["review_rct", "review_integration", "review_spec"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec {
-            description: Some("RCT: plan → implement → parallel gate review → aggregate".into()), steps, root: None });
+        flows.insert(
+            FlowId::from("main"),
+            FlowSpec {
+                description: Some(
+                    "RCT: plan → implement → parallel gate review → aggregate".into(),
+                ),
+                steps,
+                root: None,
+            },
+        );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
-        mob_definition("rct", profiles, skills, flows, identity_spawn_policy(&names))
+        mob_definition(
+            "rct",
+            profiles,
+            skills,
+            flows,
+            identity_spawn_policy(&names),
+        )
     }
 }

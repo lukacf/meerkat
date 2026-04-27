@@ -22,7 +22,7 @@ struct KennelSession {
 
 impl KennelSession {
     async fn connect(addr: &str, keypair: Keypair) -> anyhow::Result<Self> {
-        let signer_id = keypair.public_key().to_peer_id();
+        let signer_id = keypair.public_key().to_peer_id().to_string();
         let stream = TcpStream::connect(addr).await?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
@@ -48,6 +48,10 @@ impl KennelSession {
 
     fn id(&self) -> &str {
         &self.signer_id
+    }
+
+    fn pubkey(&self) -> String {
+        self.keypair.public_key().to_pubkey_string()
     }
 }
 
@@ -117,7 +121,7 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
 #[test]
 fn signed_envelope_roundtrip() {
     let kp = Keypair::generate();
-    let signer_id = kp.public_key().to_peer_id();
+    let signer_id = kp.public_key().to_peer_id().to_string();
     let payload = KennelPayload::TargetHeartbeat;
     let env = build_signed_envelope(&kp, &signer_id, payload).unwrap();
     let signer = verify_envelope(&env).unwrap();
@@ -127,7 +131,7 @@ fn signed_envelope_roundtrip() {
 #[test]
 fn invalid_signature_rejected() {
     let kp = Keypair::generate();
-    let signer_id = kp.public_key().to_peer_id();
+    let signer_id = kp.public_key().to_peer_id().to_string();
     let mut env = build_signed_envelope(&kp, &signer_id, KennelPayload::TargetHeartbeat).unwrap();
     // Corrupt the signature
     env.signature =
@@ -149,7 +153,7 @@ async fn kennel_target_register_and_list() {
         .send(KennelPayload::TargetRegister {
             target_id: target.id().to_string(),
             name: "test-target".into(),
-            pubkey: target.id().to_string(),
+            pubkey: target.pubkey().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
             rpc_addr: None,
@@ -166,7 +170,7 @@ async fn kennel_target_register_and_list() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await
@@ -200,7 +204,7 @@ async fn kennel_full_claim_release_cycle() {
         .send(KennelPayload::TargetRegister {
             target_id: target.id().to_string(),
             name: "cycle-target".into(),
-            pubkey: target.id().to_string(),
+            pubkey: target.pubkey().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
             rpc_addr: None,
@@ -216,7 +220,7 @@ async fn kennel_full_claim_release_cycle() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await
@@ -321,7 +325,7 @@ async fn kennel_target_disconnect_releases_claim() {
         .send(KennelPayload::TargetRegister {
             target_id: target.id().to_string(),
             name: "disc-target".into(),
-            pubkey: target.id().to_string(),
+            pubkey: target.pubkey().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
             rpc_addr: None,
@@ -336,7 +340,7 @@ async fn kennel_target_disconnect_releases_claim() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await
@@ -379,11 +383,7 @@ async fn kennel_target_disconnect_releases_claim() {
     // The lease TTL is 5s, so recovery expires at most ~5s from claim.
     // The kennel janitor ticks every 1s. We should get ClaimReleased
     // within ~7s.
-    let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tux.recv(),
-    )
-    .await;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(10), tux.recv()).await;
     match resp {
         Ok(Ok(KennelPayload::ClaimReleased { .. })) => {
             // Expected: the claim was released after recovery expired
@@ -408,7 +408,7 @@ async fn kennel_claim_ack_subset() {
     t1.send(KennelPayload::TargetRegister {
         target_id: t1.id().to_string(),
         name: "target-a".into(),
-        pubkey: t1.id().to_string(),
+        pubkey: t1.pubkey().to_string(),
         direct_addr: "tcp://127.0.0.1:9001".into(),
         rpc_addr: None,
         labels: Default::default(),
@@ -424,7 +424,7 @@ async fn kennel_claim_ack_subset() {
     t2.send(KennelPayload::TargetRegister {
         target_id: t2.id().to_string(),
         name: "target-b".into(),
-        pubkey: t2.id().to_string(),
+        pubkey: t2.pubkey().to_string(),
         direct_addr: "tcp://127.0.0.1:9002".into(),
         rpc_addr: None,
         labels: Default::default(),
@@ -440,7 +440,7 @@ async fn kennel_claim_ack_subset() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await
@@ -523,7 +523,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
         .send(KennelPayload::TargetRegister {
             target_id: target.id().to_string(),
             name: "ephemeral".into(),
-            pubkey: target.id().to_string(),
+            pubkey: target.pubkey().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
             rpc_addr: None,
@@ -539,7 +539,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await
@@ -588,7 +588,7 @@ async fn kennel_release_sends_claim_released_to_tux() {
         .send(KennelPayload::TargetRegister {
             target_id: target.id().to_string(),
             name: "peer-test".into(),
-            pubkey: target.id().to_string(),
+            pubkey: target.pubkey().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
             rpc_addr: None,
@@ -603,7 +603,7 @@ async fn kennel_release_sends_claim_released_to_tux() {
     let mut tux = KennelSession::connect(&addr, tux_kp).await.unwrap();
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
-        pubkey: tux.id().to_string(),
+        pubkey: tux.pubkey().to_string(),
         attached_target_ids: vec![],
     })
     .await

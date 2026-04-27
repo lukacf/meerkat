@@ -44,6 +44,10 @@ use crate::traits::RuntimeControlPlane;
 /// Default idle timeout for session-backed comms drains.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+const ED25519_PUBKEY_PREFIX: &str = "ed25519:";
+const PEER_ID_UUID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
+
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
 ///
@@ -861,6 +865,7 @@ async fn resolve_peer_route(
         .find(|entry| entry.peer_id.as_str() == from)
         .or_else(|| peers.iter().find(|entry| entry.name.as_str() == from))
         .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name.clone()))
+        .or_else(|| peer_route_from_pubkey_string(from))
         .or_else(|| {
             meerkat_core::comms::PeerId::parse(from)
                 .ok()
@@ -871,6 +876,20 @@ async fn resolve_peer_route(
                 .ok()
                 .map(|name| PeerRoute::with_display_name(meerkat_core::comms::PeerId::new(), name))
         })
+}
+
+fn peer_route_from_pubkey_string(from: &str) -> Option<PeerRoute> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    let encoded = from.strip_prefix(ED25519_PUBKEY_PREFIX)?;
+    let decoded = BASE64.decode(encoded).ok()?;
+    if decoded.len() != 32 {
+        return None;
+    }
+    Some(PeerRoute::new(PeerId::from_uuid(uuid::Uuid::new_v5(
+        &PEER_ID_UUID_NAMESPACE,
+        &decoded,
+    ))))
 }
 
 async fn send_bridge_failure(
@@ -1762,6 +1781,21 @@ mod tests {
     const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
     const PEER_ID_CURRENT_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000cccc"; // "current-supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
+
+    #[tokio::test]
+    async fn bridge_response_route_accepts_pubkey_string_sender() {
+        let sender = meerkat_comms::Keypair::generate();
+        let sender_pubkey = sender.public_key();
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("bridge-response-route").expect("runtime"),
+        );
+
+        let route = resolve_peer_route(&runtime, &sender_pubkey.to_pubkey_string())
+            .await
+            .expect("pubkey string sender should resolve to derived peer route");
+
+        assert_eq!(route.peer_id, sender_pubkey.to_peer_id());
+    }
 
     struct BootstrapRuntime {
         peer_id: String,

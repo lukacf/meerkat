@@ -217,14 +217,12 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 vec![],
             ))
         }
-        (State::Available { target_id }, Event::TargetDisconnected { .. }) => {
-            Ok((
-                State::Available {
-                    target_id: target_id.clone(),
-                },
-                vec![Effect::DropTargetRecord { target_id }],
-            ))
-        }
+        (State::Available { target_id }, Event::TargetDisconnected { .. }) => Ok((
+            State::Available {
+                target_id: target_id.clone(),
+            },
+            vec![Effect::DropTargetRecord { target_id }],
+        )),
         (State::Available { target_id }, Event::Tick { .. }) => {
             Ok((State::Available { target_id }, vec![]))
         }

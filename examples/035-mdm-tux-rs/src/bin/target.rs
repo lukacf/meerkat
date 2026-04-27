@@ -28,45 +28,43 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use meerkat::PersistentSessionService;
-use meerkat::{
-    AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
-    ScheduleToolDispatcher, SqliteScheduleStore,
-};
 use meerkat::surface::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, dispatch_from_admission, project_runtime_admission,
-    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    SurfaceScheduleSessionHost, schedule_attempt_idempotency_key, schedule_host_supported,
+    spawn_schedule_host,
+};
+use meerkat::{
+    AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleService, ScheduleToolDispatcher,
+    SqliteScheduleStore,
 };
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::{AgentToolDispatcher as _, Config, Session};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
+use meerkat_mob::MobSessionService;
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
+use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{
-    CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput, MeerkatMachine,
-};
-use meerkat_runtime::input::{
-    InputDurability, InputHeader, InputVisibility,
+    CorrelationId, IdempotencyKey, Input, InputOrigin, MeerkatMachine, PromptInput,
 };
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    DirectControlPayload, KennelPayload, ProviderKind, auto_detect,
-    build_signed_envelope, direct_control_request, parse_direct_control_message, read_envelope,
-    verify_envelope, write_envelope,
+    DirectControlPayload, KennelPayload, ProviderKind, auto_detect, build_signed_envelope,
+    direct_control_request, parse_direct_control_message, read_envelope, verify_envelope,
+    write_envelope,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
-
 
 const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}' controlled by a human operator via TUX.
@@ -119,7 +117,7 @@ impl TargetScheduleSessionHost {
         let session_exists = self.service.read(session_id).await.is_ok()
             || self
                 .service
-                .load_persisted(session_id)
+                .load_persisted_session(session_id)
                 .await
                 .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
                 .is_some();
@@ -139,11 +137,15 @@ impl TargetScheduleSessionHost {
     async fn update_peer_ingress_context(&self, session_id: &SessionId) {
         let keep_alive = self
             .service
-            .load_persisted(session_id)
+            .load_persisted_session(session_id)
             .await
             .ok()
             .flatten()
-            .and_then(|session| session.session_metadata().map(|metadata| metadata.keep_alive))
+            .and_then(|session| {
+                session
+                    .session_metadata()
+                    .map(|metadata| metadata.keep_alive)
+            })
             .unwrap_or(false);
         let comms_rt = self.service.comms_runtime(session_id).await;
         self.runtime_adapter
@@ -160,51 +162,50 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
-fn scheduled_skill_keys(
-    skill_references: &[String],
-) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, meerkat::ScheduleDomainError> {
-    if skill_references.is_empty() {
-        return Ok(None);
+fn runtime_delivery_dispatch(
+    occurrence: &meerkat::Occurrence,
+    outcome: meerkat_runtime::accept::AcceptOutcome,
+    handle: Option<meerkat_runtime::completion::CompletionHandle>,
+    materialized_session_id: Option<SessionId>,
+) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
+    match outcome {
+        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
+            Ok(meerkat::surface::build_dispatch_from_accepted(
+                occurrence,
+                meerkat::surface::AcceptedScheduledInput {
+                    correlation_id: Some(input_id.to_string()),
+                    handle,
+                },
+                materialized_session_id,
+            ))
+        }
+        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+            Ok(meerkat::surface::build_dispatch_from_accepted(
+                occurrence,
+                meerkat::surface::AcceptedScheduledInput {
+                    correlation_id: Some(existing_id.to_string()),
+                    handle: None,
+                },
+                materialized_session_id,
+            ))
+        }
+        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+            Ok(meerkat::surface::immediate_delivery_failure(
+                occurrence,
+                reason.to_string(),
+                meerkat::OccurrenceFailureClass::RuntimeRejected,
+                None,
+                materialized_session_id,
+            ))
+        }
+        _ => Ok(meerkat::surface::immediate_delivery_failure(
+            occurrence,
+            "runtime returned an unknown admission outcome".to_string(),
+            meerkat::OccurrenceFailureClass::RuntimeRejected,
+            None,
+            materialized_session_id,
+        )),
     }
-
-    skill_references
-        .iter()
-        .map(|reference| {
-            let mut parts = reference.split('/');
-            let Some(source_uuid_raw) = parts.next() else {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            };
-            let Some(skill_name_raw) = parts.next() else {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            };
-            if parts.next().is_some() {
-                return Err(meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                    "invalid scheduled skill reference: {reference}"
-                )));
-            }
-            Ok(meerkat_core::skills::SkillKey {
-                source_uuid: meerkat_core::skills::SourceUuid::parse(source_uuid_raw).map_err(
-                    |_| {
-                        meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                            "invalid scheduled skill reference: {reference}"
-                        ))
-                    },
-                )?,
-                skill_name: meerkat_core::skills::SkillName::parse(skill_name_raw).map_err(
-                    |_| {
-                        meerkat::ScheduleDomainError::InvalidSchedule(format!(
-                            "invalid scheduled skill reference: {reference}"
-                        ))
-                    },
-                )?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
 }
 
 #[async_trait::async_trait]
@@ -229,7 +230,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
 
         let persisted = self
             .service
-            .load_persisted(session_id)
+            .load_persisted_session(session_id)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         match persisted {
@@ -321,20 +322,39 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         self.ensure_runtime_session_registered(session_id).await?;
         self.update_peer_ingress_context(session_id).await;
 
-        let turn_metadata = Some(meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: None,
-            keep_alive: None,
-            skill_references: scheduled_skill_keys(&dispatch.skill_references)?,
-            flow_tool_overlay: None,
-            additional_instructions: (!dispatch.additional_instructions.is_empty())
-                .then_some(dispatch.additional_instructions.clone()),
-            model: None,
-            provider: None,
-            provider_params: None,
-            render_metadata: dispatch.render_metadata.clone(),
-            execution_kind: None,
-            connection_ref: None,
-        });
+        let turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: None,
+                keep_alive: None,
+                skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
+                    dispatch
+                        .skill_refs
+                        .iter()
+                        .map(|skill_ref| skill_ref.key().clone())
+                        .collect()
+                }),
+                flow_tool_overlay: None,
+                additional_instructions: (!dispatch.additional_instructions.is_empty())
+                    .then(|| {
+                        dispatch
+                            .additional_instructions
+                            .iter()
+                            .map(|body| {
+                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                                    body: body.clone(),
+                                }
+                            })
+                            .collect()
+                    }),
+                model: None,
+                provider: None,
+                provider_params: None,
+                render_metadata: dispatch.render_metadata.clone(),
+                execution_kind: None,
+                connection_ref: None,
+            },
+        );
         let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
@@ -349,11 +369,12 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        Ok(dispatch_from_admission(
+        runtime_delivery_dispatch(
             occurrence,
-            project_runtime_admission(outcome, handle),
+            outcome,
+            handle,
             dispatch.materialized_session_id,
-        ))
+        )
     }
 
     async fn deliver_event(
@@ -396,11 +417,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        Ok(dispatch_from_admission(
-            occurrence,
-            project_runtime_admission(outcome, handle),
-            materialized_session_id,
-        ))
+        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
     }
 }
 
@@ -446,15 +463,8 @@ async fn build_target_runtime_surface(
     let runtime_adapter = persistence.runtime_adapter();
     let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
-    let mut session_service =
+    let session_service =
         PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
-    {
-        let adapter = runtime_adapter.clone();
-        session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-            let adapter = adapter.clone();
-            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-        }));
-    }
     let service = Arc::new(session_service);
     let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
         service.clone(),
@@ -561,8 +571,7 @@ async fn spawn_comms_listener(comms_runtime: &Arc<CommsRuntime>) -> anyhow::Resu
         while let Ok((stream, _)) = listener.accept().await {
             let (kp, tp, sender) = (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let _ =
-                    meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
+                let _ = meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
             });
         }
     });
@@ -653,15 +662,13 @@ async fn main() -> anyhow::Result<()> {
     );
     let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
-    let rpc_runtime = Arc::new(
-        meerkat_rpc::session_runtime::SessionRuntime::new(
-            rpc_factory,
-            rpc_config,
-            10,
-            rpc_persistence,
-            meerkat_rpc::router::NotificationSink::noop(),
-        ),
-    );
+    let rpc_runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
+        rpc_factory,
+        rpc_config,
+        10,
+        rpc_persistence,
+        meerkat_rpc::router::NotificationSink::noop(),
+    ));
 
     println!("=== MDM Target: {name} ===");
     println!("rpc       : tcp://0.0.0.0:{rpc_port}");
@@ -673,7 +680,6 @@ async fn main() -> anyhow::Result<()> {
     meerkat_rpc::serve_tcp(&addr, rpc_runtime, rpc_config_store, None).await?;
     Ok(())
 }
-
 
 use mdm_tux::machines::target_attachment::{Effect as TaEffect, State as TaState};
 use mdm_tux::machines::target_kennel_control::{
@@ -721,16 +727,15 @@ async fn clear_attachment_hint(path: &Path) -> anyhow::Result<()> {
 /// TUX link. On 3 consecutive failures, triggers the disconnect signal.
 fn spawn_heartbeat(
     router: Arc<meerkat_comms::Router>,
-    peer: &str,
+    peer: meerkat_core::comms::PeerId,
     disconnect_tx: tokio::sync::watch::Sender<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    let peer = peer.to_owned();
     tokio::spawn(async move {
         let mut consecutive_failures = 0u32;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let send_fut = router.send(
-                &peer,
+                peer,
                 meerkat_comms::MessageKind::Request {
                     intent: "heartbeat".into(),
                     params: serde_json::json!(null),
@@ -773,7 +778,7 @@ async fn apply_target_attachment_effects(
                 tux_pubkey,
                 tux_direct_addr,
             } => {
-                let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(tux_pubkey)
+                let tux_pk = meerkat_comms::identity::PubKey::from_pubkey_string(tux_pubkey)
                     .context("parse adopted tux pubkey")?;
                 let trusted = comms_runtime.trusted_peers_shared();
                 let stale_keys: Vec<_> = trusted
@@ -788,10 +793,10 @@ async fn apply_target_attachment_effects(
                 }
                 comms_runtime
                     .register_trusted_peer(TrustedPeer {
-                    name: "tux".into(),
-                    pubkey: tux_pk,
-                    addr: tux_direct_addr.clone(),
-                    meta: PeerMeta::default(),
+                        name: "tux".into(),
+                        pubkey: tux_pk,
+                        addr: tux_direct_addr.clone(),
+                        meta: PeerMeta::default(),
                     })
                     .await?;
             }
@@ -817,7 +822,13 @@ async fn apply_target_attachment_effects(
                 }) else {
                     return Ok(false);
                 };
-                let attach_fut = router.send("tux", kind);
+                let Some(tux_peer) = attachment_hint
+                    .as_ref()
+                    .and_then(|hint| meerkat_core::comms::PeerId::parse(&hint.tux_id).ok())
+                else {
+                    return Ok(false);
+                };
+                let attach_fut = router.send(tux_peer, kind);
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(10), attach_fut).await,
                     Ok(Ok(_))
@@ -827,9 +838,15 @@ async fn apply_target_attachment_effects(
             }
             TaEffect::StartDirectHeartbeat => {
                 if heartbeat.is_none() {
+                    let Some(tux_peer) = attachment_hint
+                        .as_ref()
+                        .and_then(|hint| meerkat_core::comms::PeerId::parse(&hint.tux_id).ok())
+                    else {
+                        return Ok(false);
+                    };
                     *heartbeat = Some(spawn_heartbeat(
                         router.clone(),
-                        "tux",
+                        tux_peer,
                         disconnect_tx.clone(),
                     ));
                 }
@@ -873,8 +890,6 @@ async fn apply_target_control_effects(
     .await?;
     Ok((applied, should_return_to_register))
 }
-
-
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
 
@@ -935,7 +950,6 @@ async fn create_or_resume_session(
     .await
 }
 
-
 /// Create or resume a session and register it with the runtime adapter.
 async fn setup_session(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -951,7 +965,7 @@ async fn setup_session(
     let resume_session = match &resume_id {
         Some(id) => {
             let loaded = service
-                .load_persisted(id)
+                .load_persisted_session(id)
                 .await
                 .map_err(|e| anyhow::anyhow!("load session {id}: {e}"))?;
             Some(loaded.ok_or_else(|| anyhow::anyhow!("session {id} not found on disk"))?)
@@ -1123,9 +1137,6 @@ impl CoreExecutor for TargetCoreExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -1193,12 +1204,9 @@ struct ActiveAdoption {
 async fn load_mcp_tools(data_dir: Option<&Path>) -> anyhow::Result<Option<McpRouterAdapter>> {
     // data_dir as project scope, home dir as user scope
     let home = dirs::home_dir();
-    let servers = McpConfig::load_with_scopes_from_roots(
-        data_dir,
-        home.as_deref(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
+    let servers = McpConfig::load_with_scopes_from_roots(data_dir, home.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
     if servers.is_empty() {
         return Ok(None);
     }
@@ -1268,7 +1276,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
 
     let comms_runtime = create_target_comms_runtime(&name, &data_dir).await?;
     let comms_port = spawn_comms_listener(&comms_runtime).await?;
-    let target_id = comms_runtime.public_key().to_peer_id();
+    let target_id = comms_runtime.public_key().to_peer_id().to_string();
+    let target_pubkey = comms_runtime.public_key().to_pubkey_string();
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
     let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
@@ -1335,9 +1344,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             rpc_runtime.session_service(),
             Some(rpc_runtime.runtime_adapter()),
         ));
-        rpc_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(
-            Arc::clone(&rpc_mob_state),
-        )));
+        rpc_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
+            &rpc_mob_state,
+        ))));
         rpc_runtime.set_mob_state(rpc_mob_state);
         // Wire config runtime so hot-swap (turn/start with model override) can
         // resolve self-hosted models from the loaded config.
@@ -1350,13 +1359,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         let rpc_runtime_clone = Arc::clone(&rpc_runtime);
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{rpc_port}");
-            if let Err(e) = meerkat_rpc::serve_tcp(
-                &addr,
-                rpc_runtime_clone,
-                rpc_config_store_clone,
-                None,
-            )
-            .await
+            if let Err(e) =
+                meerkat_rpc::serve_tcp(&addr, rpc_runtime_clone, rpc_config_store_clone, None).await
             {
                 eprintln!("[target] RPC server error: {e}");
             }
@@ -1420,7 +1424,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             KennelPayload::TargetRegister {
                 target_id: target_id.clone(),
                 name: name.clone(),
-                pubkey: target_id.clone(),
+                pubkey: target_pubkey.clone(),
                 direct_addr: advertised_addr.clone(),
                 rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                 labels: Default::default(),
@@ -1449,16 +1453,21 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         };
         let _ = verify_envelope(&env)?;
         match &env.payload {
-            KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
+            KennelPayload::TargetRegistered {
+                hive_pubkey,
+                hive_comms_addr,
+            } => {
                 // Add the hive as a trusted peer so it can send us comms messages.
                 if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
-                    if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(pk_str.as_str()) {
+                    if let Ok(pk) =
+                        meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str())
+                    {
                         comms_runtime
                             .register_trusted_peer(meerkat_comms::TrustedPeer {
-                            name: "hive".into(),
-                            pubkey: pk,
-                            addr: addr.clone(),
-                            meta: meerkat_comms::PeerMeta::default(),
+                                name: "hive".into(),
+                                pubkey: pk,
+                                addr: addr.clone(),
+                                meta: meerkat_comms::PeerMeta::default(),
                             })
                             .await?;
                         eprintln!("[target] added hive as trusted peer at {addr}");
@@ -1537,7 +1546,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 KennelPayload::TargetRegister {
                                     target_id: target_id.clone(),
                                     name: name.clone(),
-                                    pubkey: target_id.clone(),
+                                    pubkey: target_pubkey.clone(),
                                     direct_addr: advertised_addr.clone(),
                                     rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                                     labels: Default::default(),
@@ -1596,7 +1605,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 KennelPayload::TargetRegister {
                                     target_id: target_id.clone(),
                                     name: name.clone(),
-                                    pubkey: target_id.clone(),
+                                    pubkey: target_pubkey.clone(),
                                     direct_addr: advertised_addr.clone(),
                                     rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                                     labels: Default::default(),
@@ -1617,7 +1626,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
                             if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
-                                if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(pk_str.as_str()) {
+                                if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
                                     comms_runtime
                                         .register_trusted_peer(meerkat_comms::TrustedPeer {
                                         name: "hive".into(),
@@ -1645,7 +1654,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             bail!("kennel rejected target re-registration ({reason:?}): {message}");
                         }
                         KennelPayload::PeerWire { peer_name, peer_id, peer_addr } => {
-                            if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(&peer_id) {
+                            if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
                                 comms_runtime
                                     .register_trusted_peer(meerkat_comms::TrustedPeer {
                                     name: peer_name.clone(),
@@ -1658,7 +1667,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             }
                         }
                         KennelPayload::PeerUnwire { peer_id } => {
-                            if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(&peer_id) {
+                            if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
                                 comms_runtime.router_arc().remove_trusted_peer(&pk);
                                 eprintln!("[target] peer unwired: {peer_id}");
                             }
@@ -1985,7 +1994,6 @@ async fn run_adopted_loop_inner(
     }
 }
 
-
 /// Probe our outbound IP toward a host via a non-sending UDP "connect".
 fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
@@ -2045,6 +2053,7 @@ mod tests {
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
     use meerkat_core::types::{ContentInput, HandlingMode};
+    use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
     use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
     use std::collections::{HashSet, VecDeque};
@@ -2156,15 +2165,8 @@ mod tests {
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
-        let mut session_service =
+        let session_service =
             PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
-        {
-            let adapter = runtime_adapter.clone();
-            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-                let adapter = adapter.clone();
-                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-            }));
-        }
         let service = Arc::new(session_service);
         let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
             service.clone(),
@@ -2261,10 +2263,10 @@ mod tests {
         // Add a dummy peer so comms tools pass the availability gate.
         comms_runtime
             .register_trusted_peer(meerkat_comms::TrustedPeer {
-            name: "tux".into(),
-            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: meerkat_comms::PeerMeta::default(),
+                name: "tux".into(),
+                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+                addr: "tcp://127.0.0.1:9999".into(),
+                meta: meerkat_comms::PeerMeta::default(),
             })
             .await
             .unwrap();
@@ -2286,11 +2288,10 @@ mod tests {
         *builder
             .default_schedule_tools
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            ScheduleToolDispatcher::new(ScheduleService::new(Arc::new(
-                SqliteScheduleStore::open(temp.path().join("schedule.sqlite")).unwrap(),
-            ))),
-        ));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
+                Arc::new(SqliteScheduleStore::open(temp.path().join("schedule.sqlite")).unwrap()),
+            ))));
 
         let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
 
@@ -2330,8 +2331,16 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "shell"));
         assert!(tool_names.iter().any(|name| name == "send_message"));
         assert!(tool_names.iter().any(|name| name == "peers"));
-        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_create"));
-        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_list"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "meerkat_schedule_create")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "meerkat_schedule_list")
+        );
         assert!(tool_names.iter().any(|name| name == "delegate"));
         assert!(tool_names.iter().any(|name| name == "mob_list"));
         assert!(tool_names.iter().any(|name| name == "mob_check_member"));
@@ -2382,7 +2391,7 @@ mod tests {
                         prompt: "scheduled ping".into(),
                         system_prompt: None,
                         render_metadata: None,
-                        skill_references: Vec::new(),
+                        skill_refs: Vec::new(),
                         additional_instructions: Vec::new(),
                     },
                 }),
@@ -2578,9 +2587,7 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    additional_instructions: None,
                     turn_metadata: None,
-
                 },
             )
             .await
@@ -2620,10 +2627,10 @@ mod tests {
         // Add a peer so comms tools pass the availability gate.
         comms_runtime
             .register_trusted_peer(meerkat_comms::TrustedPeer {
-            name: "tux".into(),
-            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: meerkat_comms::PeerMeta::default(),
+                name: "tux".into(),
+                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+                addr: "tcp://127.0.0.1:9999".into(),
+                meta: meerkat_comms::PeerMeta::default(),
             })
             .await
             .unwrap();
@@ -2743,10 +2750,10 @@ mod tests {
             .unwrap();
         comms_runtime
             .register_trusted_peer(meerkat_comms::TrustedPeer {
-            name: "tux".into(),
-            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-            addr: "tcp://127.0.0.1:9999".into(),
-            meta: meerkat_comms::PeerMeta::default(),
+                name: "tux".into(),
+                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+                addr: "tcp://127.0.0.1:9999".into(),
+                meta: meerkat_comms::PeerMeta::default(),
             })
             .await
             .unwrap();
@@ -2775,7 +2782,7 @@ mod tests {
         let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
         let loaded = surface
             .service
-            .load_persisted(&fresh_id)
+            .load_persisted_session(&fresh_id)
             .await
             .unwrap()
             .unwrap();

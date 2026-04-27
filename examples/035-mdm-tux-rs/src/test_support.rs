@@ -30,7 +30,7 @@ impl CaptureClient {
 impl LlmClient for CaptureClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         *self.seen_tools.lock().expect("capture lock") =
-            request.tools.iter().map(|tool| tool.name.clone()).collect();
+            request.tools.iter().map(|tool| tool.name.to_string()).collect();
         let seen_user_messages = request
             .messages
             .iter()

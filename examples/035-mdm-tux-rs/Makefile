@@ -4,7 +4,7 @@ TARGET_DIR := target/$(PROFILE)
 
 BINS := mdm-tux mdm-target mdm-kennel
 
-.PHONY: all build sign clean
+.PHONY: all build sign clean docker-smoke docker-tux docker-tmux docker-logs docker-down docker-clean
 
 all: build sign
 
@@ -23,3 +23,21 @@ sign: build
 
 clean:
 	$(CARGO) clean
+
+docker-smoke:
+	./scripts/docker-smoke.sh smoke
+
+docker-tux:
+	./scripts/docker-smoke.sh tux
+
+docker-tmux:
+	./scripts/docker-smoke.sh tmux
+
+docker-logs:
+	./scripts/docker-smoke.sh logs
+
+docker-down:
+	./scripts/docker-smoke.sh down
+
+docker-clean:
+	./scripts/docker-smoke.sh clean

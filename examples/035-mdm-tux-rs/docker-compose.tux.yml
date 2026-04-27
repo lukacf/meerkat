@@ -1,0 +1,122 @@
+name: mdm-tux-smoke
+
+x-mdm-env: &mdm-env
+  RUST_LOG: ${RUST_LOG:-warn}
+  RUST_MIN_STACK: ${RUST_MIN_STACK:-16777216}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy-mdm-tux-smoke-key}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+services:
+  kennel:
+    build:
+      context: ../..
+      dockerfile: examples/035-mdm-tux-rs/Dockerfile
+      args:
+        CARGO_PROFILE: ${DOCKER_CARGO_PROFILE:-debug}
+    image: mdm-tux-smoke:local
+    environment: *mdm-env
+    command:
+      - mdm-kennel
+      - --listen
+      - 0.0.0.0:5000
+      - --advertise
+      - kennel
+      - --hive-rpc-port
+      - "5010"
+      - --data-dir
+      - /data/kennel
+      - --hive-model
+      - ${MDM_HIVE_MODEL:-gpt-5.4}
+      - --hive-provider
+      - ${MDM_HIVE_PROVIDER:-openai}
+    ports:
+      - "55000:5000"
+      - "55010:5010"
+    volumes:
+      - kennel-data:/data/kennel
+
+  target-a:
+    image: mdm-tux-smoke:local
+    pull_policy: never
+    depends_on:
+      - kennel
+    environment: *mdm-env
+    command:
+      - mdm-target
+      - --kennel
+      - kennel:5000
+      - --advertise
+      - target-a
+      - --rpc-port
+      - "4800"
+      - --name
+      - target-a
+      - --model
+      - ${MDM_TARGET_A_MODEL:-${MDM_MODEL:-gpt-5.4}}
+      - --provider
+      - ${MDM_TARGET_A_PROVIDER:-${MDM_PROVIDER:-openai}}
+      - --data-dir
+      - /data/target-a
+    ports:
+      - "54801:4800"
+    volumes:
+      - target-a-data:/data/target-a
+
+  target-b:
+    image: mdm-tux-smoke:local
+    pull_policy: never
+    depends_on:
+      - kennel
+    environment: *mdm-env
+    command:
+      - mdm-target
+      - --kennel
+      - kennel:5000
+      - --advertise
+      - target-b
+      - --rpc-port
+      - "4800"
+      - --name
+      - target-b
+      - --model
+      - ${MDM_TARGET_B_MODEL:-${MDM_MODEL:-gpt-5.4}}
+      - --provider
+      - ${MDM_TARGET_B_PROVIDER:-${MDM_PROVIDER:-openai}}
+      - --data-dir
+      - /data/target-b
+    ports:
+      - "54802:4800"
+    volumes:
+      - target-b-data:/data/target-b
+
+  tux:
+    image: mdm-tux-smoke:local
+    pull_policy: never
+    profiles:
+      - manual
+    depends_on:
+      - kennel
+      - target-a
+      - target-b
+    environment: *mdm-env
+    stdin_open: true
+    tty: true
+    command:
+      - mdm-tux
+      - --kennel
+      - kennel:5000
+      - --listen
+      - "7000"
+      - --advertise
+      - tux
+      - --data-dir
+      - /data/tux
+    volumes:
+      - tux-data:/data/tux
+
+volumes:
+  kennel-data:
+  target-a-data:
+  target-b-data:
+  tux-data:

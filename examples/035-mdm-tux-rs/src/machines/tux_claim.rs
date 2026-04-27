@@ -83,18 +83,10 @@ pub enum Event {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    SendClaimToKennel {
-        target_id: String,
-    },
-    SendClaimAck {
-        lease_id: String,
-    },
-    SendReleaseToKennel {
-        lease_id: String,
-    },
-    RpcConnect {
-        rpc_addr: String,
-    },
+    SendClaimToKennel { target_id: String },
+    SendClaimAck { lease_id: String },
+    SendReleaseToKennel { lease_id: String },
+    RpcConnect { rpc_addr: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -400,12 +392,14 @@ mod tests {
                 lease_id, ..
             } if lease_id == "lease-1"
         ));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendClaimAck { .. })));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::RpcConnect { rpc_addr } if rpc_addr == "tcp://1.2.3.4:4800")));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendClaimAck { .. }))
+        );
+        assert!(effects.iter().any(
+            |e| matches!(e, Effect::RpcConnect { rpc_addr } if rpc_addr == "tcp://1.2.3.4:4800")
+        ));
     }
 
     #[test]
@@ -423,9 +417,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::RpcConnect { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::RpcConnect { .. }))
+        );
     }
 
     #[test]

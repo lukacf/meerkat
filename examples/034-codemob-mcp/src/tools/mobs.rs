@@ -5,7 +5,7 @@
 //! and available to `deliberate` without MCP restart.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -15,8 +15,8 @@ use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
-use crate::packs::{Pack, format_context, resolve_model};
 use super::ToolCallError;
+use crate::packs::{format_context, resolve_model, Pack};
 
 // ── Storage path ─────────────────────────────────────────────────────────────
 
@@ -32,7 +32,10 @@ fn validate_name(name: &str) -> Result<(), ToolCallError> {
     if name.is_empty() {
         return Err(ToolCallError::invalid_params("name must not be empty"));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ToolCallError::invalid_params(
             "name must contain only alphanumeric, hyphen, and underscore characters",
         ));
@@ -62,7 +65,9 @@ pub struct UserMobConfig {
     pub flows: BTreeMap<String, Vec<UserFlowStep>>,
 }
 
-fn default_mode() -> String { "comms".into() }
+fn default_mode() -> String {
+    "comms".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserAgentConfig {
@@ -84,7 +89,9 @@ pub struct UserFlowStep {
     pub timeout_ms: u64,
 }
 
-fn default_timeout() -> u64 { 120_000 }
+fn default_timeout() -> u64 {
+    120_000
+}
 
 // ── UserMobConfig → Pack ─────────────────────────────────────────────────────
 
@@ -97,7 +104,12 @@ impl UserMobConfig {
         provider_params: Option<&Value>,
     ) -> MobDefinition {
         let ctx = format_context(context);
-        let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
+        let tools = ToolConfig {
+            builtins: true,
+            shell: true,
+            comms: true,
+            ..ToolConfig::default()
+        };
         let is_comms = self.mode == "comms";
         let runtime = if is_comms {
             MobRuntimeMode::AutonomousHost
@@ -110,37 +122,45 @@ impl UserMobConfig {
 
         for (name, agent) in &self.agents {
             let skill_key = format!("{name}-skill");
-            profiles.insert(ProfileName::from(name.as_str()), ProfileBinding::Inline(Profile {
-                model: resolve_model(model_overrides, name, &agent.model),
-                skills: vec![skill_key.clone()],
-                tools: tools.clone(),
-                peer_description: if agent.peer_description.is_empty() {
-                    name.clone()
-                } else {
-                    agent.peer_description.clone()
+            profiles.insert(
+                ProfileName::from(name.as_str()),
+                ProfileBinding::Inline(Profile {
+                    model: resolve_model(model_overrides, name, &agent.model),
+                    skills: vec![skill_key.clone()],
+                    tools: tools.clone(),
+                    peer_description: if agent.peer_description.is_empty() {
+                        name.clone()
+                    } else {
+                        agent.peer_description.clone()
+                    },
+                    external_addressable: true,
+                    backend: None,
+                    runtime_mode: runtime.clone(),
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: provider_params.cloned(),
+                }),
+            );
+            skills.insert(
+                skill_key,
+                SkillSource::Inline {
+                    content: agent.skill.clone(),
                 },
-                external_addressable: true,
-                backend: None,
-                runtime_mode: runtime.clone(),
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: provider_params.cloned(),
-            }));
-            skills.insert(skill_key, SkillSource::Inline {
-                content: agent.skill.clone(),
-            });
+            );
         }
 
-        let role_wiring: Vec<RoleWiringRule> = self.wiring.iter().map(|pair| {
-            RoleWiringRule {
+        let role_wiring: Vec<RoleWiringRule> = self
+            .wiring
+            .iter()
+            .map(|pair| RoleWiringRule {
                 a: ProfileName::from(pair[0].as_str()),
                 b: ProfileName::from(pair[1].as_str()),
-            }
-        }).collect();
+            })
+            .collect();
 
         let has_orchestrator = self.orchestrator.is_some();
-        let orchestrator = self.orchestrator.as_ref().map(|name| {
-            OrchestratorConfig { profile: ProfileName::from(name.as_str()) }
+        let orchestrator = self.orchestrator.as_ref().map(|name| OrchestratorConfig {
+            profile: ProfileName::from(name.as_str()),
         });
 
         let mut flows = BTreeMap::new();
@@ -148,7 +168,8 @@ impl UserMobConfig {
             for (flow_name, steps) in &self.flows {
                 let mut step_specs = indexmap::IndexMap::new();
                 for step in steps {
-                    let msg = step.message
+                    let msg = step
+                        .message
                         .replace("{{ task }}", &format!("{task}{ctx}"))
                         .replace("{{task}}", &format!("{task}{ctx}"));
                     step_specs.insert(
@@ -156,7 +177,11 @@ impl UserMobConfig {
                         FlowStepSpec {
                             role: ProfileName::from(step.role.as_str()),
                             message: ContentInput::from(msg),
-                            depends_on: step.depends_on.iter().map(|s| StepId::from(s.as_str())).collect(),
+                            depends_on: step
+                                .depends_on
+                                .iter()
+                                .map(|s| StepId::from(s.as_str()))
+                                .collect(),
                             dispatch_mode: DispatchMode::default(),
                             collection_policy: CollectionPolicy::default(),
                             condition: None,
@@ -170,16 +195,22 @@ impl UserMobConfig {
                         },
                     );
                 }
-                flows.insert(FlowId::from(flow_name.as_str()), FlowSpec {
-                    description: None,
-                    steps: step_specs,
-                    root: None,
-                });
+                flows.insert(
+                    FlowId::from(flow_name.as_str()),
+                    FlowSpec {
+                        description: None,
+                        steps: step_specs,
+                        root: None,
+                    },
+                );
             }
         }
 
-        let mut definition =
-            MobDefinition::explicit(MobId::from(format!("codemob-user-{}-{}", self.name, uuid::Uuid::new_v4().as_simple())));
+        let mut definition = MobDefinition::explicit(MobId::from(format!(
+            "codemob-user-{}-{}",
+            self.name,
+            uuid::Uuid::new_v4().as_simple()
+        )));
         definition.orchestrator = orchestrator;
         definition.profiles = profiles;
         definition.wiring = WiringRules {
@@ -204,9 +235,15 @@ impl UserPack {
 }
 
 impl Pack for UserPack {
-    fn name(&self) -> &str { &self.config.name }
-    fn description(&self) -> &str { &self.config.description }
-    fn agent_count(&self) -> usize { self.config.agents.len() }
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn description(&self) -> &str {
+        &self.config.description
+    }
+    fn agent_count(&self) -> usize {
+        self.config.agents.len()
+    }
     fn flow_step_count(&self) -> usize {
         if self.config.mode == "flow" {
             self.config.flows.values().map(|steps| steps.len()).sum()
@@ -221,7 +258,8 @@ impl Pack for UserPack {
         model_overrides: &BTreeMap<String, String>,
         provider_params: Option<&Value>,
     ) -> MobDefinition {
-        self.config.to_mob_definition(task, context, model_overrides, provider_params)
+        self.config
+            .to_mob_definition(task, context, model_overrides, provider_params)
     }
 }
 
@@ -229,13 +267,19 @@ impl Pack for UserPack {
 
 pub async fn handle_create(arguments: &Value) -> Result<Value, ToolCallError> {
     let config: UserMobConfig = serde_json::from_value(
-        arguments.get("definition").cloned().unwrap_or(arguments.clone()),
-    ).map_err(|e| ToolCallError::invalid_params(format!("Invalid mob definition: {e}")))?;
+        arguments
+            .get("definition")
+            .cloned()
+            .unwrap_or(arguments.clone()),
+    )
+    .map_err(|e| ToolCallError::invalid_params(format!("Invalid mob definition: {e}")))?;
 
     validate_name(&config.name)?;
 
     if config.agents.is_empty() {
-        return Err(ToolCallError::invalid_params("At least one agent is required"));
+        return Err(ToolCallError::invalid_params(
+            "At least one agent is required",
+        ));
     }
 
     let dir = mobs_dir();
@@ -255,11 +299,15 @@ pub async fn handle_create(arguments: &Value) -> Result<Value, ToolCallError> {
     std::fs::write(&path, &json)
         .map_err(|e| ToolCallError::internal(format!("Failed to write mob file: {e}")))?;
 
-    Ok(json!({"content": [{"type": "text", "text": format!("Created mob '{}' with {} agent(s). Saved to {}", config.name, config.agents.len(), path.display())}]}))
+    Ok(
+        json!({"content": [{"type": "text", "text": format!("Created mob '{}' with {} agent(s). Saved to {}", config.name, config.agents.len(), path.display())}]}),
+    )
 }
 
 pub async fn handle_get(arguments: &Value) -> Result<Value, ToolCallError> {
-    let name = arguments.get("name").and_then(Value::as_str)
+    let name = arguments
+        .get("name")
+        .and_then(Value::as_str)
         .ok_or_else(|| ToolCallError::invalid_params("Missing 'name' parameter"))?;
     validate_name(name)?;
 
@@ -272,14 +320,21 @@ pub async fn handle_get(arguments: &Value) -> Result<Value, ToolCallError> {
 
 pub async fn handle_update(arguments: &Value) -> Result<Value, ToolCallError> {
     let config: UserMobConfig = serde_json::from_value(
-        arguments.get("definition").cloned().unwrap_or(arguments.clone()),
-    ).map_err(|e| ToolCallError::invalid_params(format!("Invalid mob definition: {e}")))?;
+        arguments
+            .get("definition")
+            .cloned()
+            .unwrap_or(arguments.clone()),
+    )
+    .map_err(|e| ToolCallError::invalid_params(format!("Invalid mob definition: {e}")))?;
 
     validate_name(&config.name)?;
 
     let path = mob_path(&config.name);
     if !path.exists() {
-        return Err(ToolCallError::invalid_params(format!("Mob '{}' does not exist. Use create_mob first.", config.name)));
+        return Err(ToolCallError::invalid_params(format!(
+            "Mob '{}' does not exist. Use create_mob first.",
+            config.name
+        )));
     }
 
     let json = serde_json::to_string_pretty(&config)
@@ -291,13 +346,17 @@ pub async fn handle_update(arguments: &Value) -> Result<Value, ToolCallError> {
 }
 
 pub async fn handle_delete(arguments: &Value) -> Result<Value, ToolCallError> {
-    let name = arguments.get("name").and_then(Value::as_str)
+    let name = arguments
+        .get("name")
+        .and_then(Value::as_str)
         .ok_or_else(|| ToolCallError::invalid_params("Missing 'name' parameter"))?;
     validate_name(name)?;
 
     let path = mob_path(name);
     if !path.exists() {
-        return Err(ToolCallError::invalid_params(format!("Mob '{name}' not found")));
+        return Err(ToolCallError::invalid_params(format!(
+            "Mob '{name}' not found"
+        )));
     }
 
     std::fs::remove_file(&path)

@@ -7,14 +7,13 @@ mod state;
 mod tools;
 
 use meerkat::surface::{
-    RequestTerminal, SurfaceRequestExecutor, noop_request_action,
-    spawn_stdio_json_writer,
+    noop_request_action, spawn_stdio_json_writer, RequestTerminal, SurfaceRequestExecutor,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use state::ForceState;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::{OnceCell, mpsc};
+use tokio::sync::{mpsc, OnceCell};
 
 static STATE: OnceCell<ForceState> = OnceCell::const_new();
 

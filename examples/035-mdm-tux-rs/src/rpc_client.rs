@@ -7,13 +7,13 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Default timeout for a single JSON-RPC request.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -73,9 +73,7 @@ impl RpcClient {
         addr: &str,
         notification_tx: mpsc::UnboundedSender<Value>,
     ) -> Result<Self, RpcError> {
-        let tcp_addr = addr
-            .strip_prefix("tcp://")
-            .unwrap_or(addr);
+        let tcp_addr = addr.strip_prefix("tcp://").unwrap_or(addr);
         let stream = TcpStream::connect(tcp_addr)
             .await
             .map_err(|e| RpcError::Transport(e.to_string()))?;
@@ -88,12 +86,7 @@ impl RpcClient {
         let reader_handle = {
             let connected = connected.clone();
             let pending = pending.clone();
-            tokio::spawn(reader_loop(
-                read_half,
-                pending,
-                notification_tx,
-                connected,
-            ))
+            tokio::spawn(reader_loop(read_half, pending, notification_tx, connected))
         };
 
         Ok(Self {
@@ -140,8 +133,8 @@ impl RpcClient {
             "id": id,
         });
 
-        let mut line = serde_json::to_string(&request)
-            .map_err(|e| RpcError::Transport(e.to_string()))?;
+        let mut line =
+            serde_json::to_string(&request).map_err(|e| RpcError::Transport(e.to_string()))?;
         line.push('\n');
 
         {
@@ -322,18 +315,10 @@ mod tests {
     async fn request_ids_auto_increment() {
         let (addr, server) = mock_echo_server().await;
         let (ntf_tx, _ntf_rx) = mpsc::unbounded_channel();
-        let client = RpcClient::connect(&addr.to_string(), ntf_tx)
-            .await
-            .unwrap();
+        let client = RpcClient::connect(&addr.to_string(), ntf_tx).await.unwrap();
 
-        let r1 = client
-            .request("ping", serde_json::json!({}))
-            .await
-            .unwrap();
-        let r2 = client
-            .request("ping", serde_json::json!({}))
-            .await
-            .unwrap();
+        let r1 = client.request("ping", serde_json::json!({})).await.unwrap();
+        let r2 = client.request("ping", serde_json::json!({})).await.unwrap();
 
         assert_eq!(r1["echo_id"], 1);
         assert_eq!(r2["echo_id"], 2);
@@ -379,11 +364,7 @@ mod tests {
         });
 
         let (ntf_tx, _ntf_rx) = mpsc::unbounded_channel();
-        let client = Arc::new(
-            RpcClient::connect(&addr.to_string(), ntf_tx)
-                .await
-                .unwrap(),
-        );
+        let client = Arc::new(RpcClient::connect(&addr.to_string(), ntf_tx).await.unwrap());
 
         // Fire both requests concurrently.
         let c1 = client.clone();
@@ -439,14 +420,9 @@ mod tests {
         });
 
         let (ntf_tx, mut ntf_rx) = mpsc::unbounded_channel();
-        let client = RpcClient::connect(&addr.to_string(), ntf_tx)
-            .await
-            .unwrap();
+        let client = RpcClient::connect(&addr.to_string(), ntf_tx).await.unwrap();
 
-        let result = client
-            .request("ping", serde_json::json!({}))
-            .await
-            .unwrap();
+        let result = client.request("ping", serde_json::json!({})).await.unwrap();
         assert_eq!(result, "ok");
 
         // The notification should have been forwarded.
@@ -470,9 +446,7 @@ mod tests {
         });
 
         let (ntf_tx, _ntf_rx) = mpsc::unbounded_channel();
-        let client = RpcClient::connect(&addr.to_string(), ntf_tx)
-            .await
-            .unwrap();
+        let client = RpcClient::connect(&addr.to_string(), ntf_tx).await.unwrap();
 
         // Give the reader loop time to notice EOF.
         tokio::time::sleep(Duration::from_millis(50)).await;

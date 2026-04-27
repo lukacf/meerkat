@@ -695,8 +695,26 @@ Semantic memory (`memory_search`) and compaction integrate through the same sess
 
 ## Repo test lanes
 
-For repository development and regression triage, use the standardized Cargo
-lanes rather than ad hoc per-surface commands:
+For repository development and regression triage, use the standardized Make
+lanes rather than ad hoc per-surface commands. Cargo is the default backend;
+`MEERKAT_BUILDBUDDY=1` opts supported broad lanes into the optional
+BuildBuddy/Bazel backend:
+
+- `make build`
+- `make check`
+- `make lint`
+- `make test`
+- `make test-unit`
+- `make test-int`
+- `make e2e-fast`
+- `make e2e-system`
+- `make e2e-live`
+- `make e2e-smoke`
+
+Use explicit `make buildbuddy-build`, `make buildbuddy-clippy`,
+`make buildbuddy-test`, and the matching `make buildbuddy-e2e-*` targets only
+when you want BuildBuddy without exporting the env var. For narrow Cargo-only
+package checks, use `./scripts/repo-cargo`:
 
 - `./scripts/repo-cargo unit`
 - `./scripts/repo-cargo int`

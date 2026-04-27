@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -21,7 +21,7 @@ all: ci
 # Build the project
 build:
 	@echo "$(GREEN)Building $(CRATE_NAME)...$(NC)"
-	$(CARGO) build --workspace
+	@scripts/run-build-backend-lane build
 
 # Build release version
 release:
@@ -31,12 +31,12 @@ release:
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	$(CARGO) fast
+	@scripts/run-build-backend-lane test
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	$(CARGO) nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
+	@scripts/run-build-backend-lane test-unit
 
 # Integration-fast tests only (no unit tests). The `int` cargo alias excludes
 # the dedicated e2e lane binaries since those have their own Makefile targets
@@ -44,12 +44,12 @@ test-unit:
 # default nextest deadline.
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	$(CARGO) int
+	@scripts/run-build-backend-lane test-int
 
 # Deterministic end-to-end lane (canonical integration harness)
 e2e-fast:
 	@echo "$(GREEN)Running e2e-fast lane...$(NC)"
-	$(CARGO) e2e-fast
+	@scripts/run-build-backend-lane e2e-fast
 
 e2e-build:
 	@echo "$(YELLOW)Running e2e-build lane (ignored by default)...$(NC)"
@@ -58,17 +58,17 @@ e2e-build:
 # Real local resources only (binaries, sockets, filesystems; no live providers)
 e2e-system:
 	@echo "$(GREEN)Running e2e-system lane...$(NC)"
-	$(CARGO) e2e-system
+	@scripts/run-build-backend-lane e2e-system
 
 # Targeted live-provider boundary checks
 e2e-live:
 	@echo "$(YELLOW)Running e2e-live lane (ignored by default)...$(NC)"
-	$(CARGO) e2e-live
+	@scripts/run-build-backend-lane e2e-live
 
 # Compound live-provider smoke scenarios
 e2e-smoke:
 	@echo "$(YELLOW)Running e2e-smoke lane (ignored by default)...$(NC)"
-	$(CARGO) e2e-smoke
+	@scripts/run-build-backend-lane e2e-smoke
 
 # Live per-model catalog validation (ignored by default; on-demand / pre-release)
 e2e-models:
@@ -230,6 +230,50 @@ buildbuddy-doctor:
 	@echo "$(GREEN)Checking optional BuildBuddy setup...$(NC)"
 	@scripts/buildbuddy-doctor
 
+buildbuddy-build:
+	@echo "$(GREEN)Building workspace with BuildBuddy...$(NC)"
+	@scripts/buildbuddy-dev build $(BUILDBUDDY_ARGS)
+
+buildbuddy-check:
+	@echo "$(GREEN)Checking workspace with BuildBuddy...$(NC)"
+	@scripts/buildbuddy-dev check $(BUILDBUDDY_ARGS)
+
+buildbuddy-clippy buildbuddy-lint:
+	@echo "$(GREEN)Running BuildBuddy clippy...$(NC)"
+	@scripts/buildbuddy-dev clippy $(BUILDBUDDY_ARGS)
+
+buildbuddy-test:
+	@echo "$(GREEN)Running BuildBuddy fast tests (unit + integration-fast)...$(NC)"
+	@scripts/buildbuddy-dev test $(BUILDBUDDY_ARGS)
+
+buildbuddy-test-all:
+	@echo "$(GREEN)Running BuildBuddy all-feature fast tests...$(NC)"
+	@scripts/buildbuddy-dev test-all $(BUILDBUDDY_ARGS)
+
+buildbuddy-test-unit:
+	@echo "$(GREEN)Running BuildBuddy unit tests...$(NC)"
+	@scripts/buildbuddy-dev test-unit $(BUILDBUDDY_ARGS)
+
+buildbuddy-test-int:
+	@echo "$(GREEN)Running BuildBuddy integration-fast tests...$(NC)"
+	@scripts/buildbuddy-dev test-int $(BUILDBUDDY_ARGS)
+
+buildbuddy-e2e-fast:
+	@echo "$(GREEN)Running BuildBuddy e2e-fast lane...$(NC)"
+	@scripts/buildbuddy-dev e2e-fast $(BUILDBUDDY_ARGS)
+
+buildbuddy-e2e-system:
+	@echo "$(GREEN)Running BuildBuddy e2e-system lane...$(NC)"
+	@scripts/buildbuddy-dev e2e-system $(BUILDBUDDY_ARGS)
+
+buildbuddy-e2e-live:
+	@echo "$(YELLOW)Running BuildBuddy e2e-live lane (requires provider keys)...$(NC)"
+	@scripts/buildbuddy-dev e2e-live $(BUILDBUDDY_ARGS)
+
+buildbuddy-e2e-smoke:
+	@echo "$(YELLOW)Running BuildBuddy e2e-smoke lane (requires provider keys)...$(NC)"
+	@scripts/buildbuddy-dev e2e-smoke $(BUILDBUDDY_ARGS)
+
 buildbuddy-agent-gate: buildbuddy-doctor
 	@echo "$(GREEN)Running BuildBuddy agent changed-path gate...$(NC)"
 	@scripts/buildbuddy-agent-gate $(AGENT_GATE_ARGS)
@@ -304,8 +348,8 @@ deprecated-backend-inventory:
 
 # Quick check - compile without producing output
 check:
-	@echo "$(GREEN)Running cargo check...$(NC)"
-	$(CARGO) check --workspace --all-targets --all-features
+	@echo "$(GREEN)Running workspace check...$(NC)"
+	@scripts/run-build-backend-lane check
 
 # Build xtask in an isolated target dir so machine-authority commands do not
 # block behind unrelated workspace cargo activity.
@@ -571,6 +615,7 @@ verify-version:
 # Help target
 help:
 	@echo "Available targets:"
+	@echo "  $(YELLOW)Cargo is the default backend. Set MEERKAT_BUILDBUDDY=1 to route supported local lanes through BuildBuddy.$(NC)"
 	@echo "  $(GREEN)build$(NC)         - Build the project (debug)"
 	@echo "  $(GREEN)release$(NC)       - Build optimized release version"
 	@echo "  $(GREEN)test$(NC)          - Run fast tests (unit + integration-fast)"
@@ -600,6 +645,16 @@ help:
 	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
 	@echo "  $(GREEN)buildbuddy-generate-check$(NC)- Check optional Bazel BUILD freshness"
 	@echo "  $(GREEN)buildbuddy-doctor$(NC)- Check optional BuildBuddy setup"
+	@echo "  $(GREEN)buildbuddy-build$(NC)- Build workspace with BuildBuddy"
+	@echo "  $(GREEN)buildbuddy-check$(NC)- Check/build workspace with BuildBuddy"
+	@echo "  $(GREEN)buildbuddy-clippy$(NC)- Run BuildBuddy clippy"
+	@echo "  $(GREEN)buildbuddy-test$(NC)- Run BuildBuddy unit + integration-fast lanes"
+	@echo "  $(GREEN)buildbuddy-test-unit$(NC)- Run BuildBuddy unit tests"
+	@echo "  $(GREEN)buildbuddy-test-int$(NC)- Run BuildBuddy integration-fast tests"
+	@echo "  $(GREEN)buildbuddy-e2e-fast$(NC)- Run BuildBuddy e2e-fast lane"
+	@echo "  $(GREEN)buildbuddy-e2e-system$(NC)- Run BuildBuddy e2e-system lane"
+	@echo "  $(GREEN)buildbuddy-e2e-live$(NC)- Run BuildBuddy e2e-live lane (requires provider keys)"
+	@echo "  $(GREEN)buildbuddy-e2e-smoke$(NC)- Run BuildBuddy e2e-smoke lane (requires provider keys)"
 	@echo "  $(GREEN)buildbuddy-agent-gate$(NC)- Run BuildBuddy gate for changed agent files (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-ci-dispatch$(NC)- Dispatch optional BuildBuddy CI mode (BUILDBUDDY_CI_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-fast$(NC)- Run optional BuildBuddy fast test lane"

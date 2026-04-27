@@ -643,6 +643,32 @@ fi
 module_lock_args=()
 lockfile="${workspace_root}/MODULE.bazel.lock"
 local_oai_vendor="${workspace_root}/vendor/oai-rt-rs"
+local_oai_vendor_build="${local_oai_vendor}/BUILD.bazel"
+module_lock_backup=""
+local_oai_vendor_build_backup=""
+restore_module_lock() {
+  if [[ -n "${module_lock_backup}" && -f "${module_lock_backup}" ]]; then
+    cp "${module_lock_backup}" "${lockfile}"
+    rm -f "${module_lock_backup}"
+  fi
+  if [[ -n "${local_oai_vendor_build_backup}" && -f "${local_oai_vendor_build_backup}" ]]; then
+    cp "${local_oai_vendor_build_backup}" "${local_oai_vendor_build}"
+    rm -f "${local_oai_vendor_build_backup}"
+  fi
+}
+if [[ -z "${BUILDBUDDY_KEEP_LOCK_REFRESH:-}" ]]; then
+  if [[ -f "${lockfile}" ]]; then
+    module_lock_backup="$(mktemp "${TMPDIR:-/tmp}/meerkat-module-lock.XXXXXX")"
+    cp "${lockfile}" "${module_lock_backup}"
+  fi
+  if [[ -f "${local_oai_vendor_build}" ]]; then
+    local_oai_vendor_build_backup="$(mktemp "${TMPDIR:-/tmp}/meerkat-oai-build.XXXXXX")"
+    cp "${local_oai_vendor_build}" "${local_oai_vendor_build_backup}"
+  fi
+  if [[ -n "${module_lock_backup}" || -n "${local_oai_vendor_build_backup}" ]]; then
+    trap restore_module_lock EXIT
+  fi
+fi
 if [[ -f "${lockfile}" ]] &&
   grep -Fq '/vendor/oai-rt-rs' "${lockfile}" &&
   ! grep -Fq "${local_oai_vendor}" "${lockfile}"; then
@@ -676,7 +702,8 @@ if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
   )
 fi
 
-exec "${bb_bin}" "${startup_args[@]}" "${command}" \
+set +e
+"${bb_bin}" "${startup_args[@]}" "${command}" \
   "${module_lock_args[@]}" \
   "${common_args[@]}" \
   --config="${config}" \
@@ -685,3 +712,12 @@ exec "${bb_bin}" "${startup_args[@]}" "${command}" \
   "${extra_args[@]}" \
   ${target} \
   "$@"
+status="$?"
+set -e
+
+if [[ -n "${module_lock_backup}" || -n "${local_oai_vendor_build_backup}" ]]; then
+  restore_module_lock
+  trap - EXIT
+fi
+
+exit "${status}"

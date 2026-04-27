@@ -1,7 +1,7 @@
-# BuildBuddy Bazel POC
+# BuildBuddy Bazel Developer And CI Guide
 
-Status: Spike notes and rollout guidance for the opt-in BuildBuddy/Bazel
-workspace experiment. Cargo remains the default developer path.
+Status: Production rollout guidance for the opt-in BuildBuddy/Bazel workspace
+backend. Cargo remains the default developer path.
 Baseline branch: `codex/buildbuddy-poc`
 Initial POC commit: `a58e2613f1a5f3cfb952b4035e8f0d38c0c35a71`
 
@@ -16,13 +16,62 @@ Initial POC commit: `a58e2613f1a5f3cfb952b4035e8f0d38c0c35a71`
   cache hits.
 - Preserve Cargo as the normal path for developers without BuildBuddy access.
 
-## Entry Points
+## Local Developer DX
 
 Install the pinned `bb` binary with `make buildbuddy-install` if it is not
 already on `PATH`. The installer writes to the user cache by default and checks
 the downloaded binary against a pinned SHA-256 digest.
 
-Use `scripts/buildbuddy-bazel-poc` with `BUILDBUDDY_BAZEL_COMMAND`:
+For normal work, use the same Make targets as Cargo. They run Cargo by default
+and switch to BuildBuddy only when `MEERKAT_BUILDBUDDY=1` is set:
+
+| Cargo-default command | BuildBuddy opt-in |
+| --- | --- |
+| `make build` | `MEERKAT_BUILDBUDDY=1 make build` |
+| `make check` | `MEERKAT_BUILDBUDDY=1 make check` |
+| `make lint` | `MEERKAT_BUILDBUDDY=1 make lint` |
+| `make test` | `MEERKAT_BUILDBUDDY=1 make test` |
+| `make test-unit` | `MEERKAT_BUILDBUDDY=1 make test-unit` |
+| `make test-int` | `MEERKAT_BUILDBUDDY=1 make test-int` |
+| `make e2e-fast` | `MEERKAT_BUILDBUDDY=1 make e2e-fast` |
+| `make e2e-system` | `MEERKAT_BUILDBUDDY=1 make e2e-system` |
+| `make e2e-live` | `MEERKAT_BUILDBUDDY=1 make e2e-live` |
+| `make e2e-smoke` | `MEERKAT_BUILDBUDDY=1 make e2e-smoke` |
+
+The explicit BuildBuddy targets are:
+
+- `make buildbuddy-build`: Build the generated Rust workspace labels.
+- `make buildbuddy-check`: Same BuildBuddy compile lane, named for Cargo users
+  reaching for `cargo check`.
+- `make buildbuddy-clippy`: Run rules_rust clippy with `-D warnings`.
+- `make buildbuddy-test`: Run unit + integration-fast lanes.
+- `make buildbuddy-test-unit`: Run unit tests.
+- `make buildbuddy-test-int`: Run integration-fast tests.
+- `make buildbuddy-e2e-fast`: Run the deterministic e2e lane.
+- `make buildbuddy-e2e-system`: Run the real-local-resource e2e lane.
+- `make buildbuddy-e2e-live`: Run targeted live-provider e2e tests.
+- `make buildbuddy-e2e-smoke`: Run kitchen-sink live smoke tests.
+
+`BUILDBUDDY_ARGS='...'` is forwarded to `scripts/buildbuddy-dev` for explicit
+targets. The lower-level facade also supports `--dry-run`, `--jobs N`, and an
+optional explicit Bazel target:
+
+```bash
+BUILDBUDDY_DRY_RUN=1 make buildbuddy-test
+scripts/buildbuddy-dev --dry-run build
+scripts/buildbuddy-dev build //meerkat-cli:rkat
+scripts/buildbuddy-dev clippy --keep_going
+```
+
+Run `make buildbuddy-doctor` when setup looks suspicious. It verifies
+credentials, the pinned `bb` CLI, generated Bazel file freshness, selector
+health, and lane isolation without printing secrets.
+
+## Lower-Level Bazel Commands
+
+Most developers should prefer the Make targets or `scripts/buildbuddy-dev`.
+When extending the BuildBuddy integration, use `scripts/buildbuddy-bazel-poc`
+with `BUILDBUDDY_BAZEL_COMMAND`:
 
 - `workspace-test`: run the full Bazel workspace test suite.
 - `workspace-test-rbe`: run the remote-compatible workspace test suite,
@@ -92,6 +141,13 @@ process-scoped lane when no `RUST_LANE_ID`, `BUILDBUDDY_AGENT_LANE`, or
 of less cache warmth between repeated manual runs. Separate Git worktrees
 automatically get different workspace hashes, so they do not share local Bazel
 output bases.
+
+`scripts/buildbuddy-bazel-poc` may need to refresh `MODULE.bazel.lock`
+temporarily when a checked-in lockfile contains a stale absolute path for the
+vendored `oai-rt-rs` path dependency. Local runs restore the checked-in lockfile
+after Bazel exits so a successful BuildBuddy build does not dirty the worktree.
+Set `BUILDBUDDY_KEEP_LOCK_REFRESH=1` only when intentionally refreshing and
+reviewing the lockfile.
 
 ## Simulation Harness
 
@@ -358,7 +414,18 @@ to roughly `4-6s` once those lanes were prepared.
   restrict the diff scope.
 - For deeper shared crates, use `affected-*` when you need reverse-dependency
   confidence, and expect broad closures for high-fanout crates.
-- For an opt-in BuildBuddy fast test pass, run `make buildbuddy-fast`.
+- For broad local developer lanes, prefer `MEERKAT_BUILDBUDDY=1 make build`,
+  `MEERKAT_BUILDBUDDY=1 make check`, `MEERKAT_BUILDBUDDY=1 make lint`, and
+  `MEERKAT_BUILDBUDDY=1 make test`. These route through
+  `scripts/buildbuddy-dev` while keeping Cargo as the default for everyone else.
+- For explicit BuildBuddy local lanes without environment switching, run
+  `make buildbuddy-build`, `make buildbuddy-check`, `make buildbuddy-clippy`,
+  `make buildbuddy-test`, `make buildbuddy-test-unit`,
+  `make buildbuddy-test-int`, `make buildbuddy-e2e-fast`, or
+  `make buildbuddy-e2e-system`. The live-provider forms are
+  `make buildbuddy-e2e-live` and `make buildbuddy-e2e-smoke`.
+- For an opt-in BuildBuddy fast test pass over the generated fast suite, run
+  `make buildbuddy-fast`.
 - To install the pinned BuildBuddy CLI without changing system directories, run
   `make buildbuddy-install`. The BuildBuddy scripts also check that cache path
   when `bb` is not already on `PATH`.

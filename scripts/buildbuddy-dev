@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: buildbuddy-dev [--dry-run] [--jobs N] <lane> [target-or-bazel-args...]
+
+Runs local developer lanes through the optional BuildBuddy/Bazel backend.
+Cargo remains the default path; this script is the readable local facade for
+developers who opt in with MEERKAT_BUILDBUDDY=1 or explicit make buildbuddy-*.
+
+Set BUILDBUDDY_DRY_RUN=1 when calling through Make.
+
+Common lanes:
+  build, check              Build the generated Rust workspace labels.
+  clippy, lint              Run rules_rust clippy with -D warnings.
+  test, test-all            Run unit + integration-fast lanes.
+  test-unit                 Run unit tests.
+  test-int, integration-fast
+                            Run integration-fast tests.
+  e2e-fast, e2e-system      Run deterministic e2e lanes.
+  e2e-live, e2e-smoke       Run live-provider lanes when keys are configured.
+  workspace-fast            Run the Cargo-fast-equivalent Bazel suite.
+  fmt-static                Run static formatting/source gates.
+  minimal                   Run minimal feature builds.
+  feature-matrix-lib        Run library feature matrix.
+  feature-matrix-surface    Build surface feature variants.
+  sdk-suites, wasm-check, wasm-contract, audit
+                            Run cargo-equivalent support lanes.
+  machine-authority, rmat-audit, seam-inventory
+                            Run authority and structural audit lanes.
+
+Examples:
+  scripts/buildbuddy-dev build
+  scripts/buildbuddy-dev build //meerkat-cli:rkat
+  scripts/buildbuddy-dev clippy
+  scripts/buildbuddy-dev test
+  scripts/buildbuddy-dev --dry-run e2e-fast
+EOF
+}
+
+workspace_root="$(git rev-parse --show-toplevel)"
+cd "${workspace_root}"
+
+jobs="${BUILDBUDDY_JOBS:-64}"
+dry_run=0
+case "${BUILDBUDDY_DRY_RUN:-}" in
+  1|true|TRUE|yes|YES|on|ON)
+    dry_run=1
+    ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --jobs)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --jobs requires a value" >&2
+        exit 2
+      fi
+      jobs="$2"
+      shift 2
+      ;;
+    --jobs=*)
+      jobs="${1#--jobs=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+lane="$1"
+shift
+extra_args=("$@")
+
+bb_config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+
+print_command() {
+  printf '+ '
+  printf '%q ' "$@"
+  printf '\n'
+}
+
+run_command() {
+  print_command "$@"
+  if [[ "${dry_run}" == "1" ]]; then
+    return 0
+  fi
+  "$@"
+}
+
+run_bazel() {
+  local bazel_command="$1"
+  shift
+  run_command env \
+    BUILDBUDDY_BAZEL_CONFIG="${bb_config}" \
+    BUILDBUDDY_BAZEL_COMMAND="${bazel_command}" \
+    ./scripts/buildbuddy-bazel-poc "$@" --jobs="${jobs}"
+}
+
+workspace_build_targets() {
+  ./scripts/bazel-affected-fast-tests.mjs --all --build
+}
+
+case "${lane}" in
+  build|check)
+    if [[ "${#extra_args[@]}" -gt 0 && "${extra_args[0]}" != -* ]]; then
+      target="${extra_args[0]}"
+      extra_args=("${extra_args[@]:1}")
+    else
+      target="$(workspace_build_targets)"
+    fi
+    run_bazel build "${target}" "${extra_args[@]}"
+    ;;
+  clippy|lint)
+    run_bazel workspace-build-clippy-rbe --color=no --curses=no "${extra_args[@]}"
+    ;;
+  test|test-all)
+    run_bazel workspace-unit-rbe "${extra_args[@]}"
+    run_bazel workspace-integration-fast-rbe "${extra_args[@]}"
+    ;;
+  test-unit|unit)
+    run_bazel workspace-unit-rbe "${extra_args[@]}"
+    ;;
+  test-int|integration-fast|int)
+    run_bazel workspace-integration-fast-rbe "${extra_args[@]}"
+    ;;
+  e2e-fast)
+    run_bazel e2e-fast-rbe "${extra_args[@]}"
+    ;;
+  e2e-system)
+    run_bazel e2e-system-rbe "${extra_args[@]}"
+    ;;
+  e2e-live)
+    run_bazel e2e-live-rbe "${extra_args[@]}"
+    ;;
+  e2e-smoke)
+    run_bazel e2e-smoke-rbe "${extra_args[@]}"
+    ;;
+  workspace-fast|fast)
+    run_bazel workspace-fast-rbe "${extra_args[@]}"
+    ;;
+  fmt-static)
+    run_bazel fmt-static-rbe "${extra_args[@]}"
+    ;;
+  minimal|minimal-feature-builds)
+    run_bazel minimal-feature-builds-rbe "${extra_args[@]}"
+    ;;
+  feature-matrix-lib)
+    run_bazel feature-matrix-lib-rbe "${extra_args[@]}"
+    ;;
+  feature-matrix-surface)
+    run_bazel feature-matrix-surface-rbe "${extra_args[@]}"
+    ;;
+  sdk-suites)
+    run_bazel sdk-suites-rbe "${extra_args[@]}"
+    ;;
+  wasm-check)
+    run_bazel wasm-check-rbe "${extra_args[@]}"
+    ;;
+  wasm-contract)
+    run_bazel wasm-contract-rbe "${extra_args[@]}"
+    ;;
+  audit|security-audit)
+    run_bazel security-audit-rbe "${extra_args[@]}"
+    ;;
+  machine-authority)
+    run_bazel machine-authority-rbe "${extra_args[@]}"
+    ;;
+  rmat-audit)
+    run_bazel rmat-audit-rbe "${extra_args[@]}"
+    ;;
+  seam-inventory)
+    run_bazel seam-inventory-rbe "${extra_args[@]}"
+    ;;
+  *)
+    echo "unknown BuildBuddy developer lane: ${lane}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

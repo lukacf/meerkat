@@ -139,7 +139,7 @@ else
   pass "GitHub workflow Rust entrypoints use the repo Cargo wrapper"
 fi
 
-if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/ci.yml &&
+if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/cargo.yml &&
   grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/buildbuddy.yml; then
   pass "CI and BuildBuddy workflows keep repo-cargo Cargo home cacheable"
 else

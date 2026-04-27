@@ -151,6 +151,30 @@ It derives build-relevant changed files and runs a package-scoped Cargo clippy
 gate. Set `MEERKAT_BUILDBUDDY=1` or pass `--buildbuddy` to opt into the
 BuildBuddy changed-path gate. That same `MEERKAT_BUILDBUDDY=1` switch makes
 the standard pre-push Rust hooks choose BuildBuddy automatically.
+
+For normal local development, keep using the Make targets. They run Cargo by
+default and switch to BuildBuddy only when explicitly opted in:
+
+```bash
+make build
+make check
+make lint
+make test
+
+MEERKAT_BUILDBUDDY=1 make build
+MEERKAT_BUILDBUDDY=1 make check
+MEERKAT_BUILDBUDDY=1 make lint
+MEERKAT_BUILDBUDDY=1 make test
+```
+
+The explicit BuildBuddy forms are also available for one-off use:
+`make buildbuddy-build`, `make buildbuddy-check`, `make buildbuddy-clippy`,
+`make buildbuddy-test`, `make buildbuddy-test-unit`, `make buildbuddy-test-int`,
+`make buildbuddy-e2e-fast`, `make buildbuddy-e2e-system`,
+`make buildbuddy-e2e-live`, and `make buildbuddy-e2e-smoke`. Pass extra Bazel
+arguments with `BUILDBUDDY_ARGS='...'`; run `make buildbuddy-doctor` if setup
+looks suspicious. Use `BUILDBUDDY_DRY_RUN=1` with explicit BuildBuddy targets
+to inspect the selected command. Live and smoke e2e lanes require provider keys.
 Use `--dry-run` to inspect the selected packages or paths before paying the
 build cost. The Cargo and BuildBuddy gates accept `--staged`, `--committed`,
 and `--working-tree` for hook and CI routing. When using Make, pass gate flags
@@ -386,14 +410,16 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 ## Development
 
 ```bash
-cargo build --workspace             # Build
-cargo rct                           # Fast tests (unit + integration-fast)
-make ci                             # Full CI pipeline
+make build                          # Cargo build by default
+make test                           # Fast tests (unit + integration-fast)
+make lint                           # Clippy
+MEERKAT_BUILDBUDDY=1 make build     # Same local lane through BuildBuddy
+make ci                             # Full Cargo CI pipeline
 ```
 
 ## Contributing
 
-1. Run `cargo rct` to verify all checks pass
+1. Run `make test` or `make agent-gate` for the relevant local gate
 2. Add tests for new functionality
 3. Submit PRs to `main`
 

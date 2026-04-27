@@ -16,30 +16,50 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 
 ## Build and Test Commands
 
+Use Make targets for normal local work. Cargo is the default backend; setting
+`MEERKAT_BUILDBUDDY=1` routes supported broad local lanes through the optional
+BuildBuddy/Bazel path. Do not invoke raw `bb` directly unless you are debugging
+the BuildBuddy wrapper itself.
+
 ```bash
 # Build everything
-./scripts/repo-cargo build --workspace
+make build
+
+# Build everything through BuildBuddy/Bazel
+MEERKAT_BUILDBUDDY=1 make build
+
+# Explicit BuildBuddy forms
+make buildbuddy-build
+make buildbuddy-check
+make buildbuddy-clippy
+make buildbuddy-test
 
 # Run fast tests (unit + integration-fast; skips doctests)
-./scripts/repo-cargo nextest run --workspace --show-progress none --status-level none --final-status-level fail
+make test
+
+# Run fast tests through BuildBuddy/Bazel
+MEERKAT_BUILDBUDDY=1 make test
 
 # Run all tests including doc-tests (SLOW due to doc-test compilation)
 ./scripts/repo-cargo test --workspace
 
 # Run deterministic end-to-end lane
-./scripts/repo-cargo e2e-fast
+make e2e-fast
+
+# Run deterministic end-to-end lane through BuildBuddy/Bazel
+MEERKAT_BUILDBUDDY=1 make e2e-fast
 
 # Run explicit build/composition end-to-end lane (ignored by default)
 ./scripts/repo-cargo test -p meerkat-integration-tests --test e2e_build_lane -- --ignored
 
 # Run real local-resource end-to-end lane
-./scripts/repo-cargo e2e-system
+make e2e-system
 
 # Run targeted live-provider lane (ignored by default)
-./scripts/repo-cargo e2e-live
+make e2e-live
 
 # Run kitchen-sink live smoke lane (ignored by default)
-./scripts/repo-cargo e2e-smoke
+make e2e-smoke
 
 # Run per-model catalog validation lane (ignored by default)
 ./scripts/repo-cargo e2e-models
@@ -90,6 +110,8 @@ This is a large workspace (~25 crates). Careless builds waste minutes. Follow th
 **Never run parallel cargo commands.** They deadlock on the workspace file lock. Run builds sequentially.
 
 **Always use `./scripts/repo-cargo`** instead of bare `cargo`. The wrapper manages per-worktree build caches and avoids cross-worktree cache pollution.
+
+**Use BuildBuddy for broad final verification when available.** Prefix the normal broad lanes with `MEERKAT_BUILDBUDDY=1`: `make build`, `make lint`, `make test`, `make test-unit`, `make test-int`, `make e2e-fast`, and `make e2e-system` then use the optional macOS arm64 BuildBuddy/Bazel backend. `make buildbuddy-doctor` verifies credentials, the pinned `bb` CLI, Bazel metadata freshness, selector health, and lane isolation. For same-checkout multi-agent work, set a distinct `RUST_LANE_ID` when you want stable warm Bazel lanes.
 
 **Key dependency chains to know** (touching a crate rebuilds everything downstream):
 - `meerkat-core` → rebuilds almost everything (~27s incremental)
@@ -341,7 +363,7 @@ Installed via `make install-hooks`. Two stages:
 - Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
 - `cargo fmt --all -- --check`
 - `scripts/pre-push-clippy.sh` (clippy on changed crates only with `--all-targets`; falls back to full workspace when root `Cargo.toml`/`Cargo.lock` changes)
-- `scripts/pre-push-unit.sh` (deterministic local gate: `cargo unit` plus `cargo e2e-fast`, with per-tree cache, serialized runs, and one retry if `nextest` discovery hangs)
+- `scripts/pre-push-unit.sh` (deterministic local gate: Cargo `unit` plus `e2e-fast` by default, or matching BuildBuddy lanes when `MEERKAT_BUILDBUDDY=1`; includes per-tree cache, serialized runs, and timeout retry)
 
 **Manual local preflight**:
 - `pre-commit run --hook-stage manual cargo-check-changed`
@@ -435,7 +457,7 @@ The crates are published in dependency order:
 
 - **Never bump `workspace.package.version` without also running `scripts/bump-sdk-versions.sh`** — the CI gate will catch drift
 - **Never change types in `meerkat-contracts` without running `make regen-schemas`** — schema artifacts and SDK types will be stale
-- **Always run `make test` (or `cargo rct`) before committing** — pre-commit hooks enforce this
+- **Always run `make test` or the narrower `make agent-gate` before committing** — set `MEERKAT_BUILDBUDDY=1` when BuildBuddy is available
 - **`ContractVersion::CURRENT` must equal `workspace.package.version`** — they are lock-stepped
 - **Use `cargo release patch` for releases** — never manually bump versions or create tags; the release hook handles SDK sync, schema regen, and parity verification automatically
 

@@ -104,6 +104,32 @@ Key targets:
 
 See `references/makefile-template.md` for the complete template.
 
+### Optional BuildBuddy Backend In Meerkat
+
+In this repository, Cargo remains the default Make backend. Agents and humans
+should use the same Make targets locally and opt into BuildBuddy with one
+environment variable when available:
+
+```bash
+make build
+make check
+make lint
+make test
+
+MEERKAT_BUILDBUDDY=1 make build
+MEERKAT_BUILDBUDDY=1 make lint
+MEERKAT_BUILDBUDDY=1 make test
+```
+
+The explicit BuildBuddy developer targets are `make buildbuddy-build`,
+`make buildbuddy-check`, `make buildbuddy-clippy`, `make buildbuddy-test`,
+`make buildbuddy-test-unit`, `make buildbuddy-test-int`,
+`make buildbuddy-e2e-fast`, `make buildbuddy-e2e-system`,
+`make buildbuddy-e2e-live`, and `make buildbuddy-e2e-smoke`. Use
+`BUILDBUDDY_DRY_RUN=1` to inspect explicit BuildBuddy Make targets. Use
+`make buildbuddy-doctor` before debugging credentials, the pinned `bb` CLI,
+Bazel metadata freshness, selector behavior, or lane isolation.
+
 ### Pre-commit Configuration
 
 The `.pre-commit-config.yaml` runs:

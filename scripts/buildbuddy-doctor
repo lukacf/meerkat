@@ -179,10 +179,13 @@ fi
 
 if grep -Fq '/vendor/oai-rt-rs' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'original.replace' scripts/buildbuddy-bazel-poc &&
-  grep -Fq -- '--lockfile_mode=refresh' scripts/buildbuddy-bazel-poc; then
-  pass "BuildBuddy launcher refreshes stale local path dependency locks"
+  grep -Fq -- '--lockfile_mode=refresh' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'restore_module_lock' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'local_oai_vendor_build' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'BUILDBUDDY_KEEP_LOCK_REFRESH' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy launcher refreshes stale local path dependency locks without dirtying the worktree"
 else
-  bad "BuildBuddy launcher does not refresh stale local path dependency locks"
+  bad "BuildBuddy launcher does not refresh stale local path dependency locks safely"
 fi
 
 if grep -Fq 'name = "package_runfiles"' vendor/oai-rt-rs/BUILD.bazel &&
@@ -217,14 +220,36 @@ else
 fi
 
 if [[ -x scripts/run-build-backend-lane ]] &&
+  [[ -x scripts/buildbuddy-dev ]] &&
+  grep -Fq 'scripts/run-build-backend-lane build' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane check' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane test' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane test-unit' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane test-int' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane e2e-fast' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane e2e-system' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane e2e-live' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane e2e-smoke' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane lint' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane test-all' Makefile &&
-  grep -Fq 'buildbuddy-ci-lane" cargo-all-features-clippy' scripts/run-build-backend-lane &&
-  grep -Fq 'buildbuddy-ci-lane" test-unit' scripts/run-build-backend-lane &&
-  grep -Fq 'buildbuddy-ci-lane" integration-fast' scripts/run-build-backend-lane; then
-  pass "Developer lint and full fast-test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
+  grep -Fq 'buildbuddy-dev" build' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-dev" check' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-dev" clippy' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-dev" test-unit' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-dev" test-int' scripts/run-build-backend-lane &&
+  grep -Fq 'workspace-build-clippy-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'workspace-unit-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'e2e-system-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'e2e-live-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'BUILDBUDDY_DRY_RUN' scripts/buildbuddy-dev &&
+  grep -Fq 'BUILDBUDDY_DRY_RUN=1' README.md &&
+  grep -Fq 'BUILDBUDDY_DRY_RUN=1' docs/architecture/buildbuddy-bazel-poc.md; then
+  pass "Developer build, check, lint, and test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
 else
-  bad "Developer lint and full fast-test lanes do not honor the BuildBuddy opt-in"
+  bad "Developer build, lint, or test lanes do not honor the BuildBuddy opt-in"
 fi
 
 if grep -Fq -- '--macos_sdk_version=' scripts/buildbuddy-bazel-poc &&
@@ -278,6 +303,10 @@ if grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/ci.yml
   grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/ci.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' README.md &&
+  grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
+  grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
+  grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/architecture/buildbuddy-bazel-poc.md &&
+  grep -Fq 'scripts/buildbuddy-dev' docs/architecture/buildbuddy-bazel-poc.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' scripts/agent-gate &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND' scripts/build-backend-env &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' README.md &&

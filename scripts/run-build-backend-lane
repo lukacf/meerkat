@@ -9,8 +9,17 @@ Runs a developer-facing lane with Cargo by default and BuildBuddy when
 MEERKAT_BUILDBUDDY=1 is set.
 
 Lanes:
+  build
+  check
   lint
+  test
   test-all
+  test-unit
+  test-int
+  e2e-fast
+  e2e-system
+  e2e-live
+  e2e-smoke
 EOF
 }
 
@@ -26,24 +35,73 @@ cd "${root}"
 source "${root}/scripts/build-backend-env"
 
 cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
-buildbuddy_mode="${MEERKAT_BUILDBUDDY_CI_MODE:-full-warm}"
 
 case "${lane}" in
+  build)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" build
+    fi
+    exec "${cargo_bin}" build --workspace
+    ;;
+  check)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" check
+    fi
+    exec "${cargo_bin}" check --workspace --all-targets --all-features
+    ;;
   lint)
     if meerkat_buildbuddy_enabled; then
-      exec env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
-        "${root}/scripts/buildbuddy-ci-lane" cargo-all-features-clippy
+      exec "${root}/scripts/buildbuddy-dev" clippy
     fi
     exec "${cargo_bin}" clippy --workspace --all-targets --all-features -- -D warnings
     ;;
+  test)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" test
+    fi
+    exec "${cargo_bin}" fast
+    ;;
   test-all)
     if meerkat_buildbuddy_enabled; then
-      env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
-        "${root}/scripts/buildbuddy-ci-lane" test-unit
-      exec env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
-        "${root}/scripts/buildbuddy-ci-lane" integration-fast
+      exec "${root}/scripts/buildbuddy-dev" test-all
     fi
     exec "${cargo_bin}" fast --all-features
+    ;;
+  test-unit)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" test-unit
+    fi
+    exec "${cargo_bin}" nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
+    ;;
+  test-int)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" test-int
+    fi
+    exec "${cargo_bin}" int
+    ;;
+  e2e-fast)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" e2e-fast
+    fi
+    exec "${cargo_bin}" e2e-fast
+    ;;
+  e2e-system)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" e2e-system
+    fi
+    exec "${cargo_bin}" e2e-system
+    ;;
+  e2e-live)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" e2e-live
+    fi
+    exec "${cargo_bin}" e2e-live
+    ;;
+  e2e-smoke)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" e2e-smoke
+    fi
+    exec "${cargo_bin}" e2e-smoke
     ;;
   *)
     echo "unknown build backend lane: ${lane}" >&2

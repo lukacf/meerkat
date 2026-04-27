@@ -37,12 +37,14 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 # Output
 - When the task is complete, provide a clear summary of what was accomplished.
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
+#[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
+use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
-    Provider, RealmConnectionSet, RealmId, Session, SessionId, SessionLlmIdentity, SessionMetadata,
+    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
     SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
@@ -726,10 +728,12 @@ pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct RoutingImageGenerationExecutor {
     executors: BTreeMap<String, Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RoutingImageGenerationExecutor {
     fn new(
         executors: BTreeMap<String, Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
@@ -746,6 +750,7 @@ impl RoutingImageGenerationExecutor {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecutor {
     async fn execute_image_generation(
@@ -1934,6 +1939,7 @@ impl AgentFactory {
         };
 
         // 3. Create LLM client.
+        #[cfg(not(target_arch = "wasm32"))]
         let mut auto_image_generation_executor: Option<
             Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
         > = None;
@@ -1996,9 +2002,12 @@ impl AgentFactory {
                         .await
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
                     provider = connection.provider;
-                    auto_image_generation_executor = provider_registry
-                        .build_image_generation_executor(connection.clone())
-                        .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        auto_image_generation_executor = provider_registry
+                            .build_image_generation_executor(connection.clone())
+                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    }
 
                     // Phase 1.5-rev loop closure — refresh-loop middle:
                     // The DSL tracks per-binding auth lifecycle state.
@@ -2067,6 +2076,7 @@ impl AgentFactory {
                 }
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
         if build_config.image_generation_executor_override.is_none() {
             let mut executors: BTreeMap<
                 String,

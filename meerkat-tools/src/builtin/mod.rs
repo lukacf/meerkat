@@ -21,7 +21,6 @@ pub mod composite;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_store;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod image_generation;
 pub mod memory_store;
 #[cfg(not(target_arch = "wasm32"))]

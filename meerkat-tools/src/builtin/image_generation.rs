@@ -23,7 +23,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait ImageGenerationMachine: Send + Sync {
     async fn session_model_routing_status(
         &self,
@@ -63,7 +64,8 @@ pub trait ImageGenerationMachine: Send + Sync {
     ) -> Result<ImageOperationPhase, RuntimeDriverError>;
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T> ImageGenerationMachine for T
 where
     T: SessionServiceRuntimeExt + ?Sized,
@@ -153,7 +155,8 @@ struct GenerateImageToolArgs {
     request: GenerateImageRequest,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for GenerateImageTool {
     fn name(&self) -> &'static str {
         "generate_image"

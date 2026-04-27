@@ -28,6 +28,7 @@ integration-real-tests = []
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-llm-core = { workspace = true }
+meerkat-runtime = { workspace = true }
 meerkat-skills = { workspace = true }
 inventory = { workspace = true }
 meerkat-comms = { workspace = true, optional = true }
@@ -48,7 +49,6 @@ toml = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-meerkat-runtime = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 base64 = "0.22"
 shlex = "1.3"

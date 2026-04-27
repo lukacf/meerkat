@@ -232,4 +232,28 @@ mod tests {
             "advanced packs should not regress to claude-opus-4-6: {models:?}"
         );
     }
+
+    #[test]
+    fn built_in_pack_defaults_keep_model_diversity_within_each_pack() {
+        let registry = PackRegistry::new();
+
+        for pack in registry.all() {
+            let definition = pack.definition("check diversity", "", &BTreeMap::new(), None);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut models = Vec::new();
+
+            for binding in definition.profiles.values() {
+                let profile = binding
+                    .as_inline()
+                    .expect("built-in packs should use inline profiles");
+                models.push(profile.model.clone());
+                assert!(
+                    seen.insert(profile.model.clone()),
+                    "pack '{}' should not duplicate default model '{}'; models: {models:?}",
+                    pack.name(),
+                    profile.model
+                );
+            }
+        }
+    }
 }

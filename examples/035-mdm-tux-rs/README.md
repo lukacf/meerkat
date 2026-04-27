@@ -110,6 +110,10 @@ make docker-tux
 # Or open TUX in tmux.
 make docker-tmux
 
+# Run the opt-in live tmux suite. This drives real model calls through Hive,
+# target-a, target-b, peer comms, and scheduler wakeups.
+make docker-live-suite
+
 # Logs and cleanup.
 make docker-logs
 make docker-down
@@ -146,6 +150,12 @@ make docker-tux
 
 The TUX helper starts with `docker compose run --no-deps` so opening the UI does
 not recreate already-running targets with different Compose interpolation.
+
+`docker-live-suite` is intentionally not part of the default smoke path. It
+requires real provider credentials, starts the Docker topology, opens TUX in a
+tmux session, and verifies four end-to-end effects: Hive `send_request` to
+target-a, direct target-b shell control, target-b to target-a peer delivery, and
+a scheduled target-a wakeup.
 
 For direct-mode host testing, the targets' RPC ports are also published as
 `localhost:54801` and `localhost:54802`.

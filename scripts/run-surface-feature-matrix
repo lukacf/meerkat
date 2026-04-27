@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo_bin="${CARGO:-}"
+if [[ -z "${cargo_bin}" ]]; then
+  cargo_bin="./scripts/repo-cargo"
+fi
+
+run_cargo() {
+  "${cargo_bin}" "$@"
+}
+
+run_cargo check --no-default-features \
+  -p meerkat-rpc \
+  -p meerkat-rest \
+  -p meerkat-mcp-server
+
+run_cargo check --no-default-features \
+  -p meerkat-rpc \
+  -p meerkat-rest \
+  -p meerkat-mcp-server \
+  --features meerkat-rpc/comms,meerkat-rpc/mcp,meerkat-rest/comms,meerkat-mcp-server/comms
+
+run_cargo check -p meerkat-rpc --bin rkat-rpc-mini --no-default-features --features mini-surface
+run_cargo check -p rkat --no-default-features --features session-store
+run_cargo check -p rkat --no-default-features --features session-store,mcp
+run_cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
+run_cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+run_cargo check -p rkat --no-default-features --features session-store,comms,mcp

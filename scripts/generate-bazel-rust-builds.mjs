@@ -285,36 +285,6 @@ function ensureGeneratedBlock(path, marker, block) {
   writeFileSync(path, `${existing}${separator}${block}`);
 }
 
-function ensureGeneratedBlockBefore(path, marker, block, beforeMarker) {
-  block = block.replace(/\n+$/u, "") + "\n";
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  const markerIndex = existing.indexOf(marker);
-  const beforeIndex = existing.indexOf(beforeMarker);
-  if (markerIndex >= 0 && (beforeIndex < 0 || markerIndex < beforeIndex)) return;
-  if (checkOnly) {
-    staleFileCount += 1;
-    console.error(`stale generated Bazel file: ${relative(root, path)}`);
-    return;
-  }
-  const withoutBlock =
-    markerIndex >= 0
-      ? existing.replace(
-          /\n*# Maintained by scripts\/generate-bazel-rust-builds\.mjs so root workspace_runfiles\n# can cross the vendored path-dependency Bazel package boundary\.\nfilegroup\(\n    name = "package_runfiles",\n    srcs = glob\(\["\*\*\/\*"\], exclude = \["BUILD", "BUILD\.bazel"\], allow_empty = True\),\n    visibility = \["\/\/visibility:public"\],\n\)\n*/u,
-          "\n",
-        )
-      : existing;
-  const insertionIndex = withoutBlock.indexOf(beforeMarker);
-  if (insertionIndex < 0) {
-    const separator = withoutBlock.endsWith("\n") ? "\n" : "\n\n";
-    writeFileSync(path, `${withoutBlock}${separator}${block}`);
-    return;
-  }
-  writeFileSync(
-    path,
-    `${withoutBlock.slice(0, insertionIndex)}${block}\n${withoutBlock.slice(insertionIndex)}`,
-  );
-}
-
 function needsWorkspaceRunfiles(target) {
   const source = readFileSync(target.src_path, "utf8");
   return [
@@ -845,22 +815,6 @@ for (const pkg of localPackages.values()) {
     ].join("\n\n"),
   );
 }
-
-const vendorPackageRunfilesMarker = 'name = "package_runfiles"';
-const vendorPackageRunfilesBlock = `# Maintained by scripts/generate-bazel-rust-builds.mjs so root workspace_runfiles
-# can cross the vendored path-dependency Bazel package boundary.
-filegroup(
-    name = "package_runfiles",
-    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
-    visibility = ["//visibility:public"],
-)`;
-
-ensureGeneratedBlockBefore(
-  resolve(root, "vendor/oai-rt-rs/BUILD.bazel"),
-  vendorPackageRunfilesMarker,
-  vendorPackageRunfilesBlock,
-  "rust_library(",
-);
 
 writeRootBuild([...new Set(fastTestLabels)].sort(), [...new Set(e2eSystemTestLabels)].sort());
 if (checkOnly && staleFileCount > 0) {

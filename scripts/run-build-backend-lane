@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: run-build-backend-lane <lane>
+
+Runs a developer-facing lane with Cargo by default and BuildBuddy when
+MEERKAT_BUILDBUDDY=1 is set.
+
+Lanes:
+  lint
+  test-all
+EOF
+}
+
+if [[ $# -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+lane="$1"
+root="$(git rev-parse --show-toplevel)"
+cd "${root}"
+
+source "${root}/scripts/build-backend-env"
+
+cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
+buildbuddy_mode="${MEERKAT_BUILDBUDDY_CI_MODE:-full-warm}"
+
+case "${lane}" in
+  lint)
+    if meerkat_buildbuddy_enabled; then
+      exec env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
+        "${root}/scripts/buildbuddy-ci-lane" cargo-all-features-clippy
+    fi
+    exec "${cargo_bin}" clippy --workspace --all-targets --all-features -- -D warnings
+    ;;
+  test-all)
+    if meerkat_buildbuddy_enabled; then
+      env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
+        "${root}/scripts/buildbuddy-ci-lane" test-unit
+      exec env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
+        "${root}/scripts/buildbuddy-ci-lane" integration-fast
+    fi
+    exec "${cargo_bin}" fast --all-features
+    ;;
+  *)
+    echo "unknown build backend lane: ${lane}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

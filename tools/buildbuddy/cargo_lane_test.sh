@@ -75,18 +75,7 @@ case "${lane}" in
     "${CARGO}" test -p meerkat --features all-providers,comms,mcp --lib --tests
     ;;
   test-feature-matrix-surface-checks)
-    "${CARGO}" check -p meerkat-rpc --no-default-features
-    "${CARGO}" check -p meerkat-rpc --no-default-features --features comms,mcp
-    "${CARGO}" check -p meerkat-rpc --bin rkat-rpc-mini --no-default-features --features mini-surface
-    "${CARGO}" check -p meerkat-rest --no-default-features
-    "${CARGO}" check -p meerkat-rest --no-default-features --features comms
-    "${CARGO}" check -p meerkat-mcp-server --no-default-features
-    "${CARGO}" check -p meerkat-mcp-server --no-default-features --features comms
-    "${CARGO}" check -p rkat --no-default-features --features session-store
-    "${CARGO}" check -p rkat --no-default-features --features session-store,mcp
-    "${CARGO}" check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
-    "${CARGO}" check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
-    "${CARGO}" check -p rkat --no-default-features --features session-store,comms,mcp
+    CARGO="${CARGO}" scripts/run-surface-feature-matrix
     CARGO="${CARGO}" ROOT="${work_root}" scripts/check_surface_modularity.sh
     ;;
   *)

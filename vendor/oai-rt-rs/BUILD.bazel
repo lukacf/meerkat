@@ -20,14 +20,6 @@ cargo_toml_env_vars(
     src = "Cargo.toml",
 )
 
-# Maintained by scripts/generate-bazel-rust-builds.mjs so root workspace_runfiles
-# can cross the vendored path-dependency Bazel package boundary.
-filegroup(
-    name = "package_runfiles",
-    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
-    visibility = ["//visibility:public"],
-)
-
 rust_library(
     name = "oai_rt_rs",
     deps = [
@@ -88,4 +80,14 @@ rust_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     version = "0.2.1",
+)
+
+# Additive BUILD file content
+
+# Maintained here so root workspace_runfiles can cross the vendored
+# path-dependency Bazel package boundary.
+filegroup(
+    name = "package_runfiles",
+    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
 )

@@ -185,20 +185,14 @@ else
   bad "BuildBuddy launcher does not refresh stale local path dependency locks"
 fi
 
-vendor_runfiles_order="$(
-  awk '
-    /name = "package_runfiles"/ { runfiles = NR }
-    /rust_library\(/ { rust_library = NR }
-    END {
-      if (runfiles > 0 && rust_library > 0 && runfiles < rust_library) print "ok";
-    }
-  ' vendor/oai-rt-rs/BUILD.bazel
-)"
-if [[ "${vendor_runfiles_order}" == "ok" ]] &&
-  grep -Fq 'ensureGeneratedBlockBefore(' scripts/generate-bazel-rust-builds.mjs; then
-  pass "Vendored oai-rt-rs runfiles target is declared before generated crate macro"
+if grep -Fq 'name = "package_runfiles"' vendor/oai-rt-rs/BUILD.bazel &&
+  grep -Fq '//vendor/oai-rt-rs:package_runfiles' BUILD.bazel xtask/BUILD.bazel &&
+  grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
+  grep -Fq 'additive_build_file_content' MODULE.bazel &&
+  grep -Fq 'additive_build_file_content' MODULE.bazel.lock; then
+  pass "Vendored oai-rt-rs runfiles target is declared in checked-in and lock-generated BUILD content"
 else
-  bad "Vendored oai-rt-rs runfiles target may be hidden by generated crate macro evaluation"
+  bad "Vendored oai-rt-rs runfiles target is missing from checked-in or lock-generated BUILD content"
 fi
 
 if grep -Fq 'Cache Bazel external repositories' .github/actions/setup-buildbuddy-ci/action.yml &&
@@ -208,6 +202,28 @@ if grep -Fq 'Cache Bazel external repositories' .github/actions/setup-buildbuddy
   pass "BuildBuddy CI caches and retries external repository fetches"
 else
   bad "BuildBuddy CI does not guard against transient external repository fetch failures"
+fi
+
+if [[ -x scripts/run-surface-feature-matrix ]] &&
+  grep -Fq './scripts/run-surface-feature-matrix' .github/workflows/ci.yml &&
+  grep -Fq 'scripts/run-surface-feature-matrix' tools/buildbuddy/cargo_lane_test.sh &&
+  grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&
+  grep -Fq -- '-p meerkat-rest \' scripts/run-surface-feature-matrix &&
+  grep -Fq -- '-p meerkat-mcp-server' scripts/run-surface-feature-matrix; then
+  pass "Surface feature matrix uses shared grouped Cargo checks in Cargo and BuildBuddy CI"
+else
+  bad "Surface feature matrix is not shared between Cargo and BuildBuddy CI"
+fi
+
+if [[ -x scripts/run-build-backend-lane ]] &&
+  grep -Fq 'scripts/run-build-backend-lane lint' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane test-all' Makefile &&
+  grep -Fq 'buildbuddy-ci-lane" cargo-all-features-clippy' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-ci-lane" test-unit' scripts/run-build-backend-lane &&
+  grep -Fq 'buildbuddy-ci-lane" integration-fast' scripts/run-build-backend-lane; then
+  pass "Developer lint and full fast-test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
+else
+  bad "Developer lint and full fast-test lanes do not honor the BuildBuddy opt-in"
 fi
 
 if grep -Fq -- '--macos_sdk_version=' scripts/buildbuddy-bazel-poc &&

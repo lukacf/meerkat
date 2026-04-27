@@ -421,19 +421,7 @@ jobs:
           prefix-key: matrix-surface-checks
 
       - name: Surface crate feature combinations
-        run: |
-          ./scripts/repo-cargo check -p meerkat-rpc --no-default-features
-          ./scripts/repo-cargo check -p meerkat-rpc --no-default-features --features comms,mcp
-          ./scripts/repo-cargo check -p meerkat-rpc --bin rkat-rpc-mini --no-default-features --features mini-surface
-          ./scripts/repo-cargo check -p meerkat-rest --no-default-features
-          ./scripts/repo-cargo check -p meerkat-rest --no-default-features --features comms
-          ./scripts/repo-cargo check -p meerkat-mcp-server --no-default-features
-          ./scripts/repo-cargo check -p meerkat-mcp-server --no-default-features --features comms
-          ./scripts/repo-cargo check -p rkat --no-default-features --features session-store
-          ./scripts/repo-cargo check -p rkat --no-default-features --features session-store,mcp
-          ./scripts/repo-cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
-          ./scripts/repo-cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
-          ./scripts/repo-cargo check -p rkat --no-default-features --features session-store,comms,mcp
+        run: ./scripts/run-surface-feature-matrix
 
       - name: Surface binary smoke
         run: make test-surface-modularity

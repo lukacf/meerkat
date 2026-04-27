@@ -88,7 +88,7 @@ test-e2e:
 # live-provider wrappers.
 test-all:
 	@echo "$(GREEN)Running all-feature fast suite...$(NC)"
-	$(CARGO) fast --all-features
+	@scripts/run-build-backend-lane test-all
 
 # Python SDK test suite
 test-sdk-python:
@@ -135,19 +135,8 @@ test-feature-matrix-lib:
 # Surface crate feature combinations
 test-feature-matrix-surface:
 	@echo "$(GREEN)Running surface feature matrix checks...$(NC)"
-	$(CARGO) check -p meerkat-rpc --no-default-features
-	$(CARGO) check -p meerkat-rpc --no-default-features --features comms,mcp
-	$(CARGO) check -p meerkat-rpc --bin rkat-rpc-mini --no-default-features --features mini-surface
-	$(CARGO) check -p meerkat-rest --no-default-features
-	$(CARGO) check -p meerkat-rest --no-default-features --features comms
-	$(CARGO) check -p meerkat-mcp-server --no-default-features
-	$(CARGO) check -p meerkat-mcp-server --no-default-features --features comms
-	$(CARGO) check -p rkat --no-default-features --features session-store
-	$(CARGO) check -p rkat --no-default-features --features session-store,mcp
-	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
-	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+	CARGO="$(CARGO)" ./scripts/run-surface-feature-matrix
 	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
-	$(CARGO) check -p rkat --no-default-features --features session-store,comms,mcp
 
 # Session capability matrix (A-F builds from spec)
 test-session-matrix:
@@ -175,7 +164,7 @@ test-surface-modularity:
 # Run clippy linter
 lint:
 	@echo "$(GREEN)Running clippy...$(NC)"
-	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	@scripts/run-build-backend-lane lint
 
 # Run clippy across key feature combinations (not just --all-features)
 lint-feature-matrix:
